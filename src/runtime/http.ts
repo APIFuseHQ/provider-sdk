@@ -218,12 +218,18 @@ function withClientHeaders(
 	clientOptions: HttpClientOptions,
 	body: unknown,
 ): RequestOptions {
+	// The ambient client signal is merged into the per-request one here so every
+	// downstream read (retry loop, sleep, body consumption) sees a single signal.
+	// The header-factory branch needs it too, otherwise factory-header requests
+	// would lose ambient cancellation entirely.
+	const signal = mergeAbortSignals(clientOptions.signal, options?.signal);
 	// A header factory is resolved per issued attempt (resolveAttemptHeaders);
 	// the client defaults are applied to its output at that point.
-	if (typeof options?.headers === "function") return { ...options };
+	if (typeof options?.headers === "function") return { ...options, signal };
 	return {
 		...options,
 		headers: withClientHeaderDefaults(options?.headers, clientOptions, body),
+		signal,
 	};
 }
 
@@ -856,20 +862,20 @@ async function fetchNativeHttp(
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
-	const signal = mergeAbortSignals(clientOptions.signal, controller?.signal);
+	const signal = mergeAbortSignals(options.signal, controller?.signal);
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
 		: undefined;
 
 	let proxy: string | undefined;
 	try {
-		throwIfAmbientAborted(clientOptions.signal);
+		throwIfAmbientAborted(options.signal);
 		// Resolve inside the try (and after the timeout is armed) so allocator
 		// failures are branded as TransportErrors and count against the request
 		// deadline, exactly as an inline resolve would.
 		proxy = await resolveNativeProxy(options, clientOptions, warn, proxyAttemptOffset);
 		observeProxy?.(Boolean(proxy));
-		throwIfAmbientAborted(clientOptions.signal);
+		throwIfAmbientAborted(options.signal);
 		// For a registry allocator chain, skip an endpoint a prior attempt already
 		// tried rather than re-issuing the same request. Returning the sentinel
 		// (instead of breaking) lets the loop keep advancing the flat offset until
@@ -925,7 +931,7 @@ async function fetchNativeHttp(
 			});
 		}
 
-		return toNativeHttpResponse(response);
+		return await toNativeHttpResponse(response);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
 			throw redactSensitiveError(
@@ -936,7 +942,7 @@ async function fetchNativeHttp(
 			);
 		}
 		const transportError: NativeHttpAttemptError = redactSensitiveError(
-			toHttpTransportError(error, clientOptions.signal, controller?.signal),
+			toHttpTransportError(error, options.signal, controller?.signal),
 			serializedUrl.sensitiveValues,
 			serializedUrl.requestUrl,
 			serializedUrl.redactedUrl,
@@ -960,16 +966,16 @@ async function fetchNativeHttpStream(
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
-	const signal = mergeAbortSignals(clientOptions.signal, controller?.signal);
+	const signal = mergeAbortSignals(options.signal, controller?.signal);
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
 		: undefined;
 
 	try {
-		throwIfAmbientAborted(clientOptions.signal);
+		throwIfAmbientAborted(options.signal);
 		const proxy = await resolveNativeProxy(options, clientOptions, warn);
 		observeProxy?.(Boolean(proxy));
-		throwIfAmbientAborted(clientOptions.signal);
+		throwIfAmbientAborted(options.signal);
 		// Streams never retry: a header factory is resolved once, as attempt 1.
 		const headers = await resolveAttemptHeaders(
 			options,
@@ -1000,9 +1006,9 @@ async function fetchNativeHttpStream(
 			});
 		}
 
-		// Per-call timeout remains header-scoped, while the ambient request signal
-		// stays attached to the response body for its full consumption lifetime.
-		return toNativeHttpStreamResponse(response, serializedUrl, clientOptions.signal);
+		// The stream timeout remains header-scoped; composed ambient and local
+		// cancellation stays attached to native fetch for the body's full lifetime.
+		return toNativeHttpStreamResponse(response, serializedUrl, options.signal);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
 			throw redactSensitiveError(
@@ -1013,7 +1019,7 @@ async function fetchNativeHttpStream(
 			);
 		}
 		throw redactSensitiveError(
-			toHttpTransportError(error, clientOptions.signal, controller?.signal),
+			toHttpTransportError(error, options.signal, controller?.signal),
 			serializedUrl.sensitiveValues,
 			serializedUrl.requestUrl,
 			serializedUrl.redactedUrl,
@@ -1197,7 +1203,7 @@ export function createHttpClient(
 			};
 
 			if (!retryEnabled || !retryOptions) {
-				throwIfAmbientAborted(clientOptions.signal);
+				throwIfAmbientAborted(headersOptions.signal);
 				const outcome = await executeOnce();
 				if (isDedupeSkipOutcome(outcome)) {
 					// Single-shot path never de-duplicates (dedupeContext is undefined),
@@ -1220,7 +1226,7 @@ export function createHttpClient(
 			// allocations skip offsets.
 			let issued = 0;
 			for (let attempt = 1; attempt <= transportAttemptCap; attempt += 1) {
-				throwIfAmbientAborted(clientOptions.signal);
+				throwIfAmbientAborted(headersOptions.signal);
 				// Whether this offset actually issued a request (vs. a skipped duplicate),
 				// so the catch counts a thrown *transport* failure once without
 				// double-counting a status outcome that already incremented before it
@@ -1240,7 +1246,7 @@ export function createHttpClient(
 						if (outcome.retryable && issued < retryOptions.attempts) {
 							await sleep(
 								computeProxyTransportRetryDelayMs(retryOptions, attempt, outcome.headers),
-								clientOptions.signal,
+								headersOptions.signal,
 							);
 							continue;
 						}
@@ -1258,7 +1264,7 @@ export function createHttpClient(
 					}
 					return response;
 				} catch (error) {
-					throwIfAmbientAborted(clientOptions.signal);
+					throwIfAmbientAborted(headersOptions.signal);
 					if (!issuedThisAttempt) issued += 1;
 					lastError = error;
 					const proxyUsed = Boolean((error as NativeHttpAttemptError).proxyUsed);
@@ -1274,7 +1280,7 @@ export function createHttpClient(
 					) {
 						await sleep(
 							computeProxyTransportRetryDelayMs(retryOptions, attempt),
-							clientOptions.signal,
+							headersOptions.signal,
 						);
 						continue;
 					}
@@ -1324,7 +1330,7 @@ export function createHttpClient(
 		// Streams never retry. Observe the header fetch without consuming its body.
 		const telemetry = startHttpTelemetry(scopedHttpTelemetry(clientOptions.httpTelemetry), "off");
 		const started = performance.now();
-		const alreadyAborted = clientOptions.signal?.aborted === true;
+		const alreadyAborted = headersOptions.signal?.aborted === true;
 		let proxyUsed = false;
 		const record = (event: Omit<HttpAttemptTelemetryEvent, "ms" | "proxyUsed">) => {
 			if (alreadyAborted) return;

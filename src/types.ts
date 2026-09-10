@@ -1287,7 +1287,10 @@ export interface RequestOptions {
 	 */
 	sensitiveParams?: Record<string, string>;
 	proxy?: string;
+	/** Per-attempt timeout. For streams, this ends once response headers arrive. */
 	timeout?: number;
+	/** Cancels this HTTP request, including retries and response-body consumption, without cancelling siblings. */
+	signal?: AbortSignal;
 	/**
 	 * Defaults to true. Set to false when callers need to inspect upstream
 	 * non-2xx bodies themselves instead of converting them to TransportError.
@@ -1338,7 +1341,7 @@ export type HttpMethod =
 	| "PATCH"
 	| "patch";
 
-export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
+export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers" | "signal"> {
 	/**
 	 * Defaults to true. Set to false when callers need to inspect upstream
 	 * non-2xx bodies themselves instead of converting them to TransportError.

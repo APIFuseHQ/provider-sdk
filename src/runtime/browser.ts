@@ -1111,6 +1111,7 @@ abstract class WebSocketCommandClient {
 	>();
 	private socket?: WebSocket;
 	private socketPromise?: Promise<WebSocket>;
+	private closed = false;
 
 	constructor(endpoint: string) {
 		this.endpoint = normalizeWebSocketEndpoint(endpoint);
@@ -1134,6 +1135,7 @@ abstract class WebSocketCommandClient {
 		params: Record<string, unknown> = {},
 	): Promise<Record<string, unknown>> {
 		const socket = await this.getSocket();
+		if (this.closed) throw new Error(`WebSocket closed: ${this.endpoint}`);
 		const id = this.nextId++;
 
 		return await new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -1144,6 +1146,7 @@ abstract class WebSocketCommandClient {
 	}
 
 	async close(): Promise<void> {
+		this.closed = true;
 		for (const pending of this.pending.values()) {
 			pending.reject(new Error(`WebSocket closed: ${this.endpoint}`));
 		}
@@ -1162,6 +1165,7 @@ abstract class WebSocketCommandClient {
 	): CdpCommandFrame | JsonRpcCommandFrame;
 
 	private async getSocket(): Promise<WebSocket> {
+		if (this.closed) throw new Error(`WebSocket closed: ${this.endpoint}`);
 		if (this.socket?.readyState === WebSocket.OPEN) {
 			return this.socket;
 		}
@@ -1174,6 +1178,11 @@ abstract class WebSocketCommandClient {
 			const socket = new WebSocket(this.endpoint);
 
 			socket.addEventListener("open", () => {
+				if (this.closed) {
+					socket.close();
+					reject(new Error(`WebSocket closed: ${this.endpoint}`));
+					return;
+				}
 				this.socket = socket;
 				resolve(socket);
 			});
@@ -1559,7 +1568,7 @@ class CdpBrowserFrame implements BrowserFrame {
 }
 
 class CdpPoolBrowserPage implements BrowserPageContract {
-	private closed = false;
+	private closePromise?: Promise<void>;
 	private initialized = false;
 	private readonly frameExecutionContexts = new Map<string, number>();
 
@@ -1779,20 +1788,17 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	}
 
 	async close(): Promise<void> {
-		if (this.closed) {
-			return;
-		}
-
-		this.closed = true;
-
-		try {
-			await this.release({
-				...(this.browserContextId ? { browserContextId: this.browserContextId } : {}),
-				pageId: this.pageId,
-			});
-		} finally {
-			await this.pageClient.close();
-		}
+		this.closePromise ??= (async () => {
+			try {
+				await this.release({
+					...(this.browserContextId ? { browserContextId: this.browserContextId } : {}),
+					pageId: this.pageId,
+				});
+			} finally {
+				await this.pageClient.close();
+			}
+		})();
+		await this.closePromise;
 	}
 
 	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
@@ -1822,8 +1828,17 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		try {
 			return await run();
 		} finally {
-			unsubscribe();
-			await this.pageClient.send("Fetch.disable");
+			try {
+				if (this.closePromise) {
+					// Keep interception active until release completes. A failed release
+					// must remain observable, not trigger a reconnect or disable policy.
+					await this.closePromise;
+				} else {
+					await this.pageClient.send("Fetch.disable");
+				}
+			} finally {
+				unsubscribe();
+			}
 		}
 	}
 
@@ -2238,22 +2253,20 @@ export class BrowserClient implements BrowserClientContract {
 	}
 
 	private activatePage(page: BrowserPageContract): BrowserPageContract {
-		let closed = false;
+		let closePromise: Promise<void> | undefined;
 		const originalClose = page.close.bind(page);
 		const trackedPage = new Proxy(page, {
 			get: (target, property, receiver) => {
 				if (property === "close") {
 					return async () => {
-						if (closed) return;
-						closed = true;
-						try {
+						closePromise ??= (async () => {
 							await originalClose();
-						} finally {
 							this.activePages.delete(trackedPage);
 							if (this.activePage === trackedPage) {
 								this.activePage = undefined;
 							}
-						}
+						})();
+						await closePromise;
 					};
 				}
 				const value = Reflect.get(target, property, receiver);
