@@ -1201,6 +1201,23 @@ export function forward(name: string, headers: Record<string, string | undefined
 		expect(diagnostics).toEqual([]);
 	});
 
+	it("reports an undefined value in the Headers shapes the runtime does not drop", () => {
+		const diagnostics = lintSourceFile(`
+export function clear(headers: Headers, tuples: Array<[string, string | undefined]>, ctx: { stealth: unknown }) {
+  headers.set("sec-fetch-dest", undefined);
+  headers.append("sec-fetch-mode", void 0);
+  tuples.push(["sec-fetch-site", undefined]);
+  return ctx.stealth;
+}
+`);
+
+		expect(diagnostics.map((diagnostic) => diagnostic.message.match(/"([^"]+)" header/)?.[1])).toEqual([
+			"sec-fetch-dest",
+			"sec-fetch-mode",
+			"sec-fetch-site",
+		]);
+	});
+
 	it("does not scope a ctx.http file into the rule because a comment or string mentions ctx.stealth", () => {
 		const diagnostics = lintSourceFile(`
 // Use ctx.http, not ctx.stealth, for custom fetch metadata.

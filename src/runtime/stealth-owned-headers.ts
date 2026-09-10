@@ -4,9 +4,14 @@
  * `ctx.stealth` composes these from the Chrome emulation and the request class,
  * so a caller value is rejected at request time with `SDKError` code
  * `STEALTH_HEADER_OVERRIDE_UNSUPPORTED` (`assertCallerHeadersSupported` in
- * stealth.ts). The `browser-version-literal` lint reports the same names in
- * files that use `ctx.stealth` (lint.ts). Both read this module so the lint
- * cannot claim a rejection the runtime does not perform, or miss one it does.
+ * stealth.ts). The `browser-version-literal` lint reports a subset of these
+ * names — the `sec-fetch-*` and `sec-ch-ua*` families — in files that use
+ * `ctx.stealth` (`isReportedOwnedHeaderName` in lint.ts). Both read this
+ * module, so the lint cannot claim a rejection the runtime does not perform;
+ * it reports deliberately less than the runtime rejects (host, connection,
+ * accept-encoding and a non-literal user-agent stay silent — see that
+ * predicate for why), so a green `apifuse check` is not proof that no owned
+ * header is set.
  *
  * Leaf module by design: no imports, so the lazily loaded CLI lint path does
  * not pull the stealth runtime in.
