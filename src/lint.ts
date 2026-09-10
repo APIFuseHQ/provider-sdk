@@ -16,7 +16,10 @@ import {
 	isHandleFieldMeta,
 } from "./handle-meta.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
-import { isStealthOwnedHeaderName } from "./runtime/stealth-owned-headers.js";
+import {
+	isStealthOwnedHeaderName,
+	SDK_OWNED_CHROME_HEADER_PREFIX,
+} from "./runtime/stealth-owned-headers.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 
@@ -1026,7 +1029,6 @@ const VERSIONED_PROFILE_LITERAL_PATTERN =
 const VERSIONED_USER_AGENT_PATTERN = /\b(?:Chrome|CriOS|Firefox|FxiOS|EdgA?|OPR)\/\d+(?:\.\d+)*/i;
 const VERSIONED_SAFARI_USER_AGENT_PATTERN = /\bVersion\/(\d+(?:\.\d+)*)(?=[\s\S]*\bSafari\/\d)/i;
 const VERSIONED_CLIENT_HINT_PATTERN = /(?:^|[;,\s])v\s*=\s*["']?\d+/i;
-const OWNED_SEC_FETCH_HEADER_PREFIX = "sec-fetch-";
 // Calls that write a header entry as (name, value): Headers/Map `set` and
 // `append`, Node's `setHeader`. Predicates, replacements, and logging calls
 // take string arguments too and must not count as header writes.
@@ -1061,13 +1063,6 @@ function isSecChUaHeaderName(value: string | undefined): boolean {
 	return value?.toLowerCase() === "sec-ch-ua";
 }
 
-/**
- * Header names this rule reports in ctx.stealth files: the Sec-Fetch-* and
- * client-hint (sec-ch-ua*) families, restricted to what the stealth runtime
- * really rejects (isStealthOwnedHeaderName). user-agent is covered by the
- * "user-agent" kind; host, connection, and accept-encoding are left alone
- * because ctx.http callers set them legitimately in the same files.
- */
 /**
  * True for the code paths that reach the stealth transport: `ctx.stealth`,
  * `ctx["stealth"]`, and `const { stealth } = ctx`. Read from the AST so a
@@ -1118,12 +1113,19 @@ function calleeName(node: import("typescript").CallExpression): string | undefin
 	return undefined;
 }
 
+/**
+ * Header names this rule reports in ctx.stealth files: the Sec-Fetch-* and
+ * client-hint (sec-ch-ua*) families, restricted to what the stealth runtime
+ * really rejects (isStealthOwnedHeaderName). user-agent is covered by the
+ * "user-agent" kind; host, connection, and accept-encoding are left alone
+ * because ctx.http callers set them legitimately in the same files.
+ */
 function isReportedOwnedHeaderName(value: string | undefined): boolean {
 	if (value === undefined) return false;
 	const name = value.toLowerCase();
 	if (!isStealthOwnedHeaderName(name)) return false;
-	if (name.startsWith(OWNED_SEC_FETCH_HEADER_PREFIX)) {
-		return name.length > OWNED_SEC_FETCH_HEADER_PREFIX.length;
+	if (name.startsWith(SDK_OWNED_CHROME_HEADER_PREFIX)) {
+		return name.length > SDK_OWNED_CHROME_HEADER_PREFIX.length;
 	}
 	return name.startsWith(OWNED_CLIENT_HINT_HEADER_PREFIX);
 }
