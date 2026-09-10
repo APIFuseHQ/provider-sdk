@@ -717,6 +717,29 @@ redacted. If a login flow must consume a rotated credential from `Location`,
 inspect it inside `stopWhen`; that callback receives the real hop while callback
 failures are sanitized before propagation.
 
+### Request-bound proof headers
+
+When an upstream requires a single-use, request-bound header (DPoP proofs,
+HTTP message signatures, HMAC nonces), pass `headers` as a factory instead of a
+record. `ctx.http` calls it once per issued attempt with the resolved URL and
+method, so a managed retry sends a fresh proof rather than replaying the first
+one, and the request keeps proxy failover and the transient retry taxonomy:
+
+```ts
+const response = await ctx.http.get(requestUrl, {
+	headers: async ({ url, method }) => ({
+		...commonHeaders,
+		dpop: await createDpopProof(url, method),
+	}),
+});
+```
+
+The factory is not invoked for redirect hops (they reuse the attempt's
+headers) or for skipped duplicate proxy offsets. A factory that throws fails
+the request with the non-retryable `TransportError` code
+`http_header_factory_failed`. `ctx.stealth` has its own `headers` option and
+does not accept a factory.
+
 ### Public local debugging checklist
 
 - Operation smoke requests use the provider server envelope:

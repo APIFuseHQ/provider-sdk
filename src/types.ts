@@ -1229,8 +1229,40 @@ export interface HttpRetrySummary {
 	lastStatus?: number;
 }
 
+/** Per-attempt input for a `RequestOptions.headers` factory. */
+export interface HttpAttemptContext {
+	/** 1-based count of issued attempts; the first request is `1`, its first retry `2`. */
+	attempt: number;
+	/**
+	 * Resolved request URL: `baseUrl` + path + `params` + `sensitiveParams`.
+	 * It is the exact URL the attempt is issued against (bind DPoP `htu`,
+	 * signature targets, etc. to it); it carries any sensitive query values, so
+	 * do not log it.
+	 */
+	url: string;
+	/** Normalized upper-case HTTP method of the request. */
+	method: HttpMethod;
+}
+
+/**
+ * Builds the request headers for one issued attempt. Managed retry calls it
+ * again for every retry, so request-bound single-use proofs (DPoP `jti`,
+ * HTTP message signatures, HMAC nonces) can be re-minted instead of replayed.
+ * A throw is raised as a non-retryable `TransportError` with code
+ * `http_header_factory_failed`.
+ */
+export type HttpHeadersFactory = (
+	attempt: HttpAttemptContext,
+) => Record<string, string> | Promise<Record<string, string>>;
+
 export interface RequestOptions {
-	headers?: Record<string, string>;
+	/**
+	 * Request headers, or a factory resolved once per issued attempt (see
+	 * `HttpHeadersFactory`). The factory runs after proxy resolution, before the
+	 * first redirect hop of that attempt; redirect hops reuse the attempt's
+	 * headers. `ctx.stealth` declares its own header option and is not affected.
+	 */
+	headers?: Record<string, string> | HttpHeadersFactory;
 	params?: RequestParams;
 	/**
 	 * Query parameters whose values contain credentials or other secret material.

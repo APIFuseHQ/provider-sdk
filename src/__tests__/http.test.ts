@@ -2097,6 +2097,219 @@ describe("createHttpClient", () => {
 			"User-Agent": "native-agent",
 		});
 	});
+
+	describe("per-attempt header factory", () => {
+		it("re-invokes the factory for every issued retry attempt", async () => {
+			const originalRandom = Math.random;
+			Math.random = () => 0;
+			mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+			mockNativeFetchState.queuedResponses.push({
+				status: 200,
+				body: JSON.stringify({ ok: true }),
+				headers: { "content-type": "application/json" },
+			});
+			const summaries: unknown[] = [];
+			const attempts: Array<{ attempt: number; url: string; method: string }> = [];
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient(undefined, {
+				onRetrySummary: (summary) => summaries.push(summary),
+			});
+			try {
+				await http.get("https://example.com/items", {
+					retry: true,
+					headers: (attempt) => {
+						attempts.push(attempt);
+						return { dpop: `proof-${attempt.attempt}` };
+					},
+				});
+			} finally {
+				Math.random = originalRandom;
+			}
+
+			expect(attempts).toEqual([
+				{ attempt: 1, url: "https://example.com/items", method: "GET" },
+				{ attempt: 2, url: "https://example.com/items", method: "GET" },
+			]);
+			expect(mockNativeFetchState.calls).toHaveLength(2);
+			expect(mockNativeFetchState.calls[0]?.init?.headers).toEqual({ dpop: "proof-1" });
+			expect(mockNativeFetchState.calls[1]?.init?.headers).toEqual({ dpop: "proof-2" });
+			expect(summaries).toMatchObject([{ attempts: 2, retries: 1 }]);
+		});
+
+		it("passes the serialized request URL and normalized method to the factory", async () => {
+			mockNativeFetchState.queuedResponses.push({ status: 200, body: "ok" });
+			const attempts: Array<{ attempt: number; url: string; method: string }> = [];
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient("https://api.example.com");
+			await http.request("/v1/lookup", {
+				method: "get",
+				params: { id: "42" },
+				sensitiveParams: { serviceKey: "secret-key" },
+				headers: async (attempt) => {
+					attempts.push(attempt);
+					return {};
+				},
+			});
+
+			expect(attempts).toEqual([
+				{
+					attempt: 1,
+					url: "https://api.example.com/v1/lookup?id=42&serviceKey=secret-key",
+					method: "GET",
+				},
+			]);
+			expect(mockNativeFetchState.calls[0]?.url).toBe(attempts[0]?.url);
+		});
+
+		it("applies client defaults on top of the factory output", async () => {
+			mockNativeFetchState.queuedResponses.push({ status: 200, body: "ok" });
+			mockNativeFetchState.queuedResponses.push({ status: 200, body: "ok" });
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient(undefined, { userAgent: "native-agent" });
+			await http.post("https://example.com/items", { key: "value" }, {
+				headers: () => ({ dpop: "proof" }),
+			});
+			await http.post("https://example.com/items", "raw", {
+				headers: async () => ({ "content-type": "text/plain" }),
+			});
+
+			expect(mockNativeFetchState.calls[0]?.init?.headers).toEqual({
+				"User-Agent": "native-agent",
+				dpop: "proof",
+				"Content-Type": "application/json",
+			});
+			expect(mockNativeFetchState.calls[1]?.init?.headers).toEqual({
+				"User-Agent": "native-agent",
+				"content-type": "text/plain",
+			});
+		});
+
+		it("raises a factory throw as a non-retryable redacted TransportError", async () => {
+			const secret = "factory-secret";
+			let factoryCalls = 0;
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient();
+			let caught: unknown;
+			try {
+				await http.get("https://example.com/items", {
+					retry: true,
+					sensitiveParams: { serviceKey: secret },
+					headers: async ({ url }) => {
+						factoryCalls += 1;
+						throw new Error(`cannot sign ${url}`);
+					},
+				});
+			} catch (error) {
+				caught = error;
+			}
+
+			expect(caught).toBeInstanceOf(TransportError);
+			assertIsError(caught);
+			expect(caught).toMatchObject({ code: "http_header_factory_failed" });
+			expect(caught.message).toBe("Request header factory failed");
+			expect(caught.cause).toBeInstanceOf(Error);
+			expect(stringifyDiagnosticGraph(caught)).not.toContain(secret);
+			expect(factoryCalls).toBe(1);
+			expect(mockNativeFetchState.calls).toHaveLength(0);
+		});
+
+		it("rejects a factory that does not return a header record", async () => {
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient();
+			let caught: unknown;
+			try {
+				await http.get("https://example.com/items", {
+					retry: true,
+					// @ts-expect-error test-invalid: runtime validation must reject a non-record factory result.
+					headers: () => "dpop",
+				});
+			} catch (error) {
+				caught = error;
+			}
+
+			expect(caught).toBeInstanceOf(TransportError);
+			expect(caught).toMatchObject({ code: "http_header_factory_failed" });
+			expect(mockNativeFetchState.calls).toHaveLength(0);
+		});
+
+		it("resolves the factory once per attempt, not per redirect hop", async () => {
+			mockNativeFetchState.queuedResponses.push({
+				status: 302,
+				body: "",
+				headers: { location: "https://example.com/items/2" },
+			});
+			mockNativeFetchState.queuedResponses.push({ status: 200, body: "ok" });
+			let factoryCalls = 0;
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient();
+			await http.get("https://example.com/items/1", {
+				redirectPolicy: { mode: "same-origin", maxHops: 1 },
+				headers: () => {
+					factoryCalls += 1;
+					return { dpop: `proof-${factoryCalls}` };
+				},
+			});
+
+			expect(factoryCalls).toBe(1);
+			expect(mockNativeFetchState.calls.map((call) => call.url)).toEqual([
+				"https://example.com/items/1",
+				"https://example.com/items/2",
+			]);
+			expect(mockNativeFetchState.calls[1]?.init?.headers).toEqual({ dpop: "proof-1" });
+		});
+
+		it("stream() resolves the factory once as attempt 1", async () => {
+			mockNativeFetchState.queuedResponses.push({ status: 200, body: "hello" });
+			const attempts: Array<{ attempt: number; url: string; method: string }> = [];
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient();
+			const response = await http.stream("https://example.com/logs", {
+				headers: (attempt) => {
+					attempts.push(attempt);
+					return { dpop: "stream-proof" };
+				},
+			});
+
+			expect(response.status).toBe(200);
+			expect(attempts).toEqual([{ attempt: 1, url: "https://example.com/logs", method: "GET" }]);
+			expect(mockNativeFetchState.calls[0]?.init?.headers).toEqual({ dpop: "stream-proof" });
+		});
+
+		it("sse() keeps the Accept default for factory headers unless the factory sets it", async () => {
+			const body = 'data: {"value":1}\n\n';
+			mockNativeFetchState.queuedResponses.push({
+				status: 200,
+				body,
+				headers: { "content-type": "text/event-stream" },
+			});
+			mockNativeFetchState.queuedResponses.push({
+				status: 200,
+				body,
+				headers: { "content-type": "text/event-stream" },
+			});
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient();
+			await http.sse("https://example.com/events", { headers: () => ({ dpop: "sse-proof" }) });
+			await http.sse("https://example.com/events", {
+				headers: async () => ({ Accept: "application/x-ndjson" }),
+			});
+
+			expect(mockNativeFetchState.calls[0]?.init?.headers).toEqual({
+				Accept: "text/event-stream",
+				dpop: "sse-proof",
+			});
+			expect(mockNativeFetchState.calls[1]?.init?.headers).toEqual({
+				Accept: "application/x-ndjson",
+			});
+		});
+	});
 });
 
 import {

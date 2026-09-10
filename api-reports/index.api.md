@@ -2643,6 +2643,13 @@ export const HealthStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }, z.core.$strict>;
 }, z.core.$strict>], "kind">;
 
+// @public
+export interface HttpAttemptContext {
+    attempt: number;
+    method: HttpMethod;
+    url: string;
+}
+
 // @public (undocumented)
 export type HttpAttemptSample = {
     n: number;
@@ -2697,6 +2704,9 @@ type HttpClientOptions = ProxyResolutionOptions & {
     httpTelemetry?: HttpTelemetrySink;
     signal?: AbortSignal;
 };
+
+// @public
+export type HttpHeadersFactory = (attempt: HttpAttemptContext) => Record<string, string> | Promise<Record<string, string>>;
 
 // @public (undocumented)
 export type HttpMethod = "HEAD" | "head" | "GET" | "get" | "POST" | "post" | "PUT" | "put" | "DELETE" | "delete" | "OPTIONS" | "options" | "TRACE" | "trace" | "PATCH" | "patch";
@@ -6121,8 +6131,7 @@ const relativeDateNodeSchema: z.ZodObject<{
 
 // @public (undocumented)
 export interface RequestOptions {
-    // (undocumented)
-    headers?: Record<string, string>;
+    headers?: Record<string, string> | HttpHeadersFactory;
     // Warning: (ae-forgotten-export) The symbol "RequestParams" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -8470,11 +8479,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:159:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:223:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:663:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1614:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1702:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1711:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1898:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1642:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1730:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1738:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1739:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1926:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

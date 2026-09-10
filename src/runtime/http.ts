@@ -7,7 +7,9 @@ import {
 import { HttpRedirectError, ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
+	HttpAttemptContext,
 	HttpClient,
+	HttpHeadersFactory,
 	HttpMethod,
 	HttpRedirectPolicy,
 	HttpResponse,
@@ -194,24 +196,65 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
 	return Object.keys(headers).some((key) => key.toLowerCase() === needle);
 }
 
+function withClientHeaderDefaults(
+	headers: Record<string, string> | undefined,
+	clientOptions: HttpClientOptions,
+	body: unknown,
+): Record<string, string> {
+	const merged: Record<string, string> = {
+		...(clientOptions.userAgent ? { "User-Agent": clientOptions.userAgent } : {}),
+		...headers,
+	};
+
+	if (body !== undefined && !hasHeader(merged, "Content-Type")) {
+		merged["Content-Type"] = "application/json";
+	}
+
+	return merged;
+}
+
 function withClientHeaders(
 	options: RequestOptions | undefined,
 	clientOptions: HttpClientOptions,
 	body: unknown,
 ): RequestOptions {
-	const headers: Record<string, string> = {
-		...(clientOptions.userAgent ? { "User-Agent": clientOptions.userAgent } : {}),
-		...options?.headers,
-	};
-
-	if (body !== undefined && !hasHeader(headers, "Content-Type")) {
-		headers["Content-Type"] = "application/json";
-	}
-
+	// A header factory is resolved per issued attempt (resolveAttemptHeaders);
+	// the client defaults are applied to its output at that point.
+	if (typeof options?.headers === "function") return { ...options };
 	return {
 		...options,
-		headers,
+		headers: withClientHeaderDefaults(options?.headers, clientOptions, body),
 	};
+}
+
+function headerFactoryFailure(message: string, cause?: unknown): TransportError {
+	// A dedicated code keeps a broken proof minter out of the retry predicate:
+	// toHttpTransportError would otherwise brand a plain throw as
+	// transport_network_error, which the default retry policy re-issues.
+	return new TransportError(message, {
+		code: "http_header_factory_failed",
+		status: 0,
+		...(cause instanceof Error ? { cause } : {}),
+	});
+}
+
+async function resolveAttemptHeaders(
+	options: RequestOptions & { body?: unknown },
+	clientOptions: HttpClientOptions,
+	attempt: HttpAttemptContext,
+): Promise<Record<string, string> | undefined> {
+	const { headers } = options;
+	if (typeof headers !== "function") return headers;
+	let minted: unknown;
+	try {
+		minted = await headers(attempt);
+	} catch (error) {
+		throw headerFactoryFailure("Request header factory failed", error);
+	}
+	if (minted === null || typeof minted !== "object" || Array.isArray(minted)) {
+		throw headerFactoryFailure("Request header factory must return a header record");
+	}
+	return withClientHeaderDefaults(minted as Record<string, string>, clientOptions, options.body);
 }
 
 function parseHttpData(body: string, headers: Record<string, string>): unknown {
@@ -773,6 +816,7 @@ async function fetchNativeHttp(
 	proxyAttemptOffset = 0,
 	dedupe?: { attempted: Set<string> },
 	observeProxy?: (used: boolean, status?: number) => void,
+	attempt = 1,
 ): Promise<NativeHttpAttemptOutcome> {
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
@@ -801,8 +845,16 @@ async function fetchNativeHttp(
 			}
 			dedupe.attempted.add(proxy);
 		}
+		// Resolve after the dedupe check so a skipped duplicate offset never burns
+		// a single-use proof, and with the serialized URL so URL-bound proofs
+		// match what is actually issued.
+		const requestHeaders = await resolveAttemptHeaders(options, clientOptions, {
+			attempt,
+			url: requestUrl,
+			method,
+		});
 		const requestInit: NativeFetchInit = {
-			headers: options.headers,
+			headers: requestHeaders,
 			method,
 			...(proxy ? { proxy } : {}),
 			...(signal ? { signal } : {}),
@@ -882,8 +934,14 @@ async function fetchNativeHttpStream(
 		const proxy = await resolveNativeProxy(options, clientOptions, warn);
 		observeProxy?.(Boolean(proxy));
 		throwIfAmbientAborted(clientOptions.signal);
+		// Streams never retry: a header factory is resolved once, as attempt 1.
+		const headers = await resolveAttemptHeaders(options, clientOptions, {
+			attempt: 1,
+			url: requestUrl,
+			method,
+		});
 		const requestInit: NativeFetchInit = {
-			headers: options.headers,
+			headers,
 			method,
 			...(proxy ? { proxy } : {}),
 			...(signal ? { signal } : {}),
@@ -1052,7 +1110,10 @@ export function createHttpClient(
 			});
 			const dedupeContext = dedupeAllocatorEndpoints ? { attempted: new Set<string>() } : undefined;
 
-			const executeOnce = async (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> => {
+			const executeOnce = async (
+				proxyAttemptOffset = 0,
+				attempt = 1,
+			): Promise<NativeHttpAttemptOutcome> => {
 				const started = performance.now();
 				let proxyUsed = false;
 				let observedStatus: number | undefined;
@@ -1074,6 +1135,7 @@ export function createHttpClient(
 							proxyUsed = used;
 							observedStatus = status;
 						},
+						attempt,
 					);
 					if (!isDedupeSkipOutcome(outcome))
 						record({
@@ -1121,7 +1183,8 @@ export function createHttpClient(
 				// re-threw as an upstream HTTP error.
 				let issuedThisAttempt = false;
 				try {
-					const outcome = await executeOnce(attempt - 1);
+					// Header factories see the issued count, not the raw proxy offset.
+					const outcome = await executeOnce(attempt - 1, issued + 1);
 					if (isDedupeSkipOutcome(outcome)) {
 						// Duplicate endpoint from a partial allocation: advance the flat
 						// offset without issuing the request (no backoff, not a failure) so
@@ -1259,10 +1322,14 @@ export function createHttpClient(
 			url,
 			options: RequestWithMethodOptions = {},
 		): Promise<AsyncIterable<SseMessage>> => {
-			const headers = {
-				Accept: "text/event-stream",
-				...options.headers,
-			};
+			const callerHeaders = options.headers;
+			const headers: Record<string, string> | HttpHeadersFactory =
+				typeof callerHeaders === "function"
+					? async (attempt) => ({
+							Accept: "text/event-stream",
+							...(await callerHeaders(attempt)),
+						})
+					: { Accept: "text/event-stream", ...callerHeaders };
 			const response = await streamRequest(url, options.method ?? "GET", {
 				...options,
 				headers,

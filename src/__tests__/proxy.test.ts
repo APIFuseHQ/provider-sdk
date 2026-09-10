@@ -1671,6 +1671,60 @@ describe("proxy integration", () => {
 		expect(httpTelemetry.toLogPayload()?.proxyUsed).toBe(true);
 	});
 
+	it("does not invoke a header factory for a dedupe-skipped ctx.http offset", async () => {
+		// Same partial-allocation crossover as above: five flat offsets, three
+		// issued requests. A single-use proof must be minted only for issued
+		// attempts, so the factory call count tracks `issued`, not the offset.
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
+		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("get-ip-v3")) {
+					return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
+				}
+				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				const proxy = (init as { proxy?: string } | undefined)?.proxy;
+				if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+					return new Response(JSON.stringify({ ok: true }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				throw new Error("socket hang up");
+			}),
+		);
+
+		const attempts: number[] = [];
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_partial_crossover_factory",
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 4 },
+				},
+			},
+		});
+
+		const response = await http.get("/health", {
+			headers: ({ attempt }) => {
+				attempts.push(attempt);
+				return { dpop: `proof-${attempt}` };
+			},
+		});
+
+		expect(response.status).toBe(200);
+		expect(nativeFetchCalls).toHaveLength(3);
+		expect(attempts).toEqual([1, 2, 3]);
+		expect(
+			nativeFetchCalls.map((call) => (call.init?.headers as Record<string, string>).dpop),
+		).toEqual(["proof-1", "proof-2", "proof-3"]);
+	});
+
 	it("honors an explicit ctx.http retry count against a single-endpoint allocation", async () => {
 		// Regression: de-duplication must not engage for an explicit retry policy. A
 		// Smartproxy pool of 1 resolves the same endpoint every attempt, but a caller
