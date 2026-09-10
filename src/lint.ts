@@ -16,6 +16,10 @@ import {
 	isHandleFieldMeta,
 } from "./handle-meta.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
+import {
+	isStealthOwnedHeaderName,
+	SDK_OWNED_CHROME_HEADER_PREFIX,
+} from "./runtime/stealth-owned-headers.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 
@@ -1025,8 +1029,13 @@ const VERSIONED_PROFILE_LITERAL_PATTERN =
 const VERSIONED_USER_AGENT_PATTERN = /\b(?:Chrome|CriOS|Firefox|FxiOS|EdgA?|OPR)\/\d+(?:\.\d+)*/i;
 const VERSIONED_SAFARI_USER_AGENT_PATTERN = /\bVersion\/(\d+(?:\.\d+)*)(?=[\s\S]*\bSafari\/\d)/i;
 const VERSIONED_CLIENT_HINT_PATTERN = /(?:^|[;,\s])v\s*=\s*["']?\d+/i;
+// Calls that write a header entry as (name, value): Headers/Map `set` and
+// `append`, Node's `setHeader`. Predicates, replacements, and logging calls
+// take string arguments too and must not count as header writes.
+const HEADER_SETTER_CALLEE_PATTERN = /^(?:set|append|setHeader|addHeader)$/;
+const OWNED_CLIENT_HINT_HEADER_PREFIX = "sec-ch-ua";
 
-type BrowserVersionLiteralKind = "profile" | "user-agent" | "sec-ch-ua";
+type BrowserVersionLiteralKind = "profile" | "user-agent" | "sec-ch-ua" | "owned-header";
 
 type BrowserVersionLiteralFinding = {
 	kind: BrowserVersionLiteralKind;
@@ -1054,6 +1063,73 @@ function isSecChUaHeaderName(value: string | undefined): boolean {
 	return value?.toLowerCase() === "sec-ch-ua";
 }
 
+/**
+ * True for the code paths that reach the stealth transport: `ctx.stealth`,
+ * `ctx["stealth"]`, and `const { stealth } = ctx`. Read from the AST so a
+ * comment or string that mentions ctx.stealth does not scope a ctx.http file
+ * into this rule.
+ */
+function isStealthContextAccess(node: import("typescript").Node): boolean {
+	const ts = getTypeScript();
+	if (ts.isPropertyAccessExpression(node)) {
+		return (
+			ts.isIdentifier(node.expression) &&
+			node.expression.text === "ctx" &&
+			node.name.text === "stealth"
+		);
+	}
+	if (ts.isElementAccessExpression(node)) {
+		return (
+			ts.isIdentifier(node.expression) &&
+			node.expression.text === "ctx" &&
+			staticStringText(node.argumentExpression) === "stealth"
+		);
+	}
+	if (ts.isBindingElement(node)) {
+		const key = node.propertyName ?? node.name;
+		if (!ts.isIdentifier(key) || key.text !== "stealth") return false;
+		const declaration = node.parent?.parent;
+		return (
+			declaration !== undefined &&
+			ts.isVariableDeclaration(declaration) &&
+			declaration.initializer !== undefined &&
+			ts.isIdentifier(declaration.initializer) &&
+			declaration.initializer.text === "ctx"
+		);
+	}
+	return false;
+}
+
+function isStaticUndefined(node: import("typescript").Node | undefined): boolean {
+	if (!node) return false;
+	const ts = getTypeScript();
+	return (ts.isIdentifier(node) && node.text === "undefined") || ts.isVoidExpression(node);
+}
+
+function calleeName(node: import("typescript").CallExpression): string | undefined {
+	const ts = getTypeScript();
+	if (ts.isPropertyAccessExpression(node.expression)) return node.expression.name.text;
+	if (ts.isIdentifier(node.expression)) return node.expression.text;
+	return undefined;
+}
+
+/**
+ * Header names this rule reports in ctx.stealth files: the Sec-Fetch-* and
+ * client-hint (sec-ch-ua*) families, restricted to what the stealth runtime
+ * really rejects (isStealthOwnedHeaderName). user-agent is covered by the
+ * "user-agent" kind; host, connection, and accept-encoding are left alone
+ * because ctx.http callers set them legitimately in the same files.
+ */
+function isReportedOwnedHeaderName(value: string | undefined): boolean {
+	if (value === undefined) return false;
+	const name = value.toLowerCase();
+	if (!isStealthOwnedHeaderName(name)) return false;
+	if (name.startsWith(SDK_OWNED_CHROME_HEADER_PREFIX)) {
+		return name.length > SDK_OWNED_CHROME_HEADER_PREFIX.length;
+	}
+	return name.startsWith(OWNED_CLIENT_HINT_HEADER_PREFIX);
+}
+
 function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLiteralFinding[] {
 	const ts = getTypeScript();
 	const sourceFile = ts.createSourceFile(
@@ -1063,8 +1139,13 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 		true,
 		ts.ScriptKind.TSX,
 	);
-	const findings: BrowserVersionLiteralFinding[] = [];
+	let findings: BrowserVersionLiteralFinding[] = [];
 	const seen = new Set<string>();
+	// Owned-header entries only count once the file is known to reach
+	// ctx.stealth, which may appear after the entry; collect them and decide
+	// after the walk.
+	let stealthAccess = false;
+	const ownedHeaderEntries: Array<{ name: string; position: number; valuePosition?: number }> = [];
 
 	const addFinding = (kind: BrowserVersionLiteralKind, literal: string, position: number) => {
 		const key = `${kind}:${position}:${literal}`;
@@ -1090,29 +1171,86 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 		}
 	};
 
+	// A header entry `name: value` in any of the shapes below. In a ctx.stealth
+	// file an owned name is the finding (the runtime rejects it whatever the
+	// value, except a statically undefined record entry, which the runtime
+	// drops); elsewhere only a versioned sec-ch-ua value is.
+	const inspectHeaderEntry = (
+		nameNode: import("typescript").Node,
+		name: string | undefined,
+		valueNode: import("typescript").Node | undefined,
+		ownedHeaderShape: boolean,
+	) => {
+		if (name === undefined) return;
+		if (ownedHeaderShape && isReportedOwnedHeaderName(name) && !isStaticUndefined(valueNode)) {
+			ownedHeaderEntries.push({
+				name,
+				position: nameNode.getStart(sourceFile),
+				valuePosition: valueNode?.getStart(sourceFile),
+			});
+		}
+		if (isSecChUaHeaderName(name)) inspectSecChUaValue(valueNode);
+	};
+
 	const visit = (node: import("typescript").Node) => {
 		const text = staticStringText(node);
 		if (text !== undefined) inspectLiteral(text, node.getStart(sourceFile));
+		if (isStealthContextAccess(node)) stealthAccess = true;
 
-		if (ts.isPropertyAssignment(node) && isSecChUaHeaderName(staticPropertyName(node.name))) {
-			inspectSecChUaValue(node.initializer);
+		if (ts.isPropertyAssignment(node)) {
+			inspectHeaderEntry(node.name, staticPropertyName(node.name), node.initializer, true);
 		}
 
-		if (ts.isCallExpression(node) && isSecChUaHeaderName(staticStringText(node.arguments[0]))) {
-			inspectSecChUaValue(node.arguments[1]);
+		if (ts.isCallExpression(node) && node.arguments[0]) {
+			// Only `headers.set(name, value)`-style calls write a header;
+			// `name.startsWith("sec-fetch-")` or `log("sec-fetch-dest", x)` do not.
+			inspectHeaderEntry(
+				node.arguments[0],
+				staticStringText(node.arguments[0]),
+				node.arguments[1],
+				node.arguments.length >= 2 && HEADER_SETTER_CALLEE_PATTERN.test(calleeName(node) ?? ""),
+			);
+		}
+
+		if (ts.isArrayLiteralExpression(node) && node.elements[0]) {
+			// Only a `[name, value]` tuple is a header. A name list such as
+			// `new Set(["sec-ch-ua-mobile", "sec-ch-ua-platform"])` is not: it is
+			// the argument of a constructor, or its second element is itself an
+			// owned name.
+			const second = node.elements[1];
+			inspectHeaderEntry(
+				node.elements[0],
+				staticStringText(node.elements[0]),
+				second,
+				node.elements.length === 2 &&
+					!ts.isNewExpression(node.parent) &&
+					!isStealthOwnedHeaderName(staticStringText(second) ?? ""),
+			);
 		}
 
 		if (
-			ts.isArrayLiteralExpression(node) &&
-			isSecChUaHeaderName(staticStringText(node.elements[0]))
+			ts.isBinaryExpression(node) &&
+			node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+			ts.isElementAccessExpression(node.left)
 		) {
-			inspectSecChUaValue(node.elements[1]);
+			const nameNode = node.left.argumentExpression;
+			inspectHeaderEntry(nameNode, staticStringText(nameNode), node.right, true);
 		}
 
 		ts.forEachChild(node, visit);
 	};
 
 	visit(sourceFile);
+	if (stealthAccess) {
+		// The owned name is the finding; do not also report its sec-ch-ua value.
+		const shadowedValues = new Set(ownedHeaderEntries.map((entry) => entry.valuePosition));
+		findings = findings.filter(
+			(finding) => !(finding.kind === "sec-ch-ua" && shadowedValues.has(finding.position)),
+		);
+		for (const entry of ownedHeaderEntries) {
+			addFinding("owned-header", entry.name, entry.position);
+		}
+	}
 	return findings.sort((left, right) => left.position - right.position);
 }
 
@@ -1124,6 +1262,8 @@ function browserVersionLiteralMessage(finding: BrowserVersionLiteralFinding): st
 			return `Hardcoded User-Agent browser version "${finding.literal}" can disagree with the stealth TLS fingerprint. Remove the literal. ctx.stealth owns User-Agent and rejects a caller value with STEALTH_HEADER_OVERRIDE_UNSUPPORTED, so omit the header there and select the profile with stealth: { browser: "chrome", os: "macos" }. For ctx.http only, derive it from getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.`;
 		case "sec-ch-ua":
 			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from stealth: { browser: "chrome", os: "macos" }. ctx.stealth also owns User-Agent, so omit that header there as well; for ctx.http only, derive it from getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.';
+		case "owned-header":
+			return `ctx.stealth owns the "${finding.literal}" header and rejects a caller value with STEALTH_HEADER_OVERRIDE_UNSUPPORTED (HTTP 500 at request time). Remove it; declare stealth: { requestClass: "navigation" | "xhr" | "post" } to drive Sec-Fetch-* and select the profile with stealth: { browser: "chrome", os: "macos" } for client hints.`;
 	}
 }
 

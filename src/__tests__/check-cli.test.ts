@@ -718,6 +718,60 @@ export const headers = {
 		expect(browserVersionDetails.join("\n")).not.toContain("chrome-120");
 	});
 
+	it("blocks stealth-owned header names only in files that use ctx.stealth", async () => {
+		const providerDir = makeProviderDir("apifuse-check-owned-headers-");
+		writeMinimalProviderIndex(providerDir);
+		mkdirSync(join(providerDir, "upstream"), { recursive: true });
+		const headersSource = `export const HEADERS: Record<string, string> = {
+  Accept: "text/html,application/xhtml+xml",
+  "Accept-Language": "ja-JP,ja;q=0.9",
+  Referer: "https://www.example.com/",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "same-origin",
+  "Upgrade-Insecure-Requests": "1",
+};
+`;
+		// The amazon-jp shape: a module-level header constant spread into a
+		// ctx.stealth wrapper elsewhere in the same file.
+		writeFileSync(
+			join(providerDir, "upstream", "stealth.ts"),
+			`${headersSource}export function getStealthClient(ctx: { stealth: unknown }) {
+  return ctx.stealth;
+}
+`,
+		);
+		// The same names are legitimate for ctx.http and must stay silent.
+		writeFileSync(
+			join(providerDir, "upstream", "http.ts"),
+			`${headersSource}export function fetchPage(ctx: { http: { get: (url: string) => unknown } }) {
+  return ctx.http.get("https://www.example.com/");
+}
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
+		const ownedHeaderDetails =
+			authoring?.details?.filter(
+				(detail) =>
+					detail.includes("browser-version-literal") &&
+					detail.includes("STEALTH_HEADER_OVERRIDE_UNSUPPORTED"),
+			) ?? [];
+
+		expect(authoring?.passed).toBe(false);
+		expect(ownedHeaderDetails).toHaveLength(3);
+		expect(ownedHeaderDetails.join("\n")).toContain("sourceFiles.upstream/stealth.ts");
+		expect(ownedHeaderDetails.join("\n")).not.toContain("upstream/http.ts");
+		for (const name of ["Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site"]) {
+			expect(ownedHeaderDetails.join("\n")).toContain(`ctx.stealth owns the "${name}" header`);
+		}
+		expect(ownedHeaderDetails.join("\n")).not.toContain("Upgrade-Insecure-Requests");
+		expect(ownedHeaderDetails.join("\n")).toContain(
+			'stealth: { requestClass: "navigation" | "xhr" | "post" }',
+		);
+	});
+
 	it("fails the prompt-assets check when the manifest is missing", async () => {
 		const providerDir = makeProviderDir("apifuse-check-prompt-assets-missing-");
 		writeMinimalProviderIndex(providerDir);
