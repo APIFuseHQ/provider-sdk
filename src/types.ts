@@ -1995,6 +1995,16 @@ export interface CredentialContext {
 
 export interface ProviderRequestContext {
 	connectionId?: string;
+	/**
+	 * Gateway-asserted principal scope of the operation request: the
+	 * organization id for customer subjects, the service-account id for
+	 * platform service accounts. `undefined` on direct calls and self-test
+	 * (unlike `FlowContext.tenantId`, which is coerced to `""`); an empty
+	 * string on the wire is normalised to `undefined` like `connectionId`.
+	 * Key per-principal policy (quota, fairness, correlation) for
+	 * connectionless operations on it. It does not scope `ctx.state`.
+	 */
+	tenantId?: string;
 	headers: Record<string, string>;
 }
 

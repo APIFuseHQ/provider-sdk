@@ -793,12 +793,17 @@ function resolveOperationConnectionId(
 	// absent so it can never override a valid id or key a real scope. Requests
 	// without any usable id fall back to the documented missing-connection
 	// sentinel scope instead of scoping context/affinity/state under "".
-	return (
-		normalizeConnectionId(request.connection?.id) ?? normalizeConnectionId(request.connectionId)
-	);
+	return normalizeIdentifier(request.connection?.id) ?? normalizeIdentifier(request.connectionId);
 }
 
-function normalizeConnectionId(id: string | undefined): string | undefined {
+function resolveOperationTenantId(request: Pick<OperationRequest, "tenantId">): string | undefined {
+	// Only the gateway-asserted envelope field is consulted; caller headers can
+	// never populate the principal scope. Same rule as connection ids: "" is a
+	// malformed identifier, not a principal.
+	return normalizeIdentifier(request.tenantId);
+}
+
+function normalizeIdentifier(id: string | undefined): string | undefined {
 	return id === "" ? undefined : id;
 }
 
@@ -910,6 +915,7 @@ function createProviderContext(
 	});
 	const requestContext = {
 		connectionId: resolveOperationConnectionId(request),
+		tenantId: resolveOperationTenantId(request),
 		headers: request.headers ?? {},
 	};
 	const requestState = instrumentProviderRuntimeState(
@@ -3617,7 +3623,10 @@ function createServerAppWithCapabilityModules(
 				requestId: request.requestId,
 				operationId,
 				headers: request.headers ?? {},
-				correlation: { connectionId: envelope.connectionId },
+				correlation: {
+					connectionId: envelope.connectionId,
+					tenantId: resolveOperationTenantId(request),
+				},
 			});
 			const response = await requestScope.run(async () => {
 				const ctx = createProviderContext(
@@ -3699,7 +3708,10 @@ function createServerAppWithCapabilityModules(
 			requestScope.enrich({
 				requestId: body.requestId,
 				headers: body.headers,
-				correlation: { connectionId: resolveOperationConnectionId(body) },
+				correlation: {
+					connectionId: resolveOperationConnectionId(body),
+					tenantId: resolveOperationTenantId(body),
+				},
 			});
 			const streaming = provider.operations[operation]?.transport?.kind
 				? provider.operations[operation]?.transport?.kind !== "json"

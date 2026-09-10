@@ -6,6 +6,8 @@ export interface StatefulForwardingRuntimeContext {
 	readonly operationRequest?: {
 		readonly requestId: string;
 		readonly connection?: unknown;
+		/** Gateway-asserted principal scope; forwarded verbatim to the owner pod. */
+		readonly tenantId?: string;
 		readonly headers?: Record<string, string>;
 		readonly trace?: Record<string, string>;
 	};
@@ -36,6 +38,7 @@ export function withStatefulLocalProviderContext(
 export function statefulForwardingContextFromProviderRequest(request: {
 	readonly requestId: string;
 	readonly connection?: unknown;
+	readonly tenantId?: string;
 	readonly headers?: Record<string, string>;
 	readonly trace?: Record<string, string>;
 }): StatefulForwardingRuntimeContext {
@@ -43,6 +46,7 @@ export function statefulForwardingContextFromProviderRequest(request: {
 		operationRequest: {
 			requestId: request.requestId,
 			...(request.connection !== undefined ? { connection: request.connection } : {}),
+			...(request.tenantId ? { tenantId: request.tenantId } : {}),
 			...(request.headers ? { headers: request.headers } : {}),
 			...(request.trace ? { trace: request.trace } : {}),
 		},

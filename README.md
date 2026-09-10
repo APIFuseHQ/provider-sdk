@@ -78,6 +78,7 @@ The operation request body is the same envelope used by the APIFuse gateway:
 | `headers` | no | Extra caller headers to expose through `ctx.request.headers`. |
 | `connectionId` | no | Connection identity only; it does not include credentials. The gateway sends it for `optional` connection mode, and only when the caller supplied a connection that passed authorization. Exposed as `ctx.request.connectionId`. |
 | `connection` | no | Credential-bearing connection data. The gateway sends it for `required` connection mode; omit it for no-auth/public (`none` mode) operations. For local debugging, pass an object with `id`, `mode`, `secrets`, `metadata`, and `externalRef`. Do not pass `null`. |
+| `tenantId` | no | Gateway-asserted principal scope: the organization id for customer subjects, the service-account id for platform service accounts. Sent for every connection mode, including `none`; absent on direct calls and self-test. Exposed as `ctx.request.tenantId` (`undefined` when absent or empty). Caller headers never populate it. |
 
 The gateway sends only `connection` for `required` mode, only `connectionId`
 for `optional` mode (and nothing when the caller passed no connection), and

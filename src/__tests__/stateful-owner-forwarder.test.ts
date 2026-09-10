@@ -9,6 +9,7 @@ const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
 const {
 	buildSessionKey,
 	HttpStatefulOwnerForwarder,
+	statefulForwardingContextFromProviderRequest,
 	StatefulOwnerForwardingError,
 } = await builtStateful;
 
@@ -152,5 +153,36 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 			new AbortController().signal,
 		);
 		expect(envelope?.deadlineAt).toBe(deadlineAt);
+	});
+
+	it("propagates the gateway-asserted tenant scope into the signed forwarding envelope", async () => {
+		let envelope: { operationRequest?: Record<string, unknown> } | undefined;
+		const forwarder = new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: "secret",
+			fetch: async (_url, init) => {
+				envelope = JSON.parse(String(init?.body));
+				return Response.json({ data: { forwarded: true } });
+			},
+		});
+		const forwardingContext = statefulForwardingContextFromProviderRequest({
+			requestId: "request-a",
+			connection: request.runtimeContext.forwarding.operationRequest.connection,
+			tenantId: "org_forwarded_tenant",
+		});
+		expect(forwardingContext.operationRequest?.tenantId).toBe("org_forwarded_tenant");
+		// Absent stays absent: the owner must not see an empty principal scope.
+		expect(
+			"tenantId" in
+				(statefulForwardingContextFromProviderRequest({ requestId: "request-a" })
+					.operationRequest ?? {}),
+		).toBe(false);
+
+		await forwarder.forward(
+			owner("http://pod-owner"),
+			{ ...request, runtimeContext: { forwarding: forwardingContext } },
+			new AbortController().signal,
+		);
+		expect(envelope?.operationRequest?.tenantId).toBe("org_forwarded_tenant");
 	});
 });

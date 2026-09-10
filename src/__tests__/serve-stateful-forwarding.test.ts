@@ -213,6 +213,47 @@ describe("signed stateful operation forwarding", () => {
 		expect(received?.signal).toBeInstanceOf(AbortSignal);
 	});
 
+	it("preserves the gateway-asserted tenant scope through the forwarded envelope", async () => {
+		const provider = createTestProvider({ defaultExecutions: 0 });
+		const events: ProviderServerLogEvent[] = [];
+		let received: ProviderServerOperationExecutorInput | undefined;
+		const app = createServerApp(provider, {
+			logger: (event) => events.push(event),
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async (input) => {
+				received = input;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({
+			forwardedAt: timestamp,
+			operationRequest: {
+				requestId: "req-stateful-forward",
+				input: { value: "forwarded" },
+				tenantId: "org_forwarded_tenant",
+			},
+		});
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(200);
+		expect(received?.request.tenantId).toBe("org_forwarded_tenant");
+		expect(received?.ctx.request?.tenantId).toBe("org_forwarded_tenant");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_completed",
+				route: "echo",
+				connectionId: "connection-1",
+				tenantId: "org_forwarded_tenant",
+			}),
+		);
+	});
+
 	it("logs proxy telemetry recorded by a forwarded operation", async () => {
 		const originalFetch = global.fetch;
 		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
