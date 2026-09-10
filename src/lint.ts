@@ -1116,9 +1116,13 @@ function calleeName(node: import("typescript").CallExpression): string | undefin
 /**
  * Header names this rule reports in ctx.stealth files: the Sec-Fetch-* and
  * client-hint (sec-ch-ua*) families, restricted to what the stealth runtime
- * really rejects (isStealthOwnedHeaderName). user-agent is covered by the
- * "user-agent" kind; host, connection, and accept-encoding are left alone
- * because ctx.http callers set them legitimately in the same files.
+ * really rejects (isStealthOwnedHeaderName). Deliberately narrower than the
+ * runtime rejection: host, connection, and accept-encoding are left alone
+ * because ctx.http callers set them legitimately in the same files, and
+ * user-agent only reaches a finding through the "user-agent" kind, which
+ * matches a versioned literal value rather than the name — a user-agent read
+ * from a variable is rejected by the runtime and stays silent here. Widening
+ * the set needs a per-file transport scope and a suppression path first.
  */
 function isReportedOwnedHeaderName(value: string | undefined): boolean {
 	if (value === undefined) return false;
@@ -1173,16 +1177,23 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 
 	// A header entry `name: value` in any of the shapes below. In a ctx.stealth
 	// file an owned name is the finding (the runtime rejects it whatever the
-	// value, except a statically undefined record entry, which the runtime
-	// drops); elsewhere only a versioned sec-ch-ua value is.
+	// value); elsewhere only a versioned sec-ch-ua value is. A statically
+	// undefined value is exempt only in the "record" shapes, the ones the
+	// runtime drops before the ownership check (`normalizedHeaderEntries`):
+	// `Headers.set(name, undefined)` stringifies to "undefined" and still
+	// throws, so it stays a finding.
 	const inspectHeaderEntry = (
 		nameNode: import("typescript").Node,
 		name: string | undefined,
 		valueNode: import("typescript").Node | undefined,
-		ownedHeaderShape: boolean,
+		ownedHeaderShape: false | "record" | "entry",
 	) => {
 		if (name === undefined) return;
-		if (ownedHeaderShape && isReportedOwnedHeaderName(name) && !isStaticUndefined(valueNode)) {
+		if (
+			ownedHeaderShape !== false &&
+			isReportedOwnedHeaderName(name) &&
+			!(ownedHeaderShape === "record" && isStaticUndefined(valueNode))
+		) {
 			ownedHeaderEntries.push({
 				name,
 				position: nameNode.getStart(sourceFile),
@@ -1198,7 +1209,7 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 		if (isStealthContextAccess(node)) stealthAccess = true;
 
 		if (ts.isPropertyAssignment(node)) {
-			inspectHeaderEntry(node.name, staticPropertyName(node.name), node.initializer, true);
+			inspectHeaderEntry(node.name, staticPropertyName(node.name), node.initializer, "record");
 		}
 
 		if (ts.isCallExpression(node) && node.arguments[0]) {
@@ -1208,7 +1219,9 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 				node.arguments[0],
 				staticStringText(node.arguments[0]),
 				node.arguments[1],
-				node.arguments.length >= 2 && HEADER_SETTER_CALLEE_PATTERN.test(calleeName(node) ?? ""),
+				node.arguments.length >= 2 && HEADER_SETTER_CALLEE_PATTERN.test(calleeName(node) ?? "")
+					? "entry"
+					: false,
 			);
 		}
 
@@ -1224,7 +1237,9 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 				second,
 				node.elements.length === 2 &&
 					!ts.isNewExpression(node.parent) &&
-					!isStealthOwnedHeaderName(staticStringText(second) ?? ""),
+					!isStealthOwnedHeaderName(staticStringText(second) ?? "")
+					? "entry"
+					: false,
 			);
 		}
 
@@ -1234,7 +1249,7 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 			ts.isElementAccessExpression(node.left)
 		) {
 			const nameNode = node.left.argumentExpression;
-			inspectHeaderEntry(nameNode, staticStringText(nameNode), node.right, true);
+			inspectHeaderEntry(nameNode, staticStringText(nameNode), node.right, "record");
 		}
 
 		ts.forEachChild(node, visit);
