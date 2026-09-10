@@ -7,7 +7,7 @@ export interface DevServerOptions {
 	sessionDbPath?: string;
 	/** Override the default in-process engine attachment. */
 	engine?: ProviderEngine;
-	/** Explicit engine mode; must agree with `APIFUSE__ENGINE__MODE` when both are set. */
+	/** Explicit engine mode; `APIFUSE__ENGINE__MODE` outranks it when both are set. */
 	engineMode?: ProviderEngineMode;
 }
 

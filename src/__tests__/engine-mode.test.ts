@@ -8,7 +8,12 @@ import {
 } from "../engine.js";
 import { SDK_OWNED_PROVIDER_ERROR_CODES } from "../error-resolution.js";
 import { ValidationError } from "../errors.js";
-import { resolveProviderEngineMode } from "../runtime/engine-mode.js";
+import {
+	assertProcessEngineModeSupported,
+	createEngineForMode,
+	isUnavailableProviderEngine,
+	resolveProviderEngineMode,
+} from "../runtime/engine-mode.js";
 import { createServerApp, type ProviderServerLogEvent, serve } from "../server/serve.js";
 import type { ProviderDefinition, ProviderSecretDeclaration } from "../types.js";
 import { createProviderDefinitionDouble, defineTestProvider } from "./test-utils.js";
@@ -137,12 +142,22 @@ describe("resolveProviderEngineMode", () => {
 		expect(
 			resolveProviderEngineMode({ engine: createInProcessProviderEngine(), environment: {} }),
 		).toEqual({ mode: "in-process", source: "engine", deprecated: true, warnings: [] });
+		// An opaque host engine still attaches inside the pod process, so the
+		// ADR-0011 audit must count it as not yet migrated.
 		expect(resolveProviderEngineMode({ engine: customEngine, environment: {} })).toEqual({
 			mode: "custom",
 			source: "engine",
-			deprecated: false,
+			deprecated: true,
 			warnings: [],
 		});
+		// Normalized like the env and the option, so the audit cannot be fooled by
+		// a host engine that spells its kind differently.
+		expect(
+			resolveProviderEngineMode({ engine: { kind: " In-Process " }, environment: {} }),
+		).toEqual({ mode: "in-process", source: "engine", deprecated: true, warnings: [] });
+		expect(
+			resolveProviderEngineMode({ engine: { kind: "REMOTE" }, environment: {} }),
+		).toEqual({ mode: "remote", source: "engine", deprecated: false, warnings: [] });
 		expect(
 			resolveProviderEngineMode({
 				engine: createInProcessProviderEngine(),
@@ -178,6 +193,42 @@ describe("resolveProviderEngineMode", () => {
 				},
 			}).warnings,
 		).toEqual([]);
+		// A host engine may be a remote client that reads the env itself; calling
+		// the env unused there would be a false report.
+		expect(
+			resolveProviderEngineMode({
+				engine: customEngine,
+				environment: { APIFUSE__ENGINE__API_KEY: "consumed-by-the-host-engine" },
+			}).warnings,
+		).toEqual([]);
+	});
+});
+
+describe("createEngineForMode", () => {
+	it("serves only the in-process lane and denies every other named mode", () => {
+		expect(isUnavailableProviderEngine(createEngineForMode("in-process"))).toBe(false);
+		// The mode union is open (`runtimeTarget: "engine"` names further lanes):
+		// an unserved lane must not fall back to in-process (ADR-0011 Pitfall 2).
+		for (const mode of ["remote", "sidecar", "custom"]) {
+			const engine = createEngineForMode(mode);
+			expect(isUnavailableProviderEngine(engine)).toBe(true);
+			expect(engine.kind).toBe(mode);
+		}
+	});
+
+	it("stops the CLIs for any mode this release does not serve", () => {
+		expect(assertProcessEngineModeSupported({}).mode).toBe("in-process");
+		expect(() =>
+			assertProcessEngineModeSupported({ [PROVIDER_ENGINE_MODE_ENV]: "remote" }),
+		).toThrow(/only serves the in-process engine/);
+		// An unrecognized value is still not a mode: it resolves to the default,
+		// so the CLI starts rather than refusing on a typo.
+		expect(assertProcessEngineModeSupported({ [PROVIDER_ENGINE_MODE_ENV]: "sidecar" })).toEqual({
+			mode: "in-process",
+			source: "default",
+			deprecated: true,
+			warnings: ["invalid_env_value"],
+		});
 	});
 });
 
@@ -318,7 +369,7 @@ describe("serve engine mode telemetry", () => {
 				{ mode: "in-process", source: "option", deprecated: true, attached: true },
 			]);
 			expect(await bootEvents({ engine: customEngine })).toMatchObject([
-				{ mode: "custom", source: "engine", deprecated: false, attached: true },
+				{ mode: "custom", source: "engine", deprecated: true, attached: true },
 			]);
 		});
 		await withEnv({ [PROVIDER_ENGINE_MODE_ENV]: "in-process" }, async () => {
@@ -332,6 +383,19 @@ describe("serve engine mode telemetry", () => {
 				{ level: "warn", mode: "remote", source: "env", deprecated: false, attached: false },
 			]);
 		});
+	});
+
+	it("stays info-level while the remote engine env is projected fleet-wide", async () => {
+		// The manifest generator projects this env before any mode flips, so it must
+		// not turn a healthy in-process boot into a warn line on every pod.
+		await withEnv(
+			{ [PROVIDER_ENGINE_MODE_ENV]: undefined, APIFUSE__ENGINE__API_KEY: "projected-early" },
+			async () => {
+				expect(await bootEvents()).toMatchObject([
+					{ level: "info", mode: "in-process", attached: true, warnings: ["engine_env_ignored"] },
+				]);
+			},
+		);
 	});
 
 	it("carries the declared runtime target and the selection warnings", async () => {

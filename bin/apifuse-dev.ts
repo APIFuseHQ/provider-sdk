@@ -51,6 +51,7 @@ export async function main() {
 
 	console.log("\nEndpoints:");
 	console.log(`  GET  http://localhost:${port}/health`);
+	console.log(`  GET  http://localhost:${port}/readyz`);
 
 	for (const operationId of Object.keys(provider.operations)) {
 		console.log(`  POST http://localhost:${port}/v1/${operationId}`);

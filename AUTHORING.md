@@ -160,7 +160,10 @@ every request with `PROVIDER_ENGINE_MODE_UNSUPPORTED` and reports `503` on
 refuse to start instead.
 
 `GET /health` is liveness only and stays engine-blind; `GET /readyz` reports the
-resolved engine attachment and is what readiness/startup probes should use.
+resolved engine attachment and is what readiness/startup probes should use — but
+only for a provider already pinned to an SDK release that serves the route.
+Earlier pins answer `404`, and a failing readiness/startup probe is not
+self-healing, so manifests move to `/readyz` after the pin wave, never before.
 
 ### Deployment intent
 

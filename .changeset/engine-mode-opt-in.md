@@ -17,17 +17,19 @@ boot failure.
   unrecognized env value is reported and ignored — a rendered manifest must never
   be able to crash a pod. A malformed `engineMode` option throws, because only
   calling code can produce one. The resolver itself stays internal.
-- `remote` has no client in this release: instead of throwing at boot the server
-  attaches an engine that fails every request with
-  `PROVIDER_ENGINE_MODE_UNSUPPORTED` (500, non-retryable) and reports 503 on the
-  new `GET /readyz`. It never falls back to in-process (ADR-0011 Pitfall 2).
-  `apifuse dev|record` still refuse to start — they are developer tools, not pods.
+- Only the in-process lane is served in this release: any other mode (`remote`
+  today, any later lane the open union names) attaches an engine that fails every
+  request with `PROVIDER_ENGINE_MODE_UNSUPPORTED` (500, non-retryable) and reports
+  503 on the new `GET /readyz`, instead of throwing at boot. In-process is never a
+  fallback (ADR-0011 Pitfall 2). `apifuse dev|record` refuse to start for any
+  unserved mode — they are developer tools, not pods.
 - New `GET /readyz` reports the resolved attachment
   (`{status, provider, version, engine:{mode, attached}}`, 200/503).
   `GET /health` is unchanged and stays engine-blind: it is what liveness probes
   use, so engine reachability may never influence it.
 - `serve` logs one `provider_engine_mode` event per boot with `mode`, `source`
-  (`engine` | `env` | `option` | `default`), `deprecated` (true for in-process),
+  (`engine` | `env` | `option` | `default`), `deprecated` (true for every
+  non-remote attachment, including an opaque host engine),
   `attached`, `sdkVersion`, `runtimeTarget` and non-fatal `warnings`.
   `createServerApp*` does not log it. `ProviderServerLogEvent` is an **open**
   union: consumers must tolerate an unknown `event` value, and a consumer that
@@ -46,7 +48,12 @@ boot failure.
   authentication, protocol mismatch, denied egress and an unsupported mode are
   non-retryable 500s, because no caller retry can clear a deployment fault.
 - `ProviderEngine.kind?: ProviderEngineMode` lets a host engine describe itself so
-  the boot event and `/readyz` can report a truthful mode.
+  the boot event and `/readyz` can report a truthful mode; the value is trimmed
+  and case-folded like the env and the option.
+- `APIFUSE__ENGINE__API_KEY` (and any credential embedded in
+  `APIFUSE__ENGINE__URL`) joins the diagnostic sensitive-value inventory, so the
+  remote engine client credential is redacted from diagnostics the way the other
+  engine-owned credentials already are.
 - `ProviderSecretDeclaration.issuer?: "apifuse" | "contributor"` is accepted and
   validated when present. It is metadata only: secret projection is unchanged, and
   nothing warns about omitting it.

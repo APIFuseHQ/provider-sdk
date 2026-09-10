@@ -1448,7 +1448,7 @@ export type ProviderServerLogEvent =
 			/** Resolved attachment; `custom` for an opaque host engine. */
 			mode: ProviderEngineMode | "custom";
 			source: "engine" | "env" | "option" | "default";
-			/** True for the in-process engine, whose removal is scheduled by ADR-0011. */
+			/** True for every non-remote attachment, whose removal is scheduled by ADR-0011. */
 			deprecated: boolean;
 			/** False when the engine refuses to attach; `/readyz` reports 503. */
 			attached: boolean;
@@ -1470,9 +1470,14 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	/** Capability attachment boundary. Defaults to the local in-process engine. */
 	engine?: ProviderEngine;
 	/**
-	 * Explicit engine attachment mode. Must agree with `APIFUSE__ENGINE__MODE` and
-	 * with `engine.kind` when those are set; disagreement fails boot with
-	 * `PROVIDER_ENGINE_MODE_CONFLICT`. Defaults to the in-process engine.
+	 * Explicit engine attachment mode. Lowest precedence of the three inputs:
+	 * an explicit `engine` object wins, then `APIFUSE__ENGINE__MODE` (the
+	 * deployment outranks provider code), then this option, then the in-process
+	 * default. Disagreement is never fatal — it is reported on the
+	 * `provider_engine_mode` boot event (`env_overrode_option`,
+	 * `engine_object_overrode_requested_mode`), which only `serve` emits. A value
+	 * that is not a known mode throws `ValidationError`, because unlike the env it
+	 * can only come from calling code.
 	 */
 	engineMode?: ProviderEngineMode;
 	/** Request-file resolver supplied by the engine host when `files` is declared. */
@@ -3511,13 +3516,24 @@ function resolveServerEngine(serverOptions: ProviderServerOptions): {
 	return { engine: createEngineForMode(resolution.mode), resolution };
 }
 
+/**
+ * `engine_env_ignored` is expected for the whole migration window: the manifest
+ * generator projects the remote engine env fleet-wide before any mode flips, so
+ * escalating on it would turn every healthy boot into a warn line. The
+ * disagreement warnings still escalate.
+ */
+const ENGINE_MODE_INFO_WARNINGS: ReadonlySet<string> = new Set(["engine_env_ignored"]);
+
 function engineModeLogEvent(
 	provider: ProviderDefinition,
 	resolution: ProviderEngineModeResolution,
 	attached: boolean,
 ): ProviderServerLogEvent {
+	const escalating = resolution.warnings.filter(
+		(warning) => !ENGINE_MODE_INFO_WARNINGS.has(warning),
+	);
 	return {
-		level: attached && resolution.warnings.length === 0 ? "info" : "warn",
+		level: attached && escalating.length === 0 ? "info" : "warn",
 		event: "provider_engine_mode",
 		providerId: provider.id,
 		mode: resolution.mode,
@@ -3535,10 +3551,11 @@ function createServerAppWithCapabilityModules(
 	serverOptions: ProviderServerOptions,
 	capabilityModules: ProviderCapabilityModules,
 ): Hono {
+	const engineSelection = resolveServerEngine(serverOptions);
 	const options: ProviderServerRuntimeOptions = {
 		...serverOptions,
 		capabilityModules,
-		engine: resolveServerEngine(serverOptions).engine,
+		engine: engineSelection.engine,
 	};
 	const engineAttached = !isUnavailableProviderEngine(options.engine);
 	const app = new Hono();
@@ -3609,7 +3626,9 @@ function createServerAppWithCapabilityModules(
 				provider: provider.id,
 				version: provider.version,
 				engine: {
-					mode: options.engine.kind ?? "custom",
+					// The resolution, not the raw engine `kind`: normalized, so this
+					// body and the `provider_engine_mode` boot event never disagree.
+					mode: engineSelection.resolution.mode,
 					attached: engineAttached,
 				},
 			},

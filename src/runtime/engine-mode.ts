@@ -18,8 +18,16 @@ const KNOWN_PROVIDER_ENGINE_MODES = ["in-process", "remote"] as const;
 /** Mode used when neither `engineMode` nor `APIFUSE__ENGINE__MODE` names one. */
 export const DEFAULT_PROVIDER_ENGINE_MODE = "in-process" satisfies ProviderEngineMode;
 
+/** Remote engine client endpoint; engine-owned, so never declarable as a provider secret. */
+export const REMOTE_ENGINE_CLIENT_URL_ENV = "APIFUSE__ENGINE__URL";
+/** Remote engine client credential; registered with the diagnostic redactor by sensitive-values. */
+export const REMOTE_ENGINE_CLIENT_API_KEY_ENV = "APIFUSE__ENGINE__API_KEY";
+
 /** Engine env names that only mean something in remote mode. */
-const REMOTE_ONLY_ENGINE_ENV_NAMES = ["APIFUSE__ENGINE__URL", "APIFUSE__ENGINE__API_KEY"] as const;
+const REMOTE_ONLY_ENGINE_ENV_NAMES = [
+	REMOTE_ENGINE_CLIENT_URL_ENV,
+	REMOTE_ENGINE_CLIENT_API_KEY_ENV,
+] as const;
 
 /** Where the resolved mode came from, in precedence order. */
 export type ProviderEngineModeSource = "engine" | "env" | "option" | "default";
@@ -29,7 +37,8 @@ export type ProviderEngineModeSource = "engine" | "env" | "option" | "default";
  * - `invalid_env_value`: `APIFUSE__ENGINE__MODE` held an unrecognized value.
  * - `env_overrode_option`: the manifest and the host code disagreed; the manifest won.
  * - `engine_object_overrode_requested_mode`: an explicit engine object cannot honour the requested mode.
- * - `engine_env_ignored`: remote-only engine env is projected but the mode is not remote.
+ * - `engine_env_ignored`: remote-only engine env is projected but the mode is not
+ *   remote (not reported for a host-supplied engine, which may consume it itself).
  */
 export type ProviderEngineModeWarning =
 	| "invalid_env_value"
@@ -40,7 +49,7 @@ export type ProviderEngineModeWarning =
 export interface ProviderEngineModeResolution {
 	readonly mode: ProviderEngineMode | "custom";
 	readonly source: ProviderEngineModeSource;
-	/** True for the in-process engine, whose removal is scheduled by ADR-0011. */
+	/** True for every non-remote attachment, whose removal is scheduled by ADR-0011. */
 	readonly deprecated: boolean;
 	readonly warnings: readonly ProviderEngineModeWarning[];
 }
@@ -107,7 +116,10 @@ export function resolveProviderEngineMode(
 	const requestedSource: ProviderEngineModeSource | undefined =
 		envMode !== undefined ? "env" : optionMode !== undefined ? "option" : undefined;
 
-	const engineKind = input.engine === undefined ? undefined : (input.engine.kind ?? "custom");
+	// Normalized like every other mode input: an un-normalized host `kind` would
+	// reach the boot event and /readyz verbatim and mis-score the fleet audit.
+	const engineKind =
+		input.engine === undefined ? undefined : (normalize(input.engine.kind) ?? "custom");
 	if (engineKind !== undefined) {
 		if (requested !== undefined && engineKind !== requested) {
 			warnings.push("engine_object_overrode_requested_mode");
@@ -131,14 +143,20 @@ function finalize(
 ): ProviderEngineModeResolution {
 	// Presence of the remote engine env never selects a mode (the manifest
 	// generator projects it fleet-wide before the SDK can use it), but staying
-	// silent about it would hide a half-applied cutover.
+	// silent about it would hide a half-applied cutover. Skipped for a host-supplied
+	// engine: that object may be a remote client that consumes the env itself, so
+	// claiming the env is unused would be a false report.
 	if (
 		mode !== "remote" &&
+		source !== "engine" &&
 		REMOTE_ONLY_ENGINE_ENV_NAMES.some((name) => normalize(environment[name]) !== undefined)
 	) {
 		warnings.push("engine_env_ignored");
 	}
-	return { mode, source, deprecated: mode === "in-process", warnings };
+	// Fail-closed for the ADR-0011 audit: everything that is not the remote lane
+	// still attaches capabilities inside the pod process and is scheduled for
+	// removal, including an opaque host engine that declares no kind.
+	return { mode, source, deprecated: mode !== "remote", warnings };
 }
 
 const UNAVAILABLE_ENGINES = new WeakSet<ProviderEngine>();
@@ -180,12 +198,14 @@ export function createUnavailableProviderEngine(
  * in-process (ADR-0011 Pitfall 2: in-process is never a fallback).
  */
 export function createEngineForMode(mode: ProviderEngineMode | "custom"): ProviderEngine {
-	if (mode !== "remote") return createInProcessProviderEngine();
-	return createUnavailableProviderEngine("remote", {
-		message:
-			"Remote provider engine mode was requested but this @apifuse/provider-sdk release has no remote engine client",
+	// Default-deny on the mode name, not just on "remote": the mode union is open
+	// so a later lane can be named, and falling through to in-process for an
+	// unserved lane is the silent downgrade ADR-0011 Pitfall 2 forbids.
+	if (mode === DEFAULT_PROVIDER_ENGINE_MODE) return createInProcessProviderEngine();
+	return createUnavailableProviderEngine(mode, {
+		message: `Provider engine mode "${mode}" was requested but this @apifuse/provider-sdk release only serves the ${DEFAULT_PROVIDER_ENGINE_MODE} engine`,
 		code: "PROVIDER_ENGINE_MODE_UNSUPPORTED",
-		fix: `Unset ${PROVIDER_ENGINE_MODE_ENV} (or the engineMode option), or upgrade to a release that ships the remote engine client.`,
+		fix: `Unset ${PROVIDER_ENGINE_MODE_ENV} (or the engineMode option), or upgrade to a release that serves this mode.`,
 	});
 }
 
@@ -198,14 +218,14 @@ export function assertProcessEngineModeSupported(
 	environment: Readonly<Record<string, string | undefined>> = process.env,
 ): ProviderEngineModeResolution {
 	const resolution = resolveProviderEngineMode({ environment });
-	if (resolution.mode === "remote") {
+	if (resolution.mode !== DEFAULT_PROVIDER_ENGINE_MODE) {
 		throw new ProviderError(
-			"Remote provider engine mode was requested but this @apifuse/provider-sdk release has no remote engine client",
+			`Provider engine mode "${resolution.mode}" was requested but this @apifuse/provider-sdk release only serves the ${DEFAULT_PROVIDER_ENGINE_MODE} engine`,
 			{
 				code: "PROVIDER_ENGINE_MODE_UNSUPPORTED",
 				retryable: false,
 				details: { mode: resolution.mode, source: resolution.source },
-				fix: `Unset ${PROVIDER_ENGINE_MODE_ENV}, or upgrade to a release that ships the remote engine client.`,
+				fix: `Unset ${PROVIDER_ENGINE_MODE_ENV}, or upgrade to a release that serves this mode.`,
 			},
 		);
 	}
