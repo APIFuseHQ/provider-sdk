@@ -20,6 +20,7 @@ import {
 	readEngineProxyCredentials,
 } from "../engine.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
+import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -1378,6 +1379,7 @@ export type ProviderServerLogEvent =
 			retryable?: boolean;
 			providerObservability?: ProviderErrorObservability;
 			causeChain?: ProviderErrorCauseFrame[];
+			stack?: string[];
 			signal?: "unregistered_provider_error_code";
 			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
@@ -2002,6 +2004,11 @@ function logProviderError(
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
 	const causeChain = providerErrorCauseChain(error, redact);
+	// Masked 500 bodies carry only errorClass, so the log is the sole channel
+	// that can locate the throw. Declared 5xx (502/504) are included too: their
+	// body carries code+message, but frame[0] is still the throw site inside
+	// provider code. 4xx failures keep the lean record.
+	const stack = status >= 500 ? providerErrorStackFrames(error, redact) : undefined;
 	const details = observabilityDetails;
 	const isUnregisteredProviderErrorCode =
 		status === 500 &&
@@ -2044,6 +2051,7 @@ function logProviderError(
 		errorClass: redactDiagnosticText(errorClass, redact),
 		message: sanitizeDiagnosticText(redactDiagnosticText(message, redact)),
 		...(causeChain ? { causeChain } : {}),
+		...(stack ? { stack } : {}),
 		...(providerObservability ? { providerObservability } : {}),
 		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
 		errorCategory: details.category,

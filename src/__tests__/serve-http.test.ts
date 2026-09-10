@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { type Socket, createServer } from "node:net";
 import { z } from "zod";
@@ -16,6 +16,7 @@ import {
 	ValidationError,
 } from "../errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
+import * as diagnosticRedactor from "../runtime/diagnostic-redactor.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { defineCursor } from "../handle.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
@@ -2661,6 +2662,8 @@ describe("provider HTTP server", () => {
 		// Must never leak the raw message/stack beyond the generic string.
 		expect(body.error.message).toBe("Internal error");
 		expect(JSON.stringify(body)).not.toContain("boom");
+		expect(JSON.stringify(body)).not.toContain(".ts:");
+		expect(JSON.stringify(body)).not.toContain('"stack"');
 		// The hub honors details.retryable; a masked crash must be non-retryable so
 		// it cannot drive the START->CONTINUE->restart loop.
 		expect(body.error.details?.retryable).toBe(false);
@@ -2670,6 +2673,238 @@ describe("provider HTTP server", () => {
 			category: "internal_error",
 			taxonomyVersion: "2026-08-07",
 			retryable: false,
+		});
+	});
+
+	describe("masked 500 stack frames", () => {
+		const STACK_FRAME_SHAPE =
+			/^(?:(?:async|new) )?[\w$.<>[\] #]* ?\((?:[\w.$-]+|native|node:[\w/.-]+):\d+:\d+\)$/;
+
+		function loggedStack(event: ProviderServerLogEvent | undefined): unknown {
+			return Object.getOwnPropertyDescriptor(event ?? {}, "stack")?.value;
+		}
+
+		function createThrowingApp(createError: () => unknown, events: ProviderServerLogEvent[]) {
+			const base = createTestProvider();
+			const provider = {
+				...base,
+				operations: {
+					crash: {
+						riskClass: READ_RISK_CLASS,
+						input: z.object({ value: z.string() }),
+						output: z.object({ ok: z.boolean() }),
+						handler: async () => {
+							throw createError();
+						},
+					},
+				},
+			} satisfies ProviderDefinition;
+			return createServerApp(provider, { logger: (event) => events.push(event) });
+		}
+
+		function requestCrash(
+			app: ReturnType<typeof createServerApp>,
+			input: unknown = { value: "x" },
+		) {
+			return app.request("/v1/crash", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_crash", input }),
+			});
+		}
+
+		it("logs basename-only frames for a masked 500 and keeps the public body unchanged", async () => {
+			const events: ProviderServerLogEvent[] = [];
+			const appWithLogger = createServerApp(createTestProvider(), {
+				logger: (event) => events.push(event),
+			});
+			const response = await appWithLogger.request("/v1/unexpectedError", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_masked_frames", input: { value: "hello" } }),
+			});
+
+			expect(response.status).toBe(500);
+			const bodyText = await response.text();
+			expect(bodyText).not.toContain("boom");
+			expect(bodyText).not.toContain(".ts:");
+			expect(bodyText).not.toContain('"stack"');
+			expect(errorObservability(response)).toEqual({
+				category: "internal_error",
+				taxonomyVersion: "2026-08-07",
+				retryable: false,
+			});
+
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({
+				event: "provider_request_failed",
+				status: 500,
+				code: "internal_error",
+				errorClass: "Error",
+				message: "boom",
+			});
+			const stack = loggedStack(events[0]);
+			expect(Array.isArray(stack)).toBe(true);
+			const frames = stack as string[];
+			expect(frames.length).toBeGreaterThanOrEqual(1);
+			expect(frames.length).toBeLessThanOrEqual(5);
+			expect(frames[0]).toMatch(/^handler \(serve-http\.test\.ts:\d+:\d+\)$/);
+			for (const frame of frames) {
+				expect(frame).toMatch(STACK_FRAME_SHAPE);
+				// Only an engine-internal `node:` module id may keep a `/`, and
+				// its grammar admits no directory or traversal segment.
+				if (frame.includes("node:")) {
+					expect(frame).toMatch(
+						/\(node:[A-Za-z_][\w.-]*(?:\/[A-Za-z_][\w.-]*)*:\d+:\d+\)$/,
+					);
+				} else {
+					expect(frame).not.toContain("/");
+				}
+				expect(frame).not.toContain("\\");
+				expect(frame).not.toContain("..");
+				expect(frame).not.toContain("/home/");
+				expect(frame).not.toContain("/tmp/");
+				expect(frame.length).toBeLessThanOrEqual(200);
+			}
+		});
+
+		it("omits stack for a 4xx failure", async () => {
+			const events: ProviderServerLogEvent[] = [];
+			const appWithLogger = createServerApp(createTestProvider(), {
+				logger: (event) => events.push(event),
+			});
+			const response = await appWithLogger.request("/v1/unexpectedError", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_4xx", input: { value: 1 } }),
+			});
+
+			expect(response.status).toBe(400);
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({ event: "provider_request_failed", status: 400 });
+			expect(Object.hasOwn(events[0], "stack")).toBe(false);
+		});
+
+		it.each([
+			[
+				"throwing getter",
+				() => {
+					const error = new Error("boom");
+					Object.defineProperty(error, "stack", {
+						get() {
+							throw new Error("getter must not run");
+						},
+						configurable: true,
+					});
+					return error;
+				},
+			],
+			[
+				"non-string stack",
+				() => Object.assign(new Error("boom"), { stack: ["    at evil (/etc/passwd:1:1)"] }),
+			],
+			[
+				"1 MiB junk stack",
+				() =>
+					Object.assign(new Error("boom"), { stack: `Error: boom\n${"x".repeat(1024 * 1024)}` }),
+			],
+			["non-Error throwable", () => ({ stack: "Error: boom\n    at evil (/etc/passwd:1:1)" })],
+		])("omits stack and still serves the masked 500 for a %s", async (_label, createError) => {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestCrash(createThrowingApp(createError, events));
+
+			expect(response.status).toBe(500);
+			const body = (await response.json()) as { error: { code: string; message: string } };
+			expect(body.error).toMatchObject({ code: "internal_error", message: "Internal error" });
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({ event: "provider_request_failed", status: 500 });
+			expect(Object.hasOwn(events[0], "stack")).toBe(false);
+			expect(JSON.stringify(events[0])).not.toContain("passwd");
+		});
+
+		it("does not emit frame-shaped lines injected through the error message", async () => {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestCrash(
+				createThrowingApp(
+					() => new Error("boom\n    at evil (/etc/passwd:1:1)\n    at evil2 (/etc/shadow:2:2)"),
+					events,
+				),
+			);
+
+			expect(response.status).toBe(500);
+			expect(events).toHaveLength(1);
+			const frames = loggedStack(events[0]) as string[];
+			expect(Array.isArray(frames)).toBe(true);
+			expect(frames[0]).toMatch(/^handler \(serve-http\.test\.ts:\d+:\d+\)$/);
+			for (const frame of frames) {
+				expect(frame).toMatch(STACK_FRAME_SHAPE);
+				expect(frame).not.toContain("evil");
+				expect(frame).not.toContain("passwd");
+				expect(frame).not.toContain("shadow");
+			}
+		});
+
+		it("redacts registered secret values inside frames", async () => {
+			const name = "D12_STACK_FRAME_SECRET";
+			const sentinel = "hrfcokey1234";
+			const previous = process.env[name];
+			process.env[name] = sentinel;
+			const events: ProviderServerLogEvent[] = [];
+			try {
+				const app = createServerApp(
+					{
+						...createTestProvider(),
+						secrets: [{ name, required: true }],
+						operations: {
+							crash: {
+								riskClass: READ_RISK_CLASS,
+								input: z.object({ value: z.string() }),
+								output: z.object({ ok: z.boolean() }),
+								handler: async () => {
+									throw Object.assign(new Error("boom"), {
+										stack: `Error: boom\n    at ${sentinel} (/srv/${sentinel}/app.js:1:1)\n    at ok (/srv/app/ok.js:2:2)`,
+									});
+								},
+							},
+						},
+					},
+					{ logger: (entry) => events.push(entry) },
+				);
+				const response = await requestCrash(app);
+				expect(response.status).toBe(500);
+				expect(events).toHaveLength(1);
+				expect(loggedStack(events[0])).toEqual(["[REDACTED] (app.js:1:1)", "ok (ok.js:2:2)"]);
+				expect(JSON.stringify(events[0])).not.toContain(sentinel);
+			} finally {
+				if (previous === undefined) delete process.env[name];
+				else process.env[name] = previous;
+			}
+		});
+
+		it("fails closed to [REDACTION_FAILED] frames when the request redactor throws", async () => {
+			const original = diagnosticRedactor.createDiagnosticRedactor;
+			const hook = spyOn(diagnosticRedactor, "createDiagnosticRedactor").mockImplementation(
+				(...args) => {
+					const registry = original(...args);
+					registry.redact = () => {
+						throw new Error("redactor failed");
+					};
+					return registry;
+				},
+			);
+			const events: ProviderServerLogEvent[] = [];
+			try {
+				const response = await requestCrash(createThrowingApp(() => new Error("boom"), events));
+				expect(response.status).toBe(500);
+				expect(events).toHaveLength(1);
+				const frames = loggedStack(events[0]) as string[];
+				expect(Array.isArray(frames)).toBe(true);
+				expect(frames.length).toBeGreaterThanOrEqual(1);
+				expect(frames.every((frame) => frame === "[REDACTION_FAILED]")).toBe(true);
+				expect(JSON.stringify(events[0])).not.toContain("serve-http.test.ts");
+			} finally {
+				hook.mockRestore();
+			}
 		});
 	});
 
