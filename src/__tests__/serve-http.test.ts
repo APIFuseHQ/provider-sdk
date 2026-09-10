@@ -19,6 +19,7 @@ import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { defineCursor } from "../handle.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { OperationRequestSchema } from "../server/index.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
@@ -168,6 +169,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				output: z.object({
 					echoed: z.string(),
 					connectionId: z.string().optional(),
+					tenantId: z.string().optional(),
 					secret: z.string().optional(),
 				}),
 				handler: async (ctx, input) => {
@@ -176,6 +178,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					return {
 						echoed: parsed.value,
 						connectionId: ctx.request?.connectionId,
+						tenantId: ctx.request?.tenantId,
 						secret: ctx.credential.get("token"),
 					};
 				},
@@ -973,6 +976,73 @@ describe("provider HTTP server", () => {
 				connectionId: "af_con_0123456789ABCDEFGHJKMN",
 			},
 		});
+	});
+
+	it("round-trips the optional envelope tenantId through OperationRequestSchema", () => {
+		const envelope = { requestId: "req_schema", input: {} };
+		expect(OperationRequestSchema.parse({ ...envelope, tenantId: "org_schema" }).tenantId).toBe(
+			"org_schema",
+		);
+		expect(OperationRequestSchema.parse(envelope).tenantId).toBeUndefined();
+	});
+
+	it("exposes the gateway-asserted tenant scope from the envelope only", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithLogger = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+		});
+		const post = (body: Record<string, unknown>, headers: Record<string, string> = {}) =>
+			appWithLogger.request("/v1/echo", {
+				method: "POST",
+				headers: { "content-type": "application/json", ...headers },
+				body: JSON.stringify(body),
+			});
+
+		// The envelope field is the only source: transport headers and
+		// caller-supplied `headers` never populate the principal scope, and it
+		// is available without any connection (connectionless operations).
+		const asserted = await post(
+			{
+				requestId: "req_tenant_scope",
+				input: { value: "hello" },
+				tenantId: "org_tenant_scope",
+				headers: { "x-apifuse-tenant-id": "body_header_tenant" },
+			},
+			{ "x-apifuse-tenant-id": "transport_header_tenant" },
+		);
+		expect(asserted.status).toBe(200);
+		expect(await asserted.json()).toEqual({
+			data: { echoed: "hello", tenantId: "org_tenant_scope" },
+		});
+		expect(events).toEqual([
+			expect.objectContaining({
+				event: "provider_request_completed",
+				kind: "operation",
+				requestId: "req_tenant_scope",
+				tenantId: "org_tenant_scope",
+			}),
+		]);
+		expect("connectionId" in (events[0] ?? {})).toBe(false);
+
+		// Absent stays absent (`undefined`, not `""`) even when a header
+		// carries a tenant-looking value.
+		events.length = 0;
+		const absent = await post(
+			{ requestId: "req_tenant_absent", input: { value: "hello" } },
+			{ "x-apifuse-tenant-id": "transport_header_tenant" },
+		);
+		expect(await absent.json()).toEqual({ data: { echoed: "hello" } });
+		expect("tenantId" in (events[0] ?? {})).toBe(false);
+
+		// An empty string is a malformed identifier, not a principal.
+		events.length = 0;
+		const empty = await post({
+			requestId: "req_tenant_empty",
+			input: { value: "hello" },
+			tenantId: "",
+		});
+		expect(await empty.json()).toEqual({ data: { echoed: "hello" } });
+		expect("tenantId" in (events[0] ?? {})).toBe(false);
 	});
 
 	it("binds native declarations into the server context while undeclared providers stay open", async () => {

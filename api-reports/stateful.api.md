@@ -529,6 +529,7 @@ const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
         requestId: z.ZodString;
         input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
         connectionId: z.ZodOptional<z.ZodString>;
+        tenantId: z.ZodOptional<z.ZodString>;
         headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         connection: z.ZodOptional<z.ZodObject<{
