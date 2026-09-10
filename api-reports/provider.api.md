@@ -3419,6 +3419,9 @@ type ProbeInterval = ms.StringValue;
 export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "handle"];
 
 // @public
+export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
+
+// @public
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 
 // @public (undocumented)
@@ -3811,9 +3814,15 @@ export interface ProviderDeploymentOverrides {
 }
 
 // @public
+export class ProviderEgressDeniedError extends ProviderError {
+    constructor(message: string, details?: unknown);
+}
+
+// @public
 export interface ProviderEngine {
     // (undocumented)
     attach<TDeclaration extends object = Record<string, unknown>>(input: ProviderEngineAttachmentInput): ProviderContext<TDeclaration>;
+    readonly kind?: ProviderEngineMode;
 }
 
 // @public (undocumented)
@@ -3822,6 +3831,11 @@ export interface ProviderEngineAttachmentInput {
     readonly bindings: ProviderEngineBindingCandidates;
     // (undocumented)
     readonly provider: ProviderDefinition;
+}
+
+// @public
+export class ProviderEngineAuthenticationError extends SDKError {
+    constructor(message?: string, options?: ProviderErrorOptions);
 }
 
 // @public (undocumented)
@@ -3854,6 +3868,18 @@ export interface ProviderEngineCapabilitySurface {
     readonly stealth: StealthClient;
     // (undocumented)
     readonly stt: SttContext;
+}
+
+// @public
+export type ProviderEngineMode = "in-process" | "remote" | (string & {});
+
+// @public
+export class ProviderEngineProtocolVersionError extends SDKError {
+    constructor(receivedVersion: unknown, expectedVersion: string);
+    // (undocumented)
+    readonly expectedVersion: string;
+    // (undocumented)
+    readonly receivedVersion: unknown;
 }
 
 // @public (undocumented)
@@ -3894,6 +3920,11 @@ export interface ProviderEngineTransport {
     openStream?(request: ProviderEngineRequest): Promise<ReadableStream<Uint8Array>>;
     // (undocumented)
     request<TResponse = unknown>(request: ProviderEngineRequest): Promise<TResponse>;
+}
+
+// @public
+export class ProviderEngineUnavailableError extends SDKError {
+    constructor(message?: string, cause?: Error);
 }
 
 // @public (undocumented)
@@ -4203,11 +4234,16 @@ export type ProviderRuntimeTarget = "vanilla" | "engine";
 interface ProviderSecretDeclaration {
     // (undocumented)
     description?: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderSecretIssuer" needs to be exported by the entry point provider.d.ts
+    issuer?: ProviderSecretIssuer;
     // (undocumented)
     name: string;
     // (undocumented)
     required?: boolean;
 }
+
+// @public
+type ProviderSecretIssuer = "apifuse" | "contributor";
 
 // @public (undocumented)
 export type ProviderStateDurationString = `${number}${"ms" | "s" | "m" | "h" | "d"}` | `PT${string}`;
@@ -5312,6 +5348,11 @@ const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
         array: "array";
     }>;
 }, z.core.$strict>]>;
+
+// @public (undocumented)
+export class SDKError extends ProviderError {
+    constructor(message: string, options?: ProviderErrorOptions);
+}
 
 // @public (undocumented)
 export function sensitive<TSchema extends ZodType>(schema: TSchema, kind?: SensitiveFieldKind): TSchema;

@@ -1744,6 +1744,7 @@ export function describeKey<TSchema extends ZodType>(schema: TSchema, key: Provi
 // @public (undocumented)
 export interface DevServerOptions {
     engine?: ProviderEngine;
+    engineMode?: ProviderEngineMode;
     // (undocumented)
     port?: number;
     // (undocumented)
@@ -4561,6 +4562,9 @@ export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "f
 export const PROVIDER_CONTRACT_SCHEMA_VERSION = "2026-06-23";
 
 // @public
+export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
+
+// @public
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 
 // @public (undocumented)
@@ -5062,9 +5066,15 @@ export interface ProviderDeploymentOverrides {
 }
 
 // @public
+export class ProviderEgressDeniedError extends ProviderError {
+    constructor(message: string, details?: unknown);
+}
+
+// @public
 export interface ProviderEngine {
     // (undocumented)
     attach<TDeclaration extends object = Record<string, unknown>>(input: ProviderEngineAttachmentInput): ProviderContext<TDeclaration>;
+    readonly kind?: ProviderEngineMode;
 }
 
 // @public (undocumented)
@@ -5073,6 +5083,11 @@ export interface ProviderEngineAttachmentInput {
     readonly bindings: ProviderEngineBindingCandidates;
     // (undocumented)
     readonly provider: ProviderDefinition;
+}
+
+// @public
+export class ProviderEngineAuthenticationError extends SDKError {
+    constructor(message?: string, options?: ProviderErrorOptions);
 }
 
 // @public (undocumented)
@@ -5105,6 +5120,18 @@ export interface ProviderEngineCapabilitySurface {
     readonly stealth: StealthClient;
     // (undocumented)
     readonly stt: SttContext;
+}
+
+// @public
+export type ProviderEngineMode = "in-process" | "remote" | (string & {});
+
+// @public
+export class ProviderEngineProtocolVersionError extends SDKError {
+    constructor(receivedVersion: unknown, expectedVersion: string);
+    // (undocumented)
+    readonly expectedVersion: string;
+    // (undocumented)
+    readonly receivedVersion: unknown;
 }
 
 // @public (undocumented)
@@ -5145,6 +5172,11 @@ export interface ProviderEngineTransport {
     openStream?(request: ProviderEngineRequest): Promise<ReadableStream<Uint8Array>>;
     // (undocumented)
     request<TResponse = unknown>(request: ProviderEngineRequest): Promise<TResponse>;
+}
+
+// @public
+export class ProviderEngineUnavailableError extends SDKError {
+    constructor(message?: string, cause?: Error);
 }
 
 // @public (undocumented)
@@ -5531,6 +5563,7 @@ export type ProviderRuntimeTarget = "vanilla" | "engine";
 export interface ProviderSecretDeclaration {
     // (undocumented)
     description?: string;
+    issuer?: ProviderSecretIssuer;
     // (undocumented)
     name: string;
     // (undocumented)
@@ -5541,6 +5574,9 @@ export interface ProviderSecretDeclaration {
 export class ProviderSecretError extends ProviderError {
     constructor(message: string, options?: ProviderErrorOptions);
 }
+
+// @public
+export type ProviderSecretIssuer = "apifuse" | "contributor";
 
 // @public (undocumented)
 export interface ProviderSelectedOption {
@@ -5625,6 +5661,17 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     hookIndex: number;
     errorClass: string;
     message: string;
+} | {
+    level: "info" | "warn";
+    event: "provider_engine_mode";
+    providerId: string;
+    mode: ProviderEngineMode | "custom";
+    source: "engine" | "env" | "option" | "default";
+    deprecated: boolean;
+    attached: boolean;
+    sdkVersion: string;
+    runtimeTarget?: ProviderRuntimeTarget;
+    warnings?: readonly string[];
 } | SelfTestCancellationLogEvent;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderRequestCost" needs to be exported by the entry point index.d.ts
@@ -5671,6 +5718,7 @@ type ProviderServerOperationExecutorInput<TContext extends Partial<ProviderConte
 type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
     logger?: ProviderServerLogger;
     engine?: ProviderEngine;
+    engineMode?: ProviderEngineMode;
     files?: ProviderFilesContext;
     operationExecutor?: ProviderServerOperationExecutor<TContext>;
     internalOperationExecutor?: ProviderServerOperationExecutor<TContext>;
@@ -8475,10 +8523,10 @@ export { z }
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:65:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:69:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:146:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:152:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:160:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:224:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:166:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:178:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:186:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:250:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:663:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1647:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1735:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts

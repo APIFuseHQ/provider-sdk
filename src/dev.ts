@@ -1,5 +1,5 @@
 import { serve } from "./server/serve.js";
-import type { ProviderEngine } from "./engine.js";
+import type { ProviderEngine, ProviderEngineMode } from "./engine.js";
 import type { ProviderDefinition } from "./types.js";
 
 export interface DevServerOptions {
@@ -7,6 +7,8 @@ export interface DevServerOptions {
 	sessionDbPath?: string;
 	/** Override the default in-process engine attachment. */
 	engine?: ProviderEngine;
+	/** Explicit engine mode; must agree with `APIFUSE__ENGINE__MODE` when both are set. */
+	engineMode?: ProviderEngineMode;
 }
 
 export function createDevServer(
@@ -19,7 +21,12 @@ export function createDevServer(
 		start: () => {
 			// Local development has no Redis by default; handles (ADR-0012) need a
 			// state backend, so fall back to memory state when none is configured.
-			void serve(provider, { port, engine: options?.engine, allowMemoryStateFallback: true });
+			void serve(provider, {
+				port,
+				engine: options?.engine,
+				engineMode: options?.engineMode,
+				allowMemoryStateFallback: true,
+			});
 			console.log(
 				`[apifuse dev] ${provider.id}@${provider.version} running at http://localhost:${port}`,
 			);

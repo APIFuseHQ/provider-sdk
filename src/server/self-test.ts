@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 
 import { TURN_KINDS } from "../auth-turn/index.js";
+import { SDK_VERSION } from "./sdk-version.js";
 
 import { type Context, Hono } from "hono";
 import { z } from "zod";
@@ -182,26 +182,6 @@ export interface SelfTestAppOptions {
 	/** Structured server logger; defaults to the same JSON console shape as the provider server. */
 	logger?: (event: SelfTestCancellationLogEvent) => void;
 }
-
-function resolveSdkVersion(): string {
-	try {
-		const packageJsonUrl = new URL("../../package.json", import.meta.url);
-		const parsed: unknown = JSON.parse(readFileSync(packageJsonUrl, "utf8"));
-		if (
-			parsed &&
-			typeof parsed === "object" &&
-			"version" in parsed &&
-			typeof (parsed as { version: unknown }).version === "string"
-		) {
-			return (parsed as { version: string }).version;
-		}
-	} catch {
-		// fall through to unknown
-	}
-	return "unknown";
-}
-
-const SDK_VERSION = resolveSdkVersion();
 
 type AnyHealthCheckSuite = HealthCheckSuite<unknown, unknown>;
 type AnyHealthCheckCase = HealthCheckCase<unknown, unknown>;

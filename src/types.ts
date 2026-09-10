@@ -2341,10 +2341,18 @@ export interface AuthConfig {
 	flow?: AuthFlowDefinition;
 }
 
+/** Who provisions a declared secret: the platform (`apifuse`) or the provider author (`contributor`). */
+export type ProviderSecretIssuer = "apifuse" | "contributor";
+
 export interface ProviderSecretDeclaration {
 	name: string;
 	description?: string;
 	required?: boolean;
+	/**
+	 * Optional today; ADR-0011 D3 makes it required once every deployed provider
+	 * declares it. Metadata only: it does not change which secrets are projected.
+	 */
+	issuer?: ProviderSecretIssuer;
 }
 
 export interface CredentialDeclaration {

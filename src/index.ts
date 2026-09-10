@@ -518,6 +518,7 @@ export type {
 	ProviderRuntimeTarget,
 	ProviderRuntimeState,
 	ProviderSecretDeclaration,
+	ProviderSecretIssuer,
 	ProviderStealthConfig,
 	ProviderStateDurationString,
 	ProviderStateNamespace,

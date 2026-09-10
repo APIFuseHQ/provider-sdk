@@ -2743,11 +2743,16 @@ type ProviderRuntimeTarget = "vanilla" | "engine";
 interface ProviderSecretDeclaration {
     // (undocumented)
     description?: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderSecretIssuer" needs to be exported by the entry point index.d.ts
+    issuer?: ProviderSecretIssuer;
     // (undocumented)
     name: string;
     // (undocumented)
     required?: boolean;
 }
+
+// @public
+type ProviderSecretIssuer = "apifuse" | "contributor";
 
 // @public (undocumented)
 type ProviderStateDurationString = `${number}${"ms" | "s" | "m" | "h" | "d"}` | `PT${string}`;
@@ -3983,7 +3988,7 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:1931:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1933:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1941:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2028:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2035:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

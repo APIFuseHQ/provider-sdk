@@ -17,6 +17,7 @@ import {
 	ProviderError,
 } from "../src/index.js";
 import { createCliResolverRuntime } from "../src/cli/resolver-runtime.js";
+import { assertProcessEngineModeSupported } from "../src/runtime/engine-mode.js";
 import { createBrowserClient } from "../src/runtime/browser.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { createStealthClient } from "../src/runtime/stealth.js";
@@ -40,6 +41,9 @@ export async function main() {
 	const providerModule = await import(resolve(providerPath, "index.ts"));
 	const provider = assertProviderDefinition(providerModule.default, providerPath);
 
+	// Fail fast before the server starts: this is a developer tool, and an
+	// explicit remote request must never silently fall back to in-process.
+	assertProcessEngineModeSupported();
 	const { startDevServer } = await import("../src/dev.js");
 	const port = Number(process.env.APIFUSE__RUNTIME__PORT) || 3900;
 

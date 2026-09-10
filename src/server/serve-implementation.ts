@@ -12,13 +12,20 @@ import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
 import {
-	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 	isEngineOwnedEnvName,
 	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
+	type ProviderEngineMode,
 	readEngineProxyCredentials,
 } from "../engine.js";
+import {
+	createEngineForMode,
+	isUnavailableProviderEngine,
+	type ProviderEngineModeResolution,
+	resolveProviderEngineMode,
+} from "../runtime/engine-mode.js";
+import { SDK_VERSION } from "./sdk-version.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
@@ -190,6 +197,7 @@ import type {
 	ProviderErrorStatus,
 	ProviderFilesContext,
 	ProviderRuntimeState,
+	ProviderRuntimeTarget,
 	ProviderStreamEvent,
 	ResolverContext,
 	StealthClient,
@@ -1432,6 +1440,27 @@ export type ProviderServerLogEvent =
 			errorClass: string;
 			message: string;
 	  }
+	| {
+			/** `warn` when the requested attachment could not be honoured, otherwise `info`. */
+			level: "info" | "warn";
+			event: "provider_engine_mode";
+			providerId: string;
+			/** Resolved attachment; `custom` for an opaque host engine. */
+			mode: ProviderEngineMode | "custom";
+			source: "engine" | "env" | "option" | "default";
+			/** True for the in-process engine, whose removal is scheduled by ADR-0011. */
+			deprecated: boolean;
+			/** False when the engine refuses to attach; `/readyz` reports 503. */
+			attached: boolean;
+			sdkVersion: string;
+			runtimeTarget?: ProviderRuntimeTarget;
+			/**
+			 * Non-fatal selection findings, e.g. `invalid_env_value`,
+			 * `env_overrode_option`, `engine_object_overrode_requested_mode`,
+			 * `engine_env_ignored`. Absent when the selection was unambiguous.
+			 */
+			warnings?: readonly string[];
+	  }
 	| SelfTestCancellationLogEvent;
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
@@ -1440,6 +1469,12 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	logger?: ProviderServerLogger;
 	/** Capability attachment boundary. Defaults to the local in-process engine. */
 	engine?: ProviderEngine;
+	/**
+	 * Explicit engine attachment mode. Must agree with `APIFUSE__ENGINE__MODE` and
+	 * with `engine.kind` when those are set; disagreement fails boot with
+	 * `PROVIDER_ENGINE_MODE_CONFLICT`. Defaults to the in-process engine.
+	 */
+	engineMode?: ProviderEngineMode;
 	/** Request-file resolver supplied by the engine host when `files` is declared. */
 	files?: ProviderFilesContext;
 	/** Optional provider-specific operation executor. Stateful providers use this to preserve provider-local runtime semantics. */
@@ -3455,6 +3490,46 @@ export function createServerApp<TContext extends Partial<ProviderContext> = Prov
 	);
 }
 
+/**
+ * Resolve the engine once at boot, before any route exists. An explicit engine
+ * object is used as given; otherwise the resolved mode selects the engine.
+ *
+ * Deliberately never throws for deployment-authored input: a mode this release
+ * cannot serve yields an engine that fails every request and a `/readyz` 503,
+ * because a boot crash would trade a structured signal for CrashLoopBackOff
+ * across the fleet (same trade-off as `provider_secrets_missing` above).
+ */
+function resolveServerEngine(serverOptions: ProviderServerOptions): {
+	engine: ProviderEngine;
+	resolution: ProviderEngineModeResolution;
+} {
+	const resolution = resolveProviderEngineMode({
+		option: serverOptions.engineMode,
+		engine: serverOptions.engine,
+	});
+	if (serverOptions.engine !== undefined) return { engine: serverOptions.engine, resolution };
+	return { engine: createEngineForMode(resolution.mode), resolution };
+}
+
+function engineModeLogEvent(
+	provider: ProviderDefinition,
+	resolution: ProviderEngineModeResolution,
+	attached: boolean,
+): ProviderServerLogEvent {
+	return {
+		level: attached && resolution.warnings.length === 0 ? "info" : "warn",
+		event: "provider_engine_mode",
+		providerId: provider.id,
+		mode: resolution.mode,
+		source: resolution.source,
+		deprecated: resolution.deprecated,
+		attached,
+		sdkVersion: SDK_VERSION,
+		...(provider.runtimeTarget === undefined ? {} : { runtimeTarget: provider.runtimeTarget }),
+		...(resolution.warnings.length === 0 ? {} : { warnings: resolution.warnings }),
+	};
+}
+
 function createServerAppWithCapabilityModules(
 	provider: ProviderDefinition,
 	serverOptions: ProviderServerOptions,
@@ -3463,8 +3538,9 @@ function createServerAppWithCapabilityModules(
 	const options: ProviderServerRuntimeOptions = {
 		...serverOptions,
 		capabilityModules,
-		engine: serverOptions.engine ?? createInProcessProviderEngine(),
+		engine: resolveServerEngine(serverOptions).engine,
 	};
+	const engineAttached = !isUnavailableProviderEngine(options.engine);
 	const app = new Hono();
 	// Compile the startup inventory once, composed with the shared outside-context fallback.
 	const staticSensitiveValues = compileProcessDiagnosticSensitiveValues(
@@ -3512,12 +3588,33 @@ function createServerAppWithCapabilityModules(
 		);
 	});
 
+	// Liveness. Deliberately static and engine-blind: generated manifests point
+	// liveness at this route, so making it depend on engine reachability would
+	// restart every provider pod on one engine incident. Engine state belongs to
+	// /readyz, which manifests wire to readiness and startup only.
 	app.get("/health", (c) =>
 		c.json({
 			status: "ok",
 			provider: provider.id,
 			version: provider.version,
 		}),
+	);
+
+	// Readiness. Reports the boot-resolved attachment; does not probe the engine
+	// per call, so it cannot amplify an engine incident into request load.
+	app.get("/readyz", (c) =>
+		c.json(
+			{
+				status: engineAttached ? "ok" : "unavailable",
+				provider: provider.id,
+				version: provider.version,
+				engine: {
+					mode: options.engine.kind ?? "custom",
+					attached: engineAttached,
+				},
+			},
+			engineAttached ? 200 : 503,
+		),
 	);
 
 	app.post(STATEFUL_INTERNAL_OPERATIONS_ROUTE, async (c) => {
@@ -3997,9 +4094,13 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 	);
 	const configuredSignals = resolveShutdownSignals(options.shutdown?.signals ?? true);
 	const selfTestSecrets = resolveSelfTestMasterSecrets();
+	// Resolve the engine here so the boot event reports the truthful source
+	// (option/env/default) and the app is handed the engine already selected —
+	// one resolution per process, not one per app construction.
+	const engineSelection = resolveServerEngine(options as unknown as ProviderServerOptions);
 	const serverAppOptions: ProviderServerOptions<TContext> = {
 		logger: options.logger,
-		engine: options.engine,
+		engine: engineSelection.engine,
 		files: options.files,
 		ocr: options.ocr,
 		stt: options.stt,
@@ -4014,6 +4115,15 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 		createServerAppAsync(provider, serverAppOptions),
 		selfTestSecrets ? import("./self-test.js") : undefined,
 	]);
+	// One structured line per process boot, before the listener binds: the fleet
+	// audit (ADR-0011 migration) counts these.
+	logger(
+		engineModeLogEvent(
+			provider as unknown as ProviderDefinition,
+			engineSelection.resolution,
+			!isUnavailableProviderEngine(engineSelection.engine),
+		),
+	);
 
 	const servers: BunServerHandle[] = [];
 	try {

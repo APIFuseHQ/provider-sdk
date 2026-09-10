@@ -20,6 +20,14 @@ export const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
 	"refresh_not_supported",
 	"RUNTIME_UNSUPPORTED",
 	"PROVIDER_STATE_UNSUPPORTED",
+	// Engine attachment (ADR-0011). Registered here so an engine failure is served
+	// as a known SDK code instead of raising a false
+	// `unregistered_provider_error_code` signal on a 500.
+	"PROVIDER_ENGINE_AUTHENTICATION_FAILED",
+	"PROVIDER_ENGINE_PROTOCOL_VERSION_MISMATCH",
+	"PROVIDER_ENGINE_UNAVAILABLE",
+	"PROVIDER_ENGINE_MODE_UNSUPPORTED",
+	"PROVIDER_EGRESS_DENIED",
 	"HANDLE_INVALID",
 	"HANDLE_NOT_FOUND",
 	"HANDLE_EXPIRED",
@@ -155,4 +163,11 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		["STT_UNAVAILABLE", 503],
 		["UNSUPPORTED_STT_BACKEND", 503],
 		["STATEFUL_FORWARDING_REPLAY_CACHE_FULL", 503],
+		// The engine is reachable-in-principle but not now: retryable, so the
+		// caller may retry once the engine recovers. Authentication, protocol
+		// mismatch, an unsupported mode and denied egress stay unmapped (500) and
+		// non-retryable: they are deployment or provider faults that no caller
+		// retry can clear, and a retryable 5xx there would turn one bad rollout
+		// into gateway-driven load.
+		["PROVIDER_ENGINE_UNAVAILABLE", 503],
 	]);
