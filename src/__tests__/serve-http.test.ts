@@ -1046,6 +1046,46 @@ describe("provider HTTP server", () => {
 		expect("tenantId" in (events[0] ?? {})).toBe(false);
 	});
 
+	it("keeps the ctx.request shape unchanged when the envelope omits tenantId", async () => {
+		// An own property holding `undefined` still changes Object.keys and
+		// `in`, so a consumer asserting the exact ctx.request shape would break
+		// on an SDK bump. The field appears only when the gateway asserted one.
+		const baseProvider = createTestProvider();
+		const provider = {
+			...baseProvider,
+			operations: {
+				...baseProvider.operations,
+				requestShape: {
+					riskClass: READ_RISK_CLASS,
+					input: z.object({}),
+					output: z.object({ keys: z.array(z.string()) }),
+					handler: async (ctx) => ({ keys: Object.keys(ctx.request ?? {}).sort() }),
+				},
+			},
+		} satisfies ProviderDefinition;
+		const shapeApp = createServerApp(provider, { logger: () => {} });
+		const post = (body: Record<string, unknown>) =>
+			shapeApp.request("/v1/requestShape", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+
+		const absent = await post({ requestId: "req_shape_absent", input: {} });
+		expect(absent.status).toBe(200);
+		expect(await absent.json()).toEqual({ data: { keys: ["connectionId", "headers"] } });
+
+		const asserted = await post({
+			requestId: "req_shape_asserted",
+			input: {},
+			tenantId: "org_shape",
+		});
+		expect(asserted.status).toBe(200);
+		expect(await asserted.json()).toEqual({
+			data: { keys: ["connectionId", "headers", "tenantId"] },
+		});
+	});
+
 	it("binds native declarations into the server context while undeclared providers stay open", async () => {
 		let accepted = 0;
 		const sockets = new Set<Socket>();
@@ -1813,6 +1853,28 @@ describe("provider HTTP server", () => {
 		);
 		expect(matchingEvent).toBeDefined();
 		expect(matchingEvent).not.toHaveProperty("requestedProviderId");
+
+		// Same identifier rule as the operation route: "" is malformed, not a
+		// principal, so it is never emitted into the correlation.
+		const emptyTenantResponse = await appWithLogger.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_auth_empty_tenant",
+				flowId: "flow_auth_empty_tenant",
+				tenantId: "",
+				providerId: "test-provider",
+				context: {},
+			}),
+		});
+		expect(emptyTenantResponse.status).toBe(200);
+		const emptyTenantEvent = events.find(
+			(event) =>
+				event.event === "provider_request_completed" &&
+				event.requestId === "req_auth_empty_tenant",
+		);
+		expect(emptyTenantEvent).toBeDefined();
+		expect("tenantId" in (emptyTenantEvent ?? {})).toBe(false);
 	});
 
 	it("dispatches auth disconnect through the standard endpoint", async () => {

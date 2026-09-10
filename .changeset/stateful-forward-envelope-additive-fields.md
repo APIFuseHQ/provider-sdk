@@ -1,0 +1,7 @@
+---
+"@apifuse/provider-sdk": patch
+---
+
+Make a received stateful owner-forwarding envelope tolerant of additive operation-request fields, so a mixed-version rolling deploy cannot fail an operation. The owner route now parses with an inbound compatibility schema whose nested `operationRequest` strips unknown keys, like the gateway-facing `/v1/:operation` route; emitted envelopes and the exported `ProviderServerStatefulForwardEnvelopeSchema` stay strict, and the envelope's own keys stay strict on both sides. Without this, a source pod on a newer SDK that carries a new `OperationRequestSchema` field (`tenantId`) is rejected by an owner pod that predates the field with a terminal `STATEFUL_FORWARDING_ENVELOPE_INVALID`, and the two pods coexist for the whole rolling update. Stateful providers pinned below this version still need the old ordering: pin every replica to this version or later *before* the version that starts sending a new request field, or run the update with no old-owner overlap.
+
+Also: `ctx.request` no longer carries a `tenantId` own property when the envelope omits the field (it held `undefined`, which changed `Object.keys(ctx.request)` for existing consumers), a non-string `tenantId` in a consumer-supplied stateful `runtimeContext` now fails at the source with `STATEFUL_FORWARDING_CONTEXT_INVALID` instead of failing the whole forwarded operation at the owner, and the auth-flow request-log correlation normalises an empty `tenantId` to absent like the operation route.

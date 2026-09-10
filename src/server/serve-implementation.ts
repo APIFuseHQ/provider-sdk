@@ -291,6 +291,22 @@ export const ProviderServerStatefulForwardEnvelopeSchema = z
 	})
 	.strict();
 
+// Inbound compatibility boundary for rolling deploys, mirroring the outbound
+// one in stateful-provider-owner-forwarder.ts: emitted envelopes stay strict
+// (above), while a received envelope's nested operation request keeps the
+// gateway route's tolerance and strips unknown keys. A source pod on a newer
+// SDK carrying an additive OperationRequestSchema field (tenantId, #164) must
+// not be rejected with STATEFUL_FORWARDING_ENVELOPE_INVALID by an owner pod
+// that predates the field: the rejection is terminal for the operation and the
+// two pods coexist for the whole rolling update. The envelope's own keys stay
+// strict on both sides, because they are protocol rather than payload.
+const ReceivedStatefulForwardEnvelopeSchema =
+	ProviderServerStatefulForwardEnvelopeSchema.extend({
+		operationRequest: z.object(
+			ProviderServerStatefulForwardEnvelopeSchema.shape.operationRequest.shape,
+		),
+	});
+
 export type ProviderServerStatefulForwardEnvelope = Readonly<
 	z.infer<typeof ProviderServerStatefulForwardEnvelopeSchema>
 >;
@@ -914,9 +930,12 @@ function createProviderContext(
 		scopes: request.connection?.scopes,
 		values: request.connection?.secrets,
 	});
+	const operationTenantId = resolveOperationTenantId(request);
 	const requestContext = {
 		connectionId: resolveOperationConnectionId(request),
-		tenantId: resolveOperationTenantId(request),
+		// Absent stays absent: an own property with an undefined value would
+		// change the shape of ctx.request for every existing consumer.
+		...(operationTenantId !== undefined ? { tenantId: operationTenantId } : {}),
 		headers: request.headers ?? {},
 	};
 	const requestState = instrumentProviderRuntimeState(
@@ -3386,7 +3405,7 @@ function parseStatefulForwardingEnvelope(
 	rawBody: unknown,
 	redact: DiagnosticRedactor,
 ): ProviderServerStatefulForwardEnvelope {
-	const parsed = ProviderServerStatefulForwardEnvelopeSchema.safeParse(rawBody);
+	const parsed = ReceivedStatefulForwardEnvelopeSchema.safeParse(rawBody);
 	if (parsed.success) return parsed.data;
 	throw new ProviderError("Stateful forwarding envelope is invalid.", {
 		code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
@@ -3812,7 +3831,7 @@ function createServerAppWithCapabilityModules(
 					correlation: {
 						connectionId: resolveOperationConnectionId(body),
 						flowId: body.flowId,
-						tenantId: body.tenantId,
+						tenantId: normalizeIdentifier(body.tenantId),
 						requestedProviderId:
 							body.providerId !== undefined && body.providerId !== provider.id
 								? body.providerId
