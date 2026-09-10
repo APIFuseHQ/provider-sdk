@@ -1240,13 +1240,16 @@ export interface HttpAttemptContext {
 	attempt: number;
 	/**
 	 * Resolved request URL: `baseUrl` + path + `params` + `sensitiveParams`.
-	 * It is the exact URL the attempt is issued against (bind DPoP `htu`,
-	 * signature targets, etc. to it); it carries any sensitive query values, so
-	 * do not log it.
+	 * It is the exact URL the attempt is issued against, so bind signature
+	 * targets to it rather than to a URL the caller rebuilds. Strip the query
+	 * and fragment for fields that are defined without them — RFC 9449 §4.2
+	 * requires that of DPoP `htu`. It carries any sensitive query values, so
+	 * never log it and never copy it verbatim into a signed field that a
+	 * verifier logs.
 	 */
 	url: string;
 	/** Normalized upper-case HTTP method of the request. */
-	method: HttpMethod;
+	method: Uppercase<HttpMethod>;
 }
 
 /**

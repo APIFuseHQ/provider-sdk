@@ -1893,6 +1893,11 @@ function publicProviderErrorMessage(error: ProviderError): string {
 		}
 		if (providerErrorCode(error) === "transport_timeout") return "Request timed out";
 		if (providerErrorCode(error) === "transport_network_error") return "Network error";
+		// Provider-local fault: no request was issued, so an upstream-flavored
+		// message would misattribute it (category is provider_error).
+		if (providerErrorCode(error) === "http_header_factory_failed") {
+			return "Request header preparation failed";
+		}
 		if (providerErrorCode(error) === "upstream_http_error" && error.status) {
 			return `Upstream request failed with status ${error.status}`;
 		}

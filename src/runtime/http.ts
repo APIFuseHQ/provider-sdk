@@ -232,12 +232,15 @@ function headerFactoryFailure(message: string, cause?: unknown): TransportError 
 	// toHttpTransportError would otherwise brand a plain throw as
 	// transport_network_error, which the default retry policy re-issues.
 	// retryable:false is explicit so the served error envelope does not
-	// advertise a deterministic signing failure as retryable (status 0 would
-	// otherwise classify as a retryable upstream_http failure).
+	// advertise a deterministic signing failure as retryable, and
+	// category:provider_error keeps a provider-local minting bug out of the
+	// upstream-failure signal (status 0 would otherwise fall through the
+	// observability ladder to upstream_http / source upstream_failure).
 	return new TransportError(message, {
 		code: "http_header_factory_failed",
 		status: 0,
 		retryable: false,
+		category: "provider_error",
 		...(cause instanceof Error ? { cause } : {}),
 	});
 }
@@ -544,7 +547,7 @@ function toNativeHttpStreamResponse(
 	};
 }
 
-function normalizeHttpMethod(method: string): HttpMethod {
+function normalizeHttpMethod(method: string): Uppercase<HttpMethod> {
 	switch (method.toUpperCase()) {
 		case "HEAD":
 			return "HEAD";
@@ -840,7 +843,7 @@ function serializeHttpRequestUrl(
 async function fetchNativeHttp(
 	baseUrl: string | undefined,
 	url: string,
-	method: HttpMethod,
+	method: Uppercase<HttpMethod>,
 	options: RequestOptions & { body?: unknown },
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
@@ -948,7 +951,7 @@ async function fetchNativeHttp(
 async function fetchNativeHttpStream(
 	baseUrl: string | undefined,
 	url: string,
-	method: HttpMethod,
+	method: Uppercase<HttpMethod>,
 	options: RequestOptions & { body?: unknown },
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
