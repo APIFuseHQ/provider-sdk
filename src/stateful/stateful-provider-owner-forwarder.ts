@@ -205,6 +205,7 @@ function buildForwardingEnvelope(input: {
 			requestId: input.request.requestId,
 			input: input.request.input as Record<string, unknown>,
 			connection: metadata.connection,
+			...(metadata.tenantId ? { tenantId: metadata.tenantId } : {}),
 			headers: sanitizeForwardedHeaders(metadata.headers),
 			...(metadata.trace ? { trace: metadata.trace } : {}),
 		},
@@ -213,6 +214,7 @@ function buildForwardingEnvelope(input: {
 
 function forwardedMetadata(request: StatefulOperationRequest): {
 	readonly connection: OperationConnection;
+	readonly tenantId?: string;
 	readonly headers?: Record<string, string>;
 	readonly trace?: Record<string, string>;
 } {
@@ -227,6 +229,7 @@ function forwardedMetadata(request: StatefulOperationRequest): {
 	const connection = OperationConnectionSchema.parse(operationRequest?.connection);
 	return {
 		connection,
+		...(operationRequest?.tenantId ? { tenantId: operationRequest.tenantId } : {}),
 		...(operationRequest?.headers ? { headers: operationRequest.headers } : {}),
 		...(operationRequest?.trace ? { trace: operationRequest.trace } : {}),
 	};

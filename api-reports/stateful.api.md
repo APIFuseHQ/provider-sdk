@@ -780,6 +780,7 @@ export type StatefulControlPlaneOperation = "resolve" | "acquire" | "renew" | "r
 export function statefulForwardingContextFromProviderRequest(request: {
     readonly requestId: string;
     readonly connection?: unknown;
+    readonly tenantId?: string;
     readonly headers?: Record<string, string>;
     readonly trace?: Record<string, string>;
 }): StatefulForwardingRuntimeContext;
@@ -790,6 +791,7 @@ export interface StatefulForwardingRuntimeContext {
     readonly operationRequest?: {
         readonly requestId: string;
         readonly connection?: unknown;
+        readonly tenantId?: string;
         readonly headers?: Record<string, string>;
         readonly trace?: Record<string, string>;
     };
