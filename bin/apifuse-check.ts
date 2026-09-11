@@ -141,6 +141,7 @@ export async function runChecks(
 	}
 	const provider = assertProviderDefinition(providerModule?.default);
 	const providerSourceFiles = collectProviderSourceFiles(providerRoot);
+	const localeCatalogEn = readEnglishLocaleCatalog(providerRoot);
 
 	return [
 		checkIndex(indexPath, provider),
@@ -148,7 +149,7 @@ export async function runChecks(
 		checkOperations(provider),
 		checkFixtures(provider),
 		checkSchemas(provider),
-		checkAuthoringLint(provider, providerSourceFiles, options.lintMode),
+		checkAuthoringLint(provider, providerSourceFiles, localeCatalogEn, options.lintMode),
 		checkProviderMetadata(provider),
 		await checkDeploymentIntent(providerRoot, provider),
 		checkDockerfile(dockerfilePath),
@@ -369,9 +370,30 @@ function checkSchemas(provider: ProviderDefinition | undefined): CheckResult {
 	};
 }
 
+/**
+ * Reads `locales/en.json` so the error-localization lint rules can resolve
+ * declared `messageKey`/`fixKey` values. An absent or unreadable catalog is
+ * reported as an empty catalog rather than as "no catalog": a provider that
+ * references locale keys without shipping `en.json` must still fail the
+ * missing-key rule instead of silently skipping it.
+ */
+function readEnglishLocaleCatalog(providerRoot: string): Record<string, unknown> {
+	const catalogPath = resolve(providerRoot, "locales", "en.json");
+	if (!existsSync(catalogPath)) return {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(catalogPath, "utf8"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
 function checkAuthoringLint(
 	provider: ProviderDefinition | undefined,
 	providerSourceFiles: Record<string, string>,
+	localeCatalogEn: Record<string, unknown>,
 	lintMode: ProviderLintMode = "official",
 ): CheckResult {
 	if (!provider) {
@@ -382,7 +404,7 @@ function checkAuthoringLint(
 	}
 
 	const { diagnostics, information } = lintProviderWithInformation(
-		{ ...provider, providerSourceFiles },
+		{ ...provider, providerSourceFiles, localeCatalogEn },
 		{ mode: lintMode },
 	);
 	const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");

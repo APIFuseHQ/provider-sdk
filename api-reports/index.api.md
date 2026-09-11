@@ -12,6 +12,9 @@ import { z } from 'zod';
 import { ZodString } from 'zod';
 import { ZodType } from 'zod';
 
+// @public
+export function acceptLanguageHeaderValue(headers: Readonly<Record<string, unknown>> | undefined): string | undefined;
+
 // @public (undocumented)
 export const APIFUSE__CACHE__KEY_PEPPER_ENV = "APIFUSE__CACHE__KEY_PEPPER";
 
@@ -1616,6 +1619,9 @@ export const DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL = "@cf/google/gemma-4-26b-a
 // @public (undocumented)
 export const DEFAULT_OPERATION_TRANSPORT: OperationJsonTransport;
 
+// @public
+export const DEFAULT_PROVIDER_ERROR_LOCALE = "en";
+
 // @public (undocumented)
 export const DEFAULT_RESOLVER_TIMEOUT_MS = 180000;
 
@@ -1737,6 +1743,9 @@ export function defineStreamOperation<TContext>(): <TInput extends SchemaLike, T
 
 // @public (undocumented)
 export function delayed(maxDelay: string): HealthScheduleRandomization;
+
+// @public
+export function derivedProviderErrorCatalogPath(code: string, field: "message" | "fix"): string;
 
 // @public (undocumented)
 export function describeKey<TSchema extends ZodType>(schema: TSchema, key: ProviderLocaleKey | string): TSchema;
@@ -2020,6 +2029,9 @@ export function getProviderBaseUrl(provider: ProviderDefinition): string | undef
 
 // @public (undocumented)
 export function getProviderLocalePath(catalog: ProviderLocaleCatalog, key: ProviderLocaleKey | string): ProviderLocaleValue | undefined;
+
+// @public
+export function getProviderLocaleSegments(catalog: ProviderLocaleCatalog, segments: readonly string[]): ProviderLocaleValue | undefined;
 
 // @public (undocumented)
 export function getStealthProfile(selection?: StealthProfileSelection): StealthProfile;
@@ -2995,6 +3007,12 @@ export type InstrumentedProviderContext<T extends Pick<ProviderContext, "trace">
 // @public (undocumented)
 export function instrumentProviderRuntimeState(state: ProviderRuntimeState, sink: StateTelemetrySink, redact?: (text: string) => string): ProviderRuntimeState;
 
+// @public
+export function interpolatedParamText(value: unknown): string | undefined;
+
+// @public
+export function interpolateProviderErrorText(template: string, params?: ProviderErrorMessageParams): string;
+
 // @public (undocumented)
 export function isCursorKind(kind: HandleKind): kind is CursorKind<any>;
 
@@ -3133,6 +3151,7 @@ export function lintProvider(provider: {
     };
     authFlowSource?: string;
     providerSourceFiles?: Record<string, string>;
+    localeCatalogEn?: ProviderLocaleCatalog;
     operations?: Record<string, {
         descriptionKey?: string;
         whenToUseKeys?: readonly string[];
@@ -3149,6 +3168,8 @@ export function lintProvider(provider: {
             code: string;
             status?: number;
             retryable?: boolean;
+            messageKey?: string;
+            fixKey?: string;
         }>;
     }>;
     meta?: {
@@ -3186,6 +3207,24 @@ export function localizeAuthTurn(turn: AuthTurn, options: {
     fallbackLocale?: ProviderLocale;
 }): AuthTurn;
 
+// @public
+export function localizeProviderErrorText(options: LocalizeProviderErrorTextOptions): string | undefined;
+
+// @public (undocumented)
+export interface LocalizeProviderErrorTextOptions {
+    // (undocumented)
+    readonly candidates: readonly ProviderErrorTextCandidate[];
+    // (undocumented)
+    readonly catalogs?: ProviderLocaleCatalogMap;
+    readonly fallback: string | undefined;
+    // (undocumented)
+    readonly fallbackLocale?: ProviderLocale;
+    // (undocumented)
+    readonly locale: ProviderLocale;
+    // (undocumented)
+    readonly params?: ProviderErrorMessageParams;
+}
+
 // @public (undocumented)
 export type ManualTriggerPolicy = {
     enabled: false;
@@ -3200,6 +3239,12 @@ export type ManualTriggerPolicy = {
 
 // @public (undocumented)
 export const ManualTriggerPolicySchema: z.ZodType<ManualTriggerPolicy, unknown, z.core.$ZodTypeInternals<ManualTriggerPolicy, unknown>>;
+
+// @public
+export const MAX_INTERPOLATED_PARAM_LENGTH = 200;
+
+// @public
+export const MAX_LOCALIZED_ERROR_TEXT_LENGTH = 2000;
 
 // @public
 export const MISSING_SECRET_CODE = "MISSING_SECRET";
@@ -4021,8 +4066,9 @@ export interface OperationDeprecationMetadata {
 export interface OperationErrorCode {
     // (undocumented)
     code: string;
-    // (undocumented)
     description: string;
+    fixKey?: ProviderLocaleKeyInput;
+    messageKey?: ProviderLocaleKeyInput;
     // (undocumented)
     retryable?: boolean;
     // (undocumented)
@@ -4569,8 +4615,14 @@ export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
 // @public
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 
+// @public
+export const PROVIDER_ERROR_CATALOG_NAMESPACE = "errors";
+
 // @public (undocumented)
 export const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+
+// @public
+export const PROVIDER_ERROR_LOCALES: readonly ["en", "ko", "ja"];
 
 // @public (undocumented)
 export const PROVIDER_ERROR_SOURCES: readonly ["client", "upstream_rule", "upstream_failure", "apifuse"];
@@ -5208,6 +5260,9 @@ export type ProviderErrorCauseFrame = {
 };
 
 // @public
+export type ProviderErrorMessageParams = Readonly<Record<string, string | number>>;
+
+// @public
 export type ProviderErrorObservability = {
     reason?: string;
     fingerprint?: string;
@@ -5223,6 +5278,9 @@ export type ProviderErrorOptions = {
     category?: ProviderErrorCategory;
     retryable?: boolean;
     observability?: ProviderErrorObservability;
+    messageKey?: ProviderLocaleKeyInput;
+    fixKey?: ProviderLocaleKeyInput;
+    params?: ProviderErrorMessageParams;
 };
 
 // @public (undocumented)
@@ -5232,6 +5290,20 @@ export type ProviderErrorSource = (typeof PROVIDER_ERROR_SOURCES)[number];
 //
 // @public (undocumented)
 export type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number];
+
+// @public
+export type ProviderErrorTextCandidate =
+/** An explicit dot-path key from a throw site or an `errorCodes[]` declaration. */
+    {
+    readonly kind: "key";
+    readonly key: string | undefined;
+}
+/** The `errors.<code>.<field>` convention; `code` is used verbatim as a segment. */
+| {
+    readonly kind: "derived";
+    readonly code: string | undefined;
+    readonly field: string;
+};
 
 // @public
 export interface ProviderFileRef {
@@ -5311,6 +5383,9 @@ export type ProviderLocaleCatalog = Record<string, unknown>;
 
 // @public (undocumented)
 export type ProviderLocaleCatalogMap = Record<ProviderLocale, ProviderLocaleCatalog>;
+
+// @public
+export function providerLocaleFromAcceptLanguage(header: string | null | undefined): ProviderLocale | undefined;
 
 // @public (undocumented)
 export type ProviderLocaleKey = string & {
@@ -5643,6 +5718,11 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     event: "provider_secrets_missing";
     providerId: string;
     missingSecrets: string[];
+} | {
+    level: "warn";
+    event: "provider_locale_catalogs_unavailable";
+    providerId: string;
+    reason: string;
 } | ({
     level: "info";
     event: "provider_handle";
@@ -5733,6 +5813,7 @@ type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderC
     stt?: SttContext;
     ocr?: OcrContext;
     resolver?: ResolverContext;
+    localeCatalogs?: ProviderLocaleCatalogMap;
     state?: ProviderRuntimeState;
     allowMemoryStateFallback?: boolean;
     shutdown?: {
@@ -6252,6 +6333,9 @@ export type ResolvedProxyConfig = {
     protocol?: ProxyProtocol;
     diagnostics?: Record<string, string | number | boolean>;
 };
+
+// @public
+export function resolveProviderErrorLocale(...headerValues: readonly (string | null | undefined)[]): ProviderLocale;
 
 // @public (undocumented)
 export function resolveProviderLocaleValue(catalogs: ProviderLocaleCatalogMap, key: ProviderLocaleKey | string, locale: ProviderLocale, fallbackLocale?: ProviderLocale): ProviderLocaleValue | undefined;
@@ -8516,25 +8600,25 @@ export { z }
 // dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:111:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:139:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:4:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:29:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:52:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:82:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:5:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:30:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:53:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:88:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:65:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:69:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:166:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:183:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:191:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:255:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:66:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:70:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:173:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:190:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:198:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:271:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:663:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1650:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1738:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1746:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1747:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1934:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1659:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1747:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1755:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1756:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1943:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

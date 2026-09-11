@@ -50,6 +50,15 @@ import {
 	localizeAuthTurn,
 	type ProviderLocaleCatalogMap,
 } from "../i18n/catalog.js";
+import {
+	acceptLanguageHeaderValue,
+	DEFAULT_PROVIDER_ERROR_LOCALE,
+	localizeProviderErrorText,
+	PROVIDER_ERROR_LOCALES,
+	type ProviderErrorMessageParams,
+	type ProviderErrorTextCandidate,
+	resolveProviderErrorLocale,
+} from "../i18n/error-messages.js";
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
@@ -265,7 +274,6 @@ function providerErrorCode(error: unknown): string | undefined {
 	}
 }
 
-const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpTelemetryCollector>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
 const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
@@ -1417,6 +1425,13 @@ export type ProviderServerLogEvent =
 			providerId: string;
 			missingSecrets: string[];
 	  }
+	| {
+			/** Emitted once at boot when `locales/en.json` exists but cannot be read. */
+			level: "warn";
+			event: "provider_locale_catalogs_unavailable";
+			providerId: string;
+			reason: string;
+	  }
 	| ({
 			level: "info";
 			event: "provider_handle";
@@ -1503,6 +1518,15 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	 * resolver is reported as one custom invocation; its internal vendor work is not exposed.
 	 */
 	resolver?: ResolverContext;
+	/**
+	 * Pre-loaded provider locale catalogs used to localize auth turns and the
+	 * client-facing `message`/`fix` of provider errors.
+	 *
+	 * Defaults to reading `locales/{en,ko,ja}.json` from the provider directory
+	 * once at server construction. Supply this to bundle catalogs instead of
+	 * probing the filesystem, or to pin catalogs in tests.
+	 */
+	localeCatalogs?: ProviderLocaleCatalogMap;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
@@ -1597,11 +1621,116 @@ function publicErrorSource(error: unknown, category: ProviderErrorCategory): Pro
 	return sourceForCategory(category);
 }
 
+/**
+ * Serve-time inputs for localizing the client-facing error envelope.
+ *
+ * Only `error.message` and `error.fix` of the response body are localized.
+ * Logs, cause frames, OTLP attributes and the error-observability header keep
+ * the English literal the provider threw.
+ */
+type ErrorEnvelopeLocalization = {
+	readonly catalogs?: ProviderLocaleCatalogMap;
+	readonly locale: ProviderLocale;
+	readonly declaredErrorCode?: OperationErrorCode;
+};
+
+function localeKeyOption(error: unknown, key: "messageKey" | "fixKey"): string | undefined {
+	const value = providerErrorOption(error, key);
+	return typeof value === "string" ? value : undefined;
+}
+
+function declaredLocaleKey(
+	declaration: OperationErrorCode | undefined,
+	key: "messageKey" | "fixKey",
+): string | undefined {
+	const value = declaration?.[key];
+	return typeof value === "string" ? value : undefined;
+}
+
+function providerErrorParams(error: unknown): ProviderErrorMessageParams | undefined {
+	const params = providerErrorOption(error, "params");
+	return params !== null && typeof params === "object" && !Array.isArray(params)
+		? (params as ProviderErrorMessageParams)
+		: undefined;
+}
+
+/**
+ * Resolution order for one localized envelope field:
+ *
+ * 1. the throw site's `messageKey`/`fixKey`;
+ * 2. the declared `errorCodes[]` entry's key for the thrown code;
+ * 3. the derived `errors.<code>.<field>` convention;
+ * 4. the English literal the provider threw.
+ *
+ * Steps 2 and 3 are skipped for SDK-owned failures (transport, Zod, stateful
+ * deadline, SDK runtime codes): their text is the SDK's contract, and a
+ * provider catalog entry must not be able to relabel one. An explicit key on
+ * the thrown error still wins, because that is the provider deliberately
+ * describing an error it constructed itself.
+ */
+function localizedErrorField(
+	error: unknown,
+	field: "message" | "fix",
+	literal: string | undefined,
+	localization: ErrorEnvelopeLocalization | undefined,
+): string | undefined {
+	if (!localization?.catalogs) return literal;
+	const optionKey = field === "message" ? "messageKey" : "fixKey";
+	const candidates: ProviderErrorTextCandidate[] = [
+		{ kind: "key", key: localeKeyOption(error, optionKey) },
+	];
+	if (!sdkOwnsErrorResolution(error)) {
+		candidates.push(
+			{ kind: "key", key: declaredLocaleKey(localization.declaredErrorCode, optionKey) },
+			{ kind: "derived", code: providerErrorCode(error), field },
+		);
+	}
+	return localizeProviderErrorText({
+		catalogs: localization.catalogs,
+		locale: localization.locale,
+		candidates,
+		params: providerErrorParams(error),
+		fallback: literal,
+	});
+}
+
+/**
+ * Reads `accept-language` out of the request envelope's `headers` map.
+ *
+ * The gateway stamps the negotiated locale there for auth flows (it persists
+ * the start locale on the flow state so continue/poll turns stay in one
+ * language), and the operation route merges HTTP headers into the same map, so
+ * the envelope is the higher-precedence source.
+ */
+function requestBodyAcceptLanguage(rawBody: unknown): string | undefined {
+	if (!rawBody || typeof rawBody !== "object") return undefined;
+	const headers = Object.getOwnPropertyDescriptor(rawBody, "headers")?.value;
+	if (!headers || typeof headers !== "object" || Array.isArray(headers)) return undefined;
+	return acceptLanguageHeaderValue(headers as Record<string, unknown>);
+}
+
+function errorEnvelopeLocalization(options: {
+	readonly catalogs: ProviderLocaleCatalogMap | undefined;
+	readonly requestHeaders?: Headers;
+	readonly rawBody?: unknown;
+	readonly declaredErrorCode?: OperationErrorCode;
+}): ErrorEnvelopeLocalization {
+	return {
+		...(options.catalogs ? { catalogs: options.catalogs } : {}),
+		locale: resolveProviderErrorLocale(
+			requestBodyAcceptLanguage(options.rawBody),
+			options.requestHeaders?.get("accept-language"),
+		),
+		...(options.declaredErrorCode ? { declaredErrorCode: options.declaredErrorCode } : {}),
+	};
+}
+
 function toErrorResponse(
 	error: unknown,
 	requestId: string | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
 	redact?: DiagnosticRedactor,
+	localization?: ErrorEnvelopeLocalization,
 ): OperationErrorResponse {
 	const observability = observabilityDetails;
 	const source = publicErrorSource(error, observability.category);
@@ -1619,14 +1748,23 @@ function toErrorResponse(
 
 	if (isProviderError(error)) {
 		const details = providerErrorOption(error, "details");
+		const literalFix = providerErrorOption(error, "fix");
+		const fix = localizedErrorField(
+			error,
+			"fix",
+			typeof literalFix === "string" && literalFix.length > 0 ? literalFix : undefined,
+			localization,
+		);
+		const literalMessage = publicProviderErrorMessage(error);
 		return {
 			error: {
 				code: providerErrorCode(error) ?? "provider_error",
-				message: publicProviderErrorMessage(error),
+				message:
+					localizedErrorField(error, "message", literalMessage, localization) ?? literalMessage,
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
 				source,
-				...(providerErrorOption(error, "fix") ? { fix: providerErrorOption(error, "fix") } : {}),
+				...(fix ? { fix } : {}),
 				...(details !== undefined ? { details } : {}),
 			},
 		};
@@ -3086,41 +3224,47 @@ function toAuthFlowResponse(
 }
 
 function authFlowLocaleFromHeaders(headers?: Record<string, string>): ProviderLocale {
-	const header = Object.entries(headers ?? {}).find(
-		([key]) => key.toLowerCase() === "accept-language",
-	)?.[1];
-	for (const token of (header ?? "").split(",")) {
-		const language = token.trim().split(";")[0]?.split("-")[0]?.toLowerCase();
-		if (isAuthFlowLocale(language)) {
-			return language;
-		}
-	}
-	return "en";
-}
-
-function isAuthFlowLocale(value: string | undefined): value is ProviderLocale {
-	return value === "en" || value === "ko" || value === "ja";
+	return resolveProviderErrorLocale(acceptLanguageHeaderValue(headers));
 }
 
 function isAuthTurn(value: unknown): value is AuthTurn {
 	return !!value && typeof value === "object" && "kind" in value && "turnId" in value;
 }
 
-function loadAuthFlowLocaleCatalogs(
+/**
+ * Loads the provider's locale catalogs once, at `createServerApp` time.
+ *
+ * Only the locales that actually exist on disk are read: a provider with
+ * `en`+`ko` but no `ja.json` used to make the whole load throw and silently
+ * disable localization for every turn. Absence of catalogs is not an error —
+ * every localized field falls back to its English literal — but a catalog that
+ * exists and cannot be read is logged once so a packaging mistake is visible at
+ * boot instead of per request.
+ */
+function resolveProviderLocaleCatalogs(
 	provider: ProviderDefinition,
+	options: ProviderServerOptions,
+	logger: ProviderServerLogger,
 ): ProviderLocaleCatalogMap | undefined {
+	if (options.localeCatalogs) return options.localeCatalogs;
 	for (const providerDir of [
 		process.cwd(),
 		join(process.cwd(), "providers", provider.id),
 		join(process.cwd(), "providers-staging", provider.id),
 	]) {
-		if (!existsSync(join(providerDir, "locales", "en.json"))) continue;
+		const locales = PROVIDER_ERROR_LOCALES.filter((locale) =>
+			existsSync(join(providerDir, "locales", `${locale}.json`)),
+		);
+		if (!locales.includes(DEFAULT_PROVIDER_ERROR_LOCALE)) continue;
 		try {
-			return loadProviderLocaleCatalogs({
-				providerDir,
-				locales: AUTH_FLOW_LOCALES,
+			return loadProviderLocaleCatalogs({ providerDir, locales });
+		} catch (error) {
+			logger({
+				level: "warn",
+				event: "provider_locale_catalogs_unavailable",
+				providerId: provider.id,
+				reason: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error)),
 			});
-		} catch {
 			return undefined;
 		}
 	}
@@ -3128,11 +3272,10 @@ function loadAuthFlowLocaleCatalogs(
 }
 
 function materializeAuthFlowTurn(
-	provider: ProviderDefinition,
 	request: AuthFlowRequest,
 	turn: AuthTurn,
+	catalogs: ProviderLocaleCatalogMap | undefined,
 ): AuthTurn {
-	const catalogs = loadAuthFlowLocaleCatalogs(provider);
 	if (!catalogs) return turn;
 	return localizeAuthTurn(turn, {
 		catalogs,
@@ -3304,7 +3447,7 @@ async function handleAuthFlow(
 			!(result instanceof Response) &&
 			!(result instanceof ReadableStream) &&
 			isAuthTurn(result)
-				? materializeAuthFlowTurn(provider, request, result)
+				? materializeAuthFlowTurn(request, result, options.localeCatalogs)
 				: result;
 		return toAuthFlowResponse(materializedResult, getPatch(), getEngineState());
 	} catch (error) {
@@ -3557,8 +3700,17 @@ function createServerAppWithCapabilityModules(
 	capabilityModules: ProviderCapabilityModules,
 ): Hono {
 	const engineSelection = resolveServerEngine(serverOptions);
+	// Read the provider's locale catalogs once here rather than per turn: the
+	// previous auth-flow loader re-read all three JSON files on every turn and
+	// threw the whole map away when one locale file was absent.
+	const localeCatalogs = resolveProviderLocaleCatalogs(
+		provider,
+		serverOptions,
+		serverOptions.logger ?? defaultProviderServerLogger,
+	);
 	const options: ProviderServerRuntimeOptions = {
 		...serverOptions,
+		...(localeCatalogs ? { localeCatalogs } : {}),
 		capabilityModules,
 		engine: engineSelection.engine,
 	};
@@ -3605,7 +3757,19 @@ function createServerAppWithCapabilityModules(
 		const error = new ProviderError("Not found", { code: "not_found", retryable: false });
 		const observabilityDetails = errorObservabilityDetails(error);
 		return responseWithErrorObservability(
-			c.json(toErrorResponse(error, undefined, observabilityDetails), 404),
+			c.json(
+				toErrorResponse(
+					error,
+					undefined,
+					observabilityDetails,
+					undefined,
+					errorEnvelopeLocalization({
+						catalogs: localeCatalogs,
+						requestHeaders: c.req.raw.headers,
+					}),
+				),
+				404,
+			),
 			observabilityDetails,
 		);
 	});
@@ -3819,7 +3983,18 @@ function createServerAppWithCapabilityModules(
 			});
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			const response = c.json(
-				toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+				toErrorResponse(
+					error,
+					requestId,
+					observabilityDetails,
+					requestScope.redact,
+					errorEnvelopeLocalization({
+						catalogs: localeCatalogs,
+						requestHeaders: c.req.raw.headers,
+						rawBody,
+						...(declaredErrorCode ? { declaredErrorCode } : {}),
+					}),
+				),
 				status,
 			);
 			return finalizeRequestResponse(requestScope, response, {
@@ -3900,7 +4075,18 @@ function createServerAppWithCapabilityModules(
 			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			const response = c.json(
-				toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+				toErrorResponse(
+					error,
+					requestId,
+					observabilityDetails,
+					requestScope.redact,
+					errorEnvelopeLocalization({
+						catalogs: localeCatalogs,
+						requestHeaders: c.req.raw.headers,
+						rawBody,
+						...(declaredErrorCode ? { declaredErrorCode } : {}),
+					}),
+				),
 				status,
 			);
 			return finalizeRequestResponse(requestScope, response, {
@@ -3981,7 +4167,17 @@ function createServerAppWithCapabilityModules(
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 				const observabilityDetails = errorObservabilityDetails(error);
 				const response = c.json(
-					toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+					toErrorResponse(
+						error,
+						requestId,
+						observabilityDetails,
+						requestScope.redact,
+						errorEnvelopeLocalization({
+							catalogs: localeCatalogs,
+							requestHeaders: c.req.raw.headers,
+							rawBody,
+						}),
+					),
 					status,
 				);
 				return finalizeRequestResponse(requestScope, response, {

@@ -924,8 +924,17 @@ export type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number
 export interface OperationErrorCode {
 	code: string;
 	status?: ProviderErrorStatus;
+	/** Developer-facing English prose for docs and MCP tool text. Never localized. */
 	description: string;
 	retryable?: boolean;
+	/**
+	 * Locale catalog key for the client-facing `message` of every error thrown
+	 * with this `code`. A throw site's own `messageKey` wins; when neither is
+	 * present the SDK derives `errors.<code>.message`.
+	 */
+	messageKey?: ProviderLocaleKeyInput;
+	/** Locale catalog key for the client-facing `fix`. Derived default: `errors.<code>.fix`. */
+	fixKey?: ProviderLocaleKeyInput;
 }
 
 export type StealthPlatform = "macos" | "windows" | "linux" | "android" | "ios";

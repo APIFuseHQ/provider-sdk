@@ -157,6 +157,7 @@ export type {
 } from "./engine.js";
 export {
 	getProviderLocalePath,
+	type ProviderErrorMessageParams,
 	providerLocaleKey,
 	qualifyProviderLocaleKey,
 } from "./i18n/index.js";
