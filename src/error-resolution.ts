@@ -67,6 +67,7 @@ export const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
 	"http_redirect_missing_location",
 	"http_redirect_loop",
 	"transport_invalid_url",
+	"http_header_factory_failed",
 	"EGRESS_LEASE_INVALID",
 	"EGRESS_LEASE_BINDING_INVALID",
 	"EGRESS_LEASE_KEY_MISSING",

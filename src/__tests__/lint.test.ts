@@ -916,6 +916,7 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 					`throw new ProviderError("upstream broke", { code: "UPSTREAM_ERROR" });`,
 					`throw new ProviderError("secret missing", { code: "MISSING_SECRET" });`,
 					`throw new ProviderError("relog", { code: "reauth_required" });`,
+					`throw new ProviderError("resign", { code: "http_header_factory_failed" });`,
 				].join("\n"),
 			}),
 		).filter(undeclaredRule);

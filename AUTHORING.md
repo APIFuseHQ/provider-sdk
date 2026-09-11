@@ -755,20 +755,37 @@ one, and the request keeps proxy failover and the transient retry taxonomy:
 
 ```ts
 const response = await ctx.http.get(requestUrl, {
-	headers: async ({ url, method }) => ({
-		...commonHeaders,
-		dpop: await createDpopProof(url, method),
-	}),
+	headers: async ({ url, method }) => {
+		// RFC 9449 §4.2: `htu` is the target URI without query and fragment.
+		const htu = new URL(url);
+		htu.search = "";
+		htu.hash = "";
+		return {
+			...commonHeaders,
+			dpop: await createDpopProof(htu.toString(), method),
+		};
+	},
 });
 ```
+
+`url` is the exact URL the attempt is issued against, including `params` and
+`sensitiveParams`. Bind to it instead of a URL you rebuild, but strip the query
+and fragment for fields that are defined without them (DPoP `htu`), and never
+log it or copy it verbatim into a signed field a verifier logs.
+
+Keep the factory fast and local. It runs after proxy resolution, so an already
+allocated egress endpoint and its lease are held while it is awaited; a remote
+signing round trip there can outlive the lease TTL. Mint locally, and set
+`timeout` on the call so a hung signer cannot hold the endpoint indefinitely.
 
 The factory is not invoked for redirect hops (they reuse the attempt's
 headers), for skipped duplicate proxy offsets, or for an attempt whose proxy
 allocation failed — those build no request, so `attempt` counts only the
-requests that are actually issued. A factory that throws fails
-the request with the non-retryable `TransportError` code
-`http_header_factory_failed`. `ctx.stealth` has its own `headers` option and
-does not accept a factory.
+requests that are actually issued. A factory that throws fails the request with
+the non-retryable `TransportError` code `http_header_factory_failed`, which is
+classified as a provider-side fault (`provider_error`), not an upstream
+failure. `ctx.stealth` has its own `headers` option and does not accept a
+factory.
 
 ### Public local debugging checklist
 

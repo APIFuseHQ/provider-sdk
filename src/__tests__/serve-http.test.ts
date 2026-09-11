@@ -523,6 +523,19 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					});
 				},
 			},
+			httpHeaderFactoryFailure: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async (ctx) => {
+					await ctx.http.get("https://api.example.com/v1/lookup", {
+						headers: () => {
+							throw new Error("provider signing bug");
+						},
+					});
+					return { ok: true };
+				},
+			},
 			transportWithDetails: {
 				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
@@ -2324,6 +2337,33 @@ describe("provider HTTP server", () => {
 			category: "network",
 			taxonomyVersion: "2026-08-07",
 			retryable: true,
+		});
+	});
+
+	it("attributes a request header factory failure to the provider, not the upstream", async () => {
+		const response = await app.request("/v1/httpHeaderFactoryFailure", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_header_factory",
+				input: { value: "hello" },
+			}),
+		});
+
+		expect(response.status).toBe(502);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "http_header_factory_failed",
+				message: "Request header preparation failed",
+				requestId: "req_header_factory",
+				retryable: false,
+				source: "apifuse",
+			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "provider_error",
+			taxonomyVersion: "2026-08-07",
+			retryable: false,
 		});
 	});
 

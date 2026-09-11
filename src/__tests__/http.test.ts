@@ -2211,7 +2211,7 @@ describe("createHttpClient", () => {
 			assertIsError(caught);
 			expect(caught).toMatchObject({
 				code: "http_header_factory_failed",
-				options: { retryable: false },
+				options: { retryable: false, category: "provider_error" },
 			});
 			expect(caught.message).toBe("Request header factory failed");
 			expect(caught.cause).toBeInstanceOf(Error);
