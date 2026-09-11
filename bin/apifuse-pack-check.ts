@@ -82,11 +82,18 @@ const requiredPaths = [
 	"dist/auth-turn/fixtures/invalid/unknown-top-level-field.json",
 	"src/auth-turn/auth-turn.v1.schema.json",
 ];
+// Test material must never reach the published tarball: it carries no consumer
+// value and the `.deploy.ts.txt` codemod fixtures describe internal provider
+// deployment intent. The `files` negations in package.json do the excluding;
+// these patterns are the ratchet that fails the build when a new test directory
+// escapes them (top-level negations do not cover nested `__tests__`).
+const isPackagedTestMaterial = (path: string): boolean =>
+	path.startsWith("__tests__/") ||
+	path.includes("/__tests__/") ||
+	path.endsWith(".test.ts") ||
+	path.endsWith(".spec.ts");
 const forbiddenMatches = filePaths.filter(
-	(path) =>
-		path.startsWith("src/__tests__/") ||
-		path === "src/index.test.ts" ||
-		path === "bin/apifuse-init.ts",
+	(path) => isPackagedTestMaterial(path) || path === "bin/apifuse-init.ts",
 );
 const missingRequiredPaths = requiredPaths.filter(
 	(path) => !filePaths.includes(path),

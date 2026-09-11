@@ -15,7 +15,7 @@ bun run pack:smoke
 ## Pull requests
 
 - PRs from forks run without secrets
-- Release publishing only happens from protected release PRs after validation evidence is present
+- Release publishing only happens from a release PR whose validation evidence the Release PR Guard produced for the exact candidate SHA; merging that PR publishes to npm right away, so the merge is the approval
 - Do not include real credentials, cookies, HAR files, or private APIFuse infrastructure details in tests or fixtures
 
 ## API reports and changesets
