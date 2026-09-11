@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { type Socket, createServer } from "node:net";
 import { z } from "zod";
@@ -16,9 +16,11 @@ import {
 	ValidationError,
 } from "../errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
+import * as diagnosticRedactor from "../runtime/diagnostic-redactor.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { defineCursor } from "../handle.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { OperationRequestSchema } from "../server/index.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
@@ -168,6 +170,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				output: z.object({
 					echoed: z.string(),
 					connectionId: z.string().optional(),
+					tenantId: z.string().optional(),
 					secret: z.string().optional(),
 				}),
 				handler: async (ctx, input) => {
@@ -176,6 +179,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					return {
 						echoed: parsed.value,
 						connectionId: ctx.request?.connectionId,
+						tenantId: ctx.request?.tenantId,
 						secret: ctx.credential.get("token"),
 					};
 				},
@@ -517,6 +521,19 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 						code: "transport_network_error",
 						status: 0,
 					});
+				},
+			},
+			httpHeaderFactoryFailure: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async (ctx) => {
+					await ctx.http.get("https://api.example.com/v1/lookup", {
+						headers: () => {
+							throw new Error("provider signing bug");
+						},
+					});
+					return { ok: true };
 				},
 			},
 			transportWithDetails: {
@@ -972,6 +989,113 @@ describe("provider HTTP server", () => {
 				echoed: "hello",
 				connectionId: "af_con_0123456789ABCDEFGHJKMN",
 			},
+		});
+	});
+
+	it("round-trips the optional envelope tenantId through OperationRequestSchema", () => {
+		const envelope = { requestId: "req_schema", input: {} };
+		expect(OperationRequestSchema.parse({ ...envelope, tenantId: "org_schema" }).tenantId).toBe(
+			"org_schema",
+		);
+		expect(OperationRequestSchema.parse(envelope).tenantId).toBeUndefined();
+	});
+
+	it("exposes the gateway-asserted tenant scope from the envelope only", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithLogger = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+		});
+		const post = (body: Record<string, unknown>, headers: Record<string, string> = {}) =>
+			appWithLogger.request("/v1/echo", {
+				method: "POST",
+				headers: { "content-type": "application/json", ...headers },
+				body: JSON.stringify(body),
+			});
+
+		// The envelope field is the only source: transport headers and
+		// caller-supplied `headers` never populate the principal scope, and it
+		// is available without any connection (connectionless operations).
+		const asserted = await post(
+			{
+				requestId: "req_tenant_scope",
+				input: { value: "hello" },
+				tenantId: "org_tenant_scope",
+				headers: { "x-apifuse-tenant-id": "body_header_tenant" },
+			},
+			{ "x-apifuse-tenant-id": "transport_header_tenant" },
+		);
+		expect(asserted.status).toBe(200);
+		expect(await asserted.json()).toEqual({
+			data: { echoed: "hello", tenantId: "org_tenant_scope" },
+		});
+		expect(events).toEqual([
+			expect.objectContaining({
+				event: "provider_request_completed",
+				kind: "operation",
+				requestId: "req_tenant_scope",
+				tenantId: "org_tenant_scope",
+			}),
+		]);
+		expect("connectionId" in (events[0] ?? {})).toBe(false);
+
+		// Absent stays absent (`undefined`, not `""`) even when a header
+		// carries a tenant-looking value.
+		events.length = 0;
+		const absent = await post(
+			{ requestId: "req_tenant_absent", input: { value: "hello" } },
+			{ "x-apifuse-tenant-id": "transport_header_tenant" },
+		);
+		expect(await absent.json()).toEqual({ data: { echoed: "hello" } });
+		expect("tenantId" in (events[0] ?? {})).toBe(false);
+
+		// An empty string is a malformed identifier, not a principal.
+		events.length = 0;
+		const empty = await post({
+			requestId: "req_tenant_empty",
+			input: { value: "hello" },
+			tenantId: "",
+		});
+		expect(await empty.json()).toEqual({ data: { echoed: "hello" } });
+		expect("tenantId" in (events[0] ?? {})).toBe(false);
+	});
+
+	it("keeps the ctx.request shape unchanged when the envelope omits tenantId", async () => {
+		// An own property holding `undefined` still changes Object.keys and
+		// `in`, so a consumer asserting the exact ctx.request shape would break
+		// on an SDK bump. The field appears only when the gateway asserted one.
+		const baseProvider = createTestProvider();
+		const provider = {
+			...baseProvider,
+			operations: {
+				...baseProvider.operations,
+				requestShape: {
+					riskClass: READ_RISK_CLASS,
+					input: z.object({}),
+					output: z.object({ keys: z.array(z.string()) }),
+					handler: async (ctx) => ({ keys: Object.keys(ctx.request ?? {}).sort() }),
+				},
+			},
+		} satisfies ProviderDefinition;
+		const shapeApp = createServerApp(provider, { logger: () => {} });
+		const post = (body: Record<string, unknown>) =>
+			shapeApp.request("/v1/requestShape", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+
+		const absent = await post({ requestId: "req_shape_absent", input: {} });
+		expect(absent.status).toBe(200);
+		expect(await absent.json()).toEqual({ data: { keys: ["connectionId", "headers"] } });
+
+		const asserted = await post({
+			requestId: "req_shape_asserted",
+			input: {},
+			tenantId: "org_shape",
+		});
+		expect(asserted.status).toBe(200);
+		expect(await asserted.json()).toEqual({
+			data: { keys: ["connectionId", "headers", "tenantId"] },
 		});
 	});
 
@@ -1742,6 +1866,28 @@ describe("provider HTTP server", () => {
 		);
 		expect(matchingEvent).toBeDefined();
 		expect(matchingEvent).not.toHaveProperty("requestedProviderId");
+
+		// Same identifier rule as the operation route: "" is malformed, not a
+		// principal, so it is never emitted into the correlation.
+		const emptyTenantResponse = await appWithLogger.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_auth_empty_tenant",
+				flowId: "flow_auth_empty_tenant",
+				tenantId: "",
+				providerId: "test-provider",
+				context: {},
+			}),
+		});
+		expect(emptyTenantResponse.status).toBe(200);
+		const emptyTenantEvent = events.find(
+			(event) =>
+				event.event === "provider_request_completed" &&
+				event.requestId === "req_auth_empty_tenant",
+		);
+		expect(emptyTenantEvent).toBeDefined();
+		expect("tenantId" in (emptyTenantEvent ?? {})).toBe(false);
 	});
 
 	it("dispatches auth disconnect through the standard endpoint", async () => {
@@ -2194,6 +2340,33 @@ describe("provider HTTP server", () => {
 		});
 	});
 
+	it("attributes a request header factory failure to the provider, not the upstream", async () => {
+		const response = await app.request("/v1/httpHeaderFactoryFailure", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_header_factory",
+				input: { value: "hello" },
+			}),
+		});
+
+		expect(response.status).toBe(502);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "http_header_factory_failed",
+				message: "Request header preparation failed",
+				requestId: "req_header_factory",
+				retryable: false,
+				source: "apifuse",
+			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "provider_error",
+			taxonomyVersion: "2026-08-07",
+			retryable: false,
+		});
+	});
+
 	it("keeps TransportError details provider-owned and moves all observability fields to the header", async () => {
 		const response = await app.request("/v1/transportWithDetails", {
 			method: "POST",
@@ -2591,6 +2764,8 @@ describe("provider HTTP server", () => {
 		// Must never leak the raw message/stack beyond the generic string.
 		expect(body.error.message).toBe("Internal error");
 		expect(JSON.stringify(body)).not.toContain("boom");
+		expect(JSON.stringify(body)).not.toContain(".ts:");
+		expect(JSON.stringify(body)).not.toContain('"stack"');
 		// The hub honors details.retryable; a masked crash must be non-retryable so
 		// it cannot drive the START->CONTINUE->restart loop.
 		expect(body.error.details?.retryable).toBe(false);
@@ -2600,6 +2775,238 @@ describe("provider HTTP server", () => {
 			category: "internal_error",
 			taxonomyVersion: "2026-08-07",
 			retryable: false,
+		});
+	});
+
+	describe("masked 500 stack frames", () => {
+		const STACK_FRAME_SHAPE =
+			/^(?:(?:async|new) )?[\w$.<>[\] #]* ?\((?:[\w.$-]+|native|node:[\w/.-]+):\d+:\d+\)$/;
+
+		function loggedStack(event: ProviderServerLogEvent | undefined): unknown {
+			return Object.getOwnPropertyDescriptor(event ?? {}, "stack")?.value;
+		}
+
+		function createThrowingApp(createError: () => unknown, events: ProviderServerLogEvent[]) {
+			const base = createTestProvider();
+			const provider = {
+				...base,
+				operations: {
+					crash: {
+						riskClass: READ_RISK_CLASS,
+						input: z.object({ value: z.string() }),
+						output: z.object({ ok: z.boolean() }),
+						handler: async () => {
+							throw createError();
+						},
+					},
+				},
+			} satisfies ProviderDefinition;
+			return createServerApp(provider, { logger: (event) => events.push(event) });
+		}
+
+		function requestCrash(
+			app: ReturnType<typeof createServerApp>,
+			input: unknown = { value: "x" },
+		) {
+			return app.request("/v1/crash", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_crash", input }),
+			});
+		}
+
+		it("logs basename-only frames for a masked 500 and keeps the public body unchanged", async () => {
+			const events: ProviderServerLogEvent[] = [];
+			const appWithLogger = createServerApp(createTestProvider(), {
+				logger: (event) => events.push(event),
+			});
+			const response = await appWithLogger.request("/v1/unexpectedError", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_masked_frames", input: { value: "hello" } }),
+			});
+
+			expect(response.status).toBe(500);
+			const bodyText = await response.text();
+			expect(bodyText).not.toContain("boom");
+			expect(bodyText).not.toContain(".ts:");
+			expect(bodyText).not.toContain('"stack"');
+			expect(errorObservability(response)).toEqual({
+				category: "internal_error",
+				taxonomyVersion: "2026-08-07",
+				retryable: false,
+			});
+
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({
+				event: "provider_request_failed",
+				status: 500,
+				code: "internal_error",
+				errorClass: "Error",
+				message: "boom",
+			});
+			const stack = loggedStack(events[0]);
+			expect(Array.isArray(stack)).toBe(true);
+			const frames = stack as string[];
+			expect(frames.length).toBeGreaterThanOrEqual(1);
+			expect(frames.length).toBeLessThanOrEqual(5);
+			expect(frames[0]).toMatch(/^handler \(serve-http\.test\.ts:\d+:\d+\)$/);
+			for (const frame of frames) {
+				expect(frame).toMatch(STACK_FRAME_SHAPE);
+				// Only an engine-internal `node:` module id may keep a `/`, and
+				// its grammar admits no directory or traversal segment.
+				if (frame.includes("node:")) {
+					expect(frame).toMatch(
+						/\(node:[A-Za-z_][\w.-]*(?:\/[A-Za-z_][\w.-]*)*:\d+:\d+\)$/,
+					);
+				} else {
+					expect(frame).not.toContain("/");
+				}
+				expect(frame).not.toContain("\\");
+				expect(frame).not.toContain("..");
+				expect(frame).not.toContain("/home/");
+				expect(frame).not.toContain("/tmp/");
+				expect(frame.length).toBeLessThanOrEqual(200);
+			}
+		});
+
+		it("omits stack for a 4xx failure", async () => {
+			const events: ProviderServerLogEvent[] = [];
+			const appWithLogger = createServerApp(createTestProvider(), {
+				logger: (event) => events.push(event),
+			});
+			const response = await appWithLogger.request("/v1/unexpectedError", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_4xx", input: { value: 1 } }),
+			});
+
+			expect(response.status).toBe(400);
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({ event: "provider_request_failed", status: 400 });
+			expect(Object.hasOwn(events[0], "stack")).toBe(false);
+		});
+
+		it.each([
+			[
+				"throwing getter",
+				() => {
+					const error = new Error("boom");
+					Object.defineProperty(error, "stack", {
+						get() {
+							throw new Error("getter must not run");
+						},
+						configurable: true,
+					});
+					return error;
+				},
+			],
+			[
+				"non-string stack",
+				() => Object.assign(new Error("boom"), { stack: ["    at evil (/etc/passwd:1:1)"] }),
+			],
+			[
+				"1 MiB junk stack",
+				() =>
+					Object.assign(new Error("boom"), { stack: `Error: boom\n${"x".repeat(1024 * 1024)}` }),
+			],
+			["non-Error throwable", () => ({ stack: "Error: boom\n    at evil (/etc/passwd:1:1)" })],
+		])("omits stack and still serves the masked 500 for a %s", async (_label, createError) => {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestCrash(createThrowingApp(createError, events));
+
+			expect(response.status).toBe(500);
+			const body = (await response.json()) as { error: { code: string; message: string } };
+			expect(body.error).toMatchObject({ code: "internal_error", message: "Internal error" });
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({ event: "provider_request_failed", status: 500 });
+			expect(Object.hasOwn(events[0], "stack")).toBe(false);
+			expect(JSON.stringify(events[0])).not.toContain("passwd");
+		});
+
+		it("does not emit frame-shaped lines injected through the error message", async () => {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestCrash(
+				createThrowingApp(
+					() => new Error("boom\n    at evil (/etc/passwd:1:1)\n    at evil2 (/etc/shadow:2:2)"),
+					events,
+				),
+			);
+
+			expect(response.status).toBe(500);
+			expect(events).toHaveLength(1);
+			const frames = loggedStack(events[0]) as string[];
+			expect(Array.isArray(frames)).toBe(true);
+			expect(frames[0]).toMatch(/^handler \(serve-http\.test\.ts:\d+:\d+\)$/);
+			for (const frame of frames) {
+				expect(frame).toMatch(STACK_FRAME_SHAPE);
+				expect(frame).not.toContain("evil");
+				expect(frame).not.toContain("passwd");
+				expect(frame).not.toContain("shadow");
+			}
+		});
+
+		it("redacts registered secret values inside frames", async () => {
+			const name = "D12_STACK_FRAME_SECRET";
+			const sentinel = "hrfcokey1234";
+			const previous = process.env[name];
+			process.env[name] = sentinel;
+			const events: ProviderServerLogEvent[] = [];
+			try {
+				const app = createServerApp(
+					{
+						...createTestProvider(),
+						secrets: [{ name, required: true }],
+						operations: {
+							crash: {
+								riskClass: READ_RISK_CLASS,
+								input: z.object({ value: z.string() }),
+								output: z.object({ ok: z.boolean() }),
+								handler: async () => {
+									throw Object.assign(new Error("boom"), {
+										stack: `Error: boom\n    at ${sentinel} (/srv/${sentinel}/app.js:1:1)\n    at ok (/srv/app/ok.js:2:2)`,
+									});
+								},
+							},
+						},
+					},
+					{ logger: (entry) => events.push(entry) },
+				);
+				const response = await requestCrash(app);
+				expect(response.status).toBe(500);
+				expect(events).toHaveLength(1);
+				expect(loggedStack(events[0])).toEqual(["[REDACTED] (app.js:1:1)", "ok (ok.js:2:2)"]);
+				expect(JSON.stringify(events[0])).not.toContain(sentinel);
+			} finally {
+				if (previous === undefined) delete process.env[name];
+				else process.env[name] = previous;
+			}
+		});
+
+		it("fails closed to [REDACTION_FAILED] frames when the request redactor throws", async () => {
+			const original = diagnosticRedactor.createDiagnosticRedactor;
+			const hook = spyOn(diagnosticRedactor, "createDiagnosticRedactor").mockImplementation(
+				(...args) => {
+					const registry = original(...args);
+					registry.redact = () => {
+						throw new Error("redactor failed");
+					};
+					return registry;
+				},
+			);
+			const events: ProviderServerLogEvent[] = [];
+			try {
+				const response = await requestCrash(createThrowingApp(() => new Error("boom"), events));
+				expect(response.status).toBe(500);
+				expect(events).toHaveLength(1);
+				const frames = loggedStack(events[0]) as string[];
+				expect(Array.isArray(frames)).toBe(true);
+				expect(frames.length).toBeGreaterThanOrEqual(1);
+				expect(frames.every((frame) => frame === "[REDACTION_FAILED]")).toBe(true);
+				expect(JSON.stringify(events[0])).not.toContain("serve-http.test.ts");
+			} finally {
+				hook.mockRestore();
+			}
 		});
 	});
 
@@ -3706,6 +4113,64 @@ describe("operation-declared error resolution", () => {
 			expect(events[0], testCase.name).toMatchObject({ retryable: testCase.retryable });
 			expect(events[0], testCase.name).not.toHaveProperty("signal");
 		}
+	});
+
+	it("serves the fleet-consensus codes from the SDK mapping without any declaration", async () => {
+		const cases = [
+			// Platform-managed key refused by the upstream: the caller holds no
+			// credential, so this is a deployment defect (400), not a 401 the
+			// caller could act on nor a 502 that will heal.
+			{ code: "UPSTREAM_AUTH_ERROR", status: 400 },
+			// Upstream response shape drifted: upstream's fault (502), and a retry
+			// returns the same broken payload.
+			{ code: "UPSTREAM_SCHEMA_ERROR", status: 502 },
+			{ code: "INVALID_REQUEST", status: 400 },
+		] as const;
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestDeclaredError(
+				createDeclaredErrorApp({
+					createError: () => new ProviderError("Upstream said no", { code: testCase.code }),
+					logger: (event) => events.push(event),
+				}),
+			);
+
+			expect(response.status, testCase.code).toBe(testCase.status);
+			expect(await response.json(), testCase.code).toMatchObject({
+				error: { code: testCase.code, retryable: false },
+			});
+			expect(errorObservability(response), testCase.code).toMatchObject({ retryable: false });
+			expect(events[0], testCase.code).toMatchObject({ status: testCase.status });
+			// The whole point of registering: an undeclared throw no longer looks
+			// like an internal fault, so the signal must stop firing too.
+			expect(events[0], testCase.code).not.toHaveProperty("signal");
+		}
+	});
+
+	it("keeps a declared status winning over the fleet-consensus mapping", async () => {
+		// These codes are status-mapped but not SDK runtime-owned, so an existing
+		// provider declaration is still authoritative. Registering them must not
+		// silently rewrite a served status; the authoring lint reports the
+		// divergence instead.
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestDeclaredError(
+			createDeclaredErrorApp({
+				entry: {
+					code: "UPSTREAM_AUTH_ERROR",
+					status: 502,
+					description: "Legacy declaration that predates SDK registration",
+					retryable: true,
+				},
+				createError: () => new ProviderError("Key refused", { code: "UPSTREAM_AUTH_ERROR" }),
+				logger: (event) => events.push(event),
+			}),
+		);
+
+		expect(response.status).toBe(502);
+		expect((await response.json()).error.retryable).toBe(true);
+		expect(errorObservability(response).retryable).toBe(true);
+		expect(events[0]).not.toHaveProperty("signal");
 	});
 
 	it("does not let a declaration override an SDK-owned code", async () => {

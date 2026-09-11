@@ -1,4 +1,3 @@
-import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { ProviderError, TransportError } from "../errors.js";
 import type {
 	OcrCaptchaCandidate,
@@ -10,6 +9,13 @@ import type {
 	OcrResult,
 	ProviderOcrConfig,
 } from "../types.js";
+import { readCapabilityErrorBody } from "./capability-response.js";
+import {
+	captureCapability,
+	registerCapabilityInput,
+	tagCapability,
+} from "./capability-telemetry.js";
+import { readDiagnosticEnv, registerDiagnosticValue } from "./diagnostic-env.js";
 import { CLOUDFLARE_ACCOUNT_ID_ENV } from "./stt.js";
 import { createTimeoutController, isTimeoutLikeError } from "./timeout.js";
 
@@ -78,14 +84,17 @@ function createErrorOcrClient(options: ErrorOcrClientOptions): OcrContext {
 			fix: options.fix,
 		});
 	};
-	return {
-		async recognize() {
-			return unavailable();
+	return tagCapability(
+		{
+			async recognize() {
+				return unavailable();
+			},
+			async extractCaptchaText() {
+				return unavailable();
+			},
 		},
-		async extractCaptchaText() {
-			return unavailable();
-		},
-	};
+		{ backend: "unavailable", engine: "custom" },
+	);
 }
 
 export function createUnsupportedOcrClient(reason?: string): OcrContext {
@@ -249,6 +258,8 @@ function responseContent(payload: unknown, cloudflare: boolean, model: string): 
 	const choices = root?.choices;
 	if (!Array.isArray(choices)) return undefined;
 	const choice = unknownRecord(choices[0]);
+	if (typeof choice?.finish_reason === "string")
+		captureCapability({ finishReason: choice.finish_reason });
 	if (typeof choice?.finish_reason === "string" && choice.finish_reason !== "stop") {
 		throw incompleteResponseError(model, choice.finish_reason);
 	}
@@ -305,7 +316,11 @@ function moondreamSseContent(body: string, model: string): string | undefined {
 			terminalFinishReason = chunk.finish_reason;
 		}
 	}
-	if (finalAnswer) return finalAnswer;
+	if (finalAnswer) {
+		captureCapability({ finishReason: "stop" });
+		return finalAnswer;
+	}
+	if (terminalFinishReason) captureCapability({ finishReason: terminalFinishReason });
 	if (terminalFinishReason) throw incompleteResponseError(model, terminalFinishReason);
 	if (firstDecodingFailure) throw malformedResponseError(model, firstDecodingFailure);
 	return finalAnswer;
@@ -361,48 +376,57 @@ export function createCloudflareWorkersAiOcrClient(
 ): OcrContext {
 	const model = options.model ?? DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL;
 	const runFetch = options.fetch ?? fetch;
-	return createOcrClient(model, async (request) => {
-		const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS);
-		try {
-			let response: Response;
+	return tagCapability(
+		createOcrClient(model, async (request) => {
+			registerCapabilityInput(request.image);
+			registerDiagnosticValue(options.apiToken);
+			registerDiagnosticValue(`Bearer ${options.apiToken}`);
+			const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS);
 			try {
-				response = await runFetch(
-					`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(options.accountId)}/ai/run/${model}`,
-					{
-						method: "POST",
-						headers: {
-							Authorization: `Bearer ${options.apiToken}`,
-							"Content-Type": "application/json",
+				let response: Response;
+				try {
+					response = await runFetch(
+						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(options.accountId)}/ai/run/${model}`,
+						{
+							method: "POST",
+							headers: {
+								Authorization: `Bearer ${options.apiToken}`,
+								"Content-Type": "application/json",
+							},
+							body: JSON.stringify(
+								isMoondreamModel(model)
+									? moondreamPayload(request)
+									: cloudflareMessagesPayload(request, model),
+							),
+							signal: timeout.controller.signal,
 						},
-						body: JSON.stringify(
-							isMoondreamModel(model)
-								? moondreamPayload(request)
-								: cloudflareMessagesPayload(request, model),
-						),
-						signal: timeout.controller.signal,
-					},
-				);
+					);
+				} catch (error) {
+					throw toOcrTransportError(error);
+				}
+				captureCapability({ status: response.status });
+				if (!response.ok) {
+					const echoed = await readCapabilityErrorBody(response, timeout.controller.signal);
+					captureCapability({ diagnostics: echoed });
+					throw new TransportError("OCR upstream request failed", {
+						code: "OCR_UPSTREAM_FAILED",
+						status: response.status,
+						upstreamStatus: response.status,
+					});
+				}
+				const text = isMoondreamModel(model)
+					? moondreamSseContent(await response.text(), model)
+					: responseContent(await responseJson(response, model), true, model);
+				if (!text) throw emptyResponseError(model);
+				return { text, model };
 			} catch (error) {
 				throw toOcrTransportError(error);
+			} finally {
+				timeout.clear();
 			}
-			if (!response.ok) {
-				throw new TransportError("OCR upstream request failed", {
-					code: "OCR_UPSTREAM_FAILED",
-					status: response.status,
-					upstreamStatus: response.status,
-				});
-			}
-			const text = isMoondreamModel(model)
-				? moondreamSseContent(await response.text(), model)
-				: responseContent(await responseJson(response, model), true, model);
-			if (!text) throw emptyResponseError(model);
-			return { text, model };
-		} catch (error) {
-			throw toOcrTransportError(error);
-		} finally {
-			timeout.clear();
-		}
-	});
+		}),
+		{ backend: "cloudflare-workers-ai", engine: "workers-ai", model },
+	);
 }
 
 export function createOpenAiCompatibleOcrClient(
@@ -410,38 +434,49 @@ export function createOpenAiCompatibleOcrClient(
 ): OcrContext {
 	const model = options.model;
 	const runFetch = options.fetch ?? fetch;
-	return createOcrClient(model, async (request) => {
-		const headers: Record<string, string> = { "Content-Type": "application/json" };
-		if (options.apiKey) headers.Authorization = `Bearer ${options.apiKey}`;
-		const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS);
-		try {
-			let response: Response;
+	return tagCapability(
+		createOcrClient(model, async (request) => {
+			registerCapabilityInput(request.image);
+			if (options.apiKey) {
+				registerDiagnosticValue(options.apiKey);
+				registerDiagnosticValue(`Bearer ${options.apiKey}`);
+			}
+			const headers: Record<string, string> = { "Content-Type": "application/json" };
+			if (options.apiKey) headers.Authorization = `Bearer ${options.apiKey}`;
+			const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS);
 			try {
-				response = await runFetch(`${options.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
-					method: "POST",
-					headers,
-					body: JSON.stringify(messagesPayload(request, model)),
-					signal: timeout.controller.signal,
-				});
+				let response: Response;
+				try {
+					response = await runFetch(`${options.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
+						method: "POST",
+						headers,
+						body: JSON.stringify(messagesPayload(request, model)),
+						signal: timeout.controller.signal,
+					});
+				} catch (error) {
+					throw toOcrTransportError(error);
+				}
+				captureCapability({ status: response.status });
+				if (!response.ok) {
+					const echoed = await readCapabilityErrorBody(response, timeout.controller.signal);
+					captureCapability({ diagnostics: echoed });
+					throw new TransportError("OCR upstream request failed", {
+						code: "OCR_UPSTREAM_FAILED",
+						status: response.status,
+						upstreamStatus: response.status,
+					});
+				}
+				const text = responseContent(await responseJson(response, model), false, model);
+				if (!text) throw emptyResponseError(model);
+				return { text, model };
 			} catch (error) {
 				throw toOcrTransportError(error);
+			} finally {
+				timeout.clear();
 			}
-			if (!response.ok) {
-				throw new TransportError("OCR upstream request failed", {
-					code: "OCR_UPSTREAM_FAILED",
-					status: response.status,
-					upstreamStatus: response.status,
-				});
-			}
-			const text = responseContent(await responseJson(response, model), false, model);
-			if (!text) throw emptyResponseError(model);
-			return { text, model };
-		} catch (error) {
-			throw toOcrTransportError(error);
-		} finally {
-			timeout.clear();
-		}
-	});
+		}),
+		{ backend: "openai-compatible", engine: "openai-compatible", model },
+	);
 }
 
 function cleanCaptchaText(text: string): string {

@@ -14,16 +14,32 @@ function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
 
 const LEGACY_COOKIE_ORIGIN = "https://legacy-cookie.invalid/";
 
+/** Extract cookie values from Set-Cookie/header strings for request-scoped registration. */
+export function cookieValuesFromHeaders(headers: string | readonly string[]): string[] {
+	const values: string[] = [];
+	for (const header of typeof headers === "string" ? [headers] : headers) {
+		const cookie = Cookie.parse(header);
+		if (cookie?.value) values.push(cookie.value);
+	}
+	return values;
+}
+
 export class StealthCookieJar implements CookieJar, StealthSessionCookies {
 	private cookies: ToughCookieJar;
 	private readonly defaultUrl: string;
+	private readonly register: ((value: string) => void) | undefined;
 
-	constructor(cookieStrings: readonly string[], defaultUrl = LEGACY_COOKIE_ORIGIN) {
+	constructor(
+		cookieStrings: readonly string[],
+		defaultUrl = LEGACY_COOKIE_ORIGIN,
+		register?: (value: string) => void,
+	) {
 		this.cookies = new ToughCookieJar(undefined, {
 			allowSecureOnLocal: false,
 			rejectPublicSuffixes: true,
 		});
 		this.defaultUrl = this.normalizeUrl(defaultUrl) ?? LEGACY_COOKIE_ORIGIN;
+		this.register = register;
 		this.setFromCookieStrings(cookieStrings);
 	}
 
@@ -31,6 +47,7 @@ export class StealthCookieJar implements CookieJar, StealthSessionCookies {
 		const cookieUrl = this.normalizeUrl(url);
 		if (!cookieUrl) return;
 		for (const cookieString of cookieStrings) {
+			for (const value of cookieValuesFromHeaders(cookieString)) this.register?.(value);
 			this.cookies.setCookieSync(cookieString, cookieUrl, { ignoreError: true });
 		}
 	}
@@ -73,6 +90,7 @@ export class StealthCookieJar implements CookieJar, StealthSessionCookies {
 		this.clear();
 		for (const [name, value] of Object.entries(cookies)) {
 			if (!name) continue;
+			this.register?.(value);
 			this.cookies.setCookieSync(new Cookie({ key: name, path: "/", value }), this.defaultUrl, {
 				ignoreError: true,
 			});
@@ -111,6 +129,10 @@ export class StealthCookieJar implements CookieJar, StealthSessionCookies {
 		return undefined;
 	}
 
+	names(url?: string): string[] {
+		return this.getUniqueCookies(url ?? this.defaultUrl).map((cookie) => cookie.key);
+	}
+
 	private normalizeUrl(url: string): string | undefined {
 		try {
 			return new URL(url).toString();
@@ -124,6 +146,7 @@ export class StealthCookieJar implements CookieJar, StealthSessionCookies {
 		if (!cookieUrl) return [];
 		const names = new Set<string>();
 		return this.cookies.getCookiesSync(cookieUrl).filter((cookie) => {
+			if (cookie.value) this.register?.(cookie.value);
 			if (names.has(cookie.key)) return false;
 			names.add(cookie.key);
 			return true;

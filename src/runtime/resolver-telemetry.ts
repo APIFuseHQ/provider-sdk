@@ -147,7 +147,7 @@ function boundedInteger(value: number): number {
 	return Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
 }
 
-function boundedText(value: string, redact?: (text: string) => string): string {
+export function boundedText(value: string, redact?: (text: string) => string): string {
 	let result = value;
 	try {
 		result = redact?.(value) ?? value;

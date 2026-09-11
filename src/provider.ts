@@ -115,8 +115,13 @@ export {
 	isProviderError,
 	isSessionExpiredError,
 	isTransportError,
+	ProviderEgressDeniedError,
+	ProviderEngineAuthenticationError,
+	ProviderEngineProtocolVersionError,
+	ProviderEngineUnavailableError,
 	ProviderError,
 	type ProviderErrorObservability,
+	SDKError,
 	SessionExpiredError,
 	TransportError,
 	ValidationError,
@@ -134,6 +139,7 @@ export {
 	isEngineOwnedRuntimeEnvName,
 	isEngineOwnedTelemetryEnvName,
 	PROVIDER_CAPABILITY_KEYS,
+	PROVIDER_ENGINE_MODE_ENV,
 	PROVIDER_ENGINE_PROTOCOL_VERSION,
 	readEngineProxyCredentials,
 } from "./engine.js";
@@ -143,6 +149,7 @@ export type {
 	ProviderEngineAttachmentInput,
 	ProviderEngineBindingCandidates,
 	ProviderEngineCapabilitySurface,
+	ProviderEngineMode,
 	ProviderEngineRequest,
 	ProviderEngineResidentSurface,
 	ProviderEngineSession,
@@ -150,6 +157,7 @@ export type {
 } from "./engine.js";
 export {
 	getProviderLocalePath,
+	type ProviderErrorMessageParams,
 	providerLocaleKey,
 	qualifyProviderLocaleKey,
 } from "./i18n/index.js";
@@ -212,6 +220,8 @@ export type {
 	HealthJourneyRunContext,
 	HealthJourneyRunResult,
 	HealthScheduleRandomization,
+	HttpAttemptContext,
+	HttpHeadersFactory,
 	HttpRedirectFailureReason,
 	HttpRedirectPolicy,
 	HttpRedirectPolicyMode,

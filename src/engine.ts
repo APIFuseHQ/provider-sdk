@@ -38,6 +38,27 @@ import type {
 /** Versioned envelope protocol used by out-of-process engine transports. */
 export const PROVIDER_ENGINE_PROTOCOL_VERSION = "provider-engine.v1" as const;
 
+/**
+ * Environment variable that selects how a provider process attaches its capability
+ * bindings. Engine-owned by prefix (`APIFUSE__ENGINE__*`): never declarable as a
+ * provider secret and never projected into `ctx.env`.
+ *
+ * Values are trimmed and case-folded; absent or blank means "unset". An
+ * unrecognized value is reported on the `provider_engine_mode` boot event and
+ * ignored — a deployment-authored typo must never turn into CrashLoopBackOff.
+ */
+export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
+
+/**
+ * How a provider process attaches its capability bindings: `"in-process"` today,
+ * `"remote"` for the authenticated engine (ADR-0011).
+ *
+ * The union is intentionally open so further lanes (for example a provider hosted
+ * inside the engine) can be named without a breaking change. Unknown values are
+ * rejected at runtime, not by the type.
+ */
+export type ProviderEngineMode = "in-process" | "remote" | (string & {});
+
 /** Credential names owned by the engine and forbidden in provider declarations. */
 export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES = [
 	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
@@ -262,6 +283,12 @@ export interface ProviderEngineAttachmentInput {
 
 /** Attachment boundary shared by in-process development and remote RPC bridges. */
 export interface ProviderEngine {
+	/**
+	 * Which attachment this engine performs. Lets the server report a truthful
+	 * mode at boot and compare an explicit engine object against a requested
+	 * `engineMode`; omit for opaque host engines (reported as `custom`).
+	 */
+	readonly kind?: ProviderEngineMode;
 	attach<TDeclaration extends object = Record<string, unknown>>(
 		input: ProviderEngineAttachmentInput,
 	): ProviderContext<TDeclaration>;
@@ -348,7 +375,16 @@ function attachInProcess<TDeclaration extends object>(
 	}) as ProviderContext<TDeclaration>;
 }
 
-/** Local engine attachment; deployed bridges implement the same interface with RPC clients. */
+/**
+ * Local engine attachment; deployed bridges implement the same interface with RPC clients.
+ *
+ * ADR-0011 makes the authenticated remote engine the only attachment, so this one
+ * is scheduled for removal — but not deprecated yet: the remote client ships in a
+ * later release, and deprecating the only working constructor before its
+ * replacement exists would flag every current caller with no fix available. Until
+ * then it stays the default, and the server reports each in-process boot as
+ * `provider_engine_mode` with `deprecated: true`.
+ */
 export function createInProcessProviderEngine(): ProviderEngine {
-	return { attach: attachInProcess };
+	return { kind: "in-process", attach: attachInProcess };
 }

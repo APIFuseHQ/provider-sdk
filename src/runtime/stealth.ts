@@ -37,6 +37,8 @@ import type {
 	StealthSession,
 } from "../types.js";
 import { chrome149HeaderOrder } from "./chrome149-header-order.js";
+import { registerDiagnosticValue } from "./diagnostic-env.js";
+import { isStealthOwnedHeaderName } from "./stealth-owned-headers.js";
 import {
 	ENGINE_CEREMONY_EGRESS_LEASE,
 	type CeremonyEgressBinding,
@@ -90,6 +92,22 @@ import {
 } from "./stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "./stealth-cookies.js";
 
+export type {
+	StealthTelemetryAttemptEvent,
+	StealthTelemetryAttemptKind,
+	StealthTelemetryDiagnostics,
+	StealthTelemetryErrorCode,
+	StealthTelemetryRequestClass,
+	StealthTelemetrySbsdEvent,
+	StealthTelemetrySbsdOutcome,
+	StealthTelemetrySink,
+} from "./stealth-telemetry.js";
+import type {
+	StealthTelemetryAttemptKind,
+	StealthTelemetryErrorCode,
+	StealthTelemetrySink,
+} from "./stealth-telemetry.js";
+
 export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
 	browser: DEFAULT_STEALTH_BROWSER,
 	os: DEFAULT_STEALTH_OS,
@@ -141,6 +159,8 @@ function sensitiveQueryParamNames(url: string): string[] {
 }
 
 export type StealthClientOptions = ProxyResolutionOptions & {
+	/** Request-scoped stealth transport observations. */
+	stealthTelemetry?: StealthTelemetrySink;
 	warn?: (message: string) => void;
 	/** Abort all requests issued by this client. */
 	signal?: AbortSignal;
@@ -373,16 +393,6 @@ function normalizedHeaderEntries(
 	return entries;
 }
 
-const SDK_OWNED_EXACT_CHROME_HEADERS = new Set([
-	"host",
-	"connection",
-	"user-agent",
-	"sec-ch-ua",
-	"sec-ch-ua-mobile",
-	"sec-ch-ua-platform",
-	"accept-encoding",
-]);
-
 // Non-pseudo-header order of real Chrome 149. The fixture captures
 // (chrome-ground-truth-capture.json, chrome-extended-capture.json,
 // h1-casing-capture.json) were taken through Playwright's `locale` option, which
@@ -558,7 +568,7 @@ function normalizedCallerHeaderEntriesFromRecord(headers: Record<string, string>
 
 function assertCallerHeadersSupported(entries: readonly HeaderTuple[]): void {
 	for (const [name] of entries) {
-		if (SDK_OWNED_EXACT_CHROME_HEADERS.has(name) || name.startsWith("sec-fetch-")) {
+		if (isStealthOwnedHeaderName(name)) {
 			throw new SDKError(`Stealth transport owns the "${name}" header; remove it from headers.`, {
 				code: "STEALTH_HEADER_OVERRIDE_UNSUPPORTED",
 			});
@@ -1210,6 +1220,123 @@ function discardStealthRedirectBody(response: StealthTransportResponse): void {
 	}
 }
 
+/** Telemetry must never replace a transport result, including with caller-provided sinks. */
+function emitStealthTelemetry(
+	sink: StealthTelemetrySink | undefined,
+	record: (sink: StealthTelemetrySink) => void,
+): void {
+	if (!sink) return;
+	try {
+		record(sink);
+	} catch {
+		/* The request owns its result. */
+	}
+}
+
+type StealthExchangeTelemetry = {
+	sink: StealthTelemetrySink;
+	profileId: StealthProfileDescriptor;
+	proxyUsed: boolean;
+	kind: StealthTelemetryAttemptKind;
+	cookieJar?: StealthCookieJar;
+};
+
+function stripStealthCookieMaterial(text: string, cookieNames: readonly string[]): string {
+	// Header-shaped Cookie/Set-Cookie material is redacted wholesale, including
+	// foreign names. Bare pairs outside a header are limited to jar-known names:
+	// a foreign bare name is indistinguishable from benign key=value prose and is
+	// therefore covered only when layer 1 registered its value.
+	let result = text.replace(
+		/(^|[^\p{L}\p{N}_-])[\t ]*(?:cookie|set-cookie)[\t ]*(?::|=)[^\r\n]*/giu,
+		"$1[REDACTED]",
+	);
+	result = result.replace(
+		/"(?:cookie|set-cookie)"[\t ]*:[\t ]*"(?:\\.|[^"\\])*"/giu,
+		"[REDACTED]",
+	);
+	for (const name of cookieNames) {
+		const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		result = result.replace(
+			new RegExp(`(^|[;,&?\\s])${escaped}\\s*=\\s*[^;,\\s&\\r\\n]+`, "giu"),
+			"$1[REDACTED]",
+		);
+	}
+	return result;
+}
+
+function startStealthExchange(
+	telemetry: StealthExchangeTelemetry | undefined,
+	method: StealthMethod,
+	options: StealthFetchOptions,
+	signal?: AbortSignal,
+): (status?: number, error?: unknown) => void {
+	if (!telemetry) return () => {};
+	const startedAt = Date.now();
+	const requestClass = chromeRequestClass(method, options.stealth?.requestClass);
+	let recorded = false;
+	return (status, error) => {
+		if (recorded) return;
+		recorded = true;
+		emitStealthTelemetry(telemetry?.sink, (sink) => {
+			let code: string | undefined;
+			if (error !== undefined) {
+				try {
+					code = signal?.aborted
+						? "transport_cancelled"
+						: normalizeStealthTransportError(error).code;
+				} catch {
+					code = "other";
+				}
+			}
+			const knownCodes: readonly string[] = [
+				"transport_network_error",
+				"transport_timeout",
+				"transport_cancelled",
+				"upstream_http_error",
+				"response_too_large",
+				"proxy_connect_failed",
+				"PROXY_POOL_STALE",
+				"PROXY_EDGE_AUTH_REJECTED",
+				"PROXY_AUTH_IP_DENIED",
+				"PROXY_EDGE_TLS_REJECTED",
+				"PROXY_REQUIRED",
+			];
+			const errorCode = code
+				? knownCodes.includes(code)
+					? (code as StealthTelemetryErrorCode)
+					: "other"
+				: status !== undefined && status >= 400
+					? "upstream_http_error"
+					: undefined;
+			const strip = (text: string) =>
+				stripStealthCookieMaterial(text, telemetry.cookieJar?.names() ?? []);
+			sink.recordAttempt({
+				ms: Date.now() - startedAt,
+				profileId: telemetry.profileId,
+				proxyUsed: telemetry.proxyUsed,
+				kind: telemetry.kind,
+				requestClass:
+					requestClass === "navigation" && options.stealth?.userActivation === false
+						? "script_navigation"
+						: requestClass,
+				...(status === undefined ? {} : { status }),
+				...(errorCode ? { errorCode } : {}),
+				...(error === undefined
+					? {}
+					: {
+							diagnostics: {
+								name: strip(error instanceof Error ? error.name : "Error"),
+								message: strip(error instanceof Error ? error.message : String(error)),
+								...(error instanceof Error && "code" in error && typeof error.code === "string"
+									? { code: strip(error.code) }
+									: {}),
+							},
+						}),
+			});
+		});
+	};
+}
+
 async function fetchStealthRedirectChain(
 	transport: WreqSession,
 	cookieJar: StealthCookieJar,
@@ -1223,6 +1350,7 @@ async function fetchStealthRedirectChain(
 		body: string | Buffer | undefined,
 		headers: Record<string, string>,
 	) => HeaderTuple[],
+	telemetry?: StealthExchangeTelemetry,
 ): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
 	let currentUrl = requestUrl;
 	let currentMethod = method;
@@ -1232,86 +1360,102 @@ async function fetchStealthRedirectChain(
 	let response: StealthTransportResponse;
 	const deadline = options.timeout ? performance.now() + options.timeout : undefined;
 
-	while (true) {
-		throwIfAmbientAborted(signal);
-		const headers = { ...currentHeaders };
-		if (!hasHeader(headers, "cookie")) {
-			const cookieHeader = cookieJar.toHeader(currentUrl);
-			if (cookieHeader) headers.cookie = cookieHeader;
-		}
-		const requestInit: StealthRequestInit = {
-			headers: buildHeaders
-				? buildHeaders(currentUrl, currentMethod, currentBody, headers)
-				: headers,
-			method: currentMethod,
-			redirect: "manual",
-			...(new URL(currentUrl).protocol === "http:" ? { disableDefaultHeaders: true } : {}),
-			...(signal ? { signal } : {}),
-		};
-		if (currentBody !== undefined) requestInit.body = currentBody;
+	let finishExchange: ReturnType<typeof startStealthExchange> | undefined;
+	let status: number | undefined;
+	let exchangeError: unknown;
+	try {
+		while (true) {
+			throwIfAmbientAborted(signal);
+			const headers = { ...currentHeaders };
+			if (!hasHeader(headers, "cookie")) {
+				const cookieHeader = cookieJar.toHeader(currentUrl);
+				if (cookieHeader) headers.cookie = cookieHeader;
+			}
+			const requestInit: StealthRequestInit = {
+				headers: buildHeaders
+					? buildHeaders(currentUrl, currentMethod, currentBody, headers)
+					: headers,
+				method: currentMethod,
+				redirect: "manual",
+				...(new URL(currentUrl).protocol === "http:" ? { disableDefaultHeaders: true } : {}),
+				...(signal ? { signal } : {}),
+			};
+			if (currentBody !== undefined) requestInit.body = currentBody;
 
-		await transport.clearCookies();
-		throwIfAmbientAborted(signal);
-		const remainingTimeout =
-			deadline === undefined ? undefined : Math.ceil(deadline - performance.now());
-		if (remainingTimeout !== undefined && remainingTimeout <= 0) {
-			throw new TransportError("Request timed out", {
-				code: "transport_timeout",
-				status: 0,
-			});
-		}
-		if (remainingTimeout !== undefined) requestInit.timeout = remainingTimeout;
-		response = await transport.fetch(currentUrl, requestInit);
-		if (signal?.aborted) {
-			discardStealthRedirectBody(response);
-			throw toAmbientCancellationError(signal);
-		}
-		cookieJar.setFromCookieStrings(
-			setCookieHeadersFromResponse(response.headers),
-			response.url ?? currentUrl,
-		);
-
-		if (!isRedirectStatus(response.status) || options.redirect === "manual") break;
-		if (options.redirect === "error") {
-			discardStealthRedirectBody(response);
-			throw new TransportError("Stealth request encountered a redirect", {
-				code: "transport_network_error",
-				status: 0,
-			});
-		}
-
-		const nextUrl = resolveRedirectUrl(
-			response.headers.get("location") ?? undefined,
-			response.url ?? currentUrl,
-		);
-		if (!nextUrl) break;
-		if (followedHops >= MAX_STEALTH_REDIRECT_HOPS) {
-			discardStealthRedirectBody(response);
-			throw new TransportError(
-				`Stealth request exceeded the ${MAX_STEALTH_REDIRECT_HOPS}-redirect limit`,
-				{ code: "transport_network_error", status: 0 },
+			await transport.clearCookies();
+			throwIfAmbientAborted(signal);
+			const remainingTimeout =
+				deadline === undefined ? undefined : Math.ceil(deadline - performance.now());
+			if (remainingTimeout !== undefined && remainingTimeout <= 0) {
+				throw new TransportError("Request timed out", {
+					code: "transport_timeout",
+					status: 0,
+				});
+			}
+			if (remainingTimeout !== undefined) requestInit.timeout = remainingTimeout;
+			status = undefined;
+			finishExchange = startStealthExchange(telemetry, currentMethod, options, signal);
+			response = await transport.fetch(currentUrl, requestInit);
+			status = response.status;
+			if (signal?.aborted) {
+				discardStealthRedirectBody(response);
+				throw toAmbientCancellationError(signal);
+			}
+			cookieJar.setFromCookieStrings(
+				setCookieHeadersFromResponse(response.headers),
+				response.url ?? currentUrl,
 			);
-		}
-		assertStealthRedirectUrl(nextUrl);
-		discardStealthRedirectBody(response);
-		const nextMethod = nextRedirectMethod(response.status, currentMethod);
-		if (nextMethod !== currentMethod) {
-			currentBody = undefined;
-			currentHeaders = withoutRedirectBodyHeaders(currentHeaders);
-		}
-		currentMethod = nextMethod;
-		currentUrl = nextUrl;
-		followedHops += 1;
-	}
 
-	const normalized = await normalizeResponseWithSignal(
-		response,
-		currentUrl,
-		options.maxBodyBytes,
-		signal,
-	);
-	if (followedHops > 0) normalized.redirected = true;
-	return { normalized, response };
+			if (!isRedirectStatus(response.status) || options.redirect === "manual") break;
+			if (options.redirect === "error") {
+				discardStealthRedirectBody(response);
+				throw new TransportError("Stealth request encountered a redirect", {
+					code: "transport_network_error",
+					status: 0,
+				});
+			}
+
+			const nextUrl = resolveRedirectUrl(
+				response.headers.get("location") ?? undefined,
+				response.url ?? currentUrl,
+			);
+			if (!nextUrl) break;
+			if (followedHops >= MAX_STEALTH_REDIRECT_HOPS) {
+				discardStealthRedirectBody(response);
+				throw new TransportError(
+					`Stealth request exceeded the ${MAX_STEALTH_REDIRECT_HOPS}-redirect limit`,
+					{ code: "transport_network_error", status: 0 },
+				);
+			}
+			assertStealthRedirectUrl(nextUrl);
+			discardStealthRedirectBody(response);
+			const nextMethod = nextRedirectMethod(response.status, currentMethod);
+			if (nextMethod !== currentMethod) {
+				currentBody = undefined;
+				currentHeaders = withoutRedirectBodyHeaders(currentHeaders);
+			}
+			currentMethod = nextMethod;
+			currentUrl = nextUrl;
+			followedHops += 1;
+			emitStealthTelemetry(telemetry?.sink, (sink) => sink.recordRedirectHop());
+			finishExchange(status);
+			finishExchange = undefined;
+		}
+
+		const normalized = await normalizeResponseWithSignal(
+			response,
+			currentUrl,
+			options.maxBodyBytes,
+			signal,
+		);
+		if (followedHops > 0) normalized.redirected = true;
+		return { normalized, response };
+	} catch (error) {
+		exchangeError = error;
+		throw error;
+	} finally {
+		finishExchange?.(status, exchangeError);
+	}
 }
 
 function createSessionFetcher(
@@ -1323,7 +1467,7 @@ function createSessionFetcher(
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
-	const cookieJar = new StealthCookieJar([], baseUrl);
+	const cookieJar = new StealthCookieJar([], baseUrl, registerDiagnosticValue);
 	const akamaiSbsdState: AkamaiSbsdSessionState = { transactions: new Map() };
 	const challengedReplays = new WeakMap<StealthResponse, ChallengedReplayRecord>();
 	const ceremonyEgressLease = clientOptions[ENGINE_CEREMONY_EGRESS_LEASE];
@@ -1558,9 +1702,12 @@ function createSessionFetcher(
 			// rotation after a transport failure). Its response reached the origin from an
 			// egress the handle does not name; accepting it would split the ceremony identity.
 			if (attemptProxy.url !== lease.binding.proxyUrl) {
-				throw new SDKError("The response arrived on an egress other than the ceremony's bound endpoint", {
-					code: "EGRESS_LEASE_BINDING_INVALID",
-				});
+				throw new SDKError(
+					"The response arrived on an egress other than the ceremony's bound endpoint",
+					{
+						code: "EGRESS_LEASE_BINDING_INVALID",
+					},
+				);
 			}
 			return;
 		}
@@ -1718,6 +1865,10 @@ function createSessionFetcher(
 						attemptResponse: StealthTransportResponse,
 						attemptNormalized: StealthResponse,
 					): StealthResponse => {
+						if (attemptNormalized.challenge)
+							emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+								sink.recordSbsd(attemptNormalized.challenge!.outcome),
+							);
 						if (
 							!attemptNormalized.challenge &&
 							attemptResponse.status >= 400 &&
@@ -1854,6 +2005,7 @@ function createSessionFetcher(
 							fetchSignal: AbortSignal | undefined,
 							orderedHeaders = buildOrderedHeaders,
 							sessionDefaultHeaders = defaultHeaders,
+							kind: StealthTelemetryAttemptKind = "request",
 						) =>
 							withClient(
 								requestProfile,
@@ -1868,6 +2020,15 @@ function createSessionFetcher(
 										fetchOptions,
 										fetchSignal,
 										orderedHeaders,
+										clientOptions.stealthTelemetry
+											? {
+													sink: clientOptions.stealthTelemetry,
+													profileId: requestProfile,
+													proxyUsed: Boolean(proxy),
+													kind,
+													cookieJar,
+												}
+											: undefined,
 									),
 								fetchSignal,
 								sessionDefaultHeaders,
@@ -1928,7 +2089,14 @@ function createSessionFetcher(
 									akamaiSbsdState,
 								)
 							: undefined;
+						if (akamaiSbsd && !detected)
+							emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+								sink.recordSbsd({ detected: false }),
+							);
 						if (detected && akamaiSbsd) {
+							emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+								sink.recordSbsd("detected"),
+							);
 							if (challengeSolveAttempted || challengeRefetchAttempted) {
 								normalized.challenge = {
 									challenge: detected,
@@ -2020,6 +2188,7 @@ function createSessionFetcher(
 											init.body,
 											normalizeHeaders(transportHeaders),
 										),
+										"resolver",
 									);
 									return {
 										status: result.normalized.status,
@@ -2057,54 +2226,57 @@ function createSessionFetcher(
 								const reuseCompletedSuccess =
 									explicitReplay && akamaiSbsdState.completedSuccessKey === transactionKey;
 								if (reuseCompletedSuccess) akamaiSbsdState.completedSuccessKey = undefined;
-							let ownsTransaction = false;
+								let ownsTransaction = false;
 								if (!reuseCompletedSuccess) {
 									let transaction = akamaiSbsdState.transactions.get(transactionKey);
-							if (!transaction) {
+									if (!transaction) {
 										akamaiSbsdState.completedSuccessKey = undefined;
-								challengeSolveAttempted = true;
-								ownsTransaction = true;
-								// The solve spans several round trips, so it runs under the client's ambient
-								// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
-								transaction = {
-									result: akamaiSbsd
-										.solve(
-											detected,
-											resolverTransport,
-											clientOptions.signal ?? new AbortController().signal,
-										)
-										.then(
-											() => ({ solved: true }) as const,
-											(error: unknown) => ({ solved: false, error }) as const,
-										)
-										.finally(() => {
-											akamaiSbsdState.transactions.delete(transactionKey);
-										}),
-								};
-								akamaiSbsdState.transactions.set(transactionKey, transaction);
-							}
-							const transactionResult = await transaction.result;
-							if (!transactionResult.solved) {
-								if (ownsTransaction) {
-									// The proxy delivered the challenged response; the resolver failed.
-									// Surface that failure as-is: it is not a transport fault to normalize
-									// or retry.
+										challengeSolveAttempted = true;
+										ownsTransaction = true;
+										// The solve spans several round trips, so it runs under the client's ambient
+										// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
+										transaction = {
+											result: akamaiSbsd
+												.solve(
+													detected,
+													resolverTransport,
+													clientOptions.signal ?? new AbortController().signal,
+												)
+												.then(
+													() => ({ solved: true }) as const,
+													(error: unknown) => ({ solved: false, error }) as const,
+												)
+												.finally(() => {
+													akamaiSbsdState.transactions.delete(transactionKey);
+												}),
+										};
+										akamaiSbsdState.transactions.set(transactionKey, transaction);
+									}
+									const transactionResult = await transaction.result;
+									if (!transactionResult.solved) {
+										emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+											sink.recordSbsd("solve_failed"),
+										);
+										if (ownsTransaction) {
+											// The proxy delivered the challenged response; the resolver failed.
+											// Surface that failure as-is: it is not a transport fault to normalize
+											// or retry.
 											if (!explicitReplay) {
 												recordProxyAttempt("ok", undefined, challenged.response.status);
 											}
-									challengeSolveFailure = { error: transactionResult.error };
-									throw challengeSolveFailure;
-								}
+											challengeSolveFailure = { error: transactionResult.error };
+											throw challengeSolveFailure;
+										}
 										return {
 											normalized: {
 												...challenged.normalized,
 												challenge: { challenge: detected, outcome: "solve_failed" },
 											},
 											response: challenged.response,
-								};
+										};
 									}
-							}
-							challengeRefetchAttempted = true;
+								}
+								challengeRefetchAttempted = true;
 								// An explicit replay is a new transport exchange on the bound endpoint and
 								// gets its own proxy-attempt record timed from here, not from the initiating
 								// fetch (the caller's think time in between is not transport duration); the
@@ -2122,28 +2294,35 @@ function createSessionFetcher(
 									attemptRecorded = false;
 									attemptStartedAt = Date.now();
 								}
+								if (!explicitReplay)
+									emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+										sink.recordSafeRefetch(),
+									);
 								const replayed = await fetchOnBoundSession(
-								requestUrl,
-								method,
+									requestUrl,
+									method,
 									replayOptions,
-								clientOptions.signal,
+									clientOptions.signal,
 								);
 								throwProxyTransportFault(replayed.response, replayed.normalized.body);
-							const persisted = detectAkamaiSbsdChallenge(
+								const persisted = detectAkamaiSbsdChallenge(
 									replayed.normalized,
-								requestUrl,
-								cookieJar,
-								akamaiSbsd.allowedHosts,
-								akamaiSbsdState,
-							);
-							if (persisted) {
+									requestUrl,
+									cookieJar,
+									akamaiSbsd.allowedHosts,
+									akamaiSbsdState,
+								);
+								emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+									sink.recordSbsd(persisted ? "challenge_persisted" : "refetch_clear"),
+								);
+								if (persisted) {
 									replayed.normalized.challenge = {
-									challenge: persisted,
-									outcome: "challenge_persisted",
-								};
+										challenge: persisted,
+										outcome: "challenge_persisted",
+									};
 								} else if (ownsTransaction && !explicitReplay) {
 									akamaiSbsdState.completedSuccessKey = transactionKey;
-						}
+								}
 								return replayed;
 							};
 
@@ -2156,18 +2335,18 @@ function createSessionFetcher(
 									consumed: false,
 									generation: attemptEgressGeneration,
 									async replay() {
-						try {
+										try {
 											const replayed = await solveAndReplay(true);
 											return finalizeAttempt(replayed.response, replayed.normalized);
 										} catch (error) {
 											const normalizedError = normalizeAttemptError(error);
 											releaseFailedCeremonyEgress(proxy, normalizedError);
 											throw recordAttemptFailure(normalizedError);
-							}
+										}
 									},
 								});
 								return finalizeAttempt(response, normalized);
-						}
+							}
 							({ normalized, response } = await solveAndReplay(false));
 						}
 
@@ -2264,6 +2443,7 @@ function createSessionFetcher(
 					refreshAttempt < MAX_POLICY_PROXY_POOL_REFRESHES
 				) {
 					throwIfAmbientAborted(clientOptions.signal);
+					emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) => sink.recordPoolRefresh());
 					await invalidateProxyResolutionCacheAsync({
 						proxyPolicy: clientOptions.proxyPolicy,
 						upstream: clientOptions.upstream,
@@ -2512,6 +2692,7 @@ function createSessionFetcher(
 					if (decision.nextMethod !== method) {
 						body = undefined;
 					}
+					emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) => sink.recordRedirectHop());
 					method = decision.nextMethod;
 					currentUrl = decision.nextUrl;
 				}
@@ -2564,18 +2745,42 @@ function createSessionFetcher(
 					throwIfAmbientAborted(clientOptions.signal);
 					await client.clearCookies();
 					throwIfAmbientAborted(clientOptions.signal);
-					const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
-						method: "GET",
-						timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
-						...(clientOptions.signal ? { signal: clientOptions.signal } : {}),
-					});
-					const normalized = await normalizeResponseWithSignal(
-						response,
-						undefined,
-						undefined,
+					const finishExchange = startStealthExchange(
+						clientOptions.stealthTelemetry
+							? {
+									sink: clientOptions.stealthTelemetry,
+									profileId: profile,
+									proxyUsed: true,
+									kind: "proxy_diagnostic",
+									cookieJar,
+								}
+							: undefined,
+						"GET",
+						{},
 						clientOptions.signal,
 					);
-					return classifyProxyAuthDiagnosticMessage(normalized.body);
+					let status: number | undefined;
+					let exchangeError: unknown;
+					try {
+						const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
+							method: "GET",
+							timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
+							...(clientOptions.signal ? { signal: clientOptions.signal } : {}),
+						});
+						status = response.status;
+						const normalized = await normalizeResponseWithSignal(
+							response,
+							undefined,
+							undefined,
+							clientOptions.signal,
+						);
+						return classifyProxyAuthDiagnosticMessage(normalized.body);
+					} catch (error) {
+						exchangeError = error;
+						throw error;
+					} finally {
+						finishExchange(status, exchangeError);
+					}
 				},
 				clientOptions.signal,
 			);

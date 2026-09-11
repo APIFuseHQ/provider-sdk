@@ -66,6 +66,7 @@ import {
 } from "./resolver-config.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
+import type { BrowserTelemetrySink } from "./browser-telemetry.js";
 import type {
 	ResolverTelemetryErrorClass,
 	ResolverTelemetryPhase,
@@ -130,6 +131,8 @@ export interface ResolverRuntimeOptions {
 	readonly cache?: ProviderCache;
 	/** Optional request-scoped observability sink; never used as resolver identity. */
 	readonly telemetry?: ResolverTelemetrySink;
+	/** Request-scoped browser sink used by the resolver-owned browser vendor. */
+	readonly browserTelemetry?: BrowserTelemetrySink;
 	/** Inputs for SDK-owned lazy proxy resolution. The SDK never accepts a caller-built identity. */
 	readonly proxyIntent?: {
 		readonly mode: ProviderProxyMode;
@@ -225,6 +228,7 @@ export type ResolverAdapterFactory = (
 	configuration: string | undefined,
 	timeoutMs: number,
 	allowedHosts: readonly string[],
+	telemetry?: BrowserTelemetrySink,
 ) => ResolverVendorAdapter;
 
 const resolverAdapterRegistry: Partial<Record<ProviderResolverVendor, ResolverAdapterFactory>> = {
@@ -245,11 +249,12 @@ const resolverAdapterRegistry: Partial<Record<ProviderResolverVendor, ResolverAd
 			timeoutMs,
 		});
 	},
-	browser(configuration, timeoutMs, allowedHosts) {
+	browser(configuration, timeoutMs, allowedHosts, telemetry) {
 		return createBrowserResolverVendorAdapter({
 			allowedHosts,
 			cdpUrl: configuration,
 			timeoutMs,
+			telemetry,
 		});
 	},
 	hypersolutions(configuration, timeoutMs, allowedHosts) {
@@ -309,7 +314,7 @@ const KNOWN_UNIMPLEMENTED_RESOLVER_VENDORS: ReadonlySet<ProviderResolverVendor> 
 type ResolverChainEntry = {
 	readonly id: ProviderResolverVendor;
 	supports(kind: ProviderChallengeKind): boolean;
-	createAdapter(): ResolverVendorAdapter;
+	createAdapter(browserTelemetry?: BrowserTelemetrySink): ResolverVendorAdapter;
 };
 
 function normalizedEnvValue(env: EnvLike, key: string): string | undefined {
@@ -368,6 +373,7 @@ function createAdapter(
 	timeoutMs: number,
 	allowedHosts: readonly string[],
 	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
+	browserTelemetry?: BrowserTelemetrySink,
 ): ResolverVendorAdapter {
 	const factory = adapterFactories[vendor.vendor];
 	if (!factory && !KNOWN_UNIMPLEMENTED_RESOLVER_VENDORS.has(vendor.vendor)) {
@@ -380,7 +386,7 @@ function createAdapter(
 	}
 
 	if (factory) {
-		return factory(vendor.configuration, timeoutMs, allowedHosts);
+		return factory(vendor.configuration, timeoutMs, allowedHosts, browserTelemetry);
 	}
 	return createUnavailableAdapter(vendor.vendor, "not_implemented");
 }
@@ -1063,7 +1069,8 @@ async function resolveResolverIdentity(
 }
 
 function createChainTelemetryBinding(options: Parameters<typeof createResolverChainClient>[0]) {
-	return (telemetry: ResolverTelemetrySink) => createResolverChainClient({ ...options, telemetry });
+	return (telemetry: ResolverTelemetrySink, browserTelemetry?: BrowserTelemetrySink) =>
+		createResolverChainClient({ ...options, telemetry, browserTelemetry });
 }
 
 function createResolverChainClient(options: {
@@ -1080,6 +1087,7 @@ function createResolverChainClient(options: {
 	readonly clientProfile?: string;
 	readonly allowedHosts?: readonly string[];
 	readonly telemetry?: ResolverTelemetrySink;
+	readonly browserTelemetry?: BrowserTelemetrySink;
 }): ResolverChainClient {
 	assertClientProfileTransportContract(options.clientProfile, options.transport);
 	const cache =
@@ -1188,7 +1196,7 @@ function createResolverChainClient(options: {
 				}
 				const attempts: ResolverChainAttempt[] = [];
 				for (const [entryIndex, entry] of supportingEntries.entries()) {
-					const adapter = entry.createAdapter();
+					const adapter = entry.createAdapter(options.browserTelemetry);
 					const attemptStartedAt = Date.now();
 					const diagnostics: ResolverAttemptDiagnostics = {};
 					const telemetryTraceRecorder = createResolverTelemetryTraceRecorder({
@@ -1363,7 +1371,7 @@ function createResolverChainClient(options: {
 		},
 	};
 	resolverCaches.set(client, cache ?? null);
-	const reusableOptions = { ...options, telemetry: undefined };
+	const reusableOptions = { ...options, telemetry: undefined, browserTelemetry: undefined };
 	registerResolverTelemetryBinding(client, createChainTelemetryBinding(reusableOptions));
 	return client;
 }
@@ -1492,12 +1500,13 @@ function createResolverClientFromEnvInternal(
 			return {
 				id: vendor,
 				supports: (kind: ProviderChallengeKind) => resolverVendorSupports(vendor, kind),
-				createAdapter: () =>
+				createAdapter: (browserTelemetry) =>
 					createAdapter(
 						resolveVendorAvailability(vendor, env),
 						timeoutMs,
 						allowedHosts,
 						adapterFactories,
+						browserTelemetry,
 					),
 			};
 		}),
@@ -1510,6 +1519,7 @@ function createResolverClientFromEnvInternal(
 		clientProfile: config.clientProfile,
 		allowedHosts,
 		telemetry: options.telemetry,
+		browserTelemetry: options.browserTelemetry,
 	});
 }
 

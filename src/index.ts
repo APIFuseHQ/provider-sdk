@@ -162,6 +162,19 @@ export { createEnvContext } from "./runtime/env.js";
 export { executeOperation } from "./runtime/executor.js";
 export { createHttpClient } from "./runtime/http.js";
 export {
+	OcrTelemetryCollector,
+	bindOcrTelemetry,
+	type OcrTelemetryBackend,
+	type OcrTelemetryEngine,
+	type OcrTelemetryErrorCode,
+	type OcrTelemetryEvent,
+	type OcrTelemetryFinishReason,
+	type OcrTelemetryHeaderPayload,
+	type OcrTelemetryLogPayload,
+	type OcrTelemetryModel,
+	type OcrTelemetrySink,
+} from "./runtime/ocr-telemetry.js";
+export {
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
 	NativeIdleTimeoutError,
@@ -228,6 +241,43 @@ export {
 	type ResolverTelemetrySink,
 	type ResolverVendorAttemptTelemetryEvent,
 } from "./runtime/resolver-telemetry.js";
+export {
+	StealthTelemetryCollector,
+	type StealthTelemetryAttemptEvent,
+	type StealthTelemetryAttemptKind,
+	type StealthTelemetryAttemptSample,
+	type StealthTelemetryDiagnostics,
+	type StealthTelemetryErrorCode,
+	type StealthTelemetryHeaderPayload,
+	type StealthTelemetryLogPayload,
+	type StealthTelemetryRequestClass,
+	type StealthTelemetrySbsdEvent,
+	type StealthTelemetrySbsdOutcome,
+	type StealthTelemetrySink,
+} from "./runtime/stealth-telemetry.js";
+export {
+	SttTelemetryCollector,
+	bindSttTelemetry,
+	type SttTelemetryBackend,
+	type SttTelemetryEngine,
+	type SttTelemetryModel,
+	type SttTelemetryErrorCode,
+	type SttTelemetryEvent,
+	type SttTelemetryHeaderPayload,
+	type SttTelemetryLogPayload,
+	type SttTelemetrySink,
+} from "./runtime/stt-telemetry.js";
+
+export {
+	BrowserTelemetryCollector,
+	type BrowserTelemetryErrorCode,
+	type BrowserTelemetryHeaderPayload,
+	type BrowserTelemetryLogPayload,
+	type BrowserTelemetryPoolAcquireOutcome,
+	type BrowserTelemetrySink,
+	type BrowserTelemetrySampleName,
+	type BrowserTelemetryEngine,
+} from "./runtime/browser-telemetry.js";
 export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
@@ -368,7 +418,9 @@ export type {
 	HealthScheduleRandomization,
 	HealthJourneySmsContext,
 	HealthJourneyStep,
+	HttpAttemptContext,
 	HttpClient,
+	HttpHeadersFactory,
 	HttpMethod,
 	HttpRedirectFailureReason,
 	HttpRedirectPolicy,
@@ -466,6 +518,7 @@ export type {
 	ProviderRuntimeTarget,
 	ProviderRuntimeState,
 	ProviderSecretDeclaration,
+	ProviderSecretIssuer,
 	ProviderStealthConfig,
 	ProviderStateDurationString,
 	ProviderStateNamespace,
@@ -572,3 +625,22 @@ export {
 	type NativeTelemetryVendorSkipReason,
 	type NativeVendorSkipTelemetryEvent,
 } from "./runtime/native-telemetry.js";
+export {
+	CacheTelemetryCollector,
+	type CacheTelemetryHeaderPayload,
+	type CacheTelemetryLogPayload,
+	type CacheTelemetrySample,
+	type CacheTelemetrySink,
+	type CacheTelemetrySource,
+} from "./runtime/cache-telemetry.js";
+export {
+	StateTelemetryCollector,
+	instrumentProviderRuntimeState,
+	type StateTelemetryBackend,
+	type StateTelemetryHeaderPayload,
+	type StateTelemetryLogPayload,
+	type StateTelemetryOperation,
+	type StateTelemetrySample,
+	type StateTelemetrySink,
+	type StateTelemetryViolation,
+} from "./runtime/state-telemetry.js";

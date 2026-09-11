@@ -205,6 +205,7 @@ function buildForwardingEnvelope(input: {
 			requestId: input.request.requestId,
 			input: input.request.input as Record<string, unknown>,
 			connection: metadata.connection,
+			...(metadata.tenantId ? { tenantId: metadata.tenantId } : {}),
 			headers: sanitizeForwardedHeaders(metadata.headers),
 			...(metadata.trace ? { trace: metadata.trace } : {}),
 		},
@@ -213,6 +214,7 @@ function buildForwardingEnvelope(input: {
 
 function forwardedMetadata(request: StatefulOperationRequest): {
 	readonly connection: OperationConnection;
+	readonly tenantId?: string;
 	readonly headers?: Record<string, string>;
 	readonly trace?: Record<string, string>;
 } {
@@ -225,11 +227,32 @@ function forwardedMetadata(request: StatefulOperationRequest): {
 	}
 	const operationRequest = forwardingContext.operationRequest;
 	const connection = OperationConnectionSchema.parse(operationRequest?.connection);
+	const tenantId = forwardedTenantId(operationRequest?.tenantId);
 	return {
 		connection,
+		...(tenantId !== undefined ? { tenantId } : {}),
 		...(operationRequest?.headers ? { headers: operationRequest.headers } : {}),
 		...(operationRequest?.trace ? { trace: operationRequest.trace } : {}),
 	};
+}
+
+/**
+ * The runtime context is consumer-supplied and typed `unknown`, and only its
+ * `requestId` is guarded on read. A malformed principal scope must fail at the
+ * source with a forwarding error — the owner would otherwise reject the whole
+ * forwarded operation, and dropping it silently would downgrade a per-principal
+ * policy to the shared scope. `""` is not a principal (same rule as ids on the
+ * ingress envelope), so it is absent rather than invalid.
+ */
+function forwardedTenantId(value: unknown): string | undefined {
+	if (value === undefined || value === "") return undefined;
+	if (typeof value !== "string") {
+		throw new StatefulOwnerForwardingError({
+			code: "STATEFUL_FORWARDING_CONTEXT_INVALID",
+			message: "Stateful operation forwarding requires a string tenantId when it is present.",
+		});
+	}
+	return value;
 }
 
 function sanitizeForwardedHeaders(

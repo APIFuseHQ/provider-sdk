@@ -924,8 +924,17 @@ export type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number
 export interface OperationErrorCode {
 	code: string;
 	status?: ProviderErrorStatus;
+	/** Developer-facing English prose for docs and MCP tool text. Never localized. */
 	description: string;
 	retryable?: boolean;
+	/**
+	 * Locale catalog key for the client-facing `message` of every error thrown
+	 * with this `code`. A throw site's own `messageKey` wins; when neither is
+	 * present the SDK derives `errors.<code>.message`.
+	 */
+	messageKey?: ProviderLocaleKeyInput;
+	/** Locale catalog key for the client-facing `fix`. Derived default: `errors.<code>.fix`. */
+	fixKey?: ProviderLocaleKeyInput;
 }
 
 export type StealthPlatform = "macos" | "windows" | "linux" | "android" | "ios";
@@ -1229,8 +1238,48 @@ export interface HttpRetrySummary {
 	lastStatus?: number;
 }
 
+/** Per-attempt input for a `RequestOptions.headers` factory. */
+export interface HttpAttemptContext {
+	/**
+	 * 1-based number of this request build: the first request is `1`, its first
+	 * retry `2`. Only attempts that reach header resolution count; a failed
+	 * proxy allocation or a skipped duplicate proxy offset builds no request
+	 * and is not numbered.
+	 */
+	attempt: number;
+	/**
+	 * Resolved request URL: `baseUrl` + path + `params` + `sensitiveParams`.
+	 * It is the exact URL the attempt is issued against, so bind signature
+	 * targets to it rather than to a URL the caller rebuilds. Strip the query
+	 * and fragment for fields that are defined without them — RFC 9449 §4.2
+	 * requires that of DPoP `htu`. It carries any sensitive query values, so
+	 * never log it and never copy it verbatim into a signed field that a
+	 * verifier logs.
+	 */
+	url: string;
+	/** Normalized upper-case HTTP method of the request. */
+	method: Uppercase<HttpMethod>;
+}
+
+/**
+ * Builds the request headers for one issued attempt. Managed retry calls it
+ * again for every retry, so request-bound single-use proofs (DPoP `jti`,
+ * HTTP message signatures, HMAC nonces) can be re-minted instead of replayed.
+ * A throw is raised as a non-retryable `TransportError` with code
+ * `http_header_factory_failed`.
+ */
+export type HttpHeadersFactory = (
+	attempt: HttpAttemptContext,
+) => Record<string, string> | Promise<Record<string, string>>;
+
 export interface RequestOptions {
-	headers?: Record<string, string>;
+	/**
+	 * Request headers, or a factory resolved once per issued attempt (see
+	 * `HttpHeadersFactory`). The factory runs after proxy resolution, before the
+	 * first redirect hop of that attempt; redirect hops reuse the attempt's
+	 * headers. `ctx.stealth` declares its own header option and is not affected.
+	 */
+	headers?: Record<string, string> | HttpHeadersFactory;
 	params?: RequestParams;
 	/**
 	 * Query parameters whose values contain credentials or other secret material.
@@ -1995,6 +2044,16 @@ export interface CredentialContext {
 
 export interface ProviderRequestContext {
 	connectionId?: string;
+	/**
+	 * Gateway-asserted principal scope of the operation request: the
+	 * organization id for customer subjects, the service-account id for
+	 * platform service accounts. `undefined` on direct calls and self-test
+	 * (unlike `FlowContext.tenantId`, which is coerced to `""`); an empty
+	 * string on the wire is normalised to `undefined` like `connectionId`.
+	 * Key per-principal policy (quota, fairness, correlation) for
+	 * connectionless operations on it. It does not scope `ctx.state`.
+	 */
+	tenantId?: string;
 	headers: Record<string, string>;
 }
 
@@ -2294,10 +2353,18 @@ export interface AuthConfig {
 	flow?: AuthFlowDefinition;
 }
 
+/** Who provisions a declared secret: the platform (`apifuse`) or the provider author (`contributor`). */
+export type ProviderSecretIssuer = "apifuse" | "contributor";
+
 export interface ProviderSecretDeclaration {
 	name: string;
 	description?: string;
 	required?: boolean;
+	/**
+	 * Optional today; ADR-0011 D3 makes it required once every deployed provider
+	 * declares it. Metadata only: it does not change which secrets are projected.
+	 */
+	issuer?: ProviderSecretIssuer;
 }
 
 export interface CredentialDeclaration {
@@ -2398,6 +2465,14 @@ export interface OperationDefinition<
  * optional. Note that the deployment `runtime` axis
  * (`shared`/`dedicated`/`browser`) is distinct from the provider execution
  * `runtime` (`standard`/`shared`/`browser`).
+ *
+ * This key is the ONLY authored deployment surface. Declare it inside the
+ * `defineProvider({...})` literal, not on a spread default export and not
+ * in a standalone `deploy.ts` (legacy; `apifuse migrate-deployment` hoists
+ * and deletes it). Write only what differs from the runtime profile —
+ * shared `25m/128Mi`, browser `200m/256Mi`, `language: "typescript"`,
+ * `replicas: 1`, HPA enabled 1-1 at 70% CPU — so most providers declare
+ * nothing and `apifuse check` warns on restated defaults.
  */
 export interface ProviderDeploymentOverrides {
 	runtime?: "shared" | "dedicated" | "browser";

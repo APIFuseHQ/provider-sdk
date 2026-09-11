@@ -2044,6 +2044,14 @@ export const HealthStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }, z.core.$strict>;
 }, z.core.$strict>], "kind">;
 
+// @public
+export interface HttpAttemptContext {
+    attempt: number;
+    // Warning: (ae-forgotten-export) The symbol "HttpMethod" needs to be exported by the entry point provider.d.ts
+    method: Uppercase<HttpMethod>;
+    url: string;
+}
+
 // @public (undocumented)
 interface HttpClient {
     // (undocumented)
@@ -2070,6 +2078,9 @@ interface HttpClient {
     // (undocumented)
     stream(url: string, options?: RequestWithMethodOptions): Promise<HttpStreamResponse>;
 }
+
+// @public
+export type HttpHeadersFactory = (attempt: HttpAttemptContext) => Record<string, string> | Promise<Record<string, string>>;
 
 // @public (undocumented)
 type HttpMethod = "HEAD" | "head" | "GET" | "get" | "POST" | "post" | "PUT" | "put" | "DELETE" | "delete" | "OPTIONS" | "options" | "TRACE" | "trace" | "PATCH" | "patch";
@@ -2166,8 +2177,6 @@ export interface HttpRetryOptions {
     jitter?: HttpRetryJitter;
     // (undocumented)
     maxDelayMs?: number;
-    // Warning: (ae-forgotten-export) The symbol "HttpMethod" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     methods?: readonly HttpMethod[];
     // (undocumented)
@@ -2947,8 +2956,9 @@ interface OperationDeprecationMetadata {
 export interface OperationErrorCode {
     // (undocumented)
     code: string;
-    // (undocumented)
     description: string;
+    fixKey?: ProviderLocaleKeyInput;
+    messageKey?: ProviderLocaleKeyInput;
     // (undocumented)
     retryable?: boolean;
     // (undocumented)
@@ -3410,6 +3420,9 @@ type ProbeInterval = ms.StringValue;
 export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "handle"];
 
 // @public
+export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
+
+// @public
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 
 // @public (undocumented)
@@ -3802,9 +3815,15 @@ export interface ProviderDeploymentOverrides {
 }
 
 // @public
+export class ProviderEgressDeniedError extends ProviderError {
+    constructor(message: string, details?: unknown);
+}
+
+// @public
 export interface ProviderEngine {
     // (undocumented)
     attach<TDeclaration extends object = Record<string, unknown>>(input: ProviderEngineAttachmentInput): ProviderContext<TDeclaration>;
+    readonly kind?: ProviderEngineMode;
 }
 
 // @public (undocumented)
@@ -3813,6 +3832,11 @@ export interface ProviderEngineAttachmentInput {
     readonly bindings: ProviderEngineBindingCandidates;
     // (undocumented)
     readonly provider: ProviderDefinition;
+}
+
+// @public
+export class ProviderEngineAuthenticationError extends SDKError {
+    constructor(message?: string, options?: ProviderErrorOptions);
 }
 
 // @public (undocumented)
@@ -3845,6 +3869,18 @@ export interface ProviderEngineCapabilitySurface {
     readonly stealth: StealthClient;
     // (undocumented)
     readonly stt: SttContext;
+}
+
+// @public
+export type ProviderEngineMode = "in-process" | "remote" | (string & {});
+
+// @public
+export class ProviderEngineProtocolVersionError extends SDKError {
+    constructor(receivedVersion: unknown, expectedVersion: string);
+    // (undocumented)
+    readonly expectedVersion: string;
+    // (undocumented)
+    readonly receivedVersion: unknown;
 }
 
 // @public (undocumented)
@@ -3887,6 +3923,11 @@ export interface ProviderEngineTransport {
     request<TResponse = unknown>(request: ProviderEngineRequest): Promise<TResponse>;
 }
 
+// @public
+export class ProviderEngineUnavailableError extends SDKError {
+    constructor(message?: string, cause?: Error);
+}
+
 // @public (undocumented)
 export class ProviderError extends Error {
     constructor(message: string, options?: ProviderErrorOptions | undefined);
@@ -3906,6 +3947,9 @@ export class ProviderError extends Error {
 type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 
 // @public
+export type ProviderErrorMessageParams = Readonly<Record<string, string | number>>;
+
+// @public
 export type ProviderErrorObservability = {
     reason?: string;
     fingerprint?: string;
@@ -3921,6 +3965,9 @@ type ProviderErrorOptions = {
     category?: ProviderErrorCategory;
     retryable?: boolean;
     observability?: ProviderErrorObservability;
+    messageKey?: ProviderLocaleKeyInput;
+    fixKey?: ProviderLocaleKeyInput;
+    params?: ProviderErrorMessageParams;
 };
 
 // Warning: (ae-forgotten-export) The symbol "VALID_OPERATION_ERROR_STATUSES" needs to be exported by the entry point provider.d.ts
@@ -4152,6 +4199,7 @@ interface ProviderRequestContext {
     connectionId?: string;
     // (undocumented)
     headers: Record<string, string>;
+    tenantId?: string;
 }
 
 // @public
@@ -4193,11 +4241,16 @@ export type ProviderRuntimeTarget = "vanilla" | "engine";
 interface ProviderSecretDeclaration {
     // (undocumented)
     description?: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderSecretIssuer" needs to be exported by the entry point provider.d.ts
+    issuer?: ProviderSecretIssuer;
     // (undocumented)
     name: string;
     // (undocumented)
     required?: boolean;
 }
+
+// @public
+type ProviderSecretIssuer = "apifuse" | "contributor";
 
 // @public (undocumented)
 export type ProviderStateDurationString = `${number}${"ms" | "s" | "m" | "h" | "d"}` | `PT${string}`;
@@ -4436,8 +4489,7 @@ const relativeDateNodeSchema: z.ZodObject<{
 
 // @public (undocumented)
 interface RequestOptions {
-    // (undocumented)
-    headers?: Record<string, string>;
+    headers?: Record<string, string> | HttpHeadersFactory;
     // Warning: (ae-forgotten-export) The symbol "RequestParams" needs to be exported by the entry point provider.d.ts
     //
     // (undocumented)
@@ -5305,6 +5357,11 @@ const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
 }, z.core.$strict>]>;
 
 // @public (undocumented)
+export class SDKError extends ProviderError {
+    constructor(message: string, options?: ProviderErrorOptions);
+}
+
+// @public (undocumented)
 export function sensitive<TSchema extends ZodType>(schema: TSchema, kind?: SensitiveFieldKind): TSchema;
 
 // @public (undocumented)
@@ -5914,9 +5971,9 @@ export { z }
 // dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:108:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:136:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
-// dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:111:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:139:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/errors.d.ts:9:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:57:5 - (ae-forgotten-export) The symbol "NativeTelemetrySink" needs to be exported by the entry point provider.d.ts
@@ -5932,19 +5989,19 @@ export { z }
 // dist/types.d.ts:339:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:663:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:674:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:887:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:892:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1254:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1254:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1561:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1568:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1572:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1579:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1614:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1882:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1888:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1890:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:896:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:901:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1299:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1299:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1606:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1612:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1613:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1617:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1624:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1659:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1937:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1943:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1945:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

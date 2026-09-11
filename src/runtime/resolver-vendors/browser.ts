@@ -8,6 +8,7 @@ import type {
 } from "../../types.js";
 import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import type { TraceRecorder } from "../trace.js";
+import type { BrowserTelemetrySink } from "../browser-telemetry.js";
 import { resolverChallengeIssuingIdentity } from "./bindings.js";
 import { assertResolverHostAllowed, normalizedResolverHostname } from "./hosts.js";
 import {
@@ -31,6 +32,59 @@ type SupportedBrowserChallengeKind = keyof typeof SUCCESS_COOKIE_NAMES;
 
 type BrowserClientFactory = (options: BrowserClientOptions) => BrowserClient;
 
+const RESOLVER_PAGE_METHODS = new Set([
+	"goto",
+	"evaluate",
+	"fill",
+	"click",
+	"type",
+	"waitForSelector",
+	"content",
+	"screenshot",
+	"cookies",
+	"url",
+	"title",
+	"userAgent",
+]);
+
+function instrumentResolverBrowser(client: BrowserClient, recorder: TraceRecorder): BrowserClient {
+	const wrapPage = (page: BrowserPage): BrowserPage =>
+		new Proxy(page, {
+			get(target, property, receiver) {
+				const value = Reflect.get(target, property, receiver);
+				if (
+					typeof property !== "string" ||
+					!RESOLVER_PAGE_METHODS.has(property) ||
+					typeof value !== "function"
+				)
+					return value;
+				return (...args: unknown[]) =>
+					recorder.runSpan(`browser.page.${property}`, () => Reflect.apply(value, target, args));
+			},
+		});
+	return new Proxy(client, {
+		get(target, property, receiver) {
+			const value = Reflect.get(target, property, receiver);
+			if (property === "newPage" && typeof value === "function")
+				return () =>
+					recorder.runSpan("browser.newPage", async () =>
+						wrapPage(await Reflect.apply(value, target, [])),
+					);
+			if (property === "rawPage" && typeof value === "function")
+				return () =>
+					recorder.runSpan("browser.rawPage", async () =>
+						wrapPage(await Reflect.apply(value, target, [])),
+					);
+			if (property === "withIsolatedContext" && typeof value === "function")
+				return (handler: (page: BrowserPage) => Promise<unknown>) =>
+					recorder.runSpan("browser.withIsolatedContext", () =>
+						Reflect.apply(value, target, [(page: BrowserPage) => handler(wrapPage(page))]),
+					);
+			return value;
+		},
+	});
+}
+
 let createResolverBrowserClient: BrowserClientFactory = createBrowserClient;
 
 /** Internal test seam; deliberately not re-exported from the package root. */
@@ -53,6 +107,7 @@ export interface BrowserResolverVendorOptions {
 	readonly pollIntervalMs?: number;
 	readonly allowedHosts: readonly string[];
 	readonly createClient?: BrowserClientFactory;
+	readonly telemetry?: BrowserTelemetrySink;
 }
 
 export interface BrowserResolverVendorAdapter extends ResolverVendorAdapter {
@@ -67,9 +122,7 @@ export interface BrowserResolverVendorAdapter extends ResolverVendorAdapter {
 
 class BrowserSolveTimeoutError extends Error {
 	constructor(blockedRequests: readonly string[]) {
-		super(
-			`Browser resolver solve budget elapsed${formatBlockedRequests(blockedRequests)}`,
-		);
+		super(`Browser resolver solve budget elapsed${formatBlockedRequests(blockedRequests)}`);
 		this.name = "BrowserSolveTimeoutError";
 	}
 }
@@ -274,10 +327,7 @@ async function solveInPage(
 			],
 		},
 		async () => {
-			const userAgent = await raceWithAbort(
-				() => page.userAgent(),
-				signal,
-			);
+			const userAgent = await raceWithAbort(() => page.userAgent(), signal);
 			try {
 				await raceWithAbort(
 					() =>
@@ -467,7 +517,15 @@ export function createBrowserResolverVendorAdapter(
 					...(proxyUrl === undefined ? {} : { proxy: proxyUrl }),
 					requireCdpPool: cdpUrl !== undefined,
 					serviceWorkers: "block",
+					telemetry: options.telemetry,
 				});
+				/**
+				 * Direct vendor callers without a telemetry sink keep the historical trace shape.
+				 * Bound server requests record browser page spans under resolver.vendor.attempt,
+				 * with resolver.vendor.cleanup as a sibling of the browser context span.
+				 */
+				if (traceRecorder && options.telemetry)
+					client = instrumentResolverBrowser(client, traceRecorder);
 				const contextOperation = client.withIsolatedContext(async (page) => {
 					handlerEntered = true;
 					return await solveInPage(

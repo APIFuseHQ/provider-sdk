@@ -5,6 +5,7 @@ export type ApifuseCommandName =
 	| "sync-assets"
 	| "migrate-shape"
 	| "migrate-operation-declaration"
+	| "migrate-deployment"
 	| "submit-check"
 	| "bounty-check"
 	| "record"
@@ -76,6 +77,18 @@ export const COMMAND_MANIFEST: Record<
 		],
 		modulePath: "./apifuse-migrate-operation-declaration",
 	},
+	"migrate-deployment": {
+		name: "migrate-deployment",
+		summary:
+			"Retire a legacy deploy.ts: hoist its non-default values into the defineProvider() deployment key and delete the file.",
+		usage:
+			"apifuse migrate-deployment [path] [--check] [--json] [--drop-codeowners-lock]",
+		examples: [
+			"apifuse migrate-deployment .",
+			"apifuse migrate-deployment . --check --json",
+		],
+		modulePath: "./apifuse-migrate-deployment",
+	},
 	"submit-check": {
 		name: "submit-check",
 		summary:
@@ -136,6 +149,7 @@ export const COMMAND_ORDER: ApifuseCommandName[] = [
 	"sync-assets",
 	"migrate-shape",
 	"migrate-operation-declaration",
+	"migrate-deployment",
 	"submit-check",
 	"record",
 	"test",

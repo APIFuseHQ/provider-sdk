@@ -1,3 +1,5 @@
+export type { ProviderLocaleCatalogMap } from "../i18n/catalog.js";
+export type { ProviderLocale, ProviderLocaleCatalog } from "../i18n/keys.js";
 export type {
 	ProxyCacheStatus,
 	ProxyProtocol,
@@ -24,6 +26,19 @@ export {
 	type TenantNeutral,
 } from "../runtime/request-telemetry.js";
 export {
+	OcrTelemetryCollector,
+	bindOcrTelemetry,
+	type OcrTelemetryBackend,
+	type OcrTelemetryEngine,
+	type OcrTelemetryErrorCode,
+	type OcrTelemetryEvent,
+	type OcrTelemetryModel,
+	type OcrTelemetryFinishReason,
+	type OcrTelemetryHeaderPayload,
+	type OcrTelemetryLogPayload,
+	type OcrTelemetrySink,
+} from "../runtime/ocr-telemetry.js";
+export {
 	ResolverTelemetryCollector,
 	type ResolverAttemptSample,
 	type ResolverCacheReadTelemetryEvent,
@@ -43,8 +58,46 @@ export {
 	type ResolverTelemetrySink,
 	type ResolverVendorAttemptTelemetryEvent,
 } from "../runtime/resolver-telemetry.js";
+export {
+	StealthTelemetryCollector,
+	type StealthTelemetryAttemptEvent,
+	type StealthTelemetryAttemptKind,
+	type StealthTelemetryAttemptSample,
+	type StealthTelemetryDiagnostics,
+	type StealthTelemetryErrorCode,
+	type StealthTelemetryHeaderPayload,
+	type StealthTelemetryLogPayload,
+	type StealthTelemetryRequestClass,
+	type StealthTelemetrySbsdEvent,
+	type StealthTelemetrySbsdOutcome,
+	type StealthTelemetrySink,
+} from "../runtime/stealth-telemetry.js";
+export {
+	SttTelemetryCollector,
+	bindSttTelemetry,
+	type SttTelemetryBackend,
+	type SttTelemetryEngine,
+	type SttTelemetryErrorCode,
+	type SttTelemetryEvent,
+	type SttTelemetryModel,
+	type SttTelemetryHeaderPayload,
+	type SttTelemetryLogPayload,
+	type SttTelemetrySink,
+} from "../runtime/stt-telemetry.js";
+
+export {
+	BrowserTelemetryCollector,
+	type BrowserTelemetryErrorCode,
+	type BrowserTelemetryHeaderPayload,
+	type BrowserTelemetryLogPayload,
+	type BrowserTelemetryPoolAcquireOutcome,
+	type BrowserTelemetrySink,
+	type BrowserTelemetrySampleName,
+	type BrowserTelemetryEngine,
+} from "../runtime/browser-telemetry.js";
 export type { ResolverVendorUnavailableReason } from "../runtime/resolver-vendors/types.js";
 export type { Span, TraceContext } from "../runtime/trace.js";
+export type { StealthBrowser, StealthOS, StealthProfileDescriptor } from "../types.js";
 export {
 	createServerApp,
 	createServerAppAsync,

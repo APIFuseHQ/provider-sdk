@@ -70,6 +70,7 @@ export type BrowserClientOptions = BrowserOptions & {
     executablePath?: string;
     extraArgs?: string[];
     serviceWorkers?: "allow" | "block";
+    telemetry?: BrowserTelemetrySink;
 };
 
 // @public (undocumented)
@@ -229,16 +230,48 @@ type BrowserResourceRoute = {
 };
 
 // @public (undocumented)
+type BrowserTelemetryEngine = BrowserEngine | "host";
+
+// @public (undocumented)
+type BrowserTelemetryErrorCode = "BROWSER_CDP_POOL_REQUIRED" | "BROWSER_PROXY_INVALID" | "BROWSER_RUNTIME_UNSUPPORTED" | "BROWSER_CDP_POOL_ERROR" | "other";
+
+// @public (undocumented)
+type BrowserTelemetryPoolAcquireOutcome = "ok" | "not_configured" | "queue_full" | "timed_out" | "shutting_down" | "unknown_lease" | "unknown_method" | "missing_allowed_hosts" | "transport_failure" | "other";
+
+// @public (undocumented)
+interface BrowserTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // Warning: (ae-forgotten-export) The symbol "BrowserTelemetryEngine" needs to be exported by the entry point browser.d.ts
+    //
+    // (undocumented)
+    recordEngine(engine: BrowserTelemetryEngine): void;
+    // Warning: (ae-forgotten-export) The symbol "BrowserTelemetryErrorCode" needs to be exported by the entry point browser.d.ts
+    //
+    // (undocumented)
+    recordError(code: BrowserTelemetryErrorCode): void;
+    // Warning: (ae-forgotten-export) The symbol "BrowserTelemetryPoolAcquireOutcome" needs to be exported by the entry point browser.d.ts
+    //
+    // (undocumented)
+    recordPoolAcquire(outcome: BrowserTelemetryPoolAcquireOutcome): void;
+    // (undocumented)
+    recordPoolAcquireUnknownCode?(code: number): void;
+    // (undocumented)
+    recordProxyAuthChallenge(): void;
+}
+
+// @public (undocumented)
 export function createBrowserClient(options?: BrowserClientOptions): BrowserClient;
 
 // Warnings were encountered during analysis:
 //
-// dist/types.d.ts:1561:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1568:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1572:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1579:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1614:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point browser.d.ts
+// dist/runtime/browser.d.ts:10:5 - (ae-forgotten-export) The symbol "BrowserTelemetrySink" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1606:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1612:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1613:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1617:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1624:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1659:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point browser.d.ts
 
 // (No @packageDocumentation comment for this package)
 

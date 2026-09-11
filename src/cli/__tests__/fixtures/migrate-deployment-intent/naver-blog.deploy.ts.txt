@@ -1,0 +1,50 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for naver-blog
+// (infra/k8s/generated/providers/naver-blog/). `replicas` is intentionally
+// absent: when an HPA is present the generator omits replicas from the
+// Deployment spec, so declaring it here would drift from what is applied.
+// The Redis cache is enabled (the generated deployment injects
+// APIFUSE__PROVIDER__CACHE_REDIS_URL and the network policies egress-allow
+// the redis service on 6379); the FQDN policy carries only the standard
+// 443/80 egress ports, so no network.additionalTcpPorts entry is needed.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+  cache: { redis: { enabled: true } },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

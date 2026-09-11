@@ -277,6 +277,24 @@ interface AuthTurn {
 // @public (undocumented)
 type Bcp47Locale = string;
 
+// Warning: (ae-forgotten-export) The symbol "OcrContext" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+export function bindOcrTelemetry(context: OcrContext, sink: OcrTelemetrySink, options?: {
+    backend?: OcrTelemetryBackend;
+    engine?: OcrTelemetryEngine;
+    model?: string;
+}): OcrContext;
+
+// Warning: (ae-forgotten-export) The symbol "SttContext" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+export function bindSttTelemetry(context: SttContext, sink: SttTelemetrySink, options?: {
+    backend?: SttTelemetryBackend;
+    engine?: SttTelemetryEngine;
+    model?: string;
+}): SttContext;
+
 // Warning: (ae-forgotten-export) The symbol "BoundedJsonPathSchema" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
@@ -468,6 +486,108 @@ type BrowserResourceRoute = {
     readonly match: string | RegExp | ((request: BrowserResourceRequest) => boolean);
     readonly handle: (request: BrowserResourceRequest) => Promise<BrowserResourceDecision> | BrowserResourceDecision;
 };
+
+// @public (undocumented)
+export class BrowserTelemetryCollector implements TelemetryContributor<BrowserTelemetryLogPayload, BrowserTelemetryHeaderPayload>, BrowserTelemetrySink {
+    constructor(options?: {
+        redact?: (value: string) => string;
+    });
+    // (undocumented)
+    readonly key: "browser";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    recordEngine(engine: BrowserTelemetryEngine): void;
+    // (undocumented)
+    recordError(code: BrowserTelemetryErrorCode): void;
+    // (undocumented)
+    recordPoolAcquire(outcome: BrowserTelemetryPoolAcquireOutcome): void;
+    // (undocumented)
+    recordPoolAcquireUnknownCode(code: number): void;
+    // (undocumented)
+    recordProxyAuthChallenge(): void;
+    // (undocumented)
+    toHeaderPayload(log: BrowserTelemetryLogPayload): BrowserTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(spans: SpanIndex): BrowserTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type BrowserTelemetryEngine = BrowserEngine | "host";
+
+// @public (undocumented)
+export type BrowserTelemetryErrorCode = "BROWSER_CDP_POOL_REQUIRED" | "BROWSER_PROXY_INVALID" | "BROWSER_RUNTIME_UNSUPPORTED" | "BROWSER_CDP_POOL_ERROR" | "other";
+
+// @public (undocumented)
+export type BrowserTelemetryHeaderPayload = {
+    allocateMs: number;
+    pages: number;
+    navigations: number;
+    actions: number;
+    evaluate: number;
+    content: number;
+    screenshot: number;
+    poolAcquireOutcome?: ClosedEnum<BrowserTelemetryPoolAcquireOutcome>;
+    poolAcquireAttempts: number;
+    poolAcquireFailures: number;
+    proxyAuthChallenges: number;
+    engine?: ClosedEnum<BrowserTelemetryEngine>;
+    lastErrorCode?: ClosedEnum<BrowserTelemetryErrorCode>;
+    samples: {
+        name: ClosedEnum<BrowserTelemetrySampleName>;
+        ms: number;
+        status: ClosedEnum<"ok" | "error">;
+    }[];
+    dropped: number;
+};
+
+// @public (undocumented)
+export type BrowserTelemetryLogPayload = {
+    allocateMs: number;
+    pages: number;
+    navigations: number;
+    actions: number;
+    evaluate: number;
+    content: number;
+    screenshot: number;
+    poolAcquireOutcome?: BrowserTelemetryPoolAcquireOutcome;
+    poolAcquireAttempts: number;
+    poolAcquireFailures: number;
+    poolAcquireUnknownCode?: number;
+    proxyAuthChallenges: number;
+    engine?: BrowserTelemetryEngine;
+    lastErrorCode?: BrowserTelemetryErrorCode;
+    samples: {
+        name: BrowserTelemetrySampleName;
+        ms: number;
+        status: "ok" | "error";
+        diagnostics?: string;
+    }[];
+    dropped: number;
+    telemetryFailed?: true;
+};
+
+// @public (undocumented)
+export type BrowserTelemetryPoolAcquireOutcome = "ok" | "not_configured" | "queue_full" | "timed_out" | "shutting_down" | "unknown_lease" | "unknown_method" | "missing_allowed_hosts" | "transport_failure" | "other";
+
+// @public (undocumented)
+export type BrowserTelemetrySampleName = "browser.newPage" | "browser.page.goto" | "browser.page.fill" | "browser.page.click" | "browser.page.type" | "browser.page.waitForSelector" | "browser.evaluate" | "browser.content" | "browser.screenshot" | "other";
+
+// @public (undocumented)
+export interface BrowserTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    recordEngine(engine: BrowserTelemetryEngine): void;
+    // (undocumented)
+    recordError(code: BrowserTelemetryErrorCode): void;
+    // (undocumented)
+    recordPoolAcquire(outcome: BrowserTelemetryPoolAcquireOutcome): void;
+    // (undocumented)
+    recordPoolAcquireUnknownCode?(code: number): void;
+    // (undocumented)
+    recordProxyAuthChallenge(): void;
+}
 
 // @public (undocumented)
 type CandidateBlock = {
@@ -820,8 +940,6 @@ interface FlowContext {
     http: HttpClient;
     // Warning: (ae-forgotten-export) The symbol "NativeContext" needs to be exported by the entry point index.d.ts
     readonly native?: NativeContext;
-    // Warning: (ae-forgotten-export) The symbol "OcrContext" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     ocr: OcrContext;
     // (undocumented)
@@ -836,8 +954,6 @@ interface FlowContext {
     //
     // (undocumented)
     stealth: StealthClient;
-    // Warning: (ae-forgotten-export) The symbol "SttContext" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     stt: SttContext;
     // (undocumented)
@@ -1333,6 +1449,14 @@ type HealthScheduleRandomization = {
 // @public (undocumented)
 type HealthStep = OperationStep | ExtractStep | AssertStep | GuardStep;
 
+// @public
+interface HttpAttemptContext {
+    attempt: number;
+    // Warning: (ae-forgotten-export) The symbol "HttpMethod" needs to be exported by the entry point index.d.ts
+    method: Uppercase<HttpMethod>;
+    url: string;
+}
+
 // @public (undocumented)
 export type HttpAttemptSample = {
     n: number;
@@ -1385,6 +1509,11 @@ interface HttpClient {
     // (undocumented)
     stream(url: string, options?: RequestWithMethodOptions): Promise<HttpStreamResponse>;
 }
+
+// Warning: (ae-forgotten-export) The symbol "HttpAttemptContext" needs to be exported by the entry point index.d.ts
+//
+// @public
+type HttpHeadersFactory = (attempt: HttpAttemptContext) => Record<string, string> | Promise<Record<string, string>>;
 
 // @public (undocumented)
 type HttpMethod = "HEAD" | "head" | "GET" | "get" | "POST" | "post" | "PUT" | "put" | "DELETE" | "delete" | "OPTIONS" | "options" | "TRACE" | "trace" | "PATCH" | "patch";
@@ -1465,8 +1594,6 @@ interface HttpRetryOptions {
     jitter?: HttpRetryJitter;
     // (undocumented)
     maxDelayMs?: number;
-    // Warning: (ae-forgotten-export) The symbol "HttpMethod" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     methods?: readonly HttpMethod[];
     // Warning: (ae-forgotten-export) The symbol "HttpRetryPreset" needs to be exported by the entry point index.d.ts
@@ -2150,6 +2277,107 @@ interface OcrResult {
 }
 
 // @public (undocumented)
+export type OcrTelemetryBackend = "cloudflare-workers-ai" | "openai-compatible" | "custom" | "unavailable";
+
+// @public (undocumented)
+export class OcrTelemetryCollector implements OcrTelemetrySink, TelemetryContributor<OcrTelemetryLogPayload, OcrTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "ocr";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    record(event: OcrTelemetryEvent): void;
+    // (undocumented)
+    toHeaderPayload(log: OcrTelemetryLogPayload): OcrTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(_spans: SpanIndex): OcrTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type OcrTelemetryEngine = "workers-ai" | "openai-compatible" | "custom";
+
+// @public (undocumented)
+export type OcrTelemetryErrorCode = "OCR_UNAVAILABLE" | "UNSUPPORTED_OCR_BACKEND" | "OCR_UPSTREAM_FAILED" | "OCR_INCOMPLETE_RESPONSE" | "transport_network_error" | "transport_timeout" | "other";
+
+// @public (undocumented)
+export type OcrTelemetryEvent = {
+    backend: OcrTelemetryBackend;
+    engine: OcrTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    bytesIn?: number;
+    bytesOut?: number;
+    candidates?: number;
+    warnings?: number;
+    errorCode?: OcrTelemetryErrorCode;
+    diagnostics?: string;
+    finishReason?: OcrTelemetryFinishReason;
+};
+
+// @public (undocumented)
+export type OcrTelemetryFinishReason = "stop" | "length" | "content_filter" | "tool_calls" | "function_call" | "error" | "unknown";
+
+// @public (undocumented)
+export type OcrTelemetryHeaderPayload = {
+    backend: ClosedEnum<OcrTelemetryBackend>;
+    engine: ClosedEnum<OcrTelemetryEngine>;
+    model?: ClosedEnum<OcrTelemetryModel>;
+    ms: number;
+    status?: number;
+    bytesIn: number;
+    bytesOut: number;
+    candidates: number;
+    warnings: number;
+    lastErrorCode?: ClosedEnum<OcrTelemetryErrorCode>;
+    finishReason?: ClosedEnum<OcrTelemetryFinishReason>;
+    samples?: Array<{
+        ms: number;
+        status?: number;
+        bytesIn?: number;
+        bytesOut?: number;
+        candidates?: number;
+        warnings?: number;
+        errorCode?: ClosedEnum<OcrTelemetryErrorCode>;
+        finishReason?: ClosedEnum<OcrTelemetryFinishReason>;
+    }>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type OcrTelemetryLogPayload = {
+    telemetryFailed?: true;
+    diagnostics?: string[];
+    backend: OcrTelemetryBackend;
+    engine: OcrTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    bytesIn: number;
+    bytesOut: number;
+    candidates: number;
+    warnings: number;
+    lastErrorCode?: OcrTelemetryErrorCode;
+    finishReason?: OcrTelemetryFinishReason;
+    samples?: Array<Omit<OcrTelemetryEvent, "backend" | "engine" | "model" | "diagnostics">>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type OcrTelemetryModel = "gemma-4-26b-a4b-it" | "glm-ocr" | "moondream3.1-9B-A2B" | "kimi-k2.7-code";
+
+// @public (undocumented)
+export interface OcrTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    record(event: OcrTelemetryEvent): void;
+}
+
+// @public (undocumented)
 interface OcrWarning {
     // (undocumented)
     readonly code: string;
@@ -2290,8 +2518,9 @@ interface OperationDeprecationMetadata {
 interface OperationErrorCode {
     // (undocumented)
     code: string;
-    // (undocumented)
     description: string;
+    fixKey?: ProviderLocaleKeyInput;
+    messageKey?: ProviderLocaleKeyInput;
     // (undocumented)
     retryable?: boolean;
     // Warning: (ae-forgotten-export) The symbol "ProviderErrorStatus" needs to be exported by the entry point index.d.ts
@@ -2400,6 +2629,7 @@ export const OperationRequestSchema: z.ZodObject<{
         metadata: z.ZodRecord<z.ZodString, z.ZodUnknown>;
         externalRef: z.ZodString;
     }, z.core.$strip>>;
+    tenantId: z.ZodOptional<z.ZodString>;
     headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
     trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
 }, z.core.$strip>;
@@ -3122,6 +3352,8 @@ interface ProviderEngine {
     //
     // (undocumented)
     attach<TDeclaration extends object = Record<string, unknown>>(input: ProviderEngineAttachmentInput): ProviderContext<TDeclaration>;
+    // Warning: (ae-forgotten-export) The symbol "ProviderEngineMode" needs to be exported by the entry point index.d.ts
+    readonly kind?: ProviderEngineMode;
 }
 
 // @public (undocumented)
@@ -3168,6 +3400,9 @@ interface ProviderEngineCapabilitySurface {
     // (undocumented)
     readonly stt: SttContext;
 }
+
+// @public
+type ProviderEngineMode = "in-process" | "remote" | (string & {});
 
 // @public
 interface ProviderEngineResidentSurface {
@@ -3243,6 +3478,17 @@ interface ProviderHealthMonitorConfig {
 
 // @public
 type ProviderHealthProbeConfig = ProviderHealthMonitorConfig;
+
+// Warning: (ae-forgotten-export) The symbol "Bcp47Locale" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+export type ProviderLocale = Bcp47Locale;
+
+// @public (undocumented)
+export type ProviderLocaleCatalog = Record<string, unknown>;
+
+// @public (undocumented)
+export type ProviderLocaleCatalogMap = Record<ProviderLocale, ProviderLocaleCatalog>;
 
 // @public (undocumented)
 type ProviderLocaleKey = string & {
@@ -3397,6 +3643,7 @@ interface ProviderRequestContext {
     connectionId?: string;
     // (undocumented)
     headers: Record<string, string>;
+    tenantId?: string;
 }
 
 // @public (undocumented)
@@ -3449,11 +3696,16 @@ type ProviderRuntimeTarget = "vanilla" | "engine";
 interface ProviderSecretDeclaration {
     // (undocumented)
     description?: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderSecretIssuer" needs to be exported by the entry point index.d.ts
+    issuer?: ProviderSecretIssuer;
     // (undocumented)
     name: string;
     // (undocumented)
     required?: boolean;
 }
+
+// @public
+type ProviderSecretIssuer = "apifuse" | "contributor";
 
 // @public (undocumented)
 export type ProviderServerCloseOptions = {
@@ -3486,6 +3738,7 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     retryable?: boolean;
     providerObservability?: ProviderErrorObservability;
     causeChain?: ProviderErrorCauseFrame[];
+    stack?: string[];
     signal?: "unregistered_provider_error_code";
     signalFix?: string;
     issues?: Array<{
@@ -3498,6 +3751,11 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     event: "provider_secrets_missing";
     providerId: string;
     missingSecrets: string[];
+} | {
+    level: "warn";
+    event: "provider_locale_catalogs_unavailable";
+    providerId: string;
+    reason: string;
 } | ({
     level: "info";
     event: "provider_handle";
@@ -3518,6 +3776,17 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     hookIndex: number;
     errorClass: string;
     message: string;
+} | {
+    level: "info" | "warn";
+    event: "provider_engine_mode";
+    providerId: string;
+    mode: ProviderEngineMode | "custom";
+    source: "engine" | "env" | "option" | "default";
+    deprecated: boolean;
+    attached: boolean;
+    sdkVersion: string;
+    runtimeTarget?: ProviderRuntimeTarget;
+    warnings?: readonly string[];
 } | SelfTestCancellationLogEvent;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderRequestCost" needs to be exported by the entry point index.d.ts
@@ -3560,6 +3829,7 @@ export type ProviderServerOperationExecutorInput<TContext extends Partial<Provid
 export type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
     logger?: ProviderServerLogger;
     engine?: ProviderEngine;
+    engineMode?: ProviderEngineMode;
     files?: ProviderFilesContext;
     operationExecutor?: ProviderServerOperationExecutor<TContext>;
     internalOperationExecutor?: ProviderServerOperationExecutor<TContext>;
@@ -3572,6 +3842,7 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
     stt?: SttContext;
     ocr?: OcrContext;
     resolver?: ResolverContext;
+    localeCatalogs?: ProviderLocaleCatalogMap;
     state?: ProviderRuntimeState;
     allowMemoryStateFallback?: boolean;
     shutdown?: {
@@ -3604,6 +3875,7 @@ const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
         requestId: z.ZodString;
         input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
         connectionId: z.ZodOptional<z.ZodString>;
+        tenantId: z.ZodOptional<z.ZodString>;
         headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         connection: z.ZodOptional<z.ZodObject<{
@@ -3954,8 +4226,8 @@ const relativeDateNodeSchema: z.ZodObject<{
 
 // @public (undocumented)
 interface RequestOptions {
-    // (undocumented)
-    headers?: Record<string, string>;
+    // Warning: (ae-forgotten-export) The symbol "HttpHeadersFactory" needs to be exported by the entry point index.d.ts
+    headers?: Record<string, string> | HttpHeadersFactory;
     // Warning: (ae-forgotten-export) The symbol "RequestParams" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -4790,8 +5062,6 @@ interface SmsOtpMatcherDefinition {
     extractOtp(body: string): string | null;
     // (undocumented)
     id: string;
-    // Warning: (ae-forgotten-export) The symbol "Bcp47Locale" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     locale?: Bcp47Locale;
     // (undocumented)
@@ -4944,6 +5214,9 @@ interface StateWriteOptions {
     ttl?: ProviderStateDurationString;
 }
 
+// @public (undocumented)
+export type StealthBrowser = "chrome" | "firefox" | "safari";
+
 // @public
 type StealthChallengeClassification = {
     readonly challenge: Extract<ProviderChallenge, {
@@ -5000,6 +5273,21 @@ interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "h
     };
     throwOnHttpError?: boolean;
 }
+
+// @public (undocumented)
+export type StealthOS = "windows" | "macos" | "linux" | "ios";
+
+// @public
+export type StealthProfileDescriptor = {
+    browser: "chrome";
+    os: "windows" | "macos" | "linux";
+} | {
+    browser: "firefox";
+    os: "windows" | "macos" | "linux";
+} | {
+    browser: "safari";
+    os: "macos" | "ios";
+};
 
 // @public
 type StealthProfileSelection = {
@@ -5095,6 +5383,132 @@ interface StealthSessionCookies extends CookieJar {
 }
 
 // @public (undocumented)
+export type StealthTelemetryAttemptEvent = {
+    readonly ms: number;
+    readonly status?: number;
+    readonly errorCode?: StealthTelemetryErrorCode;
+    readonly diagnostics?: StealthTelemetryDiagnostics;
+    readonly profileId: StealthProfileDescriptor;
+    readonly proxyUsed: boolean;
+    readonly requestClass: StealthTelemetryRequestClass;
+    readonly kind?: StealthTelemetryAttemptKind;
+};
+
+// @public (undocumented)
+export type StealthTelemetryAttemptKind = "request" | "resolver" | "proxy_diagnostic";
+
+// @public (undocumented)
+export type StealthTelemetryAttemptSample = {
+    n: number;
+    ms: number;
+    status?: number;
+    e?: StealthTelemetryErrorCode;
+    kind?: StealthTelemetryAttemptKind;
+    diagnostics?: StealthTelemetryDiagnostics;
+};
+
+// @public (undocumented)
+export class StealthTelemetryCollector implements StealthTelemetrySink, TelemetryContributor<StealthTelemetryLogPayload, StealthTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "stealth";
+    // (undocumented)
+    recordAttempt(event: StealthTelemetryAttemptEvent): void;
+    // (undocumented)
+    recordPoolRefresh(): void;
+    // (undocumented)
+    recordRedirectHop(): void;
+    // (undocumented)
+    recordSafeRefetch(): void;
+    // (undocumented)
+    recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
+    // (undocumented)
+    toHeaderPayload(log: StealthTelemetryLogPayload): StealthTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(): StealthTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type StealthTelemetryDiagnostics = {
+    readonly name?: string;
+    readonly message?: string;
+    readonly code?: string;
+};
+
+// @public (undocumented)
+export type StealthTelemetryErrorCode = "transport_network_error" | "transport_timeout" | "transport_cancelled" | "upstream_http_error" | "response_too_large" | "proxy_connect_failed" | "PROXY_POOL_STALE" | "PROXY_EDGE_AUTH_REJECTED" | "PROXY_AUTH_IP_DENIED" | "PROXY_EDGE_TLS_REJECTED" | "PROXY_REQUIRED" | "other";
+
+// @public (undocumented)
+export type StealthTelemetryHeaderPayload = {
+    attempts: number;
+    poolRefreshes: number;
+    redirectHops: number;
+    profileId?: {
+        browser: ClosedEnum<StealthBrowser>;
+        os: ClosedEnum<StealthOS>;
+    };
+    proxyUsed: boolean;
+    requestClass?: ClosedEnum<StealthTelemetryRequestClass>;
+    sbsdDetected?: boolean;
+    sbsdOutcome?: ClosedEnum<StealthTelemetrySbsdOutcome>;
+    safeRefetch: number;
+    lastStatus?: number;
+    ms: number;
+    attemptSamples?: {
+        n: number;
+        ms: number;
+        status?: number;
+        e?: ClosedEnum<StealthTelemetryErrorCode>;
+        kind?: ClosedEnum<StealthTelemetryAttemptKind>;
+    }[];
+};
+
+// @public (undocumented)
+export type StealthTelemetryLogPayload = {
+    attempts: number;
+    poolRefreshes: number;
+    redirectHops: number;
+    profileId?: StealthProfileDescriptor;
+    proxyUsed: boolean;
+    requestClass?: StealthTelemetryRequestClass;
+    sbsdDetected?: boolean;
+    sbsdOutcome?: StealthTelemetrySbsdOutcome;
+    safeRefetch: number;
+    lastStatus?: number;
+    ms: number;
+    attemptSamples?: StealthTelemetryAttemptSample[];
+    attemptSamplesDropped?: number;
+};
+
+// @public (undocumented)
+export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "xhr" | "post";
+
+// @public (undocumented)
+export type StealthTelemetrySbsdEvent = {
+    readonly detected: boolean;
+    readonly outcome?: StealthTelemetrySbsdOutcome;
+};
+
+// @public (undocumented)
+export type StealthTelemetrySbsdOutcome = StealthChallengeClassification["outcome"] | "detected" | "refetch_clear";
+
+// @public (undocumented)
+export interface StealthTelemetrySink {
+    // (undocumented)
+    recordAttempt(event: StealthTelemetryAttemptEvent): void;
+    // (undocumented)
+    recordPoolRefresh(): void;
+    // (undocumented)
+    recordRedirectHop(): void;
+    // (undocumented)
+    recordSafeRefetch(): void;
+    // (undocumented)
+    recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
+}
+
+// @public (undocumented)
 type StepBase = {
     id: string;
     result: string;
@@ -5148,6 +5562,100 @@ interface SttSegment {
     startMs?: number;
     // (undocumented)
     text: string;
+}
+
+// @public (undocumented)
+export type SttTelemetryBackend = "cloudflare-workers-ai" | "custom" | "unavailable";
+
+// @public (undocumented)
+export class SttTelemetryCollector implements SttTelemetrySink, TelemetryContributor<SttTelemetryLogPayload, SttTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "stt";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    record(event: SttTelemetryEvent): void;
+    // (undocumented)
+    toHeaderPayload(log: SttTelemetryLogPayload): SttTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(_spans: SpanIndex): SttTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type SttTelemetryEngine = "workers-ai" | "custom";
+
+// @public (undocumented)
+export type SttTelemetryErrorCode = "STT_UNAVAILABLE" | "UNSUPPORTED_STT_BACKEND" | "STT_UPSTREAM_FAILED" | "STT_AUDIO_TOO_LARGE" | "UNSUPPORTED_STT_OPTION" | "INVALID_STT_AUDIO" | "INVALID_STT_VERIFICATION_CODE_OPTIONS" | "NO_CODE_FOUND" | "AMBIGUOUS_CODE" | "transport_network_error" | "transport_timeout" | "other";
+
+// @public (undocumented)
+export type SttTelemetryEvent = {
+    backend: SttTelemetryBackend;
+    engine: SttTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    audioBytes?: number;
+    durationMs?: number;
+    usage?: number;
+    warnings?: number;
+    errorCode?: SttTelemetryErrorCode;
+    diagnostics?: string;
+};
+
+// @public (undocumented)
+export type SttTelemetryHeaderPayload = {
+    backend: ClosedEnum<SttTelemetryBackend>;
+    engine: ClosedEnum<SttTelemetryEngine>;
+    model?: ClosedEnum<SttTelemetryModel>;
+    ms: number;
+    status?: number;
+    audioBytes: number;
+    durationMs: number;
+    usage: number;
+    warnings: number;
+    lastErrorCode?: ClosedEnum<SttTelemetryErrorCode>;
+    samples?: Array<{
+        ms: number;
+        status?: number;
+        audioBytes?: number;
+        durationMs?: number;
+        usage?: number;
+        warnings?: number;
+        errorCode?: ClosedEnum<SttTelemetryErrorCode>;
+    }>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type SttTelemetryLogPayload = {
+    telemetryFailed?: true;
+    diagnostics?: string[];
+    backend: SttTelemetryBackend;
+    engine: SttTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    audioBytes: number;
+    durationMs: number;
+    usage: number;
+    warnings: number;
+    lastErrorCode?: SttTelemetryErrorCode;
+    samples?: Array<Omit<SttTelemetryEvent, "backend" | "engine" | "model" | "diagnostics">>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type SttTelemetryModel = "whisper-large-v3-turbo";
+
+// @public (undocumented)
+export interface SttTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    record(event: SttTelemetryEvent): void;
 }
 
 // @public (undocumented)
@@ -5377,9 +5885,9 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:146:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:158:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:17:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:175:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:198:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:128:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:337:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:339:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point index.d.ts
@@ -5390,30 +5898,30 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/types.d.ts:674:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:679:5 - (ae-forgotten-export) The symbol "HealthScenario" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:691:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:887:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:892:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:951:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1254:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1254:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1455:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1456:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1561:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1568:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1572:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1579:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1614:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1692:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1700:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1701:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1861:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1876:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1882:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1888:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1890:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1898:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1985:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:896:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:901:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:960:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1299:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1299:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1500:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1501:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1606:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1612:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1613:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1617:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1624:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1659:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1747:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1755:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1756:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1765:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1916:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1931:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1937:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1943:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1945:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1953:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2047:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

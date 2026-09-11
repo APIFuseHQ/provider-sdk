@@ -1,0 +1,42 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// No committed generated manifest directory exists for kakaot. This is the
+// resolver-resolved shared profile for the source's sole Redis cache override.
+// The HPA owns replicas and all Kakao upstreams use standard HTTP(S) ports.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: { cpu: "25m", memory: "128Mi" },
+  cache: { redis: { enabled: true } },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

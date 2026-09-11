@@ -3,9 +3,13 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { dirname, join } from "node:path";
 
 import {
+	DEPLOYMENT_INTENT_CHECK_MESSAGE,
+	LEGACY_DEPLOY_FILE_RULE,
 	PROMPT_ASSETS_CHECK_MESSAGE,
 	PROVIDER_JSON_CHECK_MESSAGE,
+	REDUNDANT_DEPLOYMENT_DEFAULT_RULE,
 	runChecks,
+	SPREAD_EXPORT_DEPLOYMENT_RULE,
 } from "../../bin/apifuse-check.js";
 import { PROMPT_ASSET_MANIFEST_PATH, syncPromptAssets } from "../cli/prompt-assets.js";
 
@@ -122,6 +126,109 @@ describe("apifuse check", () => {
 		);
 
 		expect(index?.passed).toBe(false);
+	});
+
+	it("warns on a legacy deploy.ts without failing the check", async () => {
+		const providerDir = makeProviderDir("apifuse-check-legacy-deploy-file-");
+		writeRuntimeRecognitionFixture(providerDir, "standard");
+		writeFileSync(
+			join(providerDir, "deploy.ts"),
+			'export default { runtime: "shared", language: "typescript", resources: { cpu: "25m", memory: "128Mi" } };\n',
+		);
+
+		const results = await runChecks(providerDir);
+		const deployment = results.find((result) => result.message === DEPLOYMENT_INTENT_CHECK_MESSAGE);
+
+		expect(deployment?.passed).toBe(true);
+		expect(deployment?.details).toEqual([
+			expect.stringContaining(
+				`WARN ${LEGACY_DEPLOY_FILE_RULE}: deploy.ts is a legacy deployment surface`,
+			),
+		]);
+		expect(deployment?.details?.[0]).toContain("apifuse migrate-deployment .");
+	});
+
+	it("warns on deployment fields that restate the runtime profile", async () => {
+		const providerDir = makeProviderDir("apifuse-check-redundant-deployment-");
+		writeFileSync(
+			join(providerDir, "index.ts"),
+			`
+export default {
+  id: "redundant-deployment-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  deployment: {
+    runtime: "shared",
+    resources: { cpu: "25m", memory: "128Mi" },
+    cache: { redis: { enabled: true } },
+  },
+  auth: { mode: "none" },
+  meta: { displayName: "Redundant Deployment Provider", category: "other" },
+  operations: {},
+};
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const deployment = results.find((result) => result.message === DEPLOYMENT_INTENT_CHECK_MESSAGE);
+
+		expect(deployment?.passed).toBe(true);
+		expect(deployment?.details).toEqual([
+			`WARN ${REDUNDANT_DEPLOYMENT_DEFAULT_RULE}: deployment.runtime restates the profile default ("shared"); omit it`,
+			`WARN ${REDUNDANT_DEPLOYMENT_DEFAULT_RULE}: deployment.resources restates the "shared" profile default (25m/128Mi); omit it`,
+		]);
+	});
+
+	it("warns on a deployment extra attached to a spread default export", async () => {
+		const providerDir = makeProviderDir("apifuse-check-spread-export-deployment-");
+		writeFileSync(
+			join(providerDir, "index.ts"),
+			`
+const provider = {
+  id: "spread-export-deployment-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  auth: { mode: "none" },
+  meta: { displayName: "Spread Export Deployment Provider", category: "other" },
+  operations: {},
+};
+
+export default { ...provider, deployment: { cache: { redis: { enabled: true } } } };
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const deployment = results.find((result) => result.message === DEPLOYMENT_INTENT_CHECK_MESSAGE);
+
+		expect(deployment?.passed).toBe(true);
+		expect(deployment?.details).toEqual([
+			expect.stringContaining(`WARN ${SPREAD_EXPORT_DEPLOYMENT_RULE}: index.ts:11 attaches`),
+		]);
+		expect(deployment?.details?.[0]).toContain("apifuse migrate-deployment .");
+	});
+
+	it("stays silent for a minimal deployment key without a legacy file", async () => {
+		const providerDir = makeProviderDir("apifuse-check-minimal-deployment-");
+		writeFileSync(
+			join(providerDir, "index.ts"),
+			`
+export default {
+  id: "minimal-deployment-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  deployment: { cache: { redis: { enabled: true } } },
+  auth: { mode: "none" },
+  meta: { displayName: "Minimal Deployment Provider", category: "other" },
+  operations: {},
+};
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const deployment = results.find((result) => result.message === DEPLOYMENT_INTENT_CHECK_MESSAGE);
+
+		expect(deployment?.passed).toBe(true);
+		expect(deployment?.details).toEqual([]);
 	});
 
 	it("passes the provider.json check for a valid declaration", async () => {
@@ -609,6 +716,60 @@ export const headers = {
 		expect(browserVersionDetails.join("\n")).not.toContain("__fixtures__");
 		expect(browserVersionDetails.join("\n")).not.toContain("__tests__");
 		expect(browserVersionDetails.join("\n")).not.toContain("chrome-120");
+	});
+
+	it("blocks stealth-owned header names only in files that use ctx.stealth", async () => {
+		const providerDir = makeProviderDir("apifuse-check-owned-headers-");
+		writeMinimalProviderIndex(providerDir);
+		mkdirSync(join(providerDir, "upstream"), { recursive: true });
+		const headersSource = `export const HEADERS: Record<string, string> = {
+  Accept: "text/html,application/xhtml+xml",
+  "Accept-Language": "ja-JP,ja;q=0.9",
+  Referer: "https://www.example.com/",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "same-origin",
+  "Upgrade-Insecure-Requests": "1",
+};
+`;
+		// The amazon-jp shape: a module-level header constant spread into a
+		// ctx.stealth wrapper elsewhere in the same file.
+		writeFileSync(
+			join(providerDir, "upstream", "stealth.ts"),
+			`${headersSource}export function getStealthClient(ctx: { stealth: unknown }) {
+  return ctx.stealth;
+}
+`,
+		);
+		// The same names are legitimate for ctx.http and must stay silent.
+		writeFileSync(
+			join(providerDir, "upstream", "http.ts"),
+			`${headersSource}export function fetchPage(ctx: { http: { get: (url: string) => unknown } }) {
+  return ctx.http.get("https://www.example.com/");
+}
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
+		const ownedHeaderDetails =
+			authoring?.details?.filter(
+				(detail) =>
+					detail.includes("browser-version-literal") &&
+					detail.includes("STEALTH_HEADER_OVERRIDE_UNSUPPORTED"),
+			) ?? [];
+
+		expect(authoring?.passed).toBe(false);
+		expect(ownedHeaderDetails).toHaveLength(3);
+		expect(ownedHeaderDetails.join("\n")).toContain("sourceFiles.upstream/stealth.ts");
+		expect(ownedHeaderDetails.join("\n")).not.toContain("upstream/http.ts");
+		for (const name of ["Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site"]) {
+			expect(ownedHeaderDetails.join("\n")).toContain(`ctx.stealth owns the "${name}" header`);
+		}
+		expect(ownedHeaderDetails.join("\n")).not.toContain("Upgrade-Insecure-Requests");
+		expect(ownedHeaderDetails.join("\n")).toContain(
+			'stealth: { requestClass: "navigation" | "xhr" | "post" }',
+		);
 	});
 
 	it("fails the prompt-assets check when the manifest is missing", async () => {

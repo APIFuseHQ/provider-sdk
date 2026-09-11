@@ -529,6 +529,7 @@ const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
         requestId: z.ZodString;
         input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
         connectionId: z.ZodOptional<z.ZodString>;
+        tenantId: z.ZodOptional<z.ZodString>;
         headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         connection: z.ZodOptional<z.ZodObject<{
@@ -779,6 +780,7 @@ export type StatefulControlPlaneOperation = "resolve" | "acquire" | "renew" | "r
 export function statefulForwardingContextFromProviderRequest(request: {
     readonly requestId: string;
     readonly connection?: unknown;
+    readonly tenantId?: string;
     readonly headers?: Record<string, string>;
     readonly trace?: Record<string, string>;
 }): StatefulForwardingRuntimeContext;
@@ -789,6 +791,7 @@ export interface StatefulForwardingRuntimeContext {
     readonly operationRequest?: {
         readonly requestId: string;
         readonly connection?: unknown;
+        readonly tenantId?: string;
         readonly headers?: Record<string, string>;
         readonly trace?: Record<string, string>;
     };

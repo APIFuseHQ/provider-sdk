@@ -1,0 +1,35 @@
+// TEMPORARY deployment mirror for external provider sources — mirrors the
+// resolved runtime profile.
+//
+// Why this file exists: the pinned @apifuse/provider-sdk does not pass a
+// `deployment` key through defineProvider(), and external polyrepo sources
+// never run the monorepo AST lint that catches the misplacement, so the
+// platform's materialization contract
+// (scripts/provider-deploy/materialize-provider.mjs) requires deploy.ts at
+// the repository root until the SDK deployment passthrough lands. Without it
+// the repository fails materialization ("Missing required provider files:
+// deploy.ts") and its first deploy cannot start.
+//
+// Delete this file only when the SDK passthrough ships and the platform
+// drops the requirement.
+export default {
+  runtime: "shared",
+  language: "typescript",
+  replicas: 1,
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  // SUUMO is an HTML-extraction provider: the rental search endpoint buffers
+  // measured 1.06MB upstream pages and parses them with cheerio, the same
+  // workload class that took ekitan from the 128Mi shared default to OOMKill
+  // twice (118.8Mi working set at 128Mi, then again at 256Mi) and runs
+  // tabelog at 512Mi. Start at ekitan's settled 384Mi; adjust only against a
+  // measured working set.
+  resources: {
+    cpu: "25m",
+    memory: "384Mi",
+  },
+};

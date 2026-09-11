@@ -1,0 +1,59 @@
+// Provider deployment contract for the polyrepo reusable-deploy pipeline.
+//
+// Shape mirrors ProviderDeploymentConfigSchema in the monorepo-owned provider
+// registry package. This split repo intentionally keeps the deploy contract as
+// a plain object so the central deploy engine can validate it without making
+// the private registry package a runtime dependency here.
+//
+// "shared" selects the standard non-browser deployment profile; it does not
+// mean KakaoTalk sessions share an owner pod. The stateful runtime fences each
+// session to one pod, and the platform's KakaoTalk manifest path provides the
+// pod identity, owner endpoint, and same-provider port 3000 policy. The
+// "dedicated" profile has no distinct manifest behavior or production
+// precedent, so using it would not strengthen session isolation.
+//
+// Do not add port 3000 to network.additionalTcpPorts: that field permits the
+// port to every upstream allowed host. Owner forwarding is instead exposed by
+// the platform's narrower KakaoTalk-only pod-to-pod NetworkPolicy and Cilium
+// rules.
+
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+  buildContext?: string;
+};
+
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  replicas: 1,
+  hpa: {
+    enabled: false,
+  },
+  resources: {
+    cpu: "100m",
+    memory: "256Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

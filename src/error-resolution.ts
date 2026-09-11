@@ -20,6 +20,14 @@ export const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
 	"refresh_not_supported",
 	"RUNTIME_UNSUPPORTED",
 	"PROVIDER_STATE_UNSUPPORTED",
+	// Engine attachment (ADR-0011). Registered here so an engine failure is served
+	// as a known SDK code instead of raising a false
+	// `unregistered_provider_error_code` signal on a 500.
+	"PROVIDER_ENGINE_AUTHENTICATION_FAILED",
+	"PROVIDER_ENGINE_PROTOCOL_VERSION_MISMATCH",
+	"PROVIDER_ENGINE_UNAVAILABLE",
+	"PROVIDER_ENGINE_MODE_UNSUPPORTED",
+	"PROVIDER_EGRESS_DENIED",
 	"HANDLE_INVALID",
 	"HANDLE_NOT_FOUND",
 	"HANDLE_EXPIRED",
@@ -59,6 +67,7 @@ export const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
 	"http_redirect_missing_location",
 	"http_redirect_loop",
 	"transport_invalid_url",
+	"http_header_factory_failed",
 	"EGRESS_LEASE_INVALID",
 	"EGRESS_LEASE_BINDING_INVALID",
 	"EGRESS_LEASE_KEY_MISSING",
@@ -86,6 +95,7 @@ export const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
 	"STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
 	"STATEFUL_FORWARDING_REQUEST_FAILED",
 	"STATEFUL_FORWARDING_CONTEXT_MISSING",
+	"STATEFUL_FORWARDING_CONTEXT_INVALID",
 	"STATEFUL_FORWARDING_BAD_RESPONSE",
 	"STATEFUL_INTERNAL_EXECUTOR_NOT_CONFIGURED",
 	"STATEFUL_FILE_FORWARDING_UNSUPPORTED",
@@ -149,9 +159,57 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		["HANDLE_BUSY", 409],
 		["UPSTREAM_ERROR", 502],
 		["BLOCKED", 502],
+		// Fleet-consensus provider codes. These are thrown by provider code, not
+		// by the SDK, so they are registered here (status mapping) and not in
+		// SDK_RUNTIME_OWNED_ERROR_CODES: an operation-declared status still wins,
+		// exactly as it does for UPSTREAM_ERROR and BLOCKED above. Registering
+		// them stops the fleet from re-declaring the same three rows on every
+		// operation, and stops an undeclared throw from being served as 500.
+		//
+		// A platform-managed upstream service key the upstream refuses. With
+		// `auth.mode: "platform-managed"` the caller holds no credential, so 401
+		// ("re-authenticate") tells the caller to do something it cannot do, and
+		// 502 ("upstream is sick") promises a recovery that will never come. It is
+		// a deployment/config defect — the same class as MISSING_SECRET above,
+		// which is already an explicit 400 for that reason.
+		["UPSTREAM_AUTH_ERROR", 400],
+		// The upstream changed its response shape and the provider cannot
+		// normalize it. 502 because the fault is upstream of us, non-retryable
+		// because a retry returns the same broken payload.
+		["UPSTREAM_SCHEMA_ERROR", 502],
+		// Caller-side bad input rejected by the provider. The minority spellings
+		// (INVALID_INPUT / VALIDATION_ERROR / BAD_REQUEST) are deliberately not
+		// registered: they migrate to this spelling on the contract track, and
+		// registering them here would freeze the divergence.
+		["INVALID_REQUEST", 400],
 		["OCR_UNAVAILABLE", 503],
 		["UNSUPPORTED_OCR_BACKEND", 503],
 		["STT_UNAVAILABLE", 503],
 		["UNSUPPORTED_STT_BACKEND", 503],
 		["STATEFUL_FORWARDING_REPLAY_CACHE_FULL", 503],
+		// The engine is reachable-in-principle but not now: retryable, so the
+		// caller may retry once the engine recovers. Authentication, protocol
+		// mismatch, an unsupported mode and denied egress stay unmapped (500) and
+		// non-retryable: they are deployment or provider faults that no caller
+		// retry can clear, and a retryable 5xx there would turn one bad rollout
+		// into gateway-driven load.
+		["PROVIDER_ENGINE_UNAVAILABLE", 503],
 	]);
+
+// Canonical retryability for the fleet-consensus codes registered above.
+//
+// Runtime retryability still resolves as `instance option ?? declared ??
+// false`, so this map changes no served response: an undeclared throw already
+// defaults to false, which is what every entry here says. It exists so the
+// authoring lint can tell a provider that its declared `retryable` contradicts
+// the registered meaning of the code, instead of the fleet quietly shipping two
+// answers for the same code. Only codes whose retryability was fixed as part of
+// registration belong here — do not backfill opinions the SDK never made.
+export const SDK_CANONICAL_ERROR_CODE_RETRYABILITY: ReadonlyMap<string, boolean> = new Map<
+	string,
+	boolean
+>([
+	["UPSTREAM_AUTH_ERROR", false],
+	["UPSTREAM_SCHEMA_ERROR", false],
+	["INVALID_REQUEST", false],
+]);

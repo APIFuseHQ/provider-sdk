@@ -1,0 +1,62 @@
+// Provider deployment contract for the polyrepo reusable-deploy pipeline.
+//
+// Shape mirrors ProviderDeploymentConfigSchema in the monorepo-owned provider
+// registry package. This split repo intentionally keeps the deploy contract as a
+// plain object so the central deploy engine can validate it without making the
+// private registry package a runtime dependency here.
+//
+// Values are authored against the RESOLVED manifests
+// (infra/k8s/generated/providers/seoul-bike/*.yaml), not against the
+// monorepo-authored override keys, so regenerated manifests stay byte-identical.
+//
+// seoul-bike is a plain REST provider over the Seoul Open Data portal. It needs
+// Redis (whole-city station list is cached) and egress on TCP 8088, which is the
+// non-standard port the upstream openapi.seoul.go.kr endpoint listens on.
+
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// `replicas` is intentionally absent: when an HPA is present the generator
+// omits replicas from the Deployment spec, so declaring it here would drift
+// from what is actually applied (verified against
+// infra/k8s/generated/providers/seoul-bike/deployment.yaml).
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+  cache: { redis: { enabled: true } },
+  network: { additionalTcpPorts: [8088] },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

@@ -1,0 +1,45 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for korea-national-law at the cutover base
+// (infra/k8s/generated/providers/korea-national-law/ @ 86da75dfb). `replicas` is
+// intentionally absent: with an HPA present the generator omits replicas
+// from the Deployment spec, so declaring it here would drift.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

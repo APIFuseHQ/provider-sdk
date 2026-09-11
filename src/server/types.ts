@@ -25,6 +25,13 @@ export const OperationRequestSchema = z.object({
 	input: z.record(z.string(), z.unknown()),
 	connectionId: z.string().optional(),
 	connection: OperationConnectionSchema.optional(),
+	/**
+	 * Gateway-asserted principal scope: the organization id for customer
+	 * subjects, the service-account id for platform service accounts. Absent
+	 * on direct calls and self-test. Trusted exactly like `connectionId`; it is
+	 * never derived from caller headers or `input`.
+	 */
+	tenantId: z.string().optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	trace: z.record(z.string(), z.string()).optional(),
 });

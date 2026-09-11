@@ -1,0 +1,47 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors all resolved manifest surfaces for modu-parking. The HPA owns the
+// replica count, so replicas is intentionally absent. The generated workload
+// injects Redis and both network policies allow it on 6379 because server-mode
+// choice tokens require shared state. The FQDN policy allows only standard
+// HTTP(S) upstream ports, so no additional TCP ports are declared.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "50m",
+    memory: "128Mi",
+  },
+  cache: { redis: { enabled: true } },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

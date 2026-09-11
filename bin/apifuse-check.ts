@@ -15,6 +15,7 @@ import {
 	DECLARATION_INVALID_CODE,
 	validateFailClosedDeclaration,
 } from "../src/declaration-validation.js";
+import { redundantDeploymentDefaults } from "../src/cli/deployment-intent.js";
 import { isProviderError } from "../src/errors.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { lintProviderWithInformation, type ProviderLintMode } from "../src/lint.js";
@@ -140,6 +141,7 @@ export async function runChecks(
 	}
 	const provider = assertProviderDefinition(providerModule?.default);
 	const providerSourceFiles = collectProviderSourceFiles(providerRoot);
+	const localeCatalogEn = readEnglishLocaleCatalog(providerRoot);
 
 	return [
 		checkIndex(indexPath, provider),
@@ -147,8 +149,9 @@ export async function runChecks(
 		checkOperations(provider),
 		checkFixtures(provider),
 		checkSchemas(provider),
-		checkAuthoringLint(provider, providerSourceFiles, options.lintMode),
+		checkAuthoringLint(provider, providerSourceFiles, localeCatalogEn, options.lintMode),
 		checkProviderMetadata(provider),
+		await checkDeploymentIntent(providerRoot, provider),
 		checkDockerfile(dockerfilePath),
 		checkPackageJson(packageJsonPath),
 		checkProviderJson(providerJsonPath, packageJsonPath),
@@ -367,9 +370,30 @@ function checkSchemas(provider: ProviderDefinition | undefined): CheckResult {
 	};
 }
 
+/**
+ * Reads `locales/en.json` so the error-localization lint rules can resolve
+ * declared `messageKey`/`fixKey` values. An absent or unreadable catalog is
+ * reported as an empty catalog rather than as "no catalog": a provider that
+ * references locale keys without shipping `en.json` must still fail the
+ * missing-key rule instead of silently skipping it.
+ */
+function readEnglishLocaleCatalog(providerRoot: string): Record<string, unknown> {
+	const catalogPath = resolve(providerRoot, "locales", "en.json");
+	if (!existsSync(catalogPath)) return {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(catalogPath, "utf8"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
 function checkAuthoringLint(
 	provider: ProviderDefinition | undefined,
 	providerSourceFiles: Record<string, string>,
+	localeCatalogEn: Record<string, unknown>,
 	lintMode: ProviderLintMode = "official",
 ): CheckResult {
 	if (!provider) {
@@ -380,7 +404,7 @@ function checkAuthoringLint(
 	}
 
 	const { diagnostics, information } = lintProviderWithInformation(
-		{ ...provider, providerSourceFiles },
+		{ ...provider, providerSourceFiles, localeCatalogEn },
 		{ mode: lintMode },
 	);
 	const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
@@ -445,6 +469,64 @@ function checkProviderMetadata(provider: ProviderDefinition | undefined): CheckR
 						`runtime: ${provider.runtime}`,
 						`auth: ${provider.auth?.mode ?? "none"}`,
 					],
+	};
+}
+
+export const DEPLOYMENT_INTENT_CHECK_MESSAGE =
+	"Deployment intent lives only in defineProvider({ deployment }) without restating profile defaults";
+export const LEGACY_DEPLOY_FILE_RULE = "deployment/legacy-deploy-file";
+export const REDUNDANT_DEPLOYMENT_DEFAULT_RULE = "deployment/redundant-default";
+export const SPREAD_EXPORT_DEPLOYMENT_RULE = "deployment/spread-export";
+
+/**
+ * Deployment intent has one authored home: the `deployment` key on
+ * `defineProvider()`, carrying only the fields that differ from the runtime
+ * profile. A standalone `deploy.ts` is a legacy surface and a field that
+ * restates a profile default is noise the platform derives anyway. Both are
+ * reported as warnings while the fleet migrates (`apifuse
+ * migrate-deployment`); they become errors once no repository carries the
+ * legacy file.
+ */
+async function checkDeploymentIntent(
+	providerRoot: string,
+	provider: ProviderDefinition | undefined,
+): Promise<CheckResult> {
+	const details: string[] = [];
+	if (existsSync(resolve(providerRoot, "deploy.ts"))) {
+		details.push(
+			`WARN ${LEGACY_DEPLOY_FILE_RULE}: deploy.ts is a legacy deployment surface; run \`apifuse migrate-deployment .\` to move its non-default values into defineProvider({ deployment }) and delete the file.`,
+		);
+	}
+	// A `deployment` extra on `export default { ...provider, deployment }` is
+	// indistinguishable from a declaration key once the module is loaded, so
+	// inspect the source. The inspector needs the TypeScript compiler (a
+	// devDependency of provider repositories); without it this rule is skipped.
+	const indexPath = resolve(providerRoot, "index.ts");
+	if (existsSync(indexPath)) {
+		try {
+			const { findSpreadExportDeploymentProperty } = await import(
+				"../src/cli/migrate-deployment-intent.js"
+			);
+			const spread = findSpreadExportDeploymentProperty(readFileSync(indexPath, "utf8"), indexPath);
+			if (spread !== undefined) {
+				details.push(
+					`WARN ${SPREAD_EXPORT_DEPLOYMENT_RULE}: index.ts:${spread.line} attaches \`deployment\` to a spread default export; the only authored surface is the \`deployment\` key inside defineProvider({...}). Run \`apifuse migrate-deployment .\` to hoist it.`,
+				);
+			}
+		} catch {
+			// TypeScript unavailable: the source-shape rule cannot run here.
+		}
+	}
+	if (provider?.deployment !== undefined) {
+		for (const redundant of redundantDeploymentDefaults(provider.deployment)) {
+			details.push(`WARN ${REDUNDANT_DEPLOYMENT_DEFAULT_RULE}: ${redundant.message}`);
+		}
+	}
+	return {
+		message: DEPLOYMENT_INTENT_CHECK_MESSAGE,
+		// Warning-only during the fleet migration window.
+		passed: true,
+		details,
 	};
 }
 

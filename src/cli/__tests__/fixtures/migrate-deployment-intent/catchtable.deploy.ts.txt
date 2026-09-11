@@ -1,0 +1,47 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for catchtable
+// (infra/k8s/generated/providers/catchtable/). `replicas` is intentionally
+// absent because the HPA owns the replica count. The upstream hosts use only
+// standard HTTP(S) ports; proxy allocator and CDP pool ports are runtime
+// infrastructure, not provider-specific network overrides.
+const deployment = {
+  runtime: "browser",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "200m",
+    memory: "256Mi",
+  },
+  cache: { redis: { enabled: true } },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

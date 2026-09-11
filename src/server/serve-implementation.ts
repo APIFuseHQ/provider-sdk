@@ -1,3 +1,4 @@
+import { bindCapabilityRoot } from "../runtime/capability-telemetry.js";
 import { STATUS_CODES } from "node:http";
 import { readDiagnosticEnv, withDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -11,14 +12,22 @@ import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
 import {
-	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 	isEngineOwnedEnvName,
 	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
+	type ProviderEngineMode,
 	readEngineProxyCredentials,
 } from "../engine.js";
+import {
+	createEngineForMode,
+	isUnavailableProviderEngine,
+	type ProviderEngineModeResolution,
+	resolveProviderEngineMode,
+} from "../runtime/engine-mode.js";
+import { SDK_VERSION } from "./sdk-version.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
+import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -41,6 +50,15 @@ import {
 	localizeAuthTurn,
 	type ProviderLocaleCatalogMap,
 } from "../i18n/catalog.js";
+import {
+	acceptLanguageHeaderValue,
+	DEFAULT_PROVIDER_ERROR_LOCALE,
+	localizeProviderErrorText,
+	PROVIDER_ERROR_LOCALES,
+	type ProviderErrorMessageParams,
+	type ProviderErrorTextCandidate,
+	resolveProviderErrorLocale,
+} from "../i18n/error-messages.js";
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
@@ -53,6 +71,7 @@ import {
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
 import { createProviderCache } from "../runtime/cache.js";
+import { bindCacheTelemetry, CacheTelemetryCollector } from "../runtime/cache-telemetry.js";
 import type { HandleTelemetryEvent } from "../handle.js";
 import { createHandleContext } from "../runtime/handle.js";
 import { createCredentialContext } from "../runtime/credential.js";
@@ -86,6 +105,7 @@ import { HttpTelemetryCollector, type HttpTelemetryLogPayload } from "../runtime
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
+import { bindOcrTelemetry, OcrTelemetryCollector } from "../runtime/ocr-telemetry.js";
 import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
@@ -129,10 +149,22 @@ import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
+import {
+	StateTelemetryCollector,
+	instrumentProviderRuntimeState,
+} from "../runtime/state-telemetry.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
+import { StealthTelemetryCollector } from "../runtime/stealth-telemetry.js";
+import { BrowserTelemetryCollector } from "../runtime/browser-telemetry.js";
+import {
+	bindBrowserTelemetry,
+	isSupportedBrowserBinding,
+	warnUnsupportedBrowserBinding,
+} from "../runtime/browser-telemetry-binding.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
+import { bindSttTelemetry, SttTelemetryCollector } from "../runtime/stt-telemetry.js";
 import {
 	createTraceContext,
 	getTraceRecorder,
@@ -174,6 +206,7 @@ import type {
 	ProviderErrorStatus,
 	ProviderFilesContext,
 	ProviderRuntimeState,
+	ProviderRuntimeTarget,
 	ProviderStreamEvent,
 	ResolverContext,
 	StealthClient,
@@ -241,7 +274,6 @@ function providerErrorCode(error: unknown): string | undefined {
 	}
 }
 
-const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpTelemetryCollector>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
 const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
@@ -274,6 +306,22 @@ export const ProviderServerStatefulForwardEnvelopeSchema = z
 		}).strict(),
 	})
 	.strict();
+
+// Inbound compatibility boundary for rolling deploys, mirroring the outbound
+// one in stateful-provider-owner-forwarder.ts: emitted envelopes stay strict
+// (above), while a received envelope's nested operation request keeps the
+// gateway route's tolerance and strips unknown keys. A source pod on a newer
+// SDK carrying an additive OperationRequestSchema field (tenantId, #164) must
+// not be rejected with STATEFUL_FORWARDING_ENVELOPE_INVALID by an owner pod
+// that predates the field: the rejection is terminal for the operation and the
+// two pods coexist for the whole rolling update. The envelope's own keys stay
+// strict on both sides, because they are protocol rather than payload.
+const ReceivedStatefulForwardEnvelopeSchema =
+	ProviderServerStatefulForwardEnvelopeSchema.extend({
+		operationRequest: z.object(
+			ProviderServerStatefulForwardEnvelopeSchema.shape.operationRequest.shape,
+		),
+	});
 
 export type ProviderServerStatefulForwardEnvelope = Readonly<
 	z.infer<typeof ProviderServerStatefulForwardEnvelopeSchema>
@@ -633,12 +681,17 @@ function createStealthChallengeDetection(
 						async solve(challenge, transport, solveSignal) {
 							const resolver = resolverRuntime.bindResolverSignal(
 								(resolverOverride
-									? bindResolverTelemetry(resolverOverride, resolverOptions.telemetry)
+									? bindResolverTelemetry(
+											resolverOverride,
+											resolverOptions.telemetry,
+											resolverOptions.browserTelemetry,
+										)
 									: undefined) ??
 									resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
 										allowedHosts: resolverOptions.allowedHosts,
 										cache: resolverOptions.cache,
 										telemetry: resolverOptions.telemetry,
+										browserTelemetry: resolverOptions.browserTelemetry,
 										identityScope: resolverOptions.identityScope,
 										// No proxyIntent: the transport is already bound to the initiating
 										// request's lease, and a second identity resolution would allocate
@@ -773,12 +826,17 @@ function resolveOperationConnectionId(
 	// absent so it can never override a valid id or key a real scope. Requests
 	// without any usable id fall back to the documented missing-connection
 	// sentinel scope instead of scoping context/affinity/state under "".
-	return (
-		normalizeConnectionId(request.connection?.id) ?? normalizeConnectionId(request.connectionId)
-	);
+	return normalizeIdentifier(request.connection?.id) ?? normalizeIdentifier(request.connectionId);
 }
 
-function normalizeConnectionId(id: string | undefined): string | undefined {
+function resolveOperationTenantId(request: Pick<OperationRequest, "tenantId">): string | undefined {
+	// Only the gateway-asserted envelope field is consulted; caller headers can
+	// never populate the principal scope. Same rule as connection ids: "" is a
+	// malformed identifier, not a principal.
+	return normalizeIdentifier(request.tenantId);
+}
+
+function normalizeIdentifier(id: string | undefined): string | undefined {
 	return id === "" ? undefined : id;
 }
 
@@ -789,12 +847,19 @@ function providerSecretNames(provider: ProviderDefinition): string[] {
 }
 
 type RequestScopeContext = {
+	run<T>(fn: () => Promise<T>): Promise<T>;
 	redact: DiagnosticRedactor;
 	trace: RuntimeTraceContext;
 	telemetry: RequestTelemetry;
 	resolverTelemetry: ResolverTelemetryCollector;
 	nativeTelemetry: NativeTelemetryCollector;
 	httpTelemetry: HttpTelemetryCollector;
+	stealthTelemetry: StealthTelemetryCollector;
+	ocrTelemetry: OcrTelemetryCollector;
+	sttTelemetry: SttTelemetryCollector;
+	browserTelemetry: BrowserTelemetryCollector;
+	cacheTelemetry: CacheTelemetryCollector;
+	stateTelemetry: StateTelemetryCollector;
 };
 
 function createProviderContext(
@@ -822,7 +887,9 @@ function createProviderContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
-	const cache = createProviderCache({ providerId: provider.id });
+	const cache = createProviderCache(
+		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
+	);
 	const { capabilityModules } = options;
 	const resolverOptions = createResolverRuntimeOptions(
 		provider,
@@ -832,6 +899,7 @@ function createProviderContext(
 		proxyClientOptions,
 		stealthProfile,
 		scope.resolverTelemetry,
+		scope.browserTelemetry,
 	);
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
@@ -842,6 +910,7 @@ function createProviderContext(
 		signal,
 	);
 	const stealthClientOptions = {
+		stealthTelemetry: scope.stealthTelemetry,
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.telemetry.proxy,
@@ -877,11 +946,19 @@ function createProviderContext(
 		scopes: request.connection?.scopes,
 		values: request.connection?.secrets,
 	});
+	const operationTenantId = resolveOperationTenantId(request);
 	const requestContext = {
 		connectionId: resolveOperationConnectionId(request),
+		// Absent stays absent: an own property with an undefined value would
+		// change the shape of ctx.request for every existing consumer.
+		...(operationTenantId !== undefined ? { tenantId: operationTenantId } : {}),
 		headers: request.headers ?? {},
 	};
-	const requestState = state.forConnection(requestContext.connectionId);
+	const requestState = instrumentProviderRuntimeState(
+		state,
+		scope.stateTelemetry,
+		scope.redact,
+	).forConnection(requestContext.connectionId);
 	const bindings: ProviderEngineBindingCandidates = {
 		env,
 		credential,
@@ -908,6 +985,7 @@ function createProviderContext(
 						requireCdpPool: isProductionProviderBrowserMode(provider),
 						stealth: true,
 						engine: provider.browser?.engine,
+						telemetry: scope.browserTelemetry,
 					})
 				: createBrowserStub(),
 		...(provider.native
@@ -928,12 +1006,22 @@ function createProviderContext(
 			: {}),
 		trace: scope.trace,
 		auth: createAuthStub(),
-		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
-		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		ocr: bindCapabilityRoot(
+			bindOcrTelemetry(options.ocr ?? createOcrClientFromEnv(provider.ocr), scope.ocrTelemetry),
+			scope.run,
+		),
+		stt: bindCapabilityRoot(
+			bindSttTelemetry(options.stt ?? createSttClientFromEnv(provider.stt), scope.sttTelemetry),
+			scope.run,
+		),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						capabilityModules.resolver.createResolverClientFromEnv(
 							provider.resolver,
@@ -944,7 +1032,11 @@ function createProviderContext(
 				)
 			: bindResolverSignalWithoutRuntime(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
@@ -962,6 +1054,7 @@ function createProviderContext(
 		}),
 	};
 	const candidateHttp = bindings.http;
+	const candidateBrowser = bindings.browser;
 	const attached = options.engine.attach({ provider, bindings }) as ProviderContext;
 	const hostHttp = provider.http ? attached.http : undefined;
 	const supportedHostHttp = provider.http && isSupportedHttpBinding(hostHttp);
@@ -970,19 +1063,31 @@ function createProviderContext(
 		supportedHostHttp && hostHttp !== candidateHttp
 			? bindHttpTelemetry(hostHttp, scope.httpTelemetry)
 			: undefined;
-	const contextTarget = observedHttp
-		? new Proxy(attached, {
-				get(target, property, receiver) {
-					return property === "http" ? observedHttp : Reflect.get(target, property, receiver);
-				},
-			})
-		: provider.http && !supportedHostHttp
+	const hostBrowser = provider.runtime === "browser" ? attached.browser : undefined;
+	const supportedHostBrowser =
+		provider.runtime === "browser" && isSupportedBrowserBinding(hostBrowser);
+	if (provider.runtime === "browser" && !supportedHostBrowser) warnUnsupportedBrowserBinding();
+	const observedBrowser =
+		supportedHostBrowser && hostBrowser !== candidateBrowser
+			? bindBrowserTelemetry(hostBrowser, scope.browserTelemetry)
+			: undefined;
+	const contextTarget =
+		observedBrowser || observedHttp
 			? new Proxy(attached, {
 					get(target, property, receiver) {
-						return property === "http" ? undefined : Reflect.get(target, property, receiver);
+						if (property === "http" && observedHttp) return observedHttp;
+						if (property === "http" && provider.http && !supportedHostHttp) return undefined;
+						if (property === "browser" && observedBrowser) return observedBrowser;
+						return Reflect.get(target, property, receiver);
 					},
 				})
-			: attached;
+			: provider.http && !supportedHostHttp
+				? new Proxy(attached, {
+						get(target, property, receiver) {
+							return property === "http" ? undefined : Reflect.get(target, property, receiver);
+						},
+					})
+				: attached;
 	const context = wrapWithInstrumentation(contextTarget);
 	retryResponseMeta.set(context, scope.httpTelemetry);
 	return context;
@@ -1099,7 +1204,9 @@ function createAuthFlowContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
-	const cache = createProviderCache({ providerId: provider.id });
+	const cache = createProviderCache(
+		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
+	);
 	const { capabilityModules } = options;
 	const resolverOptions = createResolverRuntimeOptions(
 		provider,
@@ -1109,6 +1216,7 @@ function createAuthFlowContext(
 		proxyClientOptions,
 		stealthProfile,
 		scope.resolverTelemetry,
+		scope.browserTelemetry,
 	);
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
@@ -1119,6 +1227,7 @@ function createAuthFlowContext(
 		signal,
 	);
 	const stealthClientOptions = {
+		stealthTelemetry: scope.stealthTelemetry,
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.telemetry.proxy,
@@ -1167,12 +1276,28 @@ function createAuthFlowContext(
 			...(signal ? { signal } : {}),
 			httpTelemetry: scope.httpTelemetry,
 		}),
-		state: state.forConnection(resolveOperationConnectionId(request)),
+		state: instrumentProviderRuntimeState(
+			state,
+			scope.stateTelemetry,
+			scope.redact,
+		).forConnection(resolveOperationConnectionId(request)),
 		stealth: stealthBaseUrl
 			? capabilityModules.stealth
 				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
 				: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
 			: createStealthStub(),
+		browser:
+			provider.runtime === "browser"
+				? capabilityModules.browser!.createBrowserClient({
+						allowedHosts: provider.allowedHosts,
+						cdpUrl: readDiagnosticEnv("APIFUSE__CDP_POOL__URL"),
+						headless: true,
+						requireCdpPool: isProductionProviderBrowserMode(provider),
+						stealth: true,
+						engine: provider.browser?.engine,
+						telemetry: scope.browserTelemetry,
+					})
+				: createBrowserStub(),
 		...(provider.native
 			? {
 					native: {
@@ -1195,12 +1320,22 @@ function createAuthFlowContext(
 		]),
 		credential,
 		context: flowContextStore.context,
-		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
-		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		ocr: bindCapabilityRoot(
+			bindOcrTelemetry(options.ocr ?? createOcrClientFromEnv(provider.ocr), scope.ocrTelemetry),
+			scope.run,
+		),
+		stt: bindCapabilityRoot(
+			bindSttTelemetry(options.stt ?? createSttClientFromEnv(provider.stt), scope.sttTelemetry),
+			scope.run,
+		),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						capabilityModules.resolver.createResolverClientFromEnv(
 							provider.resolver,
@@ -1211,7 +1346,11 @@ function createAuthFlowContext(
 				)
 			: bindResolverSignalWithoutRuntime(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
@@ -1275,6 +1414,7 @@ export type ProviderServerLogEvent =
 			retryable?: boolean;
 			providerObservability?: ProviderErrorObservability;
 			causeChain?: ProviderErrorCauseFrame[];
+			stack?: string[];
 			signal?: "unregistered_provider_error_code";
 			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
@@ -1284,6 +1424,13 @@ export type ProviderServerLogEvent =
 			event: "provider_secrets_missing";
 			providerId: string;
 			missingSecrets: string[];
+	  }
+	| {
+			/** Emitted once at boot when `locales/en.json` exists but cannot be read. */
+			level: "warn";
+			event: "provider_locale_catalogs_unavailable";
+			providerId: string;
+			reason: string;
 	  }
 	| ({
 			level: "info";
@@ -1308,6 +1455,27 @@ export type ProviderServerLogEvent =
 			errorClass: string;
 			message: string;
 	  }
+	| {
+			/** `warn` when the requested attachment could not be honoured, otherwise `info`. */
+			level: "info" | "warn";
+			event: "provider_engine_mode";
+			providerId: string;
+			/** Resolved attachment; `custom` for an opaque host engine. */
+			mode: ProviderEngineMode | "custom";
+			source: "engine" | "env" | "option" | "default";
+			/** True for every non-remote attachment, whose removal is scheduled by ADR-0011. */
+			deprecated: boolean;
+			/** False when the engine refuses to attach; `/readyz` reports 503. */
+			attached: boolean;
+			sdkVersion: string;
+			runtimeTarget?: ProviderRuntimeTarget;
+			/**
+			 * Non-fatal selection findings, e.g. `invalid_env_value`,
+			 * `env_overrode_option`, `engine_object_overrode_requested_mode`,
+			 * `engine_env_ignored`. Absent when the selection was unambiguous.
+			 */
+			warnings?: readonly string[];
+	  }
 	| SelfTestCancellationLogEvent;
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
@@ -1316,6 +1484,17 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	logger?: ProviderServerLogger;
 	/** Capability attachment boundary. Defaults to the local in-process engine. */
 	engine?: ProviderEngine;
+	/**
+	 * Explicit engine attachment mode. Lowest precedence of the three inputs:
+	 * an explicit `engine` object wins, then `APIFUSE__ENGINE__MODE` (the
+	 * deployment outranks provider code), then this option, then the in-process
+	 * default. Disagreement is never fatal — it is reported on the
+	 * `provider_engine_mode` boot event (`env_overrode_option`,
+	 * `engine_object_overrode_requested_mode`), which only `serve` emits. A value
+	 * that is not a known mode throws `ValidationError`, because unlike the env it
+	 * can only come from calling code.
+	 */
+	engineMode?: ProviderEngineMode;
 	/** Request-file resolver supplied by the engine host when `files` is declared. */
 	files?: ProviderFilesContext;
 	/** Optional provider-specific operation executor. Stateful providers use this to preserve provider-local runtime semantics. */
@@ -1339,6 +1518,15 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	 * resolver is reported as one custom invocation; its internal vendor work is not exposed.
 	 */
 	resolver?: ResolverContext;
+	/**
+	 * Pre-loaded provider locale catalogs used to localize auth turns and the
+	 * client-facing `message`/`fix` of provider errors.
+	 *
+	 * Defaults to reading `locales/{en,ko,ja}.json` from the provider directory
+	 * once at server construction. Supply this to bundle catalogs instead of
+	 * probing the filesystem, or to pin catalogs in tests.
+	 */
+	localeCatalogs?: ProviderLocaleCatalogMap;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
@@ -1433,11 +1621,116 @@ function publicErrorSource(error: unknown, category: ProviderErrorCategory): Pro
 	return sourceForCategory(category);
 }
 
+/**
+ * Serve-time inputs for localizing the client-facing error envelope.
+ *
+ * Only `error.message` and `error.fix` of the response body are localized.
+ * Logs, cause frames, OTLP attributes and the error-observability header keep
+ * the English literal the provider threw.
+ */
+type ErrorEnvelopeLocalization = {
+	readonly catalogs?: ProviderLocaleCatalogMap;
+	readonly locale: ProviderLocale;
+	readonly declaredErrorCode?: OperationErrorCode;
+};
+
+function localeKeyOption(error: unknown, key: "messageKey" | "fixKey"): string | undefined {
+	const value = providerErrorOption(error, key);
+	return typeof value === "string" ? value : undefined;
+}
+
+function declaredLocaleKey(
+	declaration: OperationErrorCode | undefined,
+	key: "messageKey" | "fixKey",
+): string | undefined {
+	const value = declaration?.[key];
+	return typeof value === "string" ? value : undefined;
+}
+
+function providerErrorParams(error: unknown): ProviderErrorMessageParams | undefined {
+	const params = providerErrorOption(error, "params");
+	return params !== null && typeof params === "object" && !Array.isArray(params)
+		? (params as ProviderErrorMessageParams)
+		: undefined;
+}
+
+/**
+ * Resolution order for one localized envelope field:
+ *
+ * 1. the throw site's `messageKey`/`fixKey`;
+ * 2. the declared `errorCodes[]` entry's key for the thrown code;
+ * 3. the derived `errors.<code>.<field>` convention;
+ * 4. the English literal the provider threw.
+ *
+ * Steps 2 and 3 are skipped for SDK-owned failures (transport, Zod, stateful
+ * deadline, SDK runtime codes): their text is the SDK's contract, and a
+ * provider catalog entry must not be able to relabel one. An explicit key on
+ * the thrown error still wins, because that is the provider deliberately
+ * describing an error it constructed itself.
+ */
+function localizedErrorField(
+	error: unknown,
+	field: "message" | "fix",
+	literal: string | undefined,
+	localization: ErrorEnvelopeLocalization | undefined,
+): string | undefined {
+	if (!localization?.catalogs) return literal;
+	const optionKey = field === "message" ? "messageKey" : "fixKey";
+	const candidates: ProviderErrorTextCandidate[] = [
+		{ kind: "key", key: localeKeyOption(error, optionKey) },
+	];
+	if (!sdkOwnsErrorResolution(error)) {
+		candidates.push(
+			{ kind: "key", key: declaredLocaleKey(localization.declaredErrorCode, optionKey) },
+			{ kind: "derived", code: providerErrorCode(error), field },
+		);
+	}
+	return localizeProviderErrorText({
+		catalogs: localization.catalogs,
+		locale: localization.locale,
+		candidates,
+		params: providerErrorParams(error),
+		fallback: literal,
+	});
+}
+
+/**
+ * Reads `accept-language` out of the request envelope's `headers` map.
+ *
+ * The gateway stamps the negotiated locale there for auth flows (it persists
+ * the start locale on the flow state so continue/poll turns stay in one
+ * language), and the operation route merges HTTP headers into the same map, so
+ * the envelope is the higher-precedence source.
+ */
+function requestBodyAcceptLanguage(rawBody: unknown): string | undefined {
+	if (!rawBody || typeof rawBody !== "object") return undefined;
+	const headers = Object.getOwnPropertyDescriptor(rawBody, "headers")?.value;
+	if (!headers || typeof headers !== "object" || Array.isArray(headers)) return undefined;
+	return acceptLanguageHeaderValue(headers as Record<string, unknown>);
+}
+
+function errorEnvelopeLocalization(options: {
+	readonly catalogs: ProviderLocaleCatalogMap | undefined;
+	readonly requestHeaders?: Headers;
+	readonly rawBody?: unknown;
+	readonly declaredErrorCode?: OperationErrorCode;
+}): ErrorEnvelopeLocalization {
+	return {
+		...(options.catalogs ? { catalogs: options.catalogs } : {}),
+		locale: resolveProviderErrorLocale(
+			requestBodyAcceptLanguage(options.rawBody),
+			options.requestHeaders?.get("accept-language"),
+		),
+		...(options.declaredErrorCode ? { declaredErrorCode: options.declaredErrorCode } : {}),
+	};
+}
+
 function toErrorResponse(
 	error: unknown,
 	requestId: string | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
 	redact?: DiagnosticRedactor,
+	localization?: ErrorEnvelopeLocalization,
 ): OperationErrorResponse {
 	const observability = observabilityDetails;
 	const source = publicErrorSource(error, observability.category);
@@ -1455,14 +1748,23 @@ function toErrorResponse(
 
 	if (isProviderError(error)) {
 		const details = providerErrorOption(error, "details");
+		const literalFix = providerErrorOption(error, "fix");
+		const fix = localizedErrorField(
+			error,
+			"fix",
+			typeof literalFix === "string" && literalFix.length > 0 ? literalFix : undefined,
+			localization,
+		);
+		const literalMessage = publicProviderErrorMessage(error);
 		return {
 			error: {
 				code: providerErrorCode(error) ?? "provider_error",
-				message: publicProviderErrorMessage(error),
+				message:
+					localizedErrorField(error, "message", literalMessage, localization) ?? literalMessage,
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
 				source,
-				...(providerErrorOption(error, "fix") ? { fix: providerErrorOption(error, "fix") } : {}),
+				...(fix ? { fix } : {}),
 				...(details !== undefined ? { details } : {}),
 			},
 		};
@@ -1729,6 +2031,11 @@ function publicProviderErrorMessage(error: ProviderError): string {
 		}
 		if (providerErrorCode(error) === "transport_timeout") return "Request timed out";
 		if (providerErrorCode(error) === "transport_network_error") return "Network error";
+		// Provider-local fault: no request was issued, so an upstream-flavored
+		// message would misattribute it (category is provider_error).
+		if (providerErrorCode(error) === "http_header_factory_failed") {
+			return "Request header preparation failed";
+		}
 		if (providerErrorCode(error) === "upstream_http_error" && error.status) {
 			return `Upstream request failed with status ${error.status}`;
 		}
@@ -1899,6 +2206,11 @@ function logProviderError(
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
 	const causeChain = providerErrorCauseChain(error, redact);
+	// Masked 500 bodies carry only errorClass, so the log is the sole channel
+	// that can locate the throw. Declared 5xx (502/504) are included too: their
+	// body carries code+message, but frame[0] is still the throw site inside
+	// provider code. 4xx failures keep the lean record.
+	const stack = status >= 500 ? providerErrorStackFrames(error, redact) : undefined;
 	const details = observabilityDetails;
 	const isUnregisteredProviderErrorCode =
 		status === 500 &&
@@ -1941,6 +2253,7 @@ function logProviderError(
 		errorClass: redactDiagnosticText(errorClass, redact),
 		message: sanitizeDiagnosticText(redactDiagnosticText(message, redact)),
 		...(causeChain ? { causeChain } : {}),
+		...(stack ? { stack } : {}),
 		...(providerObservability ? { providerObservability } : {}),
 		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
 		errorCategory: details.category,
@@ -2213,6 +2526,7 @@ function createRequestScope(input: {
 		),
 		finished: false,
 		staticValues: input.staticSensitiveValues,
+		register: sensitiveRegistry.add,
 	};
 	const traceConfig = withDiagnosticEnv(observeEnv, () => resolveTraceConfigFromEnv());
 	const details = {
@@ -2245,11 +2559,23 @@ function createRequestScope(input: {
 	const resolverCollector = new ResolverTelemetryCollector({ redact });
 	const nativeCollector = new NativeTelemetryCollector({ redact });
 	const httpCollector = new HttpTelemetryCollector({ redact });
+	const stealthCollector = new StealthTelemetryCollector({ redact });
+	const ocrCollector = new OcrTelemetryCollector({ redact });
+	const sttCollector = new SttTelemetryCollector({ redact });
+	const browserCollector = new BrowserTelemetryCollector({ redact });
+	const cacheTelemetry = new CacheTelemetryCollector({ redact });
+	const stateTelemetry = new StateTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
 	telemetry.register(nativeCollector);
 	telemetry.register(httpCollector);
+	telemetry.register(stealthCollector);
+	telemetry.register(browserCollector);
+	telemetry.register(ocrCollector);
+	telemetry.register(sttCollector);
+	telemetry.register(cacheTelemetry);
+	telemetry.register(stateTelemetry);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2333,6 +2659,12 @@ function createRequestScope(input: {
 		resolverTelemetry: resolverCollector,
 		nativeTelemetry: nativeCollector,
 		httpTelemetry: httpCollector,
+		stealthTelemetry: stealthCollector,
+		ocrTelemetry: ocrCollector,
+		sttTelemetry: sttCollector,
+		browserTelemetry: browserCollector,
+		cacheTelemetry,
+		stateTelemetry,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);
@@ -2891,42 +3223,44 @@ function toAuthFlowResponse(
 	};
 }
 
-function authFlowLocaleFromHeaders(headers?: Record<string, string>): ProviderLocale {
-	const header = Object.entries(headers ?? {}).find(
-		([key]) => key.toLowerCase() === "accept-language",
-	)?.[1];
-	for (const token of (header ?? "").split(",")) {
-		const language = token.trim().split(";")[0]?.split("-")[0]?.toLowerCase();
-		if (isAuthFlowLocale(language)) {
-			return language;
-		}
-	}
-	return "en";
-}
-
-function isAuthFlowLocale(value: string | undefined): value is ProviderLocale {
-	return value === "en" || value === "ko" || value === "ja";
-}
-
 function isAuthTurn(value: unknown): value is AuthTurn {
 	return !!value && typeof value === "object" && "kind" in value && "turnId" in value;
 }
 
-function loadAuthFlowLocaleCatalogs(
+/**
+ * Loads the provider's locale catalogs once, at `createServerApp` time.
+ *
+ * Only the locales that actually exist on disk are read: a provider with
+ * `en`+`ko` but no `ja.json` used to make the whole load throw and silently
+ * disable localization for every turn. Absence of catalogs is not an error —
+ * every localized field falls back to its English literal — but a catalog that
+ * exists and cannot be read is logged once so a packaging mistake is visible at
+ * boot instead of per request.
+ */
+function resolveProviderLocaleCatalogs(
 	provider: ProviderDefinition,
+	options: ProviderServerOptions,
+	logger: ProviderServerLogger,
 ): ProviderLocaleCatalogMap | undefined {
+	if (options.localeCatalogs) return options.localeCatalogs;
 	for (const providerDir of [
 		process.cwd(),
 		join(process.cwd(), "providers", provider.id),
 		join(process.cwd(), "providers-staging", provider.id),
 	]) {
-		if (!existsSync(join(providerDir, "locales", "en.json"))) continue;
+		const locales = PROVIDER_ERROR_LOCALES.filter((locale) =>
+			existsSync(join(providerDir, "locales", `${locale}.json`)),
+		);
+		if (!locales.includes(DEFAULT_PROVIDER_ERROR_LOCALE)) continue;
 		try {
-			return loadProviderLocaleCatalogs({
-				providerDir,
-				locales: AUTH_FLOW_LOCALES,
+			return loadProviderLocaleCatalogs({ providerDir, locales });
+		} catch (error) {
+			logger({
+				level: "warn",
+				event: "provider_locale_catalogs_unavailable",
+				providerId: provider.id,
+				reason: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error)),
 			});
-		} catch {
 			return undefined;
 		}
 	}
@@ -2934,16 +3268,12 @@ function loadAuthFlowLocaleCatalogs(
 }
 
 function materializeAuthFlowTurn(
-	provider: ProviderDefinition,
-	request: AuthFlowRequest,
 	turn: AuthTurn,
+	catalogs: ProviderLocaleCatalogMap | undefined,
+	locale: ProviderLocale,
 ): AuthTurn {
-	const catalogs = loadAuthFlowLocaleCatalogs(provider);
 	if (!catalogs) return turn;
-	return localizeAuthTurn(turn, {
-		catalogs,
-		locale: authFlowLocaleFromHeaders(request.headers),
-	});
+	return localizeAuthTurn(turn, { catalogs, locale });
 }
 
 function withAuthRequestHeaders(request: AuthFlowRequest, headers: Headers): AuthFlowRequest {
@@ -3054,6 +3384,14 @@ async function handleAuthFlow(
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
 	scope: RequestScopeContext,
+	/**
+	 * Negotiated once per request by the route so a successful turn and an error
+	 * envelope from the same request can never disagree. `withAuthRequestHeaders`
+	 * lets the HTTP header shadow the envelope's `Accept-Language`, but the
+	 * gateway stamps the flow's start locale into the envelope precisely so
+	 * continue/poll turns stay in one language, so the envelope wins here.
+	 */
+	locale: ProviderLocale,
 	signal?: AbortSignal,
 ): Promise<Response | AuthFlowResponse> {
 	const flow = provider.auth?.flow;
@@ -3110,7 +3448,7 @@ async function handleAuthFlow(
 			!(result instanceof Response) &&
 			!(result instanceof ReadableStream) &&
 			isAuthTurn(result)
-				? materializeAuthFlowTurn(provider, request, result)
+				? materializeAuthFlowTurn(result, options.localeCatalogs, locale)
 				: result;
 		return toAuthFlowResponse(materializedResult, getPatch(), getEngineState());
 	} catch (error) {
@@ -3256,7 +3594,7 @@ function parseStatefulForwardingEnvelope(
 	rawBody: unknown,
 	redact: DiagnosticRedactor,
 ): ProviderServerStatefulForwardEnvelope {
-	const parsed = ProviderServerStatefulForwardEnvelopeSchema.safeParse(rawBody);
+	const parsed = ReceivedStatefulForwardEnvelopeSchema.safeParse(rawBody);
 	if (parsed.success) return parsed.data;
 	throw new ProviderError("Stateful forwarding envelope is invalid.", {
 		code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
@@ -3306,16 +3644,78 @@ export function createServerApp<TContext extends Partial<ProviderContext> = Prov
 	);
 }
 
+/**
+ * Resolve the engine once at boot, before any route exists. An explicit engine
+ * object is used as given; otherwise the resolved mode selects the engine.
+ *
+ * Deliberately never throws for deployment-authored input: a mode this release
+ * cannot serve yields an engine that fails every request and a `/readyz` 503,
+ * because a boot crash would trade a structured signal for CrashLoopBackOff
+ * across the fleet (same trade-off as `provider_secrets_missing` above).
+ */
+function resolveServerEngine(serverOptions: ProviderServerOptions): {
+	engine: ProviderEngine;
+	resolution: ProviderEngineModeResolution;
+} {
+	const resolution = resolveProviderEngineMode({
+		option: serverOptions.engineMode,
+		engine: serverOptions.engine,
+	});
+	if (serverOptions.engine !== undefined) return { engine: serverOptions.engine, resolution };
+	return { engine: createEngineForMode(resolution.mode), resolution };
+}
+
+/**
+ * `engine_env_ignored` is expected for the whole migration window: the manifest
+ * generator projects the remote engine env fleet-wide before any mode flips, so
+ * escalating on it would turn every healthy boot into a warn line. The
+ * disagreement warnings still escalate.
+ */
+const ENGINE_MODE_INFO_WARNINGS: ReadonlySet<string> = new Set(["engine_env_ignored"]);
+
+function engineModeLogEvent(
+	provider: ProviderDefinition,
+	resolution: ProviderEngineModeResolution,
+	attached: boolean,
+): ProviderServerLogEvent {
+	const escalating = resolution.warnings.filter(
+		(warning) => !ENGINE_MODE_INFO_WARNINGS.has(warning),
+	);
+	return {
+		level: attached && escalating.length === 0 ? "info" : "warn",
+		event: "provider_engine_mode",
+		providerId: provider.id,
+		mode: resolution.mode,
+		source: resolution.source,
+		deprecated: resolution.deprecated,
+		attached,
+		sdkVersion: SDK_VERSION,
+		...(provider.runtimeTarget === undefined ? {} : { runtimeTarget: provider.runtimeTarget }),
+		...(resolution.warnings.length === 0 ? {} : { warnings: resolution.warnings }),
+	};
+}
+
 function createServerAppWithCapabilityModules(
 	provider: ProviderDefinition,
 	serverOptions: ProviderServerOptions,
 	capabilityModules: ProviderCapabilityModules,
 ): Hono {
+	const engineSelection = resolveServerEngine(serverOptions);
+	// Read the provider's locale catalogs once here rather than per turn: the
+	// previous auth-flow loader re-read all three JSON files on every turn and
+	// threw the whole map away when one locale file was absent.
+	const localeCatalogs = resolveProviderLocaleCatalogs(
+		provider,
+		serverOptions,
+		serverOptions.logger ?? defaultProviderServerLogger,
+	);
 	const options: ProviderServerRuntimeOptions = {
 		...serverOptions,
+		...(localeCatalogs ? { localeCatalogs } : {}),
 		capabilityModules,
-		engine: serverOptions.engine ?? createInProcessProviderEngine(),
+		engine: engineSelection.engine,
 	};
+	const engineAttached = !isUnavailableProviderEngine(options.engine);
 	const app = new Hono();
 	// Compile the startup inventory once, composed with the shared outside-context fallback.
 	const staticSensitiveValues = compileProcessDiagnosticSensitiveValues(
@@ -3358,17 +3758,52 @@ function createServerAppWithCapabilityModules(
 		const error = new ProviderError("Not found", { code: "not_found", retryable: false });
 		const observabilityDetails = errorObservabilityDetails(error);
 		return responseWithErrorObservability(
-			c.json(toErrorResponse(error, undefined, observabilityDetails), 404),
+			c.json(
+				toErrorResponse(
+					error,
+					undefined,
+					observabilityDetails,
+					undefined,
+					errorEnvelopeLocalization({
+						catalogs: localeCatalogs,
+						requestHeaders: c.req.raw.headers,
+					}),
+				),
+				404,
+			),
 			observabilityDetails,
 		);
 	});
 
+	// Liveness. Deliberately static and engine-blind: generated manifests point
+	// liveness at this route, so making it depend on engine reachability would
+	// restart every provider pod on one engine incident. Engine state belongs to
+	// /readyz, which manifests wire to readiness and startup only.
 	app.get("/health", (c) =>
 		c.json({
 			status: "ok",
 			provider: provider.id,
 			version: provider.version,
 		}),
+	);
+
+	// Readiness. Reports the boot-resolved attachment; does not probe the engine
+	// per call, so it cannot amplify an engine incident into request load.
+	app.get("/readyz", (c) =>
+		c.json(
+			{
+				status: engineAttached ? "ok" : "unavailable",
+				provider: provider.id,
+				version: provider.version,
+				engine: {
+					// The resolution, not the raw engine `kind`: normalized, so this
+					// body and the `provider_engine_mode` boot event never disagree.
+					mode: engineSelection.resolution.mode,
+					attached: engineAttached,
+				},
+			},
+			engineAttached ? 200 : 503,
+		),
 	);
 
 	app.post(STATEFUL_INTERNAL_OPERATIONS_ROUTE, async (c) => {
@@ -3501,7 +3936,10 @@ function createServerAppWithCapabilityModules(
 				requestId: request.requestId,
 				operationId,
 				headers: request.headers ?? {},
-				correlation: { connectionId: envelope.connectionId },
+				correlation: {
+					connectionId: envelope.connectionId,
+					tenantId: resolveOperationTenantId(request),
+				},
 			});
 			const response = await requestScope.run(async () => {
 				const ctx = createProviderContext(
@@ -3546,7 +3984,18 @@ function createServerAppWithCapabilityModules(
 			});
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			const response = c.json(
-				toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+				toErrorResponse(
+					error,
+					requestId,
+					observabilityDetails,
+					requestScope.redact,
+					errorEnvelopeLocalization({
+						catalogs: localeCatalogs,
+						requestHeaders: c.req.raw.headers,
+						rawBody,
+						...(declaredErrorCode ? { declaredErrorCode } : {}),
+					}),
+				),
 				status,
 			);
 			return finalizeRequestResponse(requestScope, response, {
@@ -3583,7 +4032,10 @@ function createServerAppWithCapabilityModules(
 			requestScope.enrich({
 				requestId: body.requestId,
 				headers: body.headers,
-				correlation: { connectionId: resolveOperationConnectionId(body) },
+				correlation: {
+					connectionId: resolveOperationConnectionId(body),
+					tenantId: resolveOperationTenantId(body),
+				},
 			});
 			const streaming = provider.operations[operation]?.transport?.kind
 				? provider.operations[operation]?.transport?.kind !== "json"
@@ -3624,7 +4076,18 @@ function createServerAppWithCapabilityModules(
 			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			const response = c.json(
-				toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+				toErrorResponse(
+					error,
+					requestId,
+					observabilityDetails,
+					requestScope.redact,
+					errorEnvelopeLocalization({
+						catalogs: localeCatalogs,
+						requestHeaders: c.req.raw.headers,
+						rawBody,
+						...(declaredErrorCode ? { declaredErrorCode } : {}),
+					}),
+				),
 				status,
 			);
 			return finalizeRequestResponse(requestScope, response, {
@@ -3650,6 +4113,12 @@ function createServerAppWithCapabilityModules(
 	for (const { path, flowRoute, logRoute } of authRoutes) {
 		app.post(path, async (c) => {
 			let rawBody: unknown;
+			// Negotiated once and shared by the success and failure paths so an
+			// auth turn and an error envelope from the same request agree.
+			let localization = errorEnvelopeLocalization({
+				catalogs: localeCatalogs,
+				requestHeaders: c.req.raw.headers,
+			});
 			const requestScope = createRequestScope({
 				provider,
 				staticSensitiveValues,
@@ -3664,6 +4133,11 @@ function createServerAppWithCapabilityModules(
 					.clone()
 					.json()
 					.catch(() => undefined);
+				localization = errorEnvelopeLocalization({
+					catalogs: localeCatalogs,
+					requestHeaders: c.req.raw.headers,
+					rawBody,
+				});
 				requestScope.seedCredentials(rawBody, "auth");
 				const body = withAuthRequestHeaders(
 					AuthFlowRequestSchema.parse(rawBody),
@@ -3676,7 +4150,7 @@ function createServerAppWithCapabilityModules(
 					correlation: {
 						connectionId: resolveOperationConnectionId(body),
 						flowId: body.flowId,
-						tenantId: body.tenantId,
+						tenantId: normalizeIdentifier(body.tenantId),
 						requestedProviderId:
 							body.providerId !== undefined && body.providerId !== provider.id
 								? body.providerId
@@ -3691,6 +4165,7 @@ function createServerAppWithCapabilityModules(
 						options,
 						state,
 						requestScope as RequestScope,
+						localization.locale,
 						c.req.raw.signal,
 					);
 					return handled instanceof Response ? handled : c.json(handled);
@@ -3705,7 +4180,13 @@ function createServerAppWithCapabilityModules(
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 				const observabilityDetails = errorObservabilityDetails(error);
 				const response = c.json(
-					toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+					toErrorResponse(
+						error,
+						requestId,
+						observabilityDetails,
+						requestScope.redact,
+						localization,
+					),
 					status,
 				);
 				return finalizeRequestResponse(requestScope, response, {
@@ -3842,13 +4323,18 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 	);
 	const configuredSignals = resolveShutdownSignals(options.shutdown?.signals ?? true);
 	const selfTestSecrets = resolveSelfTestMasterSecrets();
+	// Resolve the engine here so the boot event reports the truthful source
+	// (option/env/default) and the app is handed the engine already selected —
+	// one resolution per process, not one per app construction.
+	const engineSelection = resolveServerEngine(options as unknown as ProviderServerOptions);
 	const serverAppOptions: ProviderServerOptions<TContext> = {
 		logger: options.logger,
-		engine: options.engine,
+		engine: engineSelection.engine,
 		files: options.files,
 		ocr: options.ocr,
 		stt: options.stt,
 		resolver: options.resolver,
+		localeCatalogs: options.localeCatalogs,
 		state: options.state,
 		allowMemoryStateFallback: options.allowMemoryStateFallback,
 		operationExecutor: options.operationExecutor,
@@ -3859,6 +4345,15 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 		createServerAppAsync(provider, serverAppOptions),
 		selfTestSecrets ? import("./self-test.js") : undefined,
 	]);
+	// One structured line per process boot, before the listener binds: the fleet
+	// audit (ADR-0011 migration) counts these.
+	logger(
+		engineModeLogEvent(
+			provider as unknown as ProviderDefinition,
+			engineSelection.resolution,
+			!isUnavailableProviderEngine(engineSelection.engine),
+		),
+	);
 
 	const servers: BunServerHandle[] = [];
 	try {

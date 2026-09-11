@@ -119,10 +119,7 @@ type RedisBackend = {
 
 const redisBackends = new Map<string, RedisBackend>();
 
-function getRedisBackend(
-	redisUrl: string,
-	injectedRedis?: ProviderRedisClient,
-): RedisBackend {
+function getRedisBackend(redisUrl: string, injectedRedis?: ProviderRedisClient): RedisBackend {
 	const existing = redisBackends.get(redisUrl);
 	if (existing) return existing;
 	const redis =
@@ -287,20 +284,11 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 	) {}
 
 	private redisKey(key: string): string {
-		return providerStateKey(
-			this.providerId,
-			this.namespaceName,
-			this.scopeDiscriminator,
-			key,
-		);
+		return providerStateKey(this.providerId, this.namespaceName, this.scopeDiscriminator, key);
 	}
 
 	private statePrefix(): string {
-		return providerStatePrefix(
-			this.providerId,
-			this.namespaceName,
-			this.scopeDiscriminator,
-		);
+		return providerStatePrefix(this.providerId, this.namespaceName, this.scopeDiscriminator);
 	}
 
 	private indexKey(): string {
@@ -308,11 +296,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		// any state key (including "__index"), so a suffix inside the namespace
 		// could turn the ZSET into a string and break every subsequent write.
 		const namespaceIdentity = Buffer.from(
-			providerStatePrefix(
-				this.providerId,
-				this.namespaceName,
-				this.scopeDiscriminator,
-			),
+			providerStatePrefix(this.providerId, this.namespaceName, this.scopeDiscriminator),
 			"utf8",
 		).toString("base64url");
 		return `${REDIS_STATE_PREFIX}:index:${namespaceIdentity}`;
@@ -342,15 +326,17 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 	private enforceValueSize(value: unknown): void {
 		const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
 		if (bytes > this.options.maxValueBytes) {
-			throw new UnsupportedProviderStateError(
+			throw stateViolationError(
 				`Provider runtime state value exceeds maxValueBytes (${bytes} > ${this.options.maxValueBytes})`,
+				"size",
 			);
 		}
 	}
 
 	private quotaExceeded(): UnsupportedProviderStateError {
-		return new UnsupportedProviderStateError(
+		return stateViolationError(
 			`Provider runtime state namespace quota exceeded (${this.options.maxEntries + 1} > ${this.options.maxEntries})`,
+			"quota",
 		);
 	}
 
@@ -362,8 +348,9 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		const ttlMs = parseStateDurationMs(ttl ?? this.options.defaultTtl);
 		const maxTtlMs = parseStateDurationMs(this.options.maxTtl);
 		if (ttlMs > maxTtlMs) {
-			throw new UnsupportedProviderStateError(
+			throw stateViolationError(
 				`Provider runtime state ttl exceeds maxTtl (${ttlMs} > ${maxTtlMs})`,
+				"ttl",
 			);
 		}
 		const expiresAtMs = Date.now() + ttlMs;
@@ -376,7 +363,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 
 	async list<T>(options?: { limit?: number; prefix?: string }): Promise<StateValue<T>[]> {
 		const requestedLimit = Math.max(0, options?.limit ?? this.options.maxEntries);
-		if (requestedLimit === 0) return [];
+		if (requestedLimit === 0) return recordStateRedisNoop([]);
 		const keys = await this.indexedKeys(this.options.maxEntries);
 		if (keys.length === 0) return [];
 		const values = await withRequiredRedis(() => this.backend.redis.mget(keys));
@@ -453,12 +440,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		this.enforceValueSize(value);
 		const createdAt = new Date().toISOString();
 		const timing = this.writeTiming(options?.ttl);
-		const envelope = redisEnvelope(
-			value,
-			expectedVersion + 1,
-			createdAt,
-			timing.expiresAt,
-		);
+		const envelope = redisEnvelope(value, expectedVersion + 1, createdAt, timing.expiresAt);
 		await requireRedisReady(this.backend.redis);
 		const result = await withRequiredRedis(() =>
 			this.backend.redis.eval(
@@ -556,7 +538,32 @@ export class UnsupportedProviderStateError extends ProviderError {
 	constructor(message = "Provider runtime state is not available in this runtime") {
 		super(message, { code: "PROVIDER_STATE_UNSUPPORTED" });
 		this.name = "UnsupportedProviderStateError";
+		stateViolationKinds.set(this, "unsupported");
 	}
+}
+
+// Keep the exact no-command result out of band, without inspecting caller options twice.
+const stateRedisNoopResults = new WeakSet<object>();
+function recordStateRedisNoop<T extends object>(result: T): T {
+	stateRedisNoopResults.add(result);
+	return result;
+}
+export function isStateRedisNoop(result: unknown): boolean {
+	return result !== null && typeof result === "object" && stateRedisNoopResults.has(result);
+}
+
+type StateViolationKind = "quota" | "ttl" | "size" | "unsupported";
+const stateViolationKinds = new WeakMap<object, StateViolationKind>();
+function stateViolationError(
+	message: string,
+	kind: Exclude<StateViolationKind, "unsupported">,
+): UnsupportedProviderStateError {
+	const error = new UnsupportedProviderStateError(message);
+	stateViolationKinds.set(error, kind);
+	return error;
+}
+export function getStateViolation(error: unknown): StateViolationKind | undefined {
+	return error !== null && typeof error === "object" ? stateViolationKinds.get(error) : undefined;
 }
 
 class UnsupportedProviderStateNamespace implements ProviderStateNamespace {
@@ -619,8 +626,9 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 	private enforceValueSize(value: unknown): void {
 		const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
 		if (bytes > this.options.maxValueBytes) {
-			throw new UnsupportedProviderStateError(
+			throw stateViolationError(
 				`Provider runtime state value exceeds maxValueBytes (${bytes} > ${this.options.maxValueBytes})`,
+				"size",
 			);
 		}
 	}
@@ -630,13 +638,15 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 		const ttlMs = parseStateDurationMs(ttl ?? this.options.defaultTtl);
 		const maxTtlMs = parseStateDurationMs(this.options.maxTtl);
 		if (ttlMs > maxTtlMs) {
-			throw new UnsupportedProviderStateError(
+			throw stateViolationError(
 				`Provider runtime state ttl exceeds maxTtl (${ttlMs} > ${maxTtlMs})`,
+				"ttl",
 			);
 		}
 		if (!this.values.has(key) && this.values.size >= this.options.maxEntries) {
-			throw new UnsupportedProviderStateError(
+			throw stateViolationError(
 				`Provider runtime state namespace quota exceeded (${this.options.maxEntries + 1} > ${this.options.maxEntries})`,
+				"quota",
 			);
 		}
 	}
@@ -710,10 +720,7 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 			key,
 			value,
 			version: expectedVersion + 1,
-			expiresAt: resolveMemoryStateExpiresAt(
-				options?.ttl ?? this.options.defaultTtl,
-				this.now(),
-			),
+			expiresAt: resolveMemoryStateExpiresAt(options?.ttl ?? this.options.defaultTtl, this.now()),
 			createdAt: current?.createdAt ?? now,
 			updatedAt: now,
 		} satisfies StateValue<T>;
@@ -753,10 +760,7 @@ class MemoryProviderRuntimeState implements ProviderRuntimeState {
 	) {}
 
 	forConnection(connectionId: string | undefined): ProviderRuntimeState {
-		return new MemoryProviderRuntimeState(
-			this.backend,
-			connectionScopeDiscriminator(connectionId),
-		);
+		return new MemoryProviderRuntimeState(this.backend, connectionScopeDiscriminator(connectionId));
 	}
 
 	namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace {
@@ -771,10 +775,7 @@ class MemoryProviderRuntimeState implements ProviderRuntimeState {
 	}
 }
 
-function resolveMemoryStateExpiresAt(
-	ttl: StateWriteOptions["ttl"],
-	nowMs = Date.now(),
-): string {
+function resolveMemoryStateExpiresAt(ttl: StateWriteOptions["ttl"], nowMs = Date.now()): string {
 	const match = /^(\d+)(ms|s|m|h|d)$/.exec(ttl ?? "1h");
 	if (!match) return new Date(nowMs + 3_600_000).toISOString();
 	const amount = Number(match[1]);

@@ -916,11 +916,44 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 					`throw new ProviderError("upstream broke", { code: "UPSTREAM_ERROR" });`,
 					`throw new ProviderError("secret missing", { code: "MISSING_SECRET" });`,
 					`throw new ProviderError("relog", { code: "reauth_required" });`,
+					`throw new ProviderError("resign", { code: "http_header_factory_failed" });`,
 				].join("\n"),
 			}),
 		).filter(undeclaredRule);
 
 		expect(diagnostics).toEqual([]);
+	});
+
+	it("stays silent for the registered fleet-consensus codes", () => {
+		// Registering these is what lets 70+ provider repos stop repeating the
+		// same three errorCodes rows on every operation.
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"upstream/client.ts": [
+					`throw new ProviderError("key refused", { code: "UPSTREAM_AUTH_ERROR" });`,
+					`throw new ProviderError("shape drifted", { code: "UPSTREAM_SCHEMA_ERROR" });`,
+					`throw new ValidationError("bad input", { code: "INVALID_REQUEST" });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("still flags the minority spellings that migrate on the contract track", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"upstream/client.ts": [
+					`throw new ProviderError("shape drifted", { code: "UPSTREAM_SCHEMA_CHANGED" });`,
+					`throw new ValidationError("bad input", { code: "INVALID_INPUT" });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics.map((item) => item.message).join("\n")).toContain(
+			'"UPSTREAM_SCHEMA_CHANGED"',
+		);
+		expect(diagnostics.map((item) => item.message).join("\n")).toContain('"INVALID_INPUT"');
 	});
 
 	it("skips computed or dynamic codes silently", () => {
@@ -1007,6 +1040,137 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 		).filter(undeclaredRule);
 
 		expect(diagnostics).toHaveLength(1);
+	});
+});
+
+describe("lintProvider error-code declaration conflicts", () => {
+	const conflictRule = (item: { rule: string }) =>
+		item.rule === "error-code-status-conflicts-sdk" ||
+		item.rule === "error-code-retryable-conflicts-sdk";
+
+	function providerWithErrorCodes(
+		errorCodes: ReadonlyArray<{
+			code: string;
+			status?: number;
+			description: string;
+			retryable?: boolean;
+		}>,
+	) {
+		return lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			operations: {
+				lookup: {
+					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.lookup.description",
+					input: withDescriptionKey(z.object({}), "operations.lookup.input.description"),
+					output: withDescriptionKey(z.object({}), "operations.lookup.output.description"),
+					fixtures: { request: {}, response: {} },
+					errorCodes: [...errorCodes],
+				},
+			},
+		}).filter(conflictRule);
+	}
+
+	it("warns when a declared status contradicts the SDK mapping", () => {
+		const diagnostics = providerWithErrorCodes([
+			{
+				code: "UPSTREAM_AUTH_ERROR",
+				status: 502,
+				description: "Upstream refused the platform service key.",
+			},
+		]);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "error-code-status-conflicts-sdk",
+				level: "warn",
+				field: "operations.lookup.errorCodes[0].status",
+			}),
+		]);
+		expect(diagnostics[0]?.message).toContain('"UPSTREAM_AUTH_ERROR"');
+		expect(diagnostics[0]?.message).toContain("502");
+		expect(diagnostics[0]?.message).toContain("400");
+		// The message must say the declaration still wins, because it does — an
+		// author who reads "SDK-registered" as "SDK now decides" would otherwise
+		// believe a status changed under them.
+		expect(diagnostics[0]?.message).toContain("still wins at runtime");
+	});
+
+	it("warns when a declared retryable contradicts the SDK mapping", () => {
+		const diagnostics = providerWithErrorCodes([
+			{
+				code: "UPSTREAM_SCHEMA_ERROR",
+				status: 502,
+				description: "Upstream changed its response shape.",
+				retryable: true,
+			},
+		]);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "error-code-retryable-conflicts-sdk",
+				level: "warn",
+				field: "operations.lookup.errorCodes[0].retryable",
+			}),
+		]);
+		expect(diagnostics[0]?.message).toContain('"UPSTREAM_SCHEMA_ERROR"');
+		expect(diagnostics[0]?.message).toContain("retryable true");
+	});
+
+	it("reports both axes when status and retryable each diverge", () => {
+		const diagnostics = providerWithErrorCodes([
+			{
+				code: "UPSTREAM_SCHEMA_ERROR",
+				status: 400,
+				description: "Upstream changed its response shape.",
+				retryable: true,
+			},
+		]);
+
+		expect(diagnostics.map((item) => item.rule)).toEqual([
+			"error-code-status-conflicts-sdk",
+			"error-code-retryable-conflicts-sdk",
+		]);
+	});
+
+	it("stays silent when a declaration agrees with the SDK mapping", () => {
+		// Agreeing declarations keep documentation value and are not churn the
+		// fleet should be asked to make; only divergence is reported.
+		expect(
+			providerWithErrorCodes([
+				{
+					code: "UPSTREAM_SCHEMA_ERROR",
+					status: 502,
+					description: "Upstream changed its response shape.",
+					retryable: false,
+				},
+				{ code: "INVALID_REQUEST", status: 400, description: "Caller sent bad input." },
+				{ code: "UPSTREAM_ERROR", status: 502, description: "Upstream failed." },
+			]),
+		).toEqual([]);
+	});
+
+	it("stays silent for codes the SDK does not register and for omitted fields", () => {
+		expect(
+			providerWithErrorCodes([
+				{ code: "ITEM_SOLD_OUT", status: 409, description: "Upstream refused the purchase." },
+				{ code: "UPSTREAM_AUTH_ERROR", description: "Upstream refused the platform key." },
+				{ code: "UPSTREAM_SCHEMA_ERROR", description: "Upstream changed its response shape." },
+			]),
+		).toEqual([]);
+	});
+
+	it("leaves SDK runtime-owned codes to defineProvider", () => {
+		// For runtime-owned codes the declaration really is ignored, and
+		// defineProvider already says so; two messages about one line is worse
+		// than one.
+		expect(
+			providerWithErrorCodes([
+				{ code: "NOT_FOUND", status: 502, description: "Resource missing.", retryable: true },
+			]),
+		).toEqual([]);
 	});
 });
 
@@ -1097,5 +1261,161 @@ describe("flat operation safety lint", () => {
 	it("accepts an approval override that differs from the risk default", () => {
 		const diagnostics = providerWithOperation({ riskClass: "write", approval: "always" });
 		expect(diagnostics.some((item) => item.rule === "redundant-approval")).toBe(false);
+	});
+});
+
+describe("lintProvider browser-version-literal owned headers", () => {
+	const OWNED_HEADER_LITERALS = `
+export const HEADERS = {
+  Accept: "text/html",
+  "Sec-Fetch-Dest": "document",
+};
+export function apply(headers: Headers, tuples: Array<[string, string]>) {
+  headers.set("sec-fetch-mode", "navigate");
+  tuples.push(["sec-ch-ua-platform", '"macOS"']);
+  const extra: Record<string, string> = {};
+  extra["Sec-Fetch-Site"] = "same-origin";
+  return extra;
+}
+`;
+
+	function lintSourceFile(source: string) {
+		return lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			providerSourceFiles: { "upstream/client.ts": source },
+			operations: {
+				search: {
+					riskClass: READ_RISK_CLASS,
+					descriptionKey:
+						"Use this operation when callers need upstream search results and when header ownership between ctx.stealth and ctx.http must be linted.",
+					input: z.object({ query: z.string().describe("Search query") }),
+					output: z.object({ ok: z.boolean().describe("Success flag") }),
+					fixtures: { request: { query: "desk" }, response: { ok: true } },
+					handler: async () => ({ ok: true }),
+				},
+			},
+		}).filter((diagnostic) => diagnostic.rule === "browser-version-literal");
+	}
+
+	it("errors on every stealth-owned header name shape in a file that uses ctx.stealth", () => {
+		const diagnostics = lintSourceFile(
+			`${OWNED_HEADER_LITERALS}\nexport function client(ctx: { stealth: unknown }) { return ctx.stealth; }\n`,
+		);
+
+		expect(diagnostics).toHaveLength(4);
+		for (const name of [
+			"Sec-Fetch-Dest",
+			"sec-fetch-mode",
+			"sec-ch-ua-platform",
+			"Sec-Fetch-Site",
+		]) {
+			const diagnostic = diagnostics.find((item) => item.message.includes(`"${name}"`));
+			expect(diagnostic).toEqual(
+				expect.objectContaining({
+					level: "error",
+					field: "sourceFiles.upstream/client.ts",
+				}),
+			);
+			expect(diagnostic?.message).toContain("STEALTH_HEADER_OVERRIDE_UNSUPPORTED");
+			expect(diagnostic?.message).toContain(
+				'stealth: { requestClass: "navigation" | "xhr" | "post" }',
+			);
+		}
+	});
+
+	it("does not report owned header names in a file that only uses ctx.http", () => {
+		const diagnostics = lintSourceFile(
+			`${OWNED_HEADER_LITERALS}\nexport function client(ctx: { http: { get: (url: string) => unknown } }) { return ctx.http.get("https://api.example.com/"); }\n`,
+		);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("ignores owned-name predicates and name lists that are not header entries", () => {
+		const diagnostics = lintSourceFile(`
+const OWNED = new Set(["host", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"]);
+export function strip(headers: Record<string, string>, ctx: { stealth: unknown }) {
+  for (const name of Object.keys(headers)) {
+    if (OWNED.has(name.toLowerCase()) || name.toLowerCase().startsWith("sec-fetch-")) {
+      delete headers[name];
+    }
+  }
+  return ctx.stealth;
+}
+`);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("ignores two-name lists, non-setter calls, and undefined entries in a ctx.stealth file", () => {
+		const diagnostics = lintSourceFile(`
+const CLIENT_HINTS = new Set(["sec-ch-ua-mobile", "sec-ch-ua-platform"]);
+const OWNED_PAIR = ["sec-fetch-dest", "sec-fetch-mode"];
+export function forward(name: string, headers: Record<string, string | undefined>, ctx: { stealth: unknown }) {
+  if (name.startsWith("sec-fetch-site", 0)) return CLIENT_HINTS.has(name) || OWNED_PAIR.includes(name);
+  console.log("sec-fetch-dest", headers);
+  const cleared = { ...headers, "Sec-Fetch-Site": undefined };
+  cleared["Sec-Fetch-Mode"] = undefined;
+  return [cleared, ctx.stealth];
+}
+`);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("reports an undefined value in the Headers shapes the runtime does not drop", () => {
+		const diagnostics = lintSourceFile(`
+export function clear(headers: Headers, tuples: Array<[string, string | undefined]>, ctx: { stealth: unknown }) {
+  headers.set("sec-fetch-dest", undefined);
+  headers.append("sec-fetch-mode", void 0);
+  tuples.push(["sec-fetch-site", undefined]);
+  return ctx.stealth;
+}
+`);
+
+		expect(diagnostics.map((diagnostic) => diagnostic.message.match(/"([^"]+)" header/)?.[1])).toEqual([
+			"sec-fetch-dest",
+			"sec-fetch-mode",
+			"sec-fetch-site",
+		]);
+	});
+
+	it("does not scope a ctx.http file into the rule because a comment or string mentions ctx.stealth", () => {
+		const diagnostics = lintSourceFile(`
+// Use ctx.http, not ctx.stealth, for custom fetch metadata.
+const NOTE = "ctx.stealth would reject these";
+export function fetchPage(ctx: { http: { get: (url: string, init: { headers: Record<string, string> }) => unknown } }) {
+  return ctx.http.get("https://api.example.com/", { headers: { "Sec-Fetch-Site": "same-origin", note: NOTE } });
+}
+`);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("scopes a file that reaches the stealth client through destructuring or element access", () => {
+		for (const access of ["const { stealth } = ctx; return stealth;", 'return ctx["stealth"];']) {
+			const diagnostics = lintSourceFile(
+				`export const HEADERS = { "Sec-Fetch-Mode": "navigate" };\nexport function client(ctx: { stealth: unknown }) { ${access} }\n`,
+			);
+
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0]?.message).toContain('ctx.stealth owns the "Sec-Fetch-Mode" header');
+		}
+	});
+
+	it("reports a versioned sec-ch-ua entry once in a ctx.stealth file and as a version literal elsewhere", () => {
+		const source = `export const headers = { "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131"' };\n`;
+
+		const stealthDiagnostics = lintSourceFile(
+			`${source}export function client(ctx: { stealth: unknown }) { return ctx.stealth; }\n`,
+		);
+		expect(stealthDiagnostics).toHaveLength(1);
+		expect(stealthDiagnostics[0]?.message).toContain('ctx.stealth owns the "sec-ch-ua" header');
+
+		const httpDiagnostics = lintSourceFile(source);
+		expect(httpDiagnostics).toHaveLength(1);
+		expect(httpDiagnostics[0]?.message).toContain("Hardcoded sec-ch-ua versions");
 	});
 });

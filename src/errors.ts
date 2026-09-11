@@ -1,5 +1,6 @@
+import type { ProviderErrorMessageParams } from "./i18n/error-messages.js";
 import type { ProviderErrorCategory } from "./observability.js";
-import type { HttpRedirectFailureReason } from "./types.js";
+import type { HttpRedirectFailureReason, ProviderLocaleKeyInput } from "./types.js";
 
 // Versioned, cross-realm brands. `Symbol.for` resolves to the same symbol in
 // any copy/entrypoint of this SDK major version, so an error created by a
@@ -49,6 +50,25 @@ export type ProviderErrorOptions = {
 	retryable?: boolean;
 	/** Provider-authored, bounded metadata safe for operational logs and error headers. */
 	observability?: ProviderErrorObservability;
+	/**
+	 * Locale catalog key for the client-facing `message`, e.g.
+	 * `"errors.upstreamSchema.message"`. Resolved at serve time against the
+	 * provider's `locales/{en,ko,ja}.json` with the caller's `Accept-Language`,
+	 * falling back to `en` and then to the positional `message`.
+	 *
+	 * The positional `message` stays English: it is what `error.message`, cause
+	 * frames, logs and OTLP attributes carry. Only the response envelope is
+	 * localized.
+	 */
+	messageKey?: ProviderLocaleKeyInput;
+	/** Locale catalog key for the client-facing `fix`. Same resolution as {@link ProviderErrorOptions.messageKey}. */
+	fixKey?: ProviderLocaleKeyInput;
+	/**
+	 * Values substituted into `{name}` placeholders of the resolved text.
+	 * Strings and finite numbers only; string values are scrubbed and length
+	 * capped before substitution because upstream text routinely lands here.
+	 */
+	params?: ProviderErrorMessageParams;
 };
 
 /**
@@ -95,6 +115,62 @@ export class SDKError extends ProviderError {
 	constructor(message: string, options?: ProviderErrorOptions) {
 		super(message, options);
 		this.name = "SDKError";
+	}
+}
+
+/** Raised when the remote provider engine speaks an incompatible protocol version. */
+export class ProviderEngineProtocolVersionError extends SDKError {
+	constructor(
+		public readonly receivedVersion: unknown,
+		public readonly expectedVersion: string,
+	) {
+		super(
+			`Provider engine protocol version mismatch: expected ${expectedVersion}, received ${String(receivedVersion)}`,
+			{
+				code: "PROVIDER_ENGINE_PROTOCOL_VERSION_MISMATCH",
+				details: { receivedVersion, expectedVersion },
+				fix: "Update @apifuse/provider-sdk or use a compatible APIFuse provider engine.",
+			},
+		);
+		this.name = "ProviderEngineProtocolVersionError";
+	}
+}
+
+/** Raised when the remote provider engine rejects a workspace API key. */
+export class ProviderEngineAuthenticationError extends SDKError {
+	constructor(message = "Provider engine authentication failed", options?: ProviderErrorOptions) {
+		super(message, {
+			code: "PROVIDER_ENGINE_AUTHENTICATION_FAILED",
+			fix: "Set APIFUSE__ENGINE__API_KEY to the workspace API key from your APIFuse bounty dashboard.",
+			...options,
+		});
+		this.name = "ProviderEngineAuthenticationError";
+	}
+}
+
+/** Raised when the remote engine cannot be reached. There is no local fallback. */
+export class ProviderEngineUnavailableError extends SDKError {
+	constructor(message = "The remote APIFuse provider engine is unavailable", cause?: Error) {
+		super(message, {
+			code: "PROVIDER_ENGINE_UNAVAILABLE",
+			retryable: true,
+			fix: "Check network access and the provider engine endpoint, then retry.",
+			...(cause ? { cause } : {}),
+		});
+		this.name = "ProviderEngineUnavailableError";
+	}
+}
+
+/** Raised when the engine refuses egress outside the workspace's pinned allowlist. */
+export class ProviderEgressDeniedError extends ProviderError {
+	constructor(message: string, details?: unknown) {
+		super(message, {
+			code: "PROVIDER_EGRESS_DENIED",
+			retryable: false,
+			details,
+			fix: "Use a host in the provider's pinned allowedHosts declaration, or request a trusted pin update.",
+		});
+		this.name = "ProviderEgressDeniedError";
 	}
 }
 

@@ -137,6 +137,73 @@ variable, the Cloudflare OCR/STT tokens and account identifier,
 `APIFUSE__OCR__API_KEY`, and `APIFUSE__CACHE__KEY_PEPPER`. `defineProvider`
 rejects them in `secrets`; the engine reads them from its own environment.
 
+### Engine mode
+
+Provider processes attach their capability bindings through an engine. Today the
+default is the in-process engine; ADR-0011 replaces it with the authenticated
+remote engine in a phased migration, and `serve` logs every boot as
+`provider_engine_mode` (`deprecated: true` for in-process). You do not need to
+change anything now.
+
+A deployment names the mode with the engine-owned `APIFUSE__ENGINE__MODE`
+variable (`in-process` or `remote`; trimmed and case-folded, blank means unset);
+hosts may pass `engineMode` to `serve`/`createServerApp`/`startDevServer`
+instead. The manifest wins when the two disagree, so provider code cannot
+silently downgrade what the deployment asked for; the disagreement is reported in
+the boot event's `warnings`. An unrecognized value is warned about and ignored —
+it never crashes the process. `APIFUSE__ENGINE__MODE` cannot be declared in
+`secrets` (`APIFUSE__ENGINE__*` is engine-owned).
+
+`remote` has no client in this release: the server attaches an engine that fails
+every request with `PROVIDER_ENGINE_MODE_UNSUPPORTED` and reports `503` on
+`/readyz`. It never falls back to in-process. `apifuse dev` and `apifuse record`
+refuse to start instead.
+
+`GET /health` is liveness only and stays engine-blind; `GET /readyz` reports the
+resolved engine attachment and is what readiness/startup probes should use — but
+only for a provider already pinned to an SDK release that serves the route.
+Earlier pins answer `404`, and a failing readiness/startup probe is not
+self-healing, so manifests move to `/readyz` after the pin wave, never before.
+
+### Deployment intent
+
+Deployment intent (runtime profile, resources, HPA, Redis, extra TCP ports) has
+exactly one authored home: the optional `deployment` key inside
+`defineProvider({...})`. The SDK passes it through verbatim; the APIFuse
+registry resolves omitted fields from the runtime profile and rejects anything
+it cannot resolve.
+
+- Declare only what differs from the profile. Profile defaults:
+  `runtime: "shared"`, `language: "typescript"`, `replicas: 1`,
+  `hpa: { enabled: true, minReplicas: 1, maxReplicas: 1, targetCPUUtilizationPercentage: 70 }`,
+  resources `25m/128Mi` (shared) or `200m/256Mi` (browser), `buildContext: "."`.
+  Most providers therefore declare no `deployment` key at all.
+- The deployment `runtime` axis (`shared | dedicated | browser`) is distinct
+  from the execution `runtime` (`standard | shared | browser`) declared next to
+  it.
+- Do not author a standalone `deploy.ts`, a `deployment` extra on a spread
+  default export (`export default { ...provider, deployment }`), or a
+  re-exported config module. A repository that still carries `deploy.ts`
+  migrates with `apifuse migrate-deployment .`: it hoists the file's non-default
+  values into the declaration, proves the result resolves identically, and
+  deletes the file. The `/deploy.ts` CODEOWNERS entry stays until the platform
+  stops honoring a re-added legacy file (`--drop-codeowners-lock` then). A
+  refusal names the manual step.
+- `apifuse check` warns during the migration window
+  (`deployment/legacy-deploy-file`, `deployment/spread-export`,
+  `deployment/redundant-default`); the rules become errors once no repository
+  carries the legacy file.
+
+```ts
+const buildProvider = defineProvider({
+  id: "example",
+  version: "1.0.0",
+  runtime: "standard",
+  deployment: { cache: { redis: { enabled: true } } },
+  // ...
+});
+```
+
 ### Factored operations
 
 `defineProvider(declaration)` returns the builder that accepts `operations`, so
@@ -536,17 +603,19 @@ operation:
 
 ```ts
 errorCodes: [{
-  code: "UPSTREAM_SCHEMA_ERROR",
-  status: 502,
-  retryable: true,
-  description: "The upstream response no longer matches its schema.",
+  code: "ITEM_SOLD_OUT",
+  status: 409,
+  retryable: false,
+  description: "The upstream sold the item before checkout completed.",
 }],
 handler: async () => {
-  throw new ProviderError("Upstream schema changed", {
-    code: "UPSTREAM_SCHEMA_ERROR",
-  });
+  throw new ProviderError("Item sold out", { code: "ITEM_SOLD_OUT" });
 },
 ```
+
+Declare only codes the SDK does not already register. `UPSTREAM_SCHEMA_ERROR`,
+`UPSTREAM_AUTH_ERROR`, and `INVALID_REQUEST` are registered below, so throwing
+them needs no declaration at all.
 
 `defineProvider` accepts only statuses the server can emit: 400, 401, 404, 429,
 500, 502, 503, and 504. Invalid declared statuses fail provider definition,
@@ -567,10 +636,10 @@ The registered mappings are:
 | Error code or fallback | HTTP status |
 | --- | ---: |
 | `AUTH_REQUIRED`, `reauth_required` | 401 |
-| `MISSING_SECRET` | 400 |
+| `MISSING_SECRET`, `UPSTREAM_AUTH_ERROR`, `INVALID_REQUEST` | 400 |
 | `NOT_FOUND`, `not_found`, `NO_DATA` | 404 |
 | `RATE_LIMITED`, `UPSTREAM_RATE_LIMIT`, `LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR` | 429 |
-| `UPSTREAM_ERROR`, `BLOCKED` | 502 |
+| `UPSTREAM_ERROR`, `BLOCKED`, `UPSTREAM_SCHEMA_ERROR` | 502 |
 | `STT_UNAVAILABLE`, `UNSUPPORTED_STT_BACKEND`, `STATEFUL_FORWARDING_REPLAY_CACHE_FULL` | 503 |
 | Unregistered input `ValidationError` code | 400 |
 | Other unregistered `ProviderError` code | 500 |
@@ -586,6 +655,142 @@ Throw the domain `ProviderError` directly. Subclassing or wrapping it as a
 `TransportError` solely to preserve a 5xx response is obsolete; declare the
 domain code's `status` instead. Genuine `TransportError` values remain
 SDK-owned and keep their 502/504 mapping.
+
+#### Three fleet-consensus codes are registered
+
+`UPSTREAM_AUTH_ERROR` (400), `UPSTREAM_SCHEMA_ERROR` (502), and
+`INVALID_REQUEST` (400) are registered mappings. All three are non-retryable.
+
+- `UPSTREAM_AUTH_ERROR` is 400, not 401 or 502, because it means the upstream
+  refused a *platform-managed* service key. The caller holds no credential, so
+  401 ("re-authenticate") asks for something the caller cannot do, and 502
+  ("the upstream is sick") promises a recovery that will never arrive. It is a
+  deployment/config defect, exactly like `MISSING_SECRET`.
+- `UPSTREAM_SCHEMA_ERROR` is non-retryable: a retry returns the same payload
+  the provider already could not normalize.
+- `INVALID_REQUEST` is the spelling for caller-side bad input. `INVALID_INPUT`,
+  `VALIDATION_ERROR`, and `BAD_REQUEST` are not registered.
+
+Like `UPSTREAM_ERROR` and `BLOCKED`, these are thrown by provider code rather
+than by the SDK, so they are registered mappings and not SDK-owned codes: an
+existing operation declaration still wins at runtime (step 2 above). Registering
+them therefore never rewrites a status you already declared. What it does do is
+let you delete the declaration — and when your declaration disagrees with the
+registered mapping, `apifuse check` reports it rather than leaving the fleet
+answering one code two ways:
+
+- `error-code-status-conflicts-sdk` — declared `status` differs from the
+  registered status.
+- `error-code-retryable-conflicts-sdk` — declared `retryable` differs from the
+  registered retryability.
+
+Both are warnings. Drop the conflicting field so the SDK supplies the value, or,
+if your operation genuinely means something else, throw a distinct code that
+says so.
+
+### Localized error messages (`messageKey` / `fixKey`)
+
+The positional `ProviderError` message stays **English**. It is what
+`error.message`, cause frames, the `provider_request_failed` log, OTLP
+attributes and tests see. Only two fields of the response body are localized:
+`error.message` and `error.fix`. Nothing else — not `code`, not `details`, not
+`errorCodes[].description`, not the `X-ApiFuse-Error-Observability` header.
+
+Attach locale keys instead of parsing `Accept-Language` yourself:
+
+```ts
+// locales/en.json
+{ "errors": { "upstreamSchema": {
+    "message": "{provider} returned an unexpected response.",
+    "fix": "Retry in a few minutes."
+} } }
+```
+
+```ts
+throw new ProviderError("The culture data service returned an unexpected response.", {
+  code: "UPSTREAM_SCHEMA_ERROR",
+  messageKey: "errors.upstreamSchema.message",
+  fixKey: "errors.upstreamSchema.fix",
+  params: { provider: "Culture Data" },
+});
+```
+
+Keys can also live on the declaration, which localizes **every** site that
+throws that code without touching the throw sites:
+
+```ts
+errorCodes: [{
+  code: "UPSTREAM_SCHEMA_ERROR",
+  description: "The upstream response no longer matches its schema.",
+  messageKey: "errors.upstreamSchema.message",
+  fixKey: "errors.upstreamSchema.fix",
+}],
+```
+
+`status` and `retryable` are omitted because `UPSTREAM_SCHEMA_ERROR` is a
+registered code: the SDK already supplies 502 and non-retryable, and declaring
+a different value trips `error-code-status-conflicts-sdk` /
+`error-code-retryable-conflicts-sdk`. A declaration that carries only keys is
+still worth writing — it localizes every site that throws the code.
+
+Resolution order per field, evaluated at serve time:
+
+1. the throw site's `messageKey` / `fixKey`;
+2. the matching `errorCodes[]` entry's `messageKey` / `fixKey`;
+3. the derived `errors.<code>.message` / `errors.<code>.fix` (the code is used
+   verbatim as a catalog segment, so `errors.UPSTREAM_SCHEMA_ERROR.message`
+   works with no declaration at all);
+4. the English literal passed to the constructor.
+
+Each candidate is resolved in the caller's locale first and then in `en`, so a
+more specific key always beats a more specific locale. A missing key, a
+malformed key, a non-string catalog value or an absent catalog is a miss, never
+a throw: the caller always gets text. Steps 2 and 3 do not apply to SDK-owned
+failures (transport, Zod, stateful deadline, SDK runtime codes) — a provider
+catalog must not be able to relabel `Request timed out`.
+
+Locale negotiation reads `Accept-Language` from the request envelope's
+`headers` map first (the gateway stamps the flow's locale there) and then from
+the HTTP header, honours quality values, matches on the primary subtag, and
+supports `en`, `ko`, `ja` with `en` as the default. A request with no
+`Accept-Language` therefore keeps serving the `en` catalog value, so existing
+contract fixtures do not churn.
+
+**Interpolation.** `{name}` placeholders, `{{` and `}}` for literal braces.
+`params` accepts strings and finite numbers only. A placeholder with no usable
+param is left verbatim so the authoring gap is visible rather than silently
+deleting text.
+
+**Params are untrusted.** Upstream error text routinely ends up in `params`, so
+every string value is scrubbed before substitution: secrets and e-mail
+addresses redacted, control/bidi/newline characters encoded or collapsed,
+`<`, `>` and backticks removed, HTML-entity ampersands (`&lt;`) neutralized
+while ordinary ampersands survive, and the value capped at 200 characters.
+Substituted text is never rescanned, so a value containing `{other}` cannot
+trigger a second interpolation round. Prefer `details` when you need to relay
+an upstream body verbatim; `params` is for short, bounded values.
+
+**Catalog loading.** Catalogs are read once when the server is built (from the
+provider directory's `locales/{en,ko,ja}.json`, loading only the locales that
+exist). Pass `serve(provider, { localeCatalogs })` to bundle them instead. A
+catalog that exists but cannot be parsed logs one
+`provider_locale_catalogs_unavailable` warn at boot and every field falls back
+to its English literal.
+
+**Lint.** `apifuse check` reports:
+
+- `error-locale-key-missing` / `error-locale-key-malformed` (**error**) — a
+  literal `messageKey`/`fixKey`, on a throw site or on an `errorCodes[]` entry,
+  that `locales/en.json` does not resolve to non-empty text, or that is not a
+  legal locale dot path.
+- `thrown-error-message-not-localized` (**warn**) — a throw site whose declared
+  code has no key anywhere and no `errors.<code>.message` in `en`, so it is
+  served untranslated. Warning during the migration; promoted to error per
+  provider as each wave lands.
+
+`ko`/`ja` coverage needs no new rule: `en` is the baseline, so the existing
+catalog parity and placeholder checks already fail an `errors.*` key that is
+missing or untranslated in `ko`/`ja`.
 
 ### Declared secrets are SDK-enforced
 
@@ -677,6 +882,48 @@ therefore keep declared query values and common response-only credential keys
 redacted. If a login flow must consume a rotated credential from `Location`,
 inspect it inside `stopWhen`; that callback receives the real hop while callback
 failures are sanitized before propagation.
+
+### Request-bound proof headers
+
+When an upstream requires a single-use, request-bound header (DPoP proofs,
+HTTP message signatures, HMAC nonces), pass `headers` as a factory instead of a
+record. `ctx.http` calls it once per issued attempt with the resolved URL and
+method, so a managed retry sends a fresh proof rather than replaying the first
+one, and the request keeps proxy failover and the transient retry taxonomy:
+
+```ts
+const response = await ctx.http.get(requestUrl, {
+	headers: async ({ url, method }) => {
+		// RFC 9449 §4.2: `htu` is the target URI without query and fragment.
+		const htu = new URL(url);
+		htu.search = "";
+		htu.hash = "";
+		return {
+			...commonHeaders,
+			dpop: await createDpopProof(htu.toString(), method),
+		};
+	},
+});
+```
+
+`url` is the exact URL the attempt is issued against, including `params` and
+`sensitiveParams`. Bind to it instead of a URL you rebuild, but strip the query
+and fragment for fields that are defined without them (DPoP `htu`), and never
+log it or copy it verbatim into a signed field a verifier logs.
+
+Keep the factory fast and local. It runs after proxy resolution, so an already
+allocated egress endpoint and its lease are held while it is awaited; a remote
+signing round trip there can outlive the lease TTL. Mint locally, and set
+`timeout` on the call so a hung signer cannot hold the endpoint indefinitely.
+
+The factory is not invoked for redirect hops (they reuse the attempt's
+headers), for skipped duplicate proxy offsets, or for an attempt whose proxy
+allocation failed — those build no request, so `attempt` counts only the
+requests that are actually issued. A factory that throws fails the request with
+the non-retryable `TransportError` code `http_header_factory_failed`, which is
+classified as a provider-side fault (`provider_error`), not an upstream
+failure. `ctx.stealth` has its own `headers` option and does not accept a
+factory.
 
 ### Public local debugging checklist
 

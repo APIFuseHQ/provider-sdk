@@ -213,6 +213,88 @@ describe("signed stateful operation forwarding", () => {
 		expect(received?.signal).toBeInstanceOf(AbortSignal);
 	});
 
+	it("preserves the gateway-asserted tenant scope through the forwarded envelope", async () => {
+		const provider = createTestProvider({ defaultExecutions: 0 });
+		const events: ProviderServerLogEvent[] = [];
+		let received: ProviderServerOperationExecutorInput | undefined;
+		const app = createServerApp(provider, {
+			logger: (event) => events.push(event),
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async (input) => {
+				received = input;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({
+			forwardedAt: timestamp,
+			operationRequest: {
+				requestId: "req-stateful-forward",
+				input: { value: "forwarded" },
+				tenantId: "org_forwarded_tenant",
+			},
+		});
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(200);
+		expect(received?.request.tenantId).toBe("org_forwarded_tenant");
+		expect(received?.ctx.request?.tenantId).toBe("org_forwarded_tenant");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_completed",
+				route: "echo",
+				connectionId: "connection-1",
+				tenantId: "org_forwarded_tenant",
+			}),
+		);
+	});
+
+	it("accepts an operation request field a previous SDK does not know", async () => {
+		// Rolling deploys run a newer source pod against an older owner pod for
+		// the whole update, so an additive OperationRequestSchema field must be
+		// stripped by the owner, never rejected: the rejection is terminal for
+		// the operation. The envelope's own keys stay strict (see the unknown
+		// top-level field case below).
+		const state = { defaultExecutions: 0 };
+		const provider = createTestProvider(state);
+		let received: ProviderServerOperationExecutorInput | undefined;
+		const app = createServerApp(provider, {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async (input) => {
+				received = input;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({
+			forwardedAt: timestamp,
+			operationRequest: {
+				requestId: "req-stateful-forward",
+				input: { value: "forwarded" },
+				futureAdditiveField: "from-a-newer-source-pod",
+			},
+		});
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(200);
+		expect(received?.request).toEqual({
+			requestId: "req-stateful-forward",
+			input: { value: "forwarded" },
+		});
+		expect(received?.ctx.request).toBeDefined();
+	});
+
 	it("logs proxy telemetry recorded by a forwarded operation", async () => {
 		const originalFetch = global.fetch;
 		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;

@@ -1,0 +1,49 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for market-kurly
+// (infra/k8s/generated/providers/market-kurly/). `replicas` is intentionally
+// absent: when an HPA is present the generator omits replicas from the
+// Deployment spec, so declaring it here would drift from what is applied.
+// The FQDN policy carries only the standard 443/80 egress ports for
+// api.kurly.com and www.kurly.com, so no network.additionalTcpPorts entry is
+// needed, and the monorepo source ran without a Redis cache (redis disabled
+// exception path), so no cache block is declared.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;
