@@ -52,5 +52,14 @@ Also in this release:
   (**warn**: a declared code thrown with no key anywhere, so it is served
   untranslated). Both are skipped when the caller does not supply
   `localeCatalogEn`; `apifuse check` supplies it from the provider directory.
+- `thrown-error-message-not-localized` also covers a code the SDK registers a
+  canonical status for (`UPSTREAM_AUTH_ERROR`, `UPSTREAM_SCHEMA_ERROR`,
+  `INVALID_REQUEST`, `UPSTREAM_ERROR`, `BLOCKED`, …) even when no operation
+  declares it. Registration is what lets a provider delete the declaration, and
+  an undeclared throw of a registered code no longer serves the HTTP 500 that
+  `thrown-error-code-undeclared` reports — so without this the two rules left a
+  registered code served untranslated with nothing warning about it. Codes the
+  SDK runtime-owns stay excluded, because serve time ignores their declared and
+  derived catalog entries anyway.
 
 No provider change is required: behaviour is identical until a key exists.

@@ -564,6 +564,197 @@ describe("serve error envelope localization", () => {
 	});
 });
 
+// The three codes registered in SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES. Their
+// registration is what lets a provider throw them with no `errorCodes` entry at
+// all — which is exactly the shape AUTHORING now recommends, and exactly the
+// shape that leaves the localization surface no declaration to hang a
+// `messageKey` on. So the derived `errors.<code>` convention has to reach them,
+// and the registered status has to survive being localized.
+const FLEET_CONSENSUS_CODES = [
+	{ operation: "upstreamAuth", code: "UPSTREAM_AUTH_ERROR", status: 400 },
+	{ operation: "upstreamSchema", code: "UPSTREAM_SCHEMA_ERROR", status: 502 },
+	{ operation: "invalidRequest", code: "INVALID_REQUEST", status: 400 },
+] as const;
+
+const FLEET_CATALOGS: ProviderLocaleCatalogMap = {
+	en: {
+		errors: {
+			UPSTREAM_AUTH_ERROR: {
+				message: "{upstream} refused our service key.",
+				fix: "Ask APIFuse support to rotate the key.",
+			},
+			UPSTREAM_SCHEMA_ERROR: {
+				message: "{upstream} returned an unexpected response.",
+				fix: "Retry in a few minutes.",
+			},
+			INVALID_REQUEST: { message: "The request was rejected by {upstream}." },
+			declarationOnly: { message: "Declared key English", fix: "Declared fix English" },
+		},
+	},
+	ko: {
+		errors: {
+			UPSTREAM_AUTH_ERROR: {
+				message: "{upstream}이(가) 서비스 키를 거부했습니다.",
+				fix: "APIFuse 지원팀에 키 교체를 요청하세요.",
+			},
+			UPSTREAM_SCHEMA_ERROR: {
+				message: "{upstream}이(가) 예상과 다른 응답을 반환했습니다.",
+				fix: "잠시 후 다시 시도하세요.",
+			},
+			INVALID_REQUEST: { message: "{upstream}이(가) 요청을 거부했습니다." },
+			declarationOnly: { message: "선언 키 한국어", fix: "선언 키 한국어 해결" },
+		},
+	},
+	ja: {
+		errors: {
+			// Deliberately partial: `fix` is absent so the per-field en fallback is
+			// exercised on a registered code, not only on a provider-owned one.
+			UPSTREAM_SCHEMA_ERROR: { message: "予期しない応答が返されました。" },
+		},
+	},
+};
+
+function fleetConsensusProvider(): ProviderDefinition {
+	const operations: ProviderDefinition["operations"] = {};
+	for (const { operation, code } of FLEET_CONSENSUS_CODES) {
+		operations[operation] = {
+			riskClass: READ_RISK_CLASS,
+			input: z.object({}),
+			output: z.object({ ok: z.boolean() }),
+			// No errorCodes: registration is what makes this servable.
+			handler: async () => {
+				throw new ProviderError(`${code} (literal)`, {
+					code,
+					params: { upstream: "Culture Data" },
+				});
+			},
+		};
+	}
+	// A declaration that carries only locale keys, the pattern AUTHORING teaches
+	// now that declaring `status`/`retryable` for a registered code trips
+	// error-code-status-conflicts-sdk / error-code-retryable-conflicts-sdk.
+	operations.keysOnlyDeclaration = {
+		riskClass: READ_RISK_CLASS,
+		input: z.object({}),
+		output: z.object({ ok: z.boolean() }),
+		errorCodes: [
+			{
+				code: "UPSTREAM_SCHEMA_ERROR",
+				description: "The upstream response no longer matches its schema.",
+				messageKey: "errors.declarationOnly.message",
+				fixKey: "errors.declarationOnly.fix",
+			},
+		],
+		handler: async () => {
+			throw new ProviderError("UPSTREAM_SCHEMA_ERROR (literal)", {
+				code: "UPSTREAM_SCHEMA_ERROR",
+			});
+		},
+	};
+	return {
+		...localizedProvider(),
+		operations,
+	} satisfies ProviderDefinition;
+}
+
+describe("fleet-consensus error codes localize through the messageKey surface", () => {
+	const app = createServerApp(fleetConsensusProvider(), { localeCatalogs: FLEET_CATALOGS });
+
+	for (const { operation, code, status } of FLEET_CONSENSUS_CODES) {
+		it(`serves ${code} as ${status} with a localized message`, async () => {
+			const response = await postOperation(app, operation, { "accept-language": "ko-KR" });
+
+			// The registered status survives localization: #323 maps the code, #324
+			// only rewrites the message/fix of the envelope.
+			expect(response.status).toBe(status);
+			expect(response.error.code).toBe(code);
+			// Registered, non-runtime-owned codes are not SDK-owned resolution, so
+			// the derived errors.<code> candidate applies and the caller gets ko.
+			expect(response.error.message).toBe(
+				(FLEET_CATALOGS.ko?.errors as Record<string, { message: string }>)[code]?.message.replace(
+					"{upstream}",
+					"Culture Data",
+				),
+			);
+			expect(response.error.message).not.toContain("(literal)");
+			// Canonical retryability from SDK_CANONICAL_ERROR_CODE_RETRYABILITY.
+			expect(response.error.retryable).toBe(false);
+		});
+	}
+
+	it("localizes the fix hint for the registered codes that publish one", async () => {
+		const auth = await postOperation(app, "upstreamAuth", { "accept-language": "ko" });
+		const schema = await postOperation(app, "upstreamSchema", { "accept-language": "ko" });
+		const invalid = await postOperation(app, "invalidRequest", { "accept-language": "ko" });
+
+		expect(auth.error.fix).toBe("APIFuse 지원팀에 키 교체를 요청하세요.");
+		expect(schema.error.fix).toBe("잠시 후 다시 시도하세요.");
+		// No catalog fix and no literal fix on the throw site: the field is omitted
+		// rather than invented.
+		expect(invalid.error.fix).toBeUndefined();
+	});
+
+	it("serves the en catalog entry for a registered code when nothing is negotiated", async () => {
+		const { status, error } = await postOperation(app, "upstreamSchema");
+
+		expect(status).toBe(502);
+		expect(error.message).toBe("Culture Data returned an unexpected response.");
+		expect(error.fix).toBe("Retry in a few minutes.");
+	});
+
+	it("falls back per field to en for a registered code the locale only partly covers", async () => {
+		const { error } = await postOperation(app, "upstreamSchema", { "accept-language": "ja" });
+
+		expect(error.message).toBe("予期しない応答が返されました。");
+		expect(error.fix).toBe("Retry in a few minutes.");
+	});
+
+	it("falls back to en entirely for a registered code the locale does not cover", async () => {
+		const { error } = await postOperation(app, "upstreamAuth", { "accept-language": "ja" });
+
+		expect(error.message).toBe("Culture Data refused our service key.");
+	});
+
+	it("lets a keys-only declaration localize a registered code without moving its status", async () => {
+		const { status, error } = await postOperation(app, "keysOnlyDeclaration", {
+			"accept-language": "ko",
+		});
+
+		// The declaration supplies keys only, so the status still comes from the
+		// SDK registration rather than from the declaration.
+		expect(status).toBe(502);
+		expect(error.message).toBe("선언 키 한국어");
+		expect(error.fix).toBe("선언 키 한국어 해결");
+	});
+
+	it("keeps the thrown English literal in logs for a registered code", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const loggingApp = createServerApp(fleetConsensusProvider(), {
+			localeCatalogs: FLEET_CATALOGS,
+			logger: (event) => events.push(event),
+		});
+
+		const { error } = await postOperation(loggingApp, "upstreamAuth", { "accept-language": "ko" });
+
+		expect(error.message).toBe("Culture Data이(가) 서비스 키를 거부했습니다.");
+		expect(events.find((event) => event.event === "provider_request_failed")).toMatchObject({
+			message: "UPSTREAM_AUTH_ERROR (literal)",
+			code: "UPSTREAM_AUTH_ERROR",
+		});
+	});
+
+	it("serves the English literal for a registered code when the provider ships no catalogs", async () => {
+		const bareApp = createServerApp(fleetConsensusProvider(), { localeCatalogs: {} });
+
+		const { status, error } = await postOperation(bareApp, "invalidRequest", {
+			"accept-language": "ko",
+		});
+
+		expect(status).toBe(400);
+		expect(error.message).toBe("INVALID_REQUEST (literal)");
+	});
+});
+
 type AuthFlowStart = NonNullable<NonNullable<ProviderDefinition["auth"]>["flow"]>["start"];
 
 function authProvider(start: AuthFlowStart): ProviderDefinition {

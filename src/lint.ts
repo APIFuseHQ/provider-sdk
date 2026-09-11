@@ -1767,6 +1767,31 @@ function hasDerivedErrorCatalogText(
 }
 
 /**
+ * True when a thrown code reaches the caller as a real provider error whose
+ * text the declared/derived catalog path can actually reach.
+ *
+ * A code qualifies either because the provider declares it in an operation's
+ * `errorCodes`, or because the SDK registers a canonical status for it. The
+ * second arm matters because registering a code is precisely what lets a
+ * provider *delete* the declaration — AUTHORING tells it to for
+ * `UPSTREAM_AUTH_ERROR`, `UPSTREAM_SCHEMA_ERROR` and `INVALID_REQUEST` — and an
+ * undeclared throw of a registered code is no longer the HTTP 500 that
+ * `thrown-error-code-undeclared` reports. Without this arm the two rules leave
+ * a silent hole exactly where the fleet is being told to converge: a 502
+ * `UPSTREAM_SCHEMA_ERROR` served untranslated with nothing warning about it.
+ *
+ * Codes the SDK runtime-owns are excluded: `sdkOwnsErrorResolution` skips the
+ * declaration and derived candidates for them at serve time, so the catalog
+ * entry this rule asks for would never take effect.
+ */
+function isCatalogReachableThrownCode(code: string, declaredCodes: ReadonlySet<string>): boolean {
+	if (declaredCodes.has(code)) return true;
+	return (
+		!SDK_RUNTIME_OWNED_ERROR_CODES.has(code) && SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.has(code)
+	);
+}
+
+/**
  * Authoring rules for localized provider error text (see
  * `ProviderErrorOptions.messageKey`).
  *
@@ -1777,11 +1802,12 @@ function hasDerivedErrorCatalogText(
  *   runtime such a key is silently skipped and the caller gets the English
  *   literal, so nothing fails loudly without this rule.
  * - `thrown-error-message-not-localized` (**warn**): a throw site whose literal
- *   `code` is declared in the provider's `errorCodes` but that carries no
- *   `messageKey`, no declaration-level `messageKey`, and no derived
- *   `errors.<code>.message` in `en`. Such an error is served untranslated to
- *   every caller. Warning while the ~2,000 existing sites migrate; it is
- *   promoted to error per provider as each migration wave lands.
+ *   `code` is declared in the provider's `errorCodes` — or SDK-registered, and
+ *   so servable without a declaration — but that carries no `messageKey`, no
+ *   declaration-level `messageKey`, and no derived `errors.<code>.message` in
+ *   `en`. Such an error is served untranslated to every caller. Warning while
+ *   the ~2,000 existing sites migrate; it is promoted to error per provider as
+ *   each migration wave lands.
  *
  * Both rules are skipped entirely when the caller did not supply
  * `localeCatalogEn`: without the catalog they could only guess.
@@ -1844,14 +1870,21 @@ function lintErrorMessageLocalization(provider: {
 			const code = site.code;
 			if (code === undefined || reportedCodes.has(code)) continue;
 			if (site.messageKey !== undefined) continue;
-			if (!declaredCodes.has(code) || codesWithDeclaredMessageKey.has(code)) continue;
+			if (!isCatalogReachableThrownCode(code, declaredCodes)) continue;
+			if (codesWithDeclaredMessageKey.has(code)) continue;
 			if (hasDerivedErrorCatalogText(catalog, code, "message")) continue;
 			reportedCodes.add(code);
+			const origin = declaredCodes.has(code)
+				? `declared code "${code}"`
+				: `SDK-registered code "${code}"`;
+			const declarationClause = declaredCodes.has(code)
+				? "its errorCodes declaration has none, and"
+				: "no errorCodes declaration supplies one, and";
 			diagnostics.push({
 				rule: "thrown-error-message-not-localized",
 				level: "warn",
 				field,
-				message: `${site.errorClass} with declared code "${code}" (${field}) has no messageKey, its errorCodes declaration has none, and locales/en.json has no "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message"; this error is served untranslated to ko and ja callers. Add messageKey (or "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message" to every locale catalog).`,
+				message: `${site.errorClass} with ${origin} (${field}) has no messageKey, ${declarationClause} locales/en.json has no "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message"; this error is served untranslated to ko and ja callers. Add messageKey (or "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message" to every locale catalog).`,
 			});
 		}
 	}

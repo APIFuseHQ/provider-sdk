@@ -169,6 +169,67 @@ describe("thrown-error-message-not-localized", () => {
 		).toEqual([]);
 	});
 
+	// Registering UPSTREAM_AUTH_ERROR / UPSTREAM_SCHEMA_ERROR / INVALID_REQUEST
+	// stopped an undeclared throw from serving HTTP 500, which also stopped
+	// thrown-error-code-undeclared from reporting it — and AUTHORING now tells
+	// providers to delete the declaration for exactly these codes. Without the
+	// SDK-registered arm the two rules would leave the resulting untranslated
+	// error with nothing warning about it.
+	for (const code of ["UPSTREAM_AUTH_ERROR", "UPSTREAM_SCHEMA_ERROR", "INVALID_REQUEST"]) {
+		it(`warns for an undeclared throw of the SDK-registered ${code}`, () => {
+			const diagnostics = localizationDiagnostics(
+				providerUnderLint({
+					providerSourceFiles: {
+						"upstream/client.ts": `throw new ProviderError("Upstream said no", { code: "${code}" });`,
+					},
+					errorCodes: [SOLD_OUT],
+					localeCatalogEn: {},
+				}),
+			);
+
+			expect(diagnostics).toEqual([
+				expect.objectContaining({
+					rule: "thrown-error-message-not-localized",
+					level: "warn",
+					field: "sourceFiles.upstream/client.ts",
+				}),
+			]);
+			expect(diagnostics[0]?.message).toContain(`SDK-registered code "${code}"`);
+			expect(diagnostics[0]?.message).toContain(`errors.${code}.message`);
+		});
+
+		it(`stays silent for ${code} once the derived errors.<code>.message exists`, () => {
+			expect(
+				localizationDiagnostics(
+					providerUnderLint({
+						providerSourceFiles: {
+							"upstream/client.ts": `throw new ProviderError("Upstream said no", { code: "${code}" });`,
+						},
+						errorCodes: [SOLD_OUT],
+						localeCatalogEn: { errors: { [code]: { message: "Upstream said no." } } },
+					}),
+				),
+			).toEqual([]);
+		});
+	}
+
+	it("stays silent for an SDK runtime-owned code, whose catalog entry serve time ignores", () => {
+		// NOT_FOUND is in SDK_RUNTIME_OWNED_ERROR_CODES, so sdkOwnsErrorResolution
+		// skips the declared and derived candidates; asking for a catalog entry
+		// that can never take effect would be a lie.
+		expect(
+			localizationDiagnostics(
+				providerUnderLint({
+					providerSourceFiles: {
+						"upstream/client.ts": `throw new ProviderError("Missing", { code: "NOT_FOUND" });`,
+					},
+					errorCodes: [SOLD_OUT],
+					localeCatalogEn: {},
+				}),
+			),
+		).toEqual([]);
+	});
+
 	it("reports each declared code once per source file", () => {
 		const diagnostics = localizationDiagnostics(
 			providerUnderLint({
