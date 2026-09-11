@@ -58,6 +58,10 @@ describe("release workflows", () => {
 		expect(body).toContain(`Candidate SHA: ${GUARDED_SHA}`);
 		expect(body).toContain("The PR body is informational and cannot satisfy the gate");
 		expect(body).toContain("`bun run pack:smoke`");
+		// The npm-publish environment has no protection rules, so the body must not
+		// advertise an approval step nobody performs; the merge is the approval.
+		expect(body).not.toContain("environment approves");
+		expect(body).toContain("merging publishes immediately");
 		expect(body).not.toMatch(/- \[[ x]\]/i);
 	});
 

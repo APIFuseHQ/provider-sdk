@@ -62,7 +62,7 @@ Source main SHA: ${context.sourceSha}
 Release branch: ${context.branch}
 Version: ${context.version}
 
-This PR was prepared automatically after release-relevant changes landed on main. Publishing remains blocked until the Release PR Guard produces and verifies structured evidence for the exact candidate SHA, the protected npm-publish environment approves, and the PR is merged.
+This PR was prepared automatically after release-relevant changes landed on main. Publishing remains blocked until the Release PR Guard produces and verifies structured evidence for the exact candidate SHA and this PR is merged — merging publishes immediately, because the \`npm-publish\` environment carries no protection rules today.
 
 The PR body is informational and cannot satisfy the gate. The workflow artifact records exit codes for:
 
