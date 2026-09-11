@@ -41,8 +41,11 @@ Also in this release:
   localization at all. A catalog that exists but cannot be parsed logs one
   `provider_locale_catalogs_unavailable` warn at boot.
 - Locale negotiation now honours `Accept-Language` quality values instead of
-  taking the first supported tag in header order. This applies to auth turns as
-  well as error envelopes.
+  taking the first supported tag in header order, and is negotiated once per
+  request so an auth turn and an error envelope from the same request cannot
+  disagree. The request envelope's `headers` map outranks the HTTP header,
+  which is what keeps a flow's continue/poll turns in the language its start
+  turn used.
 - Authoring lint gains `error-locale-key-missing` and
   `error-locale-key-malformed` (**error**: a literal `messageKey`/`fixKey` that
   `locales/en.json` does not resolve) and `thrown-error-message-not-localized`

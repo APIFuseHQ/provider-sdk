@@ -11,7 +11,7 @@ import {
 	providerLocaleFromAcceptLanguage,
 	resolveProviderErrorLocale,
 } from "../i18n/error-messages.js";
-import { createServerApp, type ProviderServerLogEvent } from "../server/serve.js";
+import { createServerApp, type ProviderServerLogEvent, serve } from "../server/serve.js";
 import type { OperationRiskClass, ProviderDefinition } from "../types.js";
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
@@ -564,27 +564,35 @@ describe("serve error envelope localization", () => {
 	});
 });
 
-describe("auth route error envelope localization", () => {
-	it("localizes an AuthError thrown by the flow", async () => {
-		const provider: ProviderDefinition = {
-			...localizedProvider(),
-			auth: {
-				mode: "credentials",
-				flow: {
-					async start() {
-						throw new AuthError("Sign-in failed (literal)", {
-							code: "SIGN_IN_FAILED",
-							messageKey: "errors.explicit.message",
-							fixKey: "errors.explicit.fix",
-						});
-					},
-					async continue() {
-						return { kind: "complete", turnId: "turn", data: {} };
-					},
+type AuthFlowStart = NonNullable<NonNullable<ProviderDefinition["auth"]>["flow"]>["start"];
+
+function authProvider(start: AuthFlowStart): ProviderDefinition {
+	return {
+		...localizedProvider(),
+		auth: {
+			mode: "credentials",
+			flow: {
+				start,
+				async continue() {
+					return { kind: "complete", turnId: "turn", data: {} };
 				},
 			},
-		};
-		const app = createServerApp(provider, { localeCatalogs: CATALOGS });
+		},
+	};
+}
+
+describe("auth route error envelope localization", () => {
+	it("localizes an AuthError thrown by the flow", async () => {
+		const app = createServerApp(
+			authProvider(async () => {
+				throw new AuthError("Sign-in failed (literal)", {
+					code: "SIGN_IN_FAILED",
+					messageKey: "errors.explicit.message",
+					fixKey: "errors.explicit.fix",
+				});
+			}),
+			{ localeCatalogs: CATALOGS },
+		);
 
 		const response = await app.request("/auth/start", {
 			method: "POST",
@@ -595,6 +603,79 @@ describe("auth route error envelope localization", () => {
 
 		expect(payload.error.message).toBe("명시적 한국어");
 		expect(payload.error.fix).toBe("명시적 한국어 해결");
+	});
+
+	it("localizes a successful turn with the same locale an error envelope would use", async () => {
+		// The gateway stamps the flow's start locale into the envelope headers
+		// while the HTTP header carries the current caller's; the envelope wins
+		// for both the turn hint and an error message.
+		const catalogs: ProviderLocaleCatalogMap = {
+			en: { auth: { hint: "Sign in (en)" }, errors: { explicit: { message: "Explicit English" } } },
+			ko: { auth: { hint: "로그인 (ko)" }, errors: { explicit: { message: "명시적 한국어" } } },
+		};
+		const turnApp = createServerApp(
+			authProvider(async () => ({
+				kind: "form",
+				turnId: "turn-start",
+				hintKey: "auth.hint",
+				data: {},
+			})),
+			{ localeCatalogs: catalogs },
+		);
+		const errorApp = createServerApp(
+			authProvider(async () => {
+				throw new AuthError("Sign-in failed (literal)", {
+					code: "SIGN_IN_FAILED",
+					messageKey: "errors.explicit.message",
+				});
+			}),
+			{ localeCatalogs: catalogs },
+		);
+		const request = {
+			method: "POST",
+			headers: { "content-type": "application/json", "accept-language": "en" },
+			body: JSON.stringify({
+				requestId: "req_1",
+				flowId: "flow_1",
+				input: {},
+				// Same casing the HTTP header arrives with, so the auth route's
+				// header merge genuinely shadows it.
+				headers: { "accept-language": "ko" },
+			}),
+		};
+
+		const turn = (await (await turnApp.request("/auth/start", request)).json()) as {
+			data: { hint?: string };
+		};
+		const failure = (await (await errorApp.request("/auth/start", request)).json()) as {
+			error: { message: string };
+		};
+
+		expect(turn.data.hint).toBe("로그인 (ko)");
+		expect(failure.error.message).toBe("명시적 한국어");
+	});
+});
+
+describe("serve option forwarding", () => {
+	it("forwards localeCatalogs from serve() into the served app", async () => {
+		const handle = await serve(localizedProvider(), {
+			port: 0,
+			localeCatalogs: CATALOGS,
+			shutdown: { signals: false },
+			logger: () => {},
+		});
+		try {
+			const response = await fetch(`http://127.0.0.1:${handle.port}/v1/declaredOnly`, {
+				method: "POST",
+				headers: { "content-type": "application/json", "accept-language": "ko" },
+				body: JSON.stringify({ requestId: "req_1", input: {} }),
+			});
+			const payload = (await response.json()) as { error: { message: string } };
+
+			expect(payload.error.message).toBe("Tokyo Dome 매진 (ko)");
+		} finally {
+			await handle.close();
+		}
 	});
 });
 

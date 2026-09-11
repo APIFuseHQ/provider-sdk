@@ -3223,10 +3223,6 @@ function toAuthFlowResponse(
 	};
 }
 
-function authFlowLocaleFromHeaders(headers?: Record<string, string>): ProviderLocale {
-	return resolveProviderErrorLocale(acceptLanguageHeaderValue(headers));
-}
-
 function isAuthTurn(value: unknown): value is AuthTurn {
 	return !!value && typeof value === "object" && "kind" in value && "turnId" in value;
 }
@@ -3272,15 +3268,12 @@ function resolveProviderLocaleCatalogs(
 }
 
 function materializeAuthFlowTurn(
-	request: AuthFlowRequest,
 	turn: AuthTurn,
 	catalogs: ProviderLocaleCatalogMap | undefined,
+	locale: ProviderLocale,
 ): AuthTurn {
 	if (!catalogs) return turn;
-	return localizeAuthTurn(turn, {
-		catalogs,
-		locale: authFlowLocaleFromHeaders(request.headers),
-	});
+	return localizeAuthTurn(turn, { catalogs, locale });
 }
 
 function withAuthRequestHeaders(request: AuthFlowRequest, headers: Headers): AuthFlowRequest {
@@ -3391,6 +3384,14 @@ async function handleAuthFlow(
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
 	scope: RequestScopeContext,
+	/**
+	 * Negotiated once per request by the route so a successful turn and an error
+	 * envelope from the same request can never disagree. `withAuthRequestHeaders`
+	 * lets the HTTP header shadow the envelope's `Accept-Language`, but the
+	 * gateway stamps the flow's start locale into the envelope precisely so
+	 * continue/poll turns stay in one language, so the envelope wins here.
+	 */
+	locale: ProviderLocale,
 	signal?: AbortSignal,
 ): Promise<Response | AuthFlowResponse> {
 	const flow = provider.auth?.flow;
@@ -3447,7 +3448,7 @@ async function handleAuthFlow(
 			!(result instanceof Response) &&
 			!(result instanceof ReadableStream) &&
 			isAuthTurn(result)
-				? materializeAuthFlowTurn(request, result, options.localeCatalogs)
+				? materializeAuthFlowTurn(result, options.localeCatalogs, locale)
 				: result;
 		return toAuthFlowResponse(materializedResult, getPatch(), getEngineState());
 	} catch (error) {
@@ -4112,6 +4113,12 @@ function createServerAppWithCapabilityModules(
 	for (const { path, flowRoute, logRoute } of authRoutes) {
 		app.post(path, async (c) => {
 			let rawBody: unknown;
+			// Negotiated once and shared by the success and failure paths so an
+			// auth turn and an error envelope from the same request agree.
+			let localization = errorEnvelopeLocalization({
+				catalogs: localeCatalogs,
+				requestHeaders: c.req.raw.headers,
+			});
 			const requestScope = createRequestScope({
 				provider,
 				staticSensitiveValues,
@@ -4126,6 +4133,11 @@ function createServerAppWithCapabilityModules(
 					.clone()
 					.json()
 					.catch(() => undefined);
+				localization = errorEnvelopeLocalization({
+					catalogs: localeCatalogs,
+					requestHeaders: c.req.raw.headers,
+					rawBody,
+				});
 				requestScope.seedCredentials(rawBody, "auth");
 				const body = withAuthRequestHeaders(
 					AuthFlowRequestSchema.parse(rawBody),
@@ -4153,6 +4165,7 @@ function createServerAppWithCapabilityModules(
 						options,
 						state,
 						requestScope as RequestScope,
+						localization.locale,
 						c.req.raw.signal,
 					);
 					return handled instanceof Response ? handled : c.json(handled);
@@ -4172,11 +4185,7 @@ function createServerAppWithCapabilityModules(
 						requestId,
 						observabilityDetails,
 						requestScope.redact,
-						errorEnvelopeLocalization({
-							catalogs: localeCatalogs,
-							requestHeaders: c.req.raw.headers,
-							rawBody,
-						}),
+						localization,
 					),
 					status,
 				);
@@ -4325,6 +4334,7 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 		ocr: options.ocr,
 		stt: options.stt,
 		resolver: options.resolver,
+		localeCatalogs: options.localeCatalogs,
 		state: options.state,
 		allowMemoryStateFallback: options.allowMemoryStateFallback,
 		operationExecutor: options.operationExecutor,
