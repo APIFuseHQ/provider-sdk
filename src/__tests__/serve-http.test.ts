@@ -4115,6 +4115,64 @@ describe("operation-declared error resolution", () => {
 		}
 	});
 
+	it("serves the fleet-consensus codes from the SDK mapping without any declaration", async () => {
+		const cases = [
+			// Platform-managed key refused by the upstream: the caller holds no
+			// credential, so this is a deployment defect (400), not a 401 the
+			// caller could act on nor a 502 that will heal.
+			{ code: "UPSTREAM_AUTH_ERROR", status: 400 },
+			// Upstream response shape drifted: upstream's fault (502), and a retry
+			// returns the same broken payload.
+			{ code: "UPSTREAM_SCHEMA_ERROR", status: 502 },
+			{ code: "INVALID_REQUEST", status: 400 },
+		] as const;
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestDeclaredError(
+				createDeclaredErrorApp({
+					createError: () => new ProviderError("Upstream said no", { code: testCase.code }),
+					logger: (event) => events.push(event),
+				}),
+			);
+
+			expect(response.status, testCase.code).toBe(testCase.status);
+			expect(await response.json(), testCase.code).toMatchObject({
+				error: { code: testCase.code, retryable: false },
+			});
+			expect(errorObservability(response), testCase.code).toMatchObject({ retryable: false });
+			expect(events[0], testCase.code).toMatchObject({ status: testCase.status });
+			// The whole point of registering: an undeclared throw no longer looks
+			// like an internal fault, so the signal must stop firing too.
+			expect(events[0], testCase.code).not.toHaveProperty("signal");
+		}
+	});
+
+	it("keeps a declared status winning over the fleet-consensus mapping", async () => {
+		// These codes are status-mapped but not SDK runtime-owned, so an existing
+		// provider declaration is still authoritative. Registering them must not
+		// silently rewrite a served status; the authoring lint reports the
+		// divergence instead.
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestDeclaredError(
+			createDeclaredErrorApp({
+				entry: {
+					code: "UPSTREAM_AUTH_ERROR",
+					status: 502,
+					description: "Legacy declaration that predates SDK registration",
+					retryable: true,
+				},
+				createError: () => new ProviderError("Key refused", { code: "UPSTREAM_AUTH_ERROR" }),
+				logger: (event) => events.push(event),
+			}),
+		);
+
+		expect(response.status).toBe(502);
+		expect((await response.json()).error.retryable).toBe(true);
+		expect(errorObservability(response).retryable).toBe(true);
+		expect(events[0]).not.toHaveProperty("signal");
+	});
+
 	it("does not let a declaration override an SDK-owned code", async () => {
 		const events: ProviderServerLogEvent[] = [];
 		const response = await requestDeclaredError(

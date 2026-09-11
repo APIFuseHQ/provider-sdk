@@ -603,17 +603,19 @@ operation:
 
 ```ts
 errorCodes: [{
-  code: "UPSTREAM_SCHEMA_ERROR",
-  status: 502,
-  retryable: true,
-  description: "The upstream response no longer matches its schema.",
+  code: "ITEM_SOLD_OUT",
+  status: 409,
+  retryable: false,
+  description: "The upstream sold the item before checkout completed.",
 }],
 handler: async () => {
-  throw new ProviderError("Upstream schema changed", {
-    code: "UPSTREAM_SCHEMA_ERROR",
-  });
+  throw new ProviderError("Item sold out", { code: "ITEM_SOLD_OUT" });
 },
 ```
+
+Declare only codes the SDK does not already register. `UPSTREAM_SCHEMA_ERROR`,
+`UPSTREAM_AUTH_ERROR`, and `INVALID_REQUEST` are registered below, so throwing
+them needs no declaration at all.
 
 `defineProvider` accepts only statuses the server can emit: 400, 401, 404, 429,
 500, 502, 503, and 504. Invalid declared statuses fail provider definition,
@@ -634,10 +636,10 @@ The registered mappings are:
 | Error code or fallback | HTTP status |
 | --- | ---: |
 | `AUTH_REQUIRED`, `reauth_required` | 401 |
-| `MISSING_SECRET` | 400 |
+| `MISSING_SECRET`, `UPSTREAM_AUTH_ERROR`, `INVALID_REQUEST` | 400 |
 | `NOT_FOUND`, `not_found`, `NO_DATA` | 404 |
 | `RATE_LIMITED`, `UPSTREAM_RATE_LIMIT`, `LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR` | 429 |
-| `UPSTREAM_ERROR`, `BLOCKED` | 502 |
+| `UPSTREAM_ERROR`, `BLOCKED`, `UPSTREAM_SCHEMA_ERROR` | 502 |
 | `STT_UNAVAILABLE`, `UNSUPPORTED_STT_BACKEND`, `STATEFUL_FORWARDING_REPLAY_CACHE_FULL` | 503 |
 | Unregistered input `ValidationError` code | 400 |
 | Other unregistered `ProviderError` code | 500 |
@@ -653,6 +655,38 @@ Throw the domain `ProviderError` directly. Subclassing or wrapping it as a
 `TransportError` solely to preserve a 5xx response is obsolete; declare the
 domain code's `status` instead. Genuine `TransportError` values remain
 SDK-owned and keep their 502/504 mapping.
+
+#### Three fleet-consensus codes are registered
+
+`UPSTREAM_AUTH_ERROR` (400), `UPSTREAM_SCHEMA_ERROR` (502), and
+`INVALID_REQUEST` (400) are registered mappings. All three are non-retryable.
+
+- `UPSTREAM_AUTH_ERROR` is 400, not 401 or 502, because it means the upstream
+  refused a *platform-managed* service key. The caller holds no credential, so
+  401 ("re-authenticate") asks for something the caller cannot do, and 502
+  ("the upstream is sick") promises a recovery that will never arrive. It is a
+  deployment/config defect, exactly like `MISSING_SECRET`.
+- `UPSTREAM_SCHEMA_ERROR` is non-retryable: a retry returns the same payload
+  the provider already could not normalize.
+- `INVALID_REQUEST` is the spelling for caller-side bad input. `INVALID_INPUT`,
+  `VALIDATION_ERROR`, and `BAD_REQUEST` are not registered.
+
+Like `UPSTREAM_ERROR` and `BLOCKED`, these are thrown by provider code rather
+than by the SDK, so they are registered mappings and not SDK-owned codes: an
+existing operation declaration still wins at runtime (step 2 above). Registering
+them therefore never rewrites a status you already declared. What it does do is
+let you delete the declaration — and when your declaration disagrees with the
+registered mapping, `apifuse check` reports it rather than leaving the fleet
+answering one code two ways:
+
+- `error-code-status-conflicts-sdk` — declared `status` differs from the
+  registered status.
+- `error-code-retryable-conflicts-sdk` — declared `retryable` differs from the
+  registered retryability.
+
+Both are warnings. Drop the conflicting field so the SDK supplies the value, or,
+if your operation genuinely means something else, throw a distinct code that
+says so.
 
 ### Declared secrets are SDK-enforced
 

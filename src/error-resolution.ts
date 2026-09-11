@@ -159,6 +159,29 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		["HANDLE_BUSY", 409],
 		["UPSTREAM_ERROR", 502],
 		["BLOCKED", 502],
+		// Fleet-consensus provider codes. These are thrown by provider code, not
+		// by the SDK, so they are registered here (status mapping) and not in
+		// SDK_RUNTIME_OWNED_ERROR_CODES: an operation-declared status still wins,
+		// exactly as it does for UPSTREAM_ERROR and BLOCKED above. Registering
+		// them stops the fleet from re-declaring the same three rows on every
+		// operation, and stops an undeclared throw from being served as 500.
+		//
+		// A platform-managed upstream service key the upstream refuses. With
+		// `auth.mode: "platform-managed"` the caller holds no credential, so 401
+		// ("re-authenticate") tells the caller to do something it cannot do, and
+		// 502 ("upstream is sick") promises a recovery that will never come. It is
+		// a deployment/config defect — the same class as MISSING_SECRET above,
+		// which is already an explicit 400 for that reason.
+		["UPSTREAM_AUTH_ERROR", 400],
+		// The upstream changed its response shape and the provider cannot
+		// normalize it. 502 because the fault is upstream of us, non-retryable
+		// because a retry returns the same broken payload.
+		["UPSTREAM_SCHEMA_ERROR", 502],
+		// Caller-side bad input rejected by the provider. The minority spellings
+		// (INVALID_INPUT / VALIDATION_ERROR / BAD_REQUEST) are deliberately not
+		// registered: they migrate to this spelling on the contract track, and
+		// registering them here would freeze the divergence.
+		["INVALID_REQUEST", 400],
 		["OCR_UNAVAILABLE", 503],
 		["UNSUPPORTED_OCR_BACKEND", 503],
 		["STT_UNAVAILABLE", 503],
@@ -172,3 +195,21 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		// into gateway-driven load.
 		["PROVIDER_ENGINE_UNAVAILABLE", 503],
 	]);
+
+// Canonical retryability for the fleet-consensus codes registered above.
+//
+// Runtime retryability still resolves as `instance option ?? declared ??
+// false`, so this map changes no served response: an undeclared throw already
+// defaults to false, which is what every entry here says. It exists so the
+// authoring lint can tell a provider that its declared `retryable` contradicts
+// the registered meaning of the code, instead of the fleet quietly shipping two
+// answers for the same code. Only codes whose retryability was fixed as part of
+// registration belong here — do not backfill opinions the SDK never made.
+export const SDK_CANONICAL_ERROR_CODE_RETRYABILITY: ReadonlyMap<string, boolean> = new Map<
+	string,
+	boolean
+>([
+	["UPSTREAM_AUTH_ERROR", false],
+	["UPSTREAM_SCHEMA_ERROR", false],
+	["INVALID_REQUEST", false],
+]);

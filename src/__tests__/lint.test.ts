@@ -924,6 +924,38 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 		expect(diagnostics).toEqual([]);
 	});
 
+	it("stays silent for the registered fleet-consensus codes", () => {
+		// Registering these is what lets 70+ provider repos stop repeating the
+		// same three errorCodes rows on every operation.
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"upstream/client.ts": [
+					`throw new ProviderError("key refused", { code: "UPSTREAM_AUTH_ERROR" });`,
+					`throw new ProviderError("shape drifted", { code: "UPSTREAM_SCHEMA_ERROR" });`,
+					`throw new ValidationError("bad input", { code: "INVALID_REQUEST" });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("still flags the minority spellings that migrate on the contract track", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"upstream/client.ts": [
+					`throw new ProviderError("shape drifted", { code: "UPSTREAM_SCHEMA_CHANGED" });`,
+					`throw new ValidationError("bad input", { code: "INVALID_INPUT" });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics.map((item) => item.message).join("\n")).toContain(
+			'"UPSTREAM_SCHEMA_CHANGED"',
+		);
+		expect(diagnostics.map((item) => item.message).join("\n")).toContain('"INVALID_INPUT"');
+	});
+
 	it("skips computed or dynamic codes silently", () => {
 		const diagnostics = lintProvider(
 			providerWithSources({
@@ -1008,6 +1040,137 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 		).filter(undeclaredRule);
 
 		expect(diagnostics).toHaveLength(1);
+	});
+});
+
+describe("lintProvider error-code declaration conflicts", () => {
+	const conflictRule = (item: { rule: string }) =>
+		item.rule === "error-code-status-conflicts-sdk" ||
+		item.rule === "error-code-retryable-conflicts-sdk";
+
+	function providerWithErrorCodes(
+		errorCodes: ReadonlyArray<{
+			code: string;
+			status?: number;
+			description: string;
+			retryable?: boolean;
+		}>,
+	) {
+		return lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			operations: {
+				lookup: {
+					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.lookup.description",
+					input: withDescriptionKey(z.object({}), "operations.lookup.input.description"),
+					output: withDescriptionKey(z.object({}), "operations.lookup.output.description"),
+					fixtures: { request: {}, response: {} },
+					errorCodes: [...errorCodes],
+				},
+			},
+		}).filter(conflictRule);
+	}
+
+	it("warns when a declared status contradicts the SDK mapping", () => {
+		const diagnostics = providerWithErrorCodes([
+			{
+				code: "UPSTREAM_AUTH_ERROR",
+				status: 502,
+				description: "Upstream refused the platform service key.",
+			},
+		]);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "error-code-status-conflicts-sdk",
+				level: "warn",
+				field: "operations.lookup.errorCodes[0].status",
+			}),
+		]);
+		expect(diagnostics[0]?.message).toContain('"UPSTREAM_AUTH_ERROR"');
+		expect(diagnostics[0]?.message).toContain("502");
+		expect(diagnostics[0]?.message).toContain("400");
+		// The message must say the declaration still wins, because it does — an
+		// author who reads "SDK-registered" as "SDK now decides" would otherwise
+		// believe a status changed under them.
+		expect(diagnostics[0]?.message).toContain("still wins at runtime");
+	});
+
+	it("warns when a declared retryable contradicts the SDK mapping", () => {
+		const diagnostics = providerWithErrorCodes([
+			{
+				code: "UPSTREAM_SCHEMA_ERROR",
+				status: 502,
+				description: "Upstream changed its response shape.",
+				retryable: true,
+			},
+		]);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "error-code-retryable-conflicts-sdk",
+				level: "warn",
+				field: "operations.lookup.errorCodes[0].retryable",
+			}),
+		]);
+		expect(diagnostics[0]?.message).toContain('"UPSTREAM_SCHEMA_ERROR"');
+		expect(diagnostics[0]?.message).toContain("retryable true");
+	});
+
+	it("reports both axes when status and retryable each diverge", () => {
+		const diagnostics = providerWithErrorCodes([
+			{
+				code: "UPSTREAM_SCHEMA_ERROR",
+				status: 400,
+				description: "Upstream changed its response shape.",
+				retryable: true,
+			},
+		]);
+
+		expect(diagnostics.map((item) => item.rule)).toEqual([
+			"error-code-status-conflicts-sdk",
+			"error-code-retryable-conflicts-sdk",
+		]);
+	});
+
+	it("stays silent when a declaration agrees with the SDK mapping", () => {
+		// Agreeing declarations keep documentation value and are not churn the
+		// fleet should be asked to make; only divergence is reported.
+		expect(
+			providerWithErrorCodes([
+				{
+					code: "UPSTREAM_SCHEMA_ERROR",
+					status: 502,
+					description: "Upstream changed its response shape.",
+					retryable: false,
+				},
+				{ code: "INVALID_REQUEST", status: 400, description: "Caller sent bad input." },
+				{ code: "UPSTREAM_ERROR", status: 502, description: "Upstream failed." },
+			]),
+		).toEqual([]);
+	});
+
+	it("stays silent for codes the SDK does not register and for omitted fields", () => {
+		expect(
+			providerWithErrorCodes([
+				{ code: "ITEM_SOLD_OUT", status: 409, description: "Upstream refused the purchase." },
+				{ code: "UPSTREAM_AUTH_ERROR", description: "Upstream refused the platform key." },
+				{ code: "UPSTREAM_SCHEMA_ERROR", description: "Upstream changed its response shape." },
+			]),
+		).toEqual([]);
+	});
+
+	it("leaves SDK runtime-owned codes to defineProvider", () => {
+		// For runtime-owned codes the declaration really is ignored, and
+		// defineProvider already says so; two messages about one line is worse
+		// than one.
+		expect(
+			providerWithErrorCodes([
+				{ code: "NOT_FOUND", status: 502, description: "Resource missing.", retryable: true },
+			]),
+		).toEqual([]);
 	});
 });
 
