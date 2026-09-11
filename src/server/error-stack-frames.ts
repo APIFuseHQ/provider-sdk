@@ -33,6 +33,8 @@ const MAX_NODE_MODULE_ID_CHARS = 128;
 // segments cannot ride through this branch.
 const FRAME_NODE_MODULE = /^node:[A-Za-z_][\w.-]{0,40}(?:\/[A-Za-z_][\w.-]{0,40}){0,7}$/;
 const FRAME_BASENAME = /^[\w.$-]{1,120}$/;
+// A basename of dots only (`.`, `..`, `...`) names no file.
+const FRAME_BASENAME_HAS_NAME = /[^.]/;
 
 function parseFunctionName(raw: string): { modifier?: string; name?: string } | undefined {
 	let rest = raw.trim();
@@ -65,6 +67,10 @@ function parseLocation(raw: string): string | undefined {
 		const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
 		const basename = separator >= 0 ? path.slice(separator + 1) : path;
 		if (!FRAME_BASENAME.test(basename)) return undefined;
+		// `.` and `..` pass the basename character class but name no file: they
+		// are the traversal tokens the grammar exists to exclude, so a path such
+		// as `/srv/app/..:1:1` must not be emitted as `..:1:1`.
+		if (!FRAME_BASENAME_HAS_NAME.test(basename)) return undefined;
 		file = basename;
 	}
 	return `${file}:${line}:${column}`;
@@ -85,8 +91,14 @@ export function parseProviderErrorStackFrame(line: string): string | undefined {
 		functionPart = rest.slice(0, open);
 		locationPart = rest.slice(open + 1, -1);
 	} else {
-		functionPart = "";
-		locationPart = rest;
+		// A frame with no parenthesized location still carries its `async`/`new`
+		// modifier inline (`at async file:///app/index.mjs:12:3`, emitted by V8
+		// for an anonymous async frame such as a module's top-level await).
+		// Split it off here: `parseLocation` rejects anything containing
+		// whitespace, so leaving it attached dropped the whole frame.
+		const modified = FRAME_MODIFIER.exec(rest);
+		functionPart = modified ? modified[1] : "";
+		locationPart = modified ? modified[2].trim() : rest;
 	}
 	// Eval frames nest parentheses inside the function part; never pass them through.
 	if (/[()]/.test(functionPart)) return undefined;

@@ -33,6 +33,12 @@ describe("parseProviderErrorStackFrame", () => {
 			"async <anonymous> (probe-stack.ts:5:83)",
 		],
 		["    at file:///home/deploy/app/dist/index.js:12:8", "(index.js:12:8)"],
+		// V8 emits the `async` modifier inline when the frame has no function
+		// name (a module's top-level await). The location itself must still be
+		// parsed, not dropped for containing whitespace.
+		["    at async file:///home/deploy/app/dist/index.js:12:3", "async (index.js:12:3)"],
+		["    at async /srv/app/dist/index.js:12:3", "async (index.js:12:3)"],
+		["    at new /srv/app/dist/index.js:12:3", "new (index.js:12:3)"],
 		["    at run (file:///home/deploy/app/dist/index.js:12:8)", "run (index.js:12:8)"],
 		["    at handler (C:\\Users\\deploy\\app\\dist\\index.js:12:8)", "handler (index.js:12:8)"],
 		["    at C:\\Users\\deploy\\app\\dist\\index.js:12:8", "(index.js:12:8)"],
@@ -70,6 +76,12 @@ describe("parseProviderErrorStackFrame", () => {
 		`    at inner (/srv/app/index.js:1:1)${" ".repeat(1100)}`,
 		"    at `rm -rf /` (/srv/app/index.js:1:1)",
 		"    at inner (/srv/app/index.js:99999999:1)",
+		// `.`/`..` satisfy the basename charset but name no file; emitting
+		// them would pass the traversal token the grammar excludes.
+		"    at x (/srv/app/..:1:1)",
+		"    at x (/srv/app/.:1:1)",
+		"    at x (/srv/app/...:1:1)",
+		"    at ..:1:1",
 	])("drops %j instead of passing it through", (line) => {
 		expect(parseProviderErrorStackFrame(line)).toBeUndefined();
 	});
