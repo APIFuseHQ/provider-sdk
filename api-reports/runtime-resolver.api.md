@@ -638,8 +638,8 @@ interface TraceRecorder {
 // dist/runtime/resolver.d.ts:68:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:70:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
 // dist/types.d.ts:337:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:887:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:892:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:896:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:901:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 
 // (No @packageDocumentation comment for this package)
 

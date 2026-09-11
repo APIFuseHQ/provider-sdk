@@ -35,9 +35,26 @@ export function getProviderLocalePath(
 	key: ProviderLocaleKey | string,
 ): ProviderLocaleValue | undefined {
 	assertProviderLocaleKey(key);
+	return getProviderLocaleSegments(catalog, key.split("."));
+}
+
+/**
+ * Reads a catalog path from raw segments, bypassing the dot-path grammar.
+ *
+ * Derived error-message lookups address the catalog by the thrown error code
+ * (`errors.<code>.message`), and codes are `SCREAMING_SNAKE` as often as they
+ * are camelCase, so they are not valid {@link ProviderLocaleKey} segments. Own
+ * properties only: a `__proto__`/`constructor` segment must read as a miss, not
+ * as the prototype chain.
+ */
+export function getProviderLocaleSegments(
+	catalog: ProviderLocaleCatalog,
+	segments: readonly string[],
+): ProviderLocaleValue | undefined {
+	if (segments.length === 0) return undefined;
 	let cursor: unknown = catalog;
-	for (const segment of key.split(".")) {
-		if (!isRecord(cursor)) return undefined;
+	for (const segment of segments) {
+		if (!isRecord(cursor) || !Object.hasOwn(cursor, segment)) return undefined;
 		cursor = cursor[segment];
 	}
 	return isProviderLocaleValue(cursor) ? cursor : undefined;

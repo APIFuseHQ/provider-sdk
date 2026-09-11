@@ -1,5 +1,6 @@
+import type { ProviderErrorMessageParams } from "./i18n/error-messages.js";
 import type { ProviderErrorCategory } from "./observability.js";
-import type { HttpRedirectFailureReason } from "./types.js";
+import type { HttpRedirectFailureReason, ProviderLocaleKeyInput } from "./types.js";
 
 // Versioned, cross-realm brands. `Symbol.for` resolves to the same symbol in
 // any copy/entrypoint of this SDK major version, so an error created by a
@@ -49,6 +50,25 @@ export type ProviderErrorOptions = {
 	retryable?: boolean;
 	/** Provider-authored, bounded metadata safe for operational logs and error headers. */
 	observability?: ProviderErrorObservability;
+	/**
+	 * Locale catalog key for the client-facing `message`, e.g.
+	 * `"errors.upstreamSchema.message"`. Resolved at serve time against the
+	 * provider's `locales/{en,ko,ja}.json` with the caller's `Accept-Language`,
+	 * falling back to `en` and then to the positional `message`.
+	 *
+	 * The positional `message` stays English: it is what `error.message`, cause
+	 * frames, logs and OTLP attributes carry. Only the response envelope is
+	 * localized.
+	 */
+	messageKey?: ProviderLocaleKeyInput;
+	/** Locale catalog key for the client-facing `fix`. Same resolution as {@link ProviderErrorOptions.messageKey}. */
+	fixKey?: ProviderLocaleKeyInput;
+	/**
+	 * Values substituted into `{name}` placeholders of the resolved text.
+	 * Strings and finite numbers only; string values are scrubbed and length
+	 * capped before substitution because upstream text routinely lands here.
+	 */
+	params?: ProviderErrorMessageParams;
 };
 
 /**

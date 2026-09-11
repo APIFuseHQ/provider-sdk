@@ -688,6 +688,110 @@ Both are warnings. Drop the conflicting field so the SDK supplies the value, or,
 if your operation genuinely means something else, throw a distinct code that
 says so.
 
+### Localized error messages (`messageKey` / `fixKey`)
+
+The positional `ProviderError` message stays **English**. It is what
+`error.message`, cause frames, the `provider_request_failed` log, OTLP
+attributes and tests see. Only two fields of the response body are localized:
+`error.message` and `error.fix`. Nothing else — not `code`, not `details`, not
+`errorCodes[].description`, not the `X-ApiFuse-Error-Observability` header.
+
+Attach locale keys instead of parsing `Accept-Language` yourself:
+
+```ts
+// locales/en.json
+{ "errors": { "upstreamSchema": {
+    "message": "{provider} returned an unexpected response.",
+    "fix": "Retry in a few minutes."
+} } }
+```
+
+```ts
+throw new ProviderError("The culture data service returned an unexpected response.", {
+  code: "UPSTREAM_SCHEMA_ERROR",
+  messageKey: "errors.upstreamSchema.message",
+  fixKey: "errors.upstreamSchema.fix",
+  params: { provider: "Culture Data" },
+});
+```
+
+Keys can also live on the declaration, which localizes **every** site that
+throws that code without touching the throw sites:
+
+```ts
+errorCodes: [{
+  code: "UPSTREAM_SCHEMA_ERROR",
+  description: "The upstream response no longer matches its schema.",
+  messageKey: "errors.upstreamSchema.message",
+  fixKey: "errors.upstreamSchema.fix",
+}],
+```
+
+`status` and `retryable` are omitted because `UPSTREAM_SCHEMA_ERROR` is a
+registered code: the SDK already supplies 502 and non-retryable, and declaring
+a different value trips `error-code-status-conflicts-sdk` /
+`error-code-retryable-conflicts-sdk`. A declaration that carries only keys is
+still worth writing — it localizes every site that throws the code.
+
+Resolution order per field, evaluated at serve time:
+
+1. the throw site's `messageKey` / `fixKey`;
+2. the matching `errorCodes[]` entry's `messageKey` / `fixKey`;
+3. the derived `errors.<code>.message` / `errors.<code>.fix` (the code is used
+   verbatim as a catalog segment, so `errors.UPSTREAM_SCHEMA_ERROR.message`
+   works with no declaration at all);
+4. the English literal passed to the constructor.
+
+Each candidate is resolved in the caller's locale first and then in `en`, so a
+more specific key always beats a more specific locale. A missing key, a
+malformed key, a non-string catalog value or an absent catalog is a miss, never
+a throw: the caller always gets text. Steps 2 and 3 do not apply to SDK-owned
+failures (transport, Zod, stateful deadline, SDK runtime codes) — a provider
+catalog must not be able to relabel `Request timed out`.
+
+Locale negotiation reads `Accept-Language` from the request envelope's
+`headers` map first (the gateway stamps the flow's locale there) and then from
+the HTTP header, honours quality values, matches on the primary subtag, and
+supports `en`, `ko`, `ja` with `en` as the default. A request with no
+`Accept-Language` therefore keeps serving the `en` catalog value, so existing
+contract fixtures do not churn.
+
+**Interpolation.** `{name}` placeholders, `{{` and `}}` for literal braces.
+`params` accepts strings and finite numbers only. A placeholder with no usable
+param is left verbatim so the authoring gap is visible rather than silently
+deleting text.
+
+**Params are untrusted.** Upstream error text routinely ends up in `params`, so
+every string value is scrubbed before substitution: secrets and e-mail
+addresses redacted, control/bidi/newline characters encoded or collapsed,
+`<`, `>` and backticks removed, HTML-entity ampersands (`&lt;`) neutralized
+while ordinary ampersands survive, and the value capped at 200 characters.
+Substituted text is never rescanned, so a value containing `{other}` cannot
+trigger a second interpolation round. Prefer `details` when you need to relay
+an upstream body verbatim; `params` is for short, bounded values.
+
+**Catalog loading.** Catalogs are read once when the server is built (from the
+provider directory's `locales/{en,ko,ja}.json`, loading only the locales that
+exist). Pass `serve(provider, { localeCatalogs })` to bundle them instead. A
+catalog that exists but cannot be parsed logs one
+`provider_locale_catalogs_unavailable` warn at boot and every field falls back
+to its English literal.
+
+**Lint.** `apifuse check` reports:
+
+- `error-locale-key-missing` / `error-locale-key-malformed` (**error**) — a
+  literal `messageKey`/`fixKey`, on a throw site or on an `errorCodes[]` entry,
+  that `locales/en.json` does not resolve to non-empty text, or that is not a
+  legal locale dot path.
+- `thrown-error-message-not-localized` (**warn**) — a throw site whose declared
+  code has no key anywhere and no `errors.<code>.message` in `en`, so it is
+  served untranslated. Warning during the migration; promoted to error per
+  provider as each wave lands.
+
+`ko`/`ja` coverage needs no new rule: `en` is the baseline, so the existing
+catalog parity and placeholder checks already fail an `errors.*` key that is
+missing or untranslated in `ko`/`ja`.
+
 ### Declared secrets are SDK-enforced
 
 Environment/secret presence validation is single-sourced in the SDK. Declare

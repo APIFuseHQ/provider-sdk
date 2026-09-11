@@ -1,3 +1,5 @@
+export type { ProviderLocaleCatalogMap } from "../i18n/catalog.js";
+export type { ProviderLocale, ProviderLocaleCatalog } from "../i18n/keys.js";
 export type {
 	ProxyCacheStatus,
 	ProxyProtocol,

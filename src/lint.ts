@@ -16,6 +16,12 @@ import {
 	isHandleIssuedBy,
 	isHandleFieldMeta,
 } from "./handle-meta.js";
+import { PROVIDER_ERROR_CATALOG_NAMESPACE } from "./i18n/error-messages.js";
+import {
+	getProviderLocaleSegments,
+	isProviderLocaleKey,
+	type ProviderLocaleCatalog,
+} from "./i18n/keys.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
 import {
 	isStealthOwnedHeaderName,
@@ -1019,7 +1025,14 @@ function lintSelfHostedBrowserPatterns(
 	return diagnostics;
 }
 
-const THROWN_ERROR_CONSTRUCTION_PATTERN = /new\s+(?:ProviderError|ValidationError)\s*\(/g;
+// Captures the constructor name so each rule can pick its own scope: the
+// undeclared-code rule keeps its historical ProviderError/ValidationError
+// surface, while the localization rules also cover AuthError.
+const THROWN_ERROR_CONSTRUCTION_PATTERN = /new\s+(ProviderError|AuthError|ValidationError)\s*\(/g;
+const UNDECLARED_CODE_ERROR_CLASSES: ReadonlySet<string> = new Set([
+	"ProviderError",
+	"ValidationError",
+]);
 
 const TEST_SOURCE_FILE_PATTERN = /(?:^|\/)(?:__tests__|__mocks__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const RECORDED_FIXTURE_SOURCE_FILE_PATTERN =
@@ -1414,14 +1427,17 @@ function extractBalancedCallArguments(source: string, startIndex: number): strin
 }
 
 /**
- * Collects literal string values of top-level `code:` properties inside a
- * ProviderError/ValidationError options object. Only plain `"..."` / `'...'`
- * literals at options-object depth count; computed codes (identifiers,
+ * Collects literal string values of the named top-level properties inside a
+ * ProviderError/AuthError/ValidationError options object. Only plain `"..."` /
+ * `'...'` literals at options-object depth count; computed values (identifiers,
  * ternaries, template substitutions, concatenations, escapes) are skipped
- * silently so the rule never guesses.
+ * silently so the rules never guess. The first literal wins per property name.
  */
-function collectLiteralErrorCodeValues(args: string): string[] {
-	const codes: string[] = [];
+function collectLiteralErrorOptionValues(
+	args: string,
+	optionNames: readonly string[],
+): Record<string, string> {
+	const collected: Record<string, string> = {};
 	let braceDepth = 0;
 	let parenDepth = 0;
 	let bracketDepth = 0;
@@ -1431,7 +1447,7 @@ function collectLiteralErrorCodeValues(args: string): string[] {
 		if (char === '"' || char === "'" || char === "`") {
 			const end = skipStringLiteral(args, index);
 			if (end < 0) {
-				return codes;
+				return collected;
 			}
 			index = end;
 			previousSignificantChar = char;
@@ -1440,7 +1456,7 @@ function collectLiteralErrorCodeValues(args: string): string[] {
 		if (char === "/" && args[index + 1] === "/") {
 			const newline = args.indexOf("\n", index);
 			if (newline === -1) {
-				return codes;
+				return collected;
 			}
 			index = newline;
 			continue;
@@ -1448,7 +1464,7 @@ function collectLiteralErrorCodeValues(args: string): string[] {
 		if (char === "/" && args[index + 1] === "*") {
 			const end = args.indexOf("*/", index + 2);
 			if (end === -1) {
-				return codes;
+				return collected;
 			}
 			index = end + 1;
 			continue;
@@ -1472,10 +1488,14 @@ function collectLiteralErrorCodeValues(args: string): string[] {
 			braceDepth === 1 &&
 			parenDepth === 0 &&
 			bracketDepth === 0 &&
-			(previousSignificantChar === "{" || previousSignificantChar === ",") &&
-			args.startsWith("code", index)
+			(previousSignificantChar === "{" || previousSignificantChar === ",")
 		) {
-			let cursor = index + "code".length;
+			const optionName = optionNames.find((name) => startsWithOptionName(args, index, name));
+			if (optionName === undefined) {
+				previousSignificantChar = char;
+				continue;
+			}
+			let cursor = index + optionName.length;
 			while (cursor < args.length && /\s/.test(args[cursor] ?? "")) {
 				cursor++;
 			}
@@ -1498,23 +1518,41 @@ function collectLiteralErrorCodeValues(args: string): string[] {
 							!value.includes("\\") &&
 							(nextChar === "," || nextChar === "}" || nextChar === "")
 						) {
-							codes.push(value);
+							collected[optionName] ??= value;
 						}
 						index = end;
 						previousSignificantChar = quote;
 						continue;
 					}
-					return codes;
+					return collected;
 				}
 			}
 		}
 		previousSignificantChar = char;
 	}
-	return codes;
+	return collected;
 }
 
-function collectLiteralThrownErrorCodes(source: string): string[] {
-	const codes: string[] = [];
+/** True when `name` starts at `index` and is not the prefix of a longer identifier. */
+function startsWithOptionName(args: string, index: number, name: string): boolean {
+	if (!args.startsWith(name, index)) return false;
+	const next = args[index + name.length] ?? "";
+	return !/[A-Za-z0-9_$]/.test(next);
+}
+
+/** One `new ProviderError|AuthError|ValidationError(...)` construction found by source scan. */
+type ThrownErrorConstructionSite = {
+	/** Constructor name, e.g. `ProviderError`. */
+	readonly errorClass: string;
+	readonly code?: string;
+	readonly messageKey?: string;
+	readonly fixKey?: string;
+};
+
+const THROWN_ERROR_LOCALE_OPTION_NAMES = ["code", "messageKey", "fixKey"] as const;
+
+function collectThrownErrorConstructionSites(source: string): ThrownErrorConstructionSite[] {
+	const sites: ThrownErrorConstructionSite[] = [];
 	THROWN_ERROR_CONSTRUCTION_PATTERN.lastIndex = 0;
 	for (
 		let match = THROWN_ERROR_CONSTRUCTION_PATTERN.exec(source);
@@ -1524,11 +1562,52 @@ function collectLiteralThrownErrorCodes(source: string): string[] {
 		const argsStart = match.index + match[0].length;
 		const args = extractBalancedCallArguments(source, argsStart);
 		if (args !== undefined) {
-			codes.push(...collectLiteralErrorCodeValues(args));
+			const values = collectLiteralErrorOptionValues(args, THROWN_ERROR_LOCALE_OPTION_NAMES);
+			sites.push({
+				errorClass: match[1] ?? "",
+				...(values.code === undefined ? {} : { code: values.code }),
+				...(values.messageKey === undefined ? {} : { messageKey: values.messageKey }),
+				...(values.fixKey === undefined ? {} : { fixKey: values.fixKey }),
+			});
 		}
 		THROWN_ERROR_CONSTRUCTION_PATTERN.lastIndex = argsStart;
 	}
-	return codes;
+	return sites;
+}
+
+type ThrowSiteLintSource = { readonly field: string; readonly source: string };
+
+/**
+ * The provider sources a throw-site rule scans, with the diagnostic field path
+ * each one reports under. Prefers the CLI-collected source files (whole-repo
+ * coverage) and falls back to the handler/auth-flow function text available
+ * when `lintProvider` is called without them. Test sources are excluded.
+ */
+function collectThrowSiteLintSources(provider: {
+	authFlowSource?: string;
+	providerSourceFiles?: Record<string, string>;
+	operations?: Record<string, { handler?: unknown; source?: string }>;
+}): ThrowSiteLintSource[] {
+	const sourceFiles = Object.entries(provider.providerSourceFiles ?? {}).filter(
+		([filePath]) => !TEST_SOURCE_FILE_PATTERN.test(filePath),
+	);
+	if (sourceFiles.length > 0) {
+		return sourceFiles.map(([filePath, source]) => ({
+			field: `sourceFiles.${filePath}`,
+			source,
+		}));
+	}
+	const sources: ThrowSiteLintSource[] = [];
+	if (provider.authFlowSource) {
+		sources.push({ field: "auth.flow", source: provider.authFlowSource });
+	}
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const source = getOperationSource(operation);
+		if (source) {
+			sources.push({ field: `operations.${operationKey}.handler`, source });
+		}
+	}
+	return sources;
 }
 
 /**
@@ -1573,30 +1652,15 @@ function lintUndeclaredThrownErrorCodes(provider: {
 		}
 	}
 
-	const sources: Array<{ field: string; source: string }> = [];
-	const sourceFiles = Object.entries(provider.providerSourceFiles ?? {}).filter(
-		([filePath]) => !TEST_SOURCE_FILE_PATTERN.test(filePath),
-	);
-	if (sourceFiles.length > 0) {
-		for (const [filePath, source] of sourceFiles) {
-			sources.push({ field: `sourceFiles.${filePath}`, source });
-		}
-	} else {
-		if (provider.authFlowSource) {
-			sources.push({ field: "auth.flow", source: provider.authFlowSource });
-		}
-		for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-			const source = getOperationSource(operation);
-			if (source) {
-				sources.push({ field: `operations.${operationKey}.handler`, source });
-			}
-		}
-	}
+	const sources = collectThrowSiteLintSources(provider);
 
 	const diagnostics: LintDiagnostic[] = [];
 	for (const { field, source } of sources) {
 		const undeclaredCodes = new Set(
-			collectLiteralThrownErrorCodes(source).filter((code) => !knownCodes.has(code)),
+			collectThrownErrorConstructionSites(source)
+				.filter((site) => UNDECLARED_CODE_ERROR_CLASSES.has(site.errorClass))
+				.flatMap((site) => (site.code === undefined ? [] : [site.code]))
+				.filter((code) => !knownCodes.has(code)),
 		);
 		for (const code of undeclaredCodes) {
 			diagnostics.push({
@@ -1676,6 +1740,177 @@ function lintErrorCodeDeclarationConflicts(provider: {
 		}
 	}
 	return diagnostics;
+}
+
+/** Declared `errorCodes[]` entry shape the localization rules read. */
+type OperationErrorCodeLike = {
+	code: string;
+	messageKey?: string;
+	fixKey?: string;
+};
+
+type ErrorLocaleKeyStatus = "ok" | "missing" | "malformed";
+
+function errorLocaleKeyStatus(catalog: ProviderLocaleCatalog, key: string): ErrorLocaleKeyStatus {
+	if (!isProviderLocaleKey(key)) return "malformed";
+	const value = getProviderLocaleSegments(catalog, key.split("."));
+	return typeof value === "string" && value.trim().length > 0 ? "ok" : "missing";
+}
+
+function hasDerivedErrorCatalogText(
+	catalog: ProviderLocaleCatalog,
+	code: string,
+	field: "message" | "fix",
+): boolean {
+	const value = getProviderLocaleSegments(catalog, [PROVIDER_ERROR_CATALOG_NAMESPACE, code, field]);
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * True when a thrown code reaches the caller as a real provider error whose
+ * text the declared/derived catalog path can actually reach.
+ *
+ * A code qualifies either because the provider declares it in an operation's
+ * `errorCodes`, or because the SDK registers a canonical status for it. The
+ * second arm matters because registering a code is precisely what lets a
+ * provider *delete* the declaration — AUTHORING tells it to for
+ * `UPSTREAM_AUTH_ERROR`, `UPSTREAM_SCHEMA_ERROR` and `INVALID_REQUEST` — and an
+ * undeclared throw of a registered code is no longer the HTTP 500 that
+ * `thrown-error-code-undeclared` reports. Without this arm the two rules leave
+ * a silent hole exactly where the fleet is being told to converge: a 502
+ * `UPSTREAM_SCHEMA_ERROR` served untranslated with nothing warning about it.
+ *
+ * Codes the SDK runtime-owns are excluded: `sdkOwnsErrorResolution` skips the
+ * declaration and derived candidates for them at serve time, so the catalog
+ * entry this rule asks for would never take effect.
+ */
+function isCatalogReachableThrownCode(code: string, declaredCodes: ReadonlySet<string>): boolean {
+	if (declaredCodes.has(code)) return true;
+	return (
+		!SDK_RUNTIME_OWNED_ERROR_CODES.has(code) && SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.has(code)
+	);
+}
+
+/**
+ * Authoring rules for localized provider error text (see
+ * `ProviderErrorOptions.messageKey`).
+ *
+ * - `error-locale-key-missing` / `error-locale-key-malformed` (**error**): a
+ *   literal `messageKey`/`fixKey`, whether on a throw site or on an
+ *   `errorCodes[]` declaration, that the provider's `en` catalog does not
+ *   resolve to non-empty text, or that is not a legal locale dot path. At
+ *   runtime such a key is silently skipped and the caller gets the English
+ *   literal, so nothing fails loudly without this rule.
+ * - `thrown-error-message-not-localized` (**warn**): a throw site whose literal
+ *   `code` is declared in the provider's `errorCodes` — or SDK-registered, and
+ *   so servable without a declaration — but that carries no `messageKey`, no
+ *   declaration-level `messageKey`, and no derived `errors.<code>.message` in
+ *   `en`. Such an error is served untranslated to every caller. Warning while
+ *   the ~2,000 existing sites migrate; it is promoted to error per provider as
+ *   each migration wave lands.
+ *
+ * Both rules are skipped entirely when the caller did not supply
+ * `localeCatalogEn`: without the catalog they could only guess.
+ */
+function lintErrorMessageLocalization(provider: {
+	authFlowSource?: string;
+	providerSourceFiles?: Record<string, string>;
+	localeCatalogEn?: ProviderLocaleCatalog;
+	operations?: Record<
+		string,
+		{
+			handler?: unknown;
+			source?: string;
+			errorCodes?: ReadonlyArray<OperationErrorCodeLike>;
+		}
+	>;
+}): LintDiagnostic[] {
+	const catalog = provider.localeCatalogEn;
+	if (!catalog) return [];
+
+	const diagnostics: LintDiagnostic[] = [];
+	const declaredCodes = new Set<string>();
+	const codesWithDeclaredMessageKey = new Set<string>();
+
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		for (const entry of operation.errorCodes ?? []) {
+			if (typeof entry?.code !== "string") continue;
+			declaredCodes.add(entry.code);
+			for (const keyField of ["messageKey", "fixKey"] as const) {
+				const key = entry[keyField];
+				if (typeof key !== "string") continue;
+				if (keyField === "messageKey") codesWithDeclaredMessageKey.add(entry.code);
+				const status = errorLocaleKeyStatus(catalog, key);
+				if (status === "ok") continue;
+				diagnostics.push(
+					errorLocaleKeyDiagnostic(
+						status,
+						`operations.${operationKey}.errorCodes`,
+						key,
+						`errorCodes entry "${entry.code}" of operation "${operationKey}"`,
+					),
+				);
+			}
+		}
+	}
+
+	for (const { field, source } of collectThrowSiteLintSources(provider)) {
+		const reportedKeys = new Set<string>();
+		const reportedCodes = new Set<string>();
+		for (const site of collectThrownErrorConstructionSites(source)) {
+			for (const key of [site.messageKey, site.fixKey]) {
+				if (key === undefined || reportedKeys.has(key)) continue;
+				const status = errorLocaleKeyStatus(catalog, key);
+				if (status === "ok") continue;
+				reportedKeys.add(key);
+				diagnostics.push(
+					errorLocaleKeyDiagnostic(status, field, key, `a thrown error in ${field}`),
+				);
+			}
+			const code = site.code;
+			if (code === undefined || reportedCodes.has(code)) continue;
+			if (site.messageKey !== undefined) continue;
+			if (!isCatalogReachableThrownCode(code, declaredCodes)) continue;
+			if (codesWithDeclaredMessageKey.has(code)) continue;
+			if (hasDerivedErrorCatalogText(catalog, code, "message")) continue;
+			reportedCodes.add(code);
+			const origin = declaredCodes.has(code)
+				? `declared code "${code}"`
+				: `SDK-registered code "${code}"`;
+			const declarationClause = declaredCodes.has(code)
+				? "its errorCodes declaration has none, and"
+				: "no errorCodes declaration supplies one, and";
+			diagnostics.push({
+				rule: "thrown-error-message-not-localized",
+				level: "warn",
+				field,
+				message: `${site.errorClass} with ${origin} (${field}) has no messageKey, ${declarationClause} locales/en.json has no "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message"; this error is served untranslated to ko and ja callers. Add messageKey (or "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message" to every locale catalog).`,
+			});
+		}
+	}
+
+	return diagnostics;
+}
+
+function errorLocaleKeyDiagnostic(
+	status: Exclude<ErrorLocaleKeyStatus, "ok">,
+	field: string,
+	key: string,
+	owner: string,
+): LintDiagnostic {
+	return status === "malformed"
+		? {
+				rule: "error-locale-key-malformed",
+				level: "error",
+				field,
+				message: `Locale key ${JSON.stringify(key)} on ${owner} is not a locale dot path such as "errors.upstreamSchema.message"; the SDK skips it at serve time and the caller gets the English literal instead.`,
+			}
+		: {
+				rule: "error-locale-key-missing",
+				level: "error",
+				field,
+				message: `Locale key ${JSON.stringify(key)} on ${owner} is missing from locales/en.json (or resolves to a non-string/empty value); the SDK falls back to the English literal at serve time, so the key never takes effect.`,
+			};
 }
 
 type HandleFieldOccurrence = {
@@ -2125,6 +2360,11 @@ export function lintProvider(
 		};
 		authFlowSource?: string;
 		providerSourceFiles?: Record<string, string>;
+		/**
+		 * The provider's `locales/en.json`, injected by `apifuse check`. Error
+		 * message localization rules are skipped when it is absent.
+		 */
+		localeCatalogEn?: ProviderLocaleCatalog;
 		operations?: Record<
 			string,
 			{
@@ -2139,7 +2379,13 @@ export function lintProvider(
 				fixtures?: unknown;
 				handler?: unknown;
 				source?: string;
-				errorCodes?: ReadonlyArray<{ code: string; status?: number; retryable?: boolean }>;
+				errorCodes?: ReadonlyArray<{
+					code: string;
+					status?: number;
+					retryable?: boolean;
+					messageKey?: string;
+					fixKey?: string;
+				}>;
 			}
 		>;
 		meta?: {
@@ -2171,6 +2417,7 @@ export function lintProviderWithInformation(
 		...lintBrowserVersionLiterals(provider),
 		...lintUndeclaredThrownErrorCodes(provider),
 		...lintErrorCodeDeclarationConflicts(provider),
+		...lintErrorMessageLocalization(provider),
 		...lintLegacyChoiceUsage(provider),
 		...lintHandleDeclarations(provider),
 	];
