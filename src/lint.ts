@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import type { ZodType } from "zod";
 
 import {
+	SDK_CANONICAL_ERROR_CODE_RETRYABILITY,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 } from "./error-resolution.js";
@@ -1609,6 +1610,74 @@ function lintUndeclaredThrownErrorCodes(provider: {
 	return diagnostics;
 }
 
+/**
+ * Flags an operation `errorCodes` entry whose declared `status` or `retryable`
+ * contradicts the SDK's canonical resolution for that code.
+ *
+ * For a code the SDK status-maps but does not runtime-own (UPSTREAM_ERROR,
+ * BLOCKED, and the fleet-consensus codes registered alongside them), the
+ * declaration still wins at runtime — `toStatusCode` reads the declaration
+ * before the canonical map. So registering a code never silently rewrites an
+ * existing declaration's status, and it must not: that would change a served
+ * status behind the author's back. What it does create is a fleet that answers
+ * one code two ways. This rule is where that divergence surfaces, by name, with
+ * the canonical value to converge on.
+ *
+ * Codes the SDK runtime-owns are handled separately: `defineProvider` already
+ * warns there, because for those the declaration really is ignored.
+ *
+ * Warning level, deliberately: the divergent providers are live and converge on
+ * their own schedule, so this must not fail `apifuse check`.
+ */
+function lintErrorCodeDeclarationConflicts(provider: {
+	id?: string;
+	operations?: Record<
+		string,
+		{
+			errorCodes?: ReadonlyArray<{ code: string; status?: number; retryable?: boolean }>;
+		}
+	>;
+}): LintDiagnostic[] {
+	const diagnostics: LintDiagnostic[] = [];
+	const providerId = provider.id ?? "unknown";
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		for (const [index, entry] of (operation.errorCodes ?? []).entries()) {
+			if (typeof entry?.code !== "string") continue;
+			// SDK-owned codes ignore the declaration outright; defineProvider owns
+			// that message so authors are not told two different things.
+			if (SDK_RUNTIME_OWNED_ERROR_CODES.has(entry.code)) continue;
+
+			const field = `operations.${operationKey}.errorCodes[${index}]`;
+			const canonicalStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(entry.code);
+			if (canonicalStatus !== undefined && entry.status !== undefined) {
+				if (entry.status !== canonicalStatus) {
+					diagnostics.push({
+						rule: "error-code-status-conflicts-sdk",
+						level: "warn",
+						field: `${field}.status`,
+						message: `Provider "${providerId}" operation "${operationKey}" declares status ${entry.status} for SDK-registered error code "${entry.code}", whose canonical status is ${canonicalStatus}. The declaration still wins at runtime, so this operation serves ${entry.status} while the rest of the fleet serves ${canonicalStatus} for the same code. Drop the status (the SDK supplies ${canonicalStatus}) or, if ${entry.status} is genuinely the right answer here, throw a distinct code that means that.`,
+					});
+				}
+			}
+
+			const canonicalRetryable = SDK_CANONICAL_ERROR_CODE_RETRYABILITY.get(entry.code);
+			if (
+				canonicalRetryable !== undefined &&
+				entry.retryable !== undefined &&
+				entry.retryable !== canonicalRetryable
+			) {
+				diagnostics.push({
+					rule: "error-code-retryable-conflicts-sdk",
+					level: "warn",
+					field: `${field}.retryable`,
+					message: `Provider "${providerId}" operation "${operationKey}" declares retryable ${entry.retryable} for SDK-registered error code "${entry.code}", whose canonical retryability is ${canonicalRetryable}. The declaration still wins at runtime, so callers and the Gateway retry policy get a different answer here than everywhere else the same code is thrown. Drop the retryable (the SDK supplies ${canonicalRetryable}) or throw a distinct code for the retryable condition.`,
+				});
+			}
+		}
+	}
+	return diagnostics;
+}
+
 type HandleFieldOccurrence = {
 	/** Diagnostic path, e.g. `output.offers[].waiting_token`. */
 	path: string;
@@ -2070,7 +2139,7 @@ export function lintProvider(
 				fixtures?: unknown;
 				handler?: unknown;
 				source?: string;
-				errorCodes?: ReadonlyArray<{ code: string }>;
+				errorCodes?: ReadonlyArray<{ code: string; status?: number; retryable?: boolean }>;
 			}
 		>;
 		meta?: {
@@ -2101,6 +2170,7 @@ export function lintProviderWithInformation(
 		...lintSelfHostedBrowserPatterns(provider, options),
 		...lintBrowserVersionLiterals(provider),
 		...lintUndeclaredThrownErrorCodes(provider),
+		...lintErrorCodeDeclarationConflicts(provider),
 		...lintLegacyChoiceUsage(provider),
 		...lintHandleDeclarations(provider),
 	];
