@@ -13,8 +13,8 @@ import {
 	type HandleKindDeclaration,
 	handleFieldDescription,
 	handleIssuerList,
-	isHandleIssuedBy,
 	isHandleFieldMeta,
+	isHandleIssuedBy,
 } from "./handle-meta.js";
 import { PROVIDER_ERROR_CATALOG_NAMESPACE } from "./i18n/error-messages.js";
 import {
@@ -27,6 +27,7 @@ import {
 	isStealthOwnedHeaderName,
 	SDK_OWNED_CHROME_HEADER_PREFIX,
 } from "./runtime/stealth-owned-headers.js";
+import { lintRuntimeBoundary } from "./runtime-boundary-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 
@@ -2421,6 +2422,10 @@ export function lintProviderWithInformation(
 		...lintLegacyChoiceUsage(provider),
 		...lintHandleDeclarations(provider),
 	];
+	// Runtime boundary rules (process.env, node:fs/net/child_process, raw
+	// fetch) also yield information entries for `@apifuse-allow` acknowledgements.
+	const runtimeBoundary = lintRuntimeBoundary(getTypeScript(), provider, getOperationSource);
+	diagnostics.push(...runtimeBoundary.diagnostics);
 
 	if (provider.operations) {
 		const authMode = provider.auth?.mode;
@@ -2464,7 +2469,10 @@ export function lintProviderWithInformation(
 	}
 
 	if (!provider.operations) {
-		return applyPinnedWireFieldPaths(provider, diagnostics);
+		return withInformation(
+			applyPinnedWireFieldPaths(provider, diagnostics),
+			runtimeBoundary.information,
+		);
 	}
 
 	diagnostics.push(
@@ -2495,5 +2503,16 @@ export function lintProviderWithInformation(
 		),
 	);
 
-	return applyPinnedWireFieldPaths(provider, diagnostics);
+	return withInformation(
+		applyPinnedWireFieldPaths(provider, diagnostics),
+		runtimeBoundary.information,
+	);
+}
+
+function withInformation(
+	result: ProviderLintResult,
+	information: readonly ProviderLintInformation[],
+): ProviderLintResult {
+	if (information.length === 0) return result;
+	return { diagnostics: result.diagnostics, information: [...information, ...result.information] };
 }

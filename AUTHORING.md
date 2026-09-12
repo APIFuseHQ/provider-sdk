@@ -857,6 +857,50 @@ Note the asymmetry: the gate treats whitespace-only values as missing, but
 `ctx.env.get()` still returns the raw value to handlers — trim at the point of
 use if the upstream is whitespace-sensitive.
 
+### Runtime boundary: no `process.env`, `node:fs`, `child_process`, or raw `fetch()`
+
+Provider runtime code reaches the outside world through the context only:
+`ctx.http` / `ctx.stealth` for HTTP, `ctx.browser` for browser work,
+`ctx.env.get()` / `ctx.credential` for configuration and secrets, `ctx.files` /
+`ctx.cache` / `ctx.state` for data that must outlive a request. Ambient Node
+and Bun globals bypass `allowedHosts`, proxy policy, retries, redaction, the
+secret presence gate, and telemetry. `apifuse check` reports them (**warn** in
+this release; the level is raised once the fleet is clean):
+
+- `process-env-direct-read` — `process.env.X`, `process.env["X"]`, a bare
+  `process.env` object use, `Bun.env`. The `APIFUSE__RUNTIME__*` bootstrap
+  family (`APIFUSE__RUNTIME__PORT`, `…POD_ID`, `…POD_ENDPOINT`) is exempt
+  everywhere; every other value is declared in `defineProvider` (`secrets:
+  [{ name, required }]`, or `env: true`) and read with `ctx.env.get(name)`.
+- `node-runtime-module-import` — value imports of `fs`, `fs/promises`, `net`,
+  `tls`, `dgram`, `http`, `https`, `http2`, `child_process` (with or without
+  `node:`), and `Bun.spawn` / `Bun.spawnSync` / ``Bun.$` ` `` / `Bun.file` /
+  `Bun.write`. `import type` is ignored; `node:path`, `node:crypto`,
+  `node:url` are fine.
+- `direct-fetch-call` — the global `fetch()` (also `globalThis.fetch`).
+  `ctx.stealth.fetch()` never matches, nor does a `fetch` the file declares
+  itself (parameter, variable, import).
+
+Scope is runtime source only: tests, recorded fixtures, `.d.ts`, the root
+`dev.ts` / `start.ts` / `deploy.ts` entrypoints, and the `scripts/`, `tools/`,
+`bin/` directories at the provider root are not scanned. Keep fixture
+recorders, smoke scripts, and other operator tooling under `scripts/`, and do
+not import from there in request-path modules.
+
+Acknowledge a deliberate exception on the finding line or the comment-only
+line above it with `// @apifuse-allow <rule>: <reason>`; the finding then
+appears as an `INFO` audit line instead of a warning.
+
+```ts
+// Before: request-path module reads the ambient environment and the disk
+import { mkdir, writeFile } from "node:fs/promises";
+const tapDirectory = process.env.TABELOG_DIAG_TAP_DIR?.trim();
+
+// After: declared configuration through the context; no filesystem in the pod
+const tapDirectory = ctx.env.get("APIFUSE__PROVIDER__TABELOG__DIAG_TAP_DIR")?.trim();
+// …and route diagnostics through ctx.trace / ctx.files instead of writing files.
+```
+
 ### Credentials forced into query parameters
 
 Prefer an authorization header or request body whenever the upstream supports
