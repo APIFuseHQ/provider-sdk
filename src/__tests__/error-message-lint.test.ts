@@ -323,6 +323,53 @@ describe("error-locale-key-missing", () => {
 		]);
 	});
 
+	it("accepts the SCREAMING_SNAKE error-code key AUTHORING tells authors to write", () => {
+		// AUTHORING documents `errors.<code>.<field>` with the code verbatim, so a
+		// registered code such as UPSTREAM_SCHEMA_ERROR is the documented spelling.
+		// The grammar used to reject it, reporting error-locale-key-malformed for
+		// text the SDK serves correctly.
+		expect(
+			localizationDiagnostics(
+				providerUnderLint({
+					providerSourceFiles: {
+						"upstream/client.ts": `throw new ProviderError("Bad shape", { code: "UPSTREAM_SCHEMA_ERROR", messageKey: "errors.UPSTREAM_SCHEMA_ERROR.message", fixKey: "errors.UPSTREAM_SCHEMA_ERROR.fix" });`,
+					},
+					localeCatalogEn: {
+						errors: {
+							UPSTREAM_SCHEMA_ERROR: { message: "Upstream changed.", fix: "Retry later." },
+						},
+					},
+				}),
+			),
+		).toEqual([]);
+	});
+
+	it("accepts a declaration-level error-code key for every code PR #323 registered", () => {
+		for (const code of ["UPSTREAM_AUTH_ERROR", "UPSTREAM_SCHEMA_ERROR", "INVALID_REQUEST"]) {
+			expect({
+				code,
+				diagnostics: localizationDiagnostics(
+					providerUnderLint({
+						providerSourceFiles: {
+							"upstream/client.ts": `throw new ProviderError("Upstream failed", { code: ${JSON.stringify(code)} });`,
+						},
+						errorCodes: [
+							{
+								code,
+								description: "Registered code documented in AUTHORING.",
+								messageKey: `errors.${code}.message`,
+								fixKey: `errors.${code}.fix`,
+							},
+						],
+						localeCatalogEn: {
+							errors: { [code]: { message: "Upstream failed.", fix: "Retry later." } },
+						},
+					}),
+				),
+			}).toEqual({ code, diagnostics: [] });
+		}
+	});
+
 	it("errors on a malformed key instead of claiming it is missing", () => {
 		const diagnostics = localizationDiagnostics(
 			providerUnderLint({
