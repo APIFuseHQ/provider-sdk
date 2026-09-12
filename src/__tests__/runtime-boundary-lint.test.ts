@@ -286,13 +286,83 @@ describe(`runtime boundary lint: ${DIRECT_FETCH_CALL_RULE}`, () => {
 				"export function withTransport(fetch: typeof globalThis.fetch) {",
 				"  return fetch('https://api.example.com');",
 				"}",
+				"export const bound = (fetch) => fetch('https://api.example.com');",
+				"export const named = function fetch(url) { return fetch(url); };",
+				"export function hoisted() { if (flag) { var fetch = shim; } return fetch('/v'); }",
+				"try { run(); } catch (fetch) { fetch('/z'); }",
+				"for (const fetch of transports) fetch('/y');",
+				"{ const fetch = ctx.stealth.fetch; await fetch('/x'); }",
 			].join("\n"),
 			"upstream/aliased.ts": [
 				'import { fetch } from "undici";',
 				"export const load = () => fetch('https://api.example.com');",
 			].join("\n"),
+			"upstream/destructured.ts": [
+				"const { fetch } = createTransport();",
+				"export const load = () => fetch('https://api.example.com');",
+			].join("\n"),
 		});
 		expect(diagnostics).toEqual([]);
+	});
+
+	it("still reports a global fetch when another scope in the same file declares its own", () => {
+		const diagnostics = boundaryDiagnostics({
+			"upstream/session.ts": [
+				"export function withTransport(fetch: typeof globalThis.fetch) {",
+				"  return fetch('https://api.example.com/probe');",
+				"}",
+				"function helper() { const fetch = 1; return fetch; }",
+				"export async function login(url: string, password: string) {",
+				"  return await fetch(url, { method: 'POST', body: password });",
+				"}",
+				"{ const fetch = ctx.stealth.fetch; await fetch('/x'); }",
+				"await fetch('https://api.example.com/after-block');",
+				"const { fetch: aliased } = createTransport();",
+				"await aliased('/aliased'); await fetch('https://api.example.com/last');",
+			].join("\n"),
+		});
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]).toMatchObject({
+			rule: DIRECT_FETCH_CALL_RULE,
+			field: "sourceFiles.upstream/session.ts",
+		});
+		expect(diagnostics[0]?.message).toContain("fetch() (line 6, 9, 11)");
+	});
+});
+
+describe("runtime boundary lint: parsing", () => {
+	it("parses .ts as TypeScript so a generic arrow or angle-bracket assertion does not hide the rest of the file", () => {
+		const diagnostics = boundaryDiagnostics({
+			"upstream/generic.ts": [
+				"const identity = <T>(value: T): T => value;",
+				"const count = <number>identity(1);",
+				"const key = process.env.REAL_SECRET;",
+				"const res = await fetch('https://api.example.com');",
+				'import { readFileSync } from "node:fs";',
+			].join("\n"),
+		});
+		expect(diagnostics.map((diagnostic) => diagnostic.rule).sort()).toEqual(
+			[...RUNTIME_BOUNDARY_RULES].sort(),
+		);
+		const messages = diagnostics.map((diagnostic) => diagnostic.message).join("\n");
+		expect(messages).toContain("process.env.REAL_SECRET (line 3)");
+		expect(messages).toContain("fetch() (line 4)");
+		expect(messages).toContain("node:fs (line 5)");
+	});
+
+	it("parses .tsx with JSX", () => {
+		const diagnostics = boundaryDiagnostics({
+			"ui/widget.tsx": [
+				"export const Widget = () => <div>{process.env.PUBLIC_LABEL}</div>;",
+				"export const load = () => fetch('https://api.example.com');",
+			].join("\n"),
+		});
+		expect(diagnostics.map((diagnostic) => diagnostic.rule).sort()).toEqual(
+			[DIRECT_FETCH_CALL_RULE, PROCESS_ENV_DIRECT_READ_RULE].sort(),
+		);
+		const messages = diagnostics.map((diagnostic) => diagnostic.message).join("\n");
+		expect(messages).toContain("process.env.PUBLIC_LABEL (line 1)");
+		expect(messages).toContain("fetch() (line 2)");
 	});
 });
 

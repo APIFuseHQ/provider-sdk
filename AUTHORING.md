@@ -878,8 +878,10 @@ this release; the level is raised once the fleet is clean):
   `Bun.write`. Type-only imports (`import type`, or every binding inline `type`) are ignored; `node:path`, `node:crypto`,
   `node:url` are fine.
 - `direct-fetch-call` — the global `fetch()` (also `globalThis.fetch`).
-  `ctx.stealth.fetch()` never matches, nor does a `fetch` the file declares
-  itself (parameter, variable, import).
+  `ctx.stealth.fetch()` never matches, nor does a call to a `fetch` binding
+  declared in an enclosing scope (parameter, variable, import, catch clause).
+  The check is lexical: a wrapper that takes `fetch` as a parameter does not
+  hide a global `fetch()` in another function of the same file.
 
 Scope is runtime source only: tests, recorded fixtures, `.d.ts`, the root
 `dev.ts` / `start.ts` / `deploy.ts` entrypoints, and the `scripts/`, `tools/`,

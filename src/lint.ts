@@ -27,7 +27,7 @@ import {
 	isStealthOwnedHeaderName,
 	SDK_OWNED_CHROME_HEADER_PREFIX,
 } from "./runtime/stealth-owned-headers.js";
-import { lintRuntimeBoundary } from "./runtime-boundary-lint.js";
+import { lintRuntimeBoundary, scriptKindForSourceFile } from "./runtime-boundary-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 
@@ -1149,14 +1149,17 @@ function isReportedOwnedHeaderName(value: string | undefined): boolean {
 	return name.startsWith(OWNED_CLIENT_HINT_HEADER_PREFIX);
 }
 
-function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLiteralFinding[] {
+function collectBrowserVersionLiteralFindings(
+	fileName: string,
+	source: string,
+): BrowserVersionLiteralFinding[] {
 	const ts = getTypeScript();
 	const sourceFile = ts.createSourceFile(
-		"provider-source.ts",
+		fileName,
 		source,
 		ts.ScriptTarget.Latest,
 		true,
-		ts.ScriptKind.TSX,
+		scriptKindForSourceFile(ts, fileName),
 	);
 	let findings: BrowserVersionLiteralFinding[] = [];
 	const seen = new Set<string>();
@@ -1298,7 +1301,7 @@ function browserVersionLiteralMessage(finding: BrowserVersionLiteralFinding): st
 }
 
 function lintBrowserVersionLiterals(provider: ProviderSourceLike): LintDiagnostic[] {
-	const sources: Array<{ field: string; source: string }> = [];
+	const sources: Array<{ field: string; fileName: string; source: string }> = [];
 	const sourceFiles = Object.entries(provider.providerSourceFiles ?? {}).filter(
 		([filePath]) =>
 			JAVASCRIPT_SOURCE_FILE_PATTERN.test(filePath) &&
@@ -1307,19 +1310,28 @@ function lintBrowserVersionLiterals(provider: ProviderSourceLike): LintDiagnosti
 	);
 	if (sourceFiles.length > 0) {
 		for (const [filePath, source] of sourceFiles) {
-			sources.push({ field: `sourceFiles.${filePath}`, source });
+			sources.push({ field: `sourceFiles.${filePath}`, fileName: filePath, source });
 		}
 	} else {
 		if (provider.authFlowSource)
-			sources.push({ field: "auth.flow", source: provider.authFlowSource });
+			sources.push({
+				field: "auth.flow",
+				fileName: "auth-flow.ts",
+				source: provider.authFlowSource,
+			});
 		for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 			const source = getOperationSource(operation);
-			if (source) sources.push({ field: `operations.${operationKey}.handler`, source });
+			if (source)
+				sources.push({
+					field: `operations.${operationKey}.handler`,
+					fileName: `${operationKey}.ts`,
+					source,
+				});
 		}
 	}
 
-	return sources.flatMap(({ field, source }) =>
-		collectBrowserVersionLiteralFindings(source).map((finding) => ({
+	return sources.flatMap(({ field, fileName, source }) =>
+		collectBrowserVersionLiteralFindings(fileName, source).map((finding) => ({
 			rule: "browser-version-literal",
 			level: "error" as const,
 			field,
@@ -2163,7 +2175,7 @@ const LEGACY_CHOICE_IDENTIFIERS = new Set([
  * the provider) while code inside `${}` interpolations still does. Falls back
  * to a raw-source regex when TypeScript is not installed.
  */
-function findLegacyChoiceUsage(source: string): string | undefined {
+function findLegacyChoiceUsage(fileName: string, source: string): string | undefined {
 	let ts: typeof import("typescript");
 	try {
 		ts = getTypeScript();
@@ -2171,11 +2183,11 @@ function findLegacyChoiceUsage(source: string): string | undefined {
 		return LEGACY_CHOICE_USAGE_PATTERN.exec(source)?.[0];
 	}
 	const file = ts.createSourceFile(
-		"provider.ts",
+		fileName,
 		source,
 		ts.ScriptTarget.Latest,
 		false,
-		ts.ScriptKind.TSX,
+		scriptKindForSourceFile(ts, fileName),
 	);
 	let found: string | undefined;
 	const visit = (node: import("typescript").Node): void => {
@@ -2200,23 +2212,27 @@ function findLegacyChoiceUsage(source: string): string | undefined {
 }
 
 function lintLegacyChoiceUsage(provider: ProviderSourceLike): LintDiagnostic[] {
-	const sources: Array<{ field: string; source: string }> = [];
+	const sources: Array<{ field: string; fileName: string; source: string }> = [];
 
 	if (provider.authFlowSource) {
-		sources.push({ field: "auth.flow", source: provider.authFlowSource });
+		sources.push({ field: "auth.flow", fileName: "auth-flow.ts", source: provider.authFlowSource });
 	}
 	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
-		sources.push({ field: `sourceFiles.${filePath}`, source });
+		sources.push({ field: `sourceFiles.${filePath}`, fileName: filePath, source });
 	}
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		const source = getOperationSource(operation);
 		if (source) {
-			sources.push({ field: `operations.${operationKey}.handler`, source });
+			sources.push({
+				field: `operations.${operationKey}.handler`,
+				fileName: `${operationKey}.ts`,
+				source,
+			});
 		}
 	}
 
-	return sources.flatMap(({ field, source }) => {
-		const match = findLegacyChoiceUsage(source);
+	return sources.flatMap(({ field, fileName, source }) => {
+		const match = findLegacyChoiceUsage(fileName, source);
 		if (!match) return [];
 		return [
 			{
