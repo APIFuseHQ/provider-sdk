@@ -1111,6 +1111,7 @@ abstract class WebSocketCommandClient {
 	>();
 	private socket?: WebSocket;
 	private socketPromise?: Promise<WebSocket>;
+	private closed = false;
 
 	constructor(endpoint: string) {
 		this.endpoint = normalizeWebSocketEndpoint(endpoint);
@@ -1134,6 +1135,7 @@ abstract class WebSocketCommandClient {
 		params: Record<string, unknown> = {},
 	): Promise<Record<string, unknown>> {
 		const socket = await this.getSocket();
+		if (this.closed) throw new Error(`WebSocket closed: ${this.endpoint}`);
 		const id = this.nextId++;
 
 		return await new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -1144,6 +1146,7 @@ abstract class WebSocketCommandClient {
 	}
 
 	async close(): Promise<void> {
+		this.closed = true;
 		for (const pending of this.pending.values()) {
 			pending.reject(new Error(`WebSocket closed: ${this.endpoint}`));
 		}
@@ -1162,6 +1165,7 @@ abstract class WebSocketCommandClient {
 	): CdpCommandFrame | JsonRpcCommandFrame;
 
 	private async getSocket(): Promise<WebSocket> {
+		if (this.closed) throw new Error(`WebSocket closed: ${this.endpoint}`);
 		if (this.socket?.readyState === WebSocket.OPEN) {
 			return this.socket;
 		}
@@ -1174,6 +1178,11 @@ abstract class WebSocketCommandClient {
 			const socket = new WebSocket(this.endpoint);
 
 			socket.addEventListener("open", () => {
+				if (this.closed) {
+					socket.close();
+					reject(new Error(`WebSocket closed: ${this.endpoint}`));
+					return;
+				}
 				this.socket = socket;
 				resolve(socket);
 			});
@@ -1559,7 +1568,7 @@ class CdpBrowserFrame implements BrowserFrame {
 }
 
 class CdpPoolBrowserPage implements BrowserPageContract {
-	private closed = false;
+	private closePromise?: Promise<void>;
 	private initialized = false;
 	private readonly frameExecutionContexts = new Map<string, number>();
 
@@ -1779,20 +1788,25 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	}
 
 	async close(): Promise<void> {
-		if (this.closed) {
+		// Only the first caller observes the release outcome; repeat calls stay
+		// idempotent (as they were before the promise was memoized) instead of
+		// replaying a cached rejection, and never re-issue a release against a
+		// target the pool has already disposed.
+		if (this.closePromise) {
+			await this.closePromise.catch(() => undefined);
 			return;
 		}
-
-		this.closed = true;
-
-		try {
-			await this.release({
-				...(this.browserContextId ? { browserContextId: this.browserContextId } : {}),
-				pageId: this.pageId,
-			});
-		} finally {
-			await this.pageClient.close();
-		}
+		this.closePromise = (async () => {
+			try {
+				await this.release({
+					...(this.browserContextId ? { browserContextId: this.browserContextId } : {}),
+					pageId: this.pageId,
+				});
+			} finally {
+				await this.pageClient.close();
+			}
+		})();
+		await this.closePromise;
 	}
 
 	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
@@ -1822,8 +1836,19 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		try {
 			return await run();
 		} finally {
-			unsubscribe();
-			await this.pageClient.send("Fetch.disable");
+			try {
+				if (this.closePromise) {
+					// Keep interception active until release settles. The release failure
+					// stays observable through close() itself; swallowing it here keeps
+					// this finally from replacing run()'s own outcome, and still avoids a
+					// reconnect or a disable against a disposed target.
+					await this.closePromise.catch(() => undefined);
+				} else {
+					await this.pageClient.send("Fetch.disable");
+				}
+			} finally {
+				unsubscribe();
+			}
 		}
 	}
 
@@ -2238,22 +2263,34 @@ export class BrowserClient implements BrowserClientContract {
 	}
 
 	private activatePage(page: BrowserPageContract): BrowserPageContract {
-		let closed = false;
+		let closePromise: Promise<void> | undefined;
 		const originalClose = page.close.bind(page);
 		const trackedPage = new Proxy(page, {
 			get: (target, property, receiver) => {
 				if (property === "close") {
 					return async () => {
-						if (closed) return;
-						closed = true;
-						try {
-							await originalClose();
-						} finally {
-							this.activePages.delete(trackedPage);
-							if (this.activePage === trackedPage) {
-								this.activePage = undefined;
-							}
+						// Repeat calls resolve on the first outcome instead of replaying a
+						// cached rejection, so a failed release cannot make close() — or
+						// BrowserClient.close(), which closes every tracked page — throw
+						// forever.
+						if (closePromise) {
+							await closePromise.catch(() => undefined);
+							return;
 						}
+						closePromise = (async () => {
+							// Bookkeeping runs even when the release fails: the page is gone
+							// either way, so leaving it in activePages would leak it and let
+							// solveChallenge reuse a disposed target.
+							try {
+								await originalClose();
+							} finally {
+								this.activePages.delete(trackedPage);
+								if (this.activePage === trackedPage) {
+									this.activePage = undefined;
+								}
+							}
+						})();
+						await closePromise;
 					};
 				}
 				const value = Reflect.get(target, property, receiver);

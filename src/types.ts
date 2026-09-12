@@ -1287,7 +1287,23 @@ export interface RequestOptions {
 	 */
 	sensitiveParams?: Record<string, string>;
 	proxy?: string;
+	/**
+	 * Per-attempt timeout for the response-header phase. It is disarmed once a
+	 * successful response's headers arrive, so it never bounds consumption of
+	 * that body — on the buffered path as well as on streams; use `signal` for
+	 * that. A non-2xx body the transport discards on the caller's behalf is
+	 * still drained under this deadline, so a wedged error body cannot hang the
+	 * attempt.
+	 */
 	timeout?: number;
+	/**
+	 * Cancels this request only — its retries, its backoff sleep and its
+	 * response-body consumption — leaving the client's other in-flight requests
+	 * untouched. Merged with the client-level `signal`, so a rejection reads as
+	 * `transport_cancelled` either way; inspect `signal.reason` to tell a
+	 * per-request abort from a fleet-wide one.
+	 */
+	signal?: AbortSignal;
 	/**
 	 * Defaults to true. Set to false when callers need to inspect upstream
 	 * non-2xx bodies themselves instead of converting them to TransportError.
@@ -1339,6 +1355,13 @@ export type HttpMethod =
 	| "patch";
 
 export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
+	/**
+	 * Not supported by the stealth transport, which observes only the
+	 * client-level `signal` passed to `createStealthClient`. Typed as `never` so
+	 * a per-request signal fails to compile instead of being silently ignored;
+	 * threading one through the stealth session is a separate change.
+	 */
+	signal?: never;
 	/**
 	 * Defaults to true. Set to false when callers need to inspect upstream
 	 * non-2xx bodies themselves instead of converting them to TransportError.
