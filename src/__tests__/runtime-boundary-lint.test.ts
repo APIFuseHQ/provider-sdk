@@ -193,20 +193,41 @@ describe(`runtime boundary lint: ${NODE_RUNTIME_MODULE_IMPORT_RULE}`, () => {
 		});
 	});
 
-	it("ignores type-only imports", () => {
+	it("ignores imports and re-exports that are erased as type-only", () => {
 		const diagnostics = boundaryDiagnostics({
 			"protocol/types.ts": [
 				'import type { Socket } from "node:net";',
-				'import { type ChildProcess } from "node:child_process";',
+				'import { type ChildProcess, type SpawnOptions } from "node:child_process";',
 				'export type { Stats } from "node:fs";',
+				'export { type Dirent } from "node:fs/promises";',
 			].join("\n"),
 		});
-		// `import { type X } from` still evaluates the module; only the clause-level
-		// `import type` is erased. The middle line is a value import and stays reported.
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("still reports an import that keeps a value binding next to inline types", () => {
+		const diagnostics = boundaryDiagnostics({
+			"upstream/io.ts": [
+				'import { type ChildProcess, spawn } from "node:child_process";',
+				'import fs, { type Stats } from "node:fs";',
+				'import * as net from "node:net";',
+				'import "node:tls";',
+				'export * from "node:dgram";',
+				'export { request, type IncomingMessage } from "node:http";',
+			].join("\n"),
+		});
 		expect(diagnostics).toHaveLength(1);
-		expect(diagnostics[0]?.message).toContain("node:child_process (line 2)");
-		expect(diagnostics[0]?.message).not.toContain("node:net");
-		expect(diagnostics[0]?.message).not.toContain("node:fs");
+		const message = diagnostics[0]?.message ?? "";
+		for (const specifier of [
+			"node:child_process (line 1)",
+			"node:fs (line 2)",
+			"node:net (line 3)",
+			"node:tls (line 4)",
+			"node:dgram (line 5)",
+			"node:http (line 6)",
+		]) {
+			expect(message).toContain(specifier);
+		}
 	});
 
 	it("warns on the Bun process and file equivalents", () => {

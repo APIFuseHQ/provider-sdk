@@ -225,6 +225,40 @@ function envKeyReadFrom(ts: TypeScriptModule, envNode: TsNode): string | undefin
 	return undefined;
 }
 
+/**
+ * True when the import statement still loads the module at runtime. A
+ * clause-level `import type`, and a named import whose every binding is
+ * inline `type`, are erased by Bun and by tsc (without
+ * `verbatimModuleSyntax`), so they never reach the module. A side-effect
+ * import (`import "node:fs"`), a default or namespace binding, or any
+ * value-level named binding does load it.
+ */
+function importDeclarationLoadsModule(
+	ts: TypeScriptModule,
+	node: import("typescript").ImportDeclaration,
+): boolean {
+	const clause = node.importClause;
+	if (!clause) return true;
+	if (clause.isTypeOnly) return false;
+	if (clause.name) return true;
+	const bindings = clause.namedBindings;
+	if (!bindings) return true;
+	if (ts.isNamespaceImport(bindings)) return true;
+	return bindings.elements.some((element) => !element.isTypeOnly);
+}
+
+/** Same rule for `export … from`: erased when type-only at the clause or on every specifier. */
+function exportDeclarationLoadsModule(
+	ts: TypeScriptModule,
+	node: import("typescript").ExportDeclaration,
+): boolean {
+	if (node.isTypeOnly) return false;
+	const clause = node.exportClause;
+	if (!clause) return true;
+	if (ts.isNamespaceExport(clause)) return true;
+	return clause.elements.some((element) => !element.isTypeOnly);
+}
+
 /** Names declared anywhere in the file (parameters, variables, imports, functions, catch clauses). */
 function collectDeclaredNames(ts: TypeScriptModule, sourceFile: TsSourceFile): Set<string> {
 	const names = new Set<string>();
@@ -324,15 +358,14 @@ export function analyzeRuntimeBoundary(
 		// --- node:fs / node:net / node:child_process … ---------------------
 		if (ts.isImportDeclaration(node)) {
 			const specifier = staticString(ts, node.moduleSpecifier);
-			const typeOnly = node.importClause?.isTypeOnly === true;
-			if (specifier && !typeOnly && isForbiddenNodeModule(specifier)) {
+			if (specifier && importDeclarationLoadsModule(ts, node) && isForbiddenNodeModule(specifier)) {
 				record(NODE_RUNTIME_MODULE_IMPORT_RULE, node, specifier);
 			}
 			return;
 		}
 		if (ts.isExportDeclaration(node)) {
 			const specifier = staticString(ts, node.moduleSpecifier);
-			if (specifier && !node.isTypeOnly && isForbiddenNodeModule(specifier)) {
+			if (specifier && exportDeclarationLoadsModule(ts, node) && isForbiddenNodeModule(specifier)) {
 				record(NODE_RUNTIME_MODULE_IMPORT_RULE, node, specifier);
 			}
 			return;

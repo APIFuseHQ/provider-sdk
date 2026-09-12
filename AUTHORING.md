@@ -875,7 +875,7 @@ this release; the level is raised once the fleet is clean):
 - `node-runtime-module-import` — value imports of `fs`, `fs/promises`, `net`,
   `tls`, `dgram`, `http`, `https`, `http2`, `child_process` (with or without
   `node:`), and `Bun.spawn` / `Bun.spawnSync` / ``Bun.$` ` `` / `Bun.file` /
-  `Bun.write`. `import type` is ignored; `node:path`, `node:crypto`,
+  `Bun.write`. Type-only imports (`import type`, or every binding inline `type`) are ignored; `node:path`, `node:crypto`,
   `node:url` are fine.
 - `direct-fetch-call` — the global `fetch()` (also `globalThis.fetch`).
   `ctx.stealth.fetch()` never matches, nor does a `fetch` the file declares
