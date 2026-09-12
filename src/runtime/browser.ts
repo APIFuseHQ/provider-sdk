@@ -1788,7 +1788,15 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	}
 
 	async close(): Promise<void> {
-		this.closePromise ??= (async () => {
+		// Only the first caller observes the release outcome; repeat calls stay
+		// idempotent (as they were before the promise was memoized) instead of
+		// replaying a cached rejection, and never re-issue a release against a
+		// target the pool has already disposed.
+		if (this.closePromise) {
+			await this.closePromise.catch(() => undefined);
+			return;
+		}
+		this.closePromise = (async () => {
 			try {
 				await this.release({
 					...(this.browserContextId ? { browserContextId: this.browserContextId } : {}),
@@ -1830,9 +1838,11 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		} finally {
 			try {
 				if (this.closePromise) {
-					// Keep interception active until release completes. A failed release
-					// must remain observable, not trigger a reconnect or disable policy.
-					await this.closePromise;
+					// Keep interception active until release settles. The release failure
+					// stays observable through close() itself; swallowing it here keeps
+					// this finally from replacing run()'s own outcome, and still avoids a
+					// reconnect or a disable against a disposed target.
+					await this.closePromise.catch(() => undefined);
 				} else {
 					await this.pageClient.send("Fetch.disable");
 				}
@@ -2259,11 +2269,25 @@ export class BrowserClient implements BrowserClientContract {
 			get: (target, property, receiver) => {
 				if (property === "close") {
 					return async () => {
-						closePromise ??= (async () => {
-							await originalClose();
-							this.activePages.delete(trackedPage);
-							if (this.activePage === trackedPage) {
-								this.activePage = undefined;
+						// Repeat calls resolve on the first outcome instead of replaying a
+						// cached rejection, so a failed release cannot make close() — or
+						// BrowserClient.close(), which closes every tracked page — throw
+						// forever.
+						if (closePromise) {
+							await closePromise.catch(() => undefined);
+							return;
+						}
+						closePromise = (async () => {
+							// Bookkeeping runs even when the release fails: the page is gone
+							// either way, so leaving it in activePages would leak it and let
+							// solveChallenge reuse a disposed target.
+							try {
+								await originalClose();
+							} finally {
+								this.activePages.delete(trackedPage);
+								if (this.activePage === trackedPage) {
+									this.activePage = undefined;
+								}
 							}
 						})();
 						await closePromise;

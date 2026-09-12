@@ -13,6 +13,8 @@ it.each([
 	"cdp-late-route",
 	"http-pre-abort",
 	"http-headers",
+	"http-factory-ambient",
+	"http-timeout-body",
 	"http-stream-local",
 	"http-stream-ambient",
 	"http-buffered",

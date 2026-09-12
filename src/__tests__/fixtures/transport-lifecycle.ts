@@ -5,6 +5,7 @@ import { createHttpClient } from "../../runtime/http.js";
 import {
 	HttpRetryJitter,
 	HttpRetryPreset,
+	type BrowserPage,
 	type BrowserResourceDecision,
 	type RequestOptions,
 } from "../../types.js";
@@ -78,6 +79,8 @@ async function cdp(): Promise<void> {
 				switch (command.method) {
 					case "Page.enable":
 					case "Runtime.enable":
+					// #308 enables the Network domain for cookie-safe telemetry spans.
+					case "Network.enable":
 					case "Fetch.enable":
 						reply();
 						break;
@@ -149,8 +152,10 @@ async function cdp(): Promise<void> {
 			assert.equal(await operation, "ok");
 			await page.close();
 		} else {
-			const outcome = browser.withIsolatedContext((page) =>
-				page.withResourcePolicy(
+			let openedPage: BrowserPage | undefined;
+			const outcome = browser.withIsolatedContext((page) => {
+				openedPage = page;
+				return page.withResourcePolicy(
 					{
 						routes:
 							scenario === "cdp-late-route"
@@ -175,10 +180,16 @@ async function cdp(): Promise<void> {
 						if (scenario === "cdp-error" || scenario === "cdp-abort") throw original;
 						return "ok";
 					},
-				),
-			);
-			if (scenario === "cdp-release-error") await assert.rejects(outcome, /release failed/);
-			else if (scenario === "cdp-disable-error") await assert.rejects(outcome, /disable failed/);
+				);
+			});
+			if (scenario === "cdp-release-error") {
+				await assert.rejects(outcome, /release failed/);
+				// The failed release is reported once. A later close() — including the
+				// one BrowserClient.close() issues for every tracked page — resolves
+				// without re-releasing a target the pool already disposed.
+				assert.ok(openedPage);
+				await openedPage.close();
+			} else if (scenario === "cdp-disable-error") await assert.rejects(outcome, /disable failed/);
 			else if (scenario === "cdp-error" || scenario === "cdp-abort")
 				await assert.rejects(outcome, (error) => error === original);
 			else assert.equal(await outcome, "ok");
@@ -187,6 +198,11 @@ async function cdp(): Promise<void> {
 				await routeDecision.promise;
 				// Real I/O barrier after the continuation resumes; no polling or sleep.
 				await (await fetch(new URL("/barrier", server.url))).text();
+				// A route decision that settles after close() is dropped, not sent:
+				// the page client is already closed, and resuming would mean
+				// reconnecting to a target the pool has disposed (reconnects stays 0
+				// below). Pinned so a future reconnect-on-send change fails here.
+				assert.equal(commands.includes("Fetch.continueRequest"), false);
 			}
 		}
 		assert.equal(releaseCount, 1);
@@ -222,7 +238,7 @@ async function http(): Promise<void> {
 			}
 			requests++;
 			received.resolve();
-			if (scenario === "http-headers")
+			if (scenario === "http-headers" || scenario === "http-factory-ambient")
 				return new Promise<Response>((resolve) => {
 					request.signal.addEventListener(
 						"abort",
@@ -256,7 +272,7 @@ async function http(): Promise<void> {
 	globalThis.fetch = Object.assign(
 		async (...args: Parameters<typeof fetch>) => {
 			const response = await nativeFetch(...args);
-				headersReceived.resolve();
+			headersReceived.resolve();
 			return response;
 		},
 		{ preconnect: nativeFetch.preconnect },
@@ -271,8 +287,11 @@ async function http(): Promise<void> {
 	}
 	const options: RequestOptions = { signal: local.signal, retry: false };
 	const client = createHttpClient(undefined, { signal: ambient.signal });
+	// Scenarios that abort the ambient signal cannot hold a sibling open across it.
 	const sibling =
-		scenario !== "http-stream-ambient" && scenario !== "http-body-error"
+		scenario !== "http-stream-ambient" &&
+		scenario !== "http-body-error" &&
+		scenario !== "http-factory-ambient"
 			? client.get(new URL("/sibling", url).href)
 			: undefined;
 	try {
@@ -281,6 +300,31 @@ async function http(): Promise<void> {
 			local.abort("local reason");
 			await assert.rejects(client.get(url, options), { code: "transport_cancelled" });
 			assert.equal(requests, 0);
+		} else if (scenario === "http-factory-ambient") {
+			// A header factory takes its own branch through withClientHeaders; the
+			// ambient client signal has to survive it, not only the literal-headers
+			// branch.
+			const pending = client.get(url, {
+				retry: false,
+				headers: async () => ({ "x-proof": "issued" }),
+			});
+			const rejected = assert.rejects(pending, { code: "transport_cancelled" });
+			await received.promise;
+			ambient.abort(new Error("ambient deadline"));
+			await rejected;
+			await disconnected.promise;
+			assert.equal(requests, 1);
+		} else if (scenario === "http-timeout-body") {
+			// `timeout` bounds the header phase only. Headers arrive at once and the
+			// body finishes well past the deadline; the request must still succeed.
+			options.timeout = 150;
+			const pending = client.get(url, options);
+			await headersReceived.promise;
+			await Bun.sleep(options.timeout * 2);
+			assert.ok(endBody);
+			endBody();
+			assert.equal(await (await pending).text(), "firstlast");
+			assert.equal(requests, 1);
 		} else if (
 			scenario === "http-headers" ||
 			scenario === "http-buffered" ||

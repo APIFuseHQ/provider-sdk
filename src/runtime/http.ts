@@ -863,9 +863,14 @@ async function fetchNativeHttp(
 	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
 	const signal = mergeAbortSignals(options.signal, controller?.signal);
-	const timeoutHandle = options.timeout
+	let timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
 		: undefined;
+	const disarmTimeout = () => {
+		if (!timeoutHandle) return;
+		clearTimeout(timeoutHandle);
+		timeoutHandle = undefined;
+	};
 
 	let proxy: string | undefined;
 	try {
@@ -931,6 +936,14 @@ async function fetchNativeHttp(
 			});
 		}
 
+		// `timeout` bounds the header phase (types.ts RequestOptions.timeout), so it
+		// is disarmed before the body is read: awaiting the buffered body inside
+		// this try brands a mid-body failure as a transport error, but must not
+		// extend the deadline over the download. Cancellation still applies —
+		// `signal` stays attached to the native response. The discarded non-2xx
+		// bodies drained above stay under the deadline on purpose: nothing else
+		// bounds them, and their content is never returned to the caller.
+		disarmTimeout();
 		return await toNativeHttpResponse(response);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
@@ -950,7 +963,7 @@ async function fetchNativeHttp(
 		transportError.proxyUsed = Boolean(proxy);
 		throw transportError;
 	} finally {
-		if (timeoutHandle) clearTimeout(timeoutHandle);
+		disarmTimeout();
 	}
 }
 
