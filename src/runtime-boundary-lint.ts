@@ -324,9 +324,9 @@ function nearestAncestor(
 /**
  * Value bindings per lexical scope: parameters on their function, `let`/`const`
  * and named function/class declarations on the enclosing block, `var` on the
- * enclosing function, imports on the file, a catch variable on its clause, a
- * named function/class expression on itself. Destructuring patterns contribute
- * every leaf name.
+ * enclosing function body, imports on the file, a catch variable on its
+ * clause, a named function/class expression on itself. Destructuring patterns
+ * contribute every leaf name.
  */
 function collectScopeBindings(ts: TypeScriptModule, sourceFile: TsSourceFile): ScopeBindings {
 	const bindings: ScopeBindings = new Map();
@@ -346,8 +346,17 @@ function collectScopeBindings(ts: TypeScriptModule, sourceFile: TsSourceFile): S
 	};
 	const blockScopeOf = (node: TsNode) =>
 		nearestAncestor(node, sourceFile, (candidate) => isBlockScopeContainer(ts, candidate));
-	const functionScopeOf = (node: TsNode) =>
-		nearestAncestor(node, sourceFile, (candidate) => isFunctionScopeContainer(ts, candidate));
+	const functionScopeOf = (node: TsNode) => {
+		const container = nearestAncestor(node, sourceFile, (candidate) =>
+			isFunctionScopeContainer(ts, candidate),
+		);
+		// `var` hoists to the function *body*, which parameter initializers cannot
+		// see: `function load(result = fetch(url)) { var fetch = transport; }`
+		// still calls the global in the initializer.
+		const body = (container as { body?: TsNode }).body;
+		if (ts.isFunctionLike(container) && body && ts.isBlock(body)) return body;
+		return container;
+	};
 
 	const visit = (node: TsNode) => {
 		if (ts.isVariableDeclaration(node)) {

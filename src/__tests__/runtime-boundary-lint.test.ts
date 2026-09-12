@@ -319,6 +319,8 @@ describe(`runtime boundary lint: ${DIRECT_FETCH_CALL_RULE}`, () => {
 				"await fetch('https://api.example.com/after-block');",
 				"const { fetch: aliased } = createTransport();",
 				"await aliased('/aliased'); await fetch('https://api.example.com/last');",
+				"// A body `var` is not visible from a parameter initializer.",
+				"function load(result = fetch('https://api.example.com/default')) { var fetch = transport; return result; }",
 			].join("\n"),
 		});
 		expect(diagnostics).toHaveLength(1);
@@ -326,7 +328,7 @@ describe(`runtime boundary lint: ${DIRECT_FETCH_CALL_RULE}`, () => {
 			rule: DIRECT_FETCH_CALL_RULE,
 			field: "sourceFiles.upstream/session.ts",
 		});
-		expect(diagnostics[0]?.message).toContain("fetch() (line 6, 9, 11)");
+		expect(diagnostics[0]?.message).toContain("fetch() (line 6, 9, 11, 13)");
 	});
 });
 
