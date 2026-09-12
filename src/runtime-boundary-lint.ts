@@ -17,10 +17,18 @@
  *   `Bun.file`, `Bun.write`. Type-only imports are not runtime reach and are
  *   ignored.
  * - `direct-fetch-call`: a call to the global `fetch` (bare identifier, or
- *   `globalThis`/`window`/`self`/`global` member). A file that declares its own
- *   `fetch` binding (parameter, variable, import, function) is not calling the
- *   global and is left alone; `ctx.stealth.fetch()` is a member call and never
- *   matches.
+ *   `globalThis`/`window`/`self`/`global` member). A bare `fetch` call whose
+ *   enclosing scope declares a `fetch` binding (parameter, variable, import,
+ *   function, catch clause) is calling that binding, not the global, and is
+ *   left alone; the check is lexical, so a wrapper that takes `fetch` as a
+ *   parameter does not hide a global `fetch()` elsewhere in the same file.
+ *   `ctx.stealth.fetch()` is a member call and never matches.
+ *
+ * Files are parsed with the script kind their extension implies (`.ts` as
+ * TypeScript, `.tsx` as TSX, …). Parsing everything as TSX would make a
+ * generic arrow (`<T>(value: T) => value`) or an angle-bracket assertion in an
+ * ordinary `.ts` file read as JSX, and everything after it would silently drop
+ * out of the AST.
  *
  * Scope is the provider *runtime* source: JavaScript/TypeScript files under
  * `providerSourceFiles` minus tests, recorded fixtures, the root bootstrap
@@ -259,37 +267,145 @@ function exportDeclarationLoadsModule(
 	return clause.elements.some((element) => !element.isTypeOnly);
 }
 
-/** Names declared anywhere in the file (parameters, variables, imports, functions, catch clauses). */
-function collectDeclaredNames(ts: TypeScriptModule, sourceFile: TsSourceFile): Set<string> {
-	const names = new Set<string>();
-	const addBinding = (name: import("typescript").BindingName) => {
+/**
+ * Script kind for a provider source file, from its extension. `.tsx`/`.jsx`
+ * enable JSX; everything else (`.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`,
+ * and the synthetic names used for in-memory sources) does not, so a generic
+ * arrow or `<T>value` assertion in a `.ts` file parses as TypeScript instead
+ * of swallowing the rest of the file as unterminated JSX.
+ */
+export function scriptKindForSourceFile(
+	ts: TypeScriptModule,
+	fileName: string,
+): import("typescript").ScriptKind {
+	const lower = fileName.toLowerCase();
+	if (lower.endsWith(".tsx")) return ts.ScriptKind.TSX;
+	if (lower.endsWith(".jsx")) return ts.ScriptKind.JSX;
+	if (/\.[cm]?js$/.test(lower)) return ts.ScriptKind.JS;
+	return ts.ScriptKind.TS;
+}
+
+/** Scope node → value bindings declared directly in that scope. */
+type ScopeBindings = Map<TsNode, Set<string>>;
+
+/** Containers that own `let`/`const`/`class`/`function` declarations. */
+function isBlockScopeContainer(ts: TypeScriptModule, node: TsNode): boolean {
+	return (
+		ts.isSourceFile(node) ||
+		ts.isBlock(node) ||
+		ts.isModuleBlock(node) ||
+		ts.isCaseBlock(node) ||
+		ts.isForStatement(node) ||
+		ts.isForInStatement(node) ||
+		ts.isForOfStatement(node)
+	);
+}
+
+/** Containers that own `var` declarations (hoisted past blocks). */
+function isFunctionScopeContainer(ts: TypeScriptModule, node: TsNode): boolean {
+	return (
+		ts.isSourceFile(node) ||
+		ts.isModuleBlock(node) ||
+		ts.isFunctionLike(node) ||
+		ts.isClassStaticBlockDeclaration(node)
+	);
+}
+
+function nearestAncestor(
+	node: TsNode,
+	sourceFile: TsSourceFile,
+	predicate: (candidate: TsNode) => boolean,
+): TsNode {
+	let current: TsNode | undefined = node.parent;
+	while (current && !predicate(current)) current = current.parent;
+	return current ?? sourceFile;
+}
+
+/**
+ * Value bindings per lexical scope: parameters on their function, `let`/`const`
+ * and named function/class declarations on the enclosing block, `var` on the
+ * enclosing function body, imports on the file, a catch variable on its
+ * clause, a named function/class expression on itself. Destructuring patterns
+ * contribute every leaf name.
+ */
+function collectScopeBindings(ts: TypeScriptModule, sourceFile: TsSourceFile): ScopeBindings {
+	const bindings: ScopeBindings = new Map();
+	const bind = (scope: TsNode, name: string) => {
+		const names = bindings.get(scope) ?? new Set<string>();
+		names.add(name);
+		bindings.set(scope, names);
+	};
+	const bindPattern = (scope: TsNode, name: import("typescript").BindingName) => {
 		if (ts.isIdentifier(name)) {
-			names.add(name.text);
+			bind(scope, name.text);
 			return;
 		}
 		for (const element of name.elements) {
-			if (ts.isBindingElement(element)) addBinding(element.name);
+			if (ts.isBindingElement(element)) bindPattern(scope, element.name);
 		}
 	};
+	const blockScopeOf = (node: TsNode) => {
+		const container = nearestAncestor(node, sourceFile, (candidate) =>
+			isBlockScopeContainer(ts, candidate),
+		);
+		// A for-in/for-of binding is visible in the loop body only; the iterable
+		// expression is evaluated before it exists (`for (const fetch of
+		// fetch(url))` reaches past the loop binding).
+		if (ts.isForInStatement(container) || ts.isForOfStatement(container)) {
+			return container.statement;
+		}
+		return container;
+	};
+	const functionScopeOf = (node: TsNode) => {
+		const container = nearestAncestor(node, sourceFile, (candidate) =>
+			isFunctionScopeContainer(ts, candidate),
+		);
+		// `var` hoists to the function *body*, which parameter initializers cannot
+		// see: `function load(result = fetch(url)) { var fetch = transport; }`
+		// still calls the global in the initializer.
+		const body = (container as { body?: TsNode }).body;
+		if (ts.isFunctionLike(container) && body && ts.isBlock(body)) return body;
+		return container;
+	};
+
 	const visit = (node: TsNode) => {
-		if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
-			addBinding(node.name);
-		} else if (
-			(ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
-			node.name !== undefined
-		) {
-			names.add(node.name.text);
-		} else if (ts.isImportSpecifier(node) || ts.isImportClause(node)) {
-			if (node.name) names.add(node.name.text);
-		} else if (ts.isNamespaceImport(node)) {
-			names.add(node.name.text);
-		} else if (ts.isCatchClause(node) && node.variableDeclaration) {
-			addBinding(node.variableDeclaration.name);
+		if (ts.isVariableDeclaration(node)) {
+			if (ts.isCatchClause(node.parent)) {
+				bindPattern(node.parent, node.name);
+			} else if (ts.getCombinedNodeFlags(node) & ts.NodeFlags.BlockScoped) {
+				bindPattern(blockScopeOf(node.parent), node.name);
+			} else {
+				bindPattern(functionScopeOf(node.parent), node.name);
+			}
+		} else if (ts.isParameter(node)) {
+			bindPattern(node.parent, node.name);
+		} else if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) {
+			if (node.name) bind(blockScopeOf(node), node.name.text);
+		} else if (ts.isFunctionExpression(node) || ts.isClassExpression(node)) {
+			if (node.name) bind(node, node.name.text);
+		} else if (ts.isEnumDeclaration(node)) {
+			bind(blockScopeOf(node), node.name.text);
+		} else if (ts.isModuleDeclaration(node) && ts.isIdentifier(node.name)) {
+			bind(blockScopeOf(node), node.name.text);
+		} else if (ts.isImportClause(node) || ts.isImportSpecifier(node)) {
+			if (node.name) bind(sourceFile, node.name.text);
+		} else if (ts.isNamespaceImport(node) || ts.isImportEqualsDeclaration(node)) {
+			bind(sourceFile, node.name.text);
 		}
 		ts.forEachChild(node, visit);
 	};
 	visit(sourceFile);
-	return names;
+	return bindings;
+}
+
+/** True when a scope enclosing `node` (or `node` itself) declares `name`. */
+function isBindingInScope(bindings: ScopeBindings, node: TsNode, name: string): boolean {
+	let current: TsNode | undefined = node;
+	while (current) {
+		if (bindings.get(current)?.has(name)) return true;
+		current = current.parent;
+	}
+	return false;
 }
 
 function readAllowComment(
@@ -323,11 +439,10 @@ export function analyzeRuntimeBoundary(
 		source,
 		ts.ScriptTarget.Latest,
 		true,
-		ts.ScriptKind.TSX,
+		scriptKindForSourceFile(ts, fileName),
 	);
 	const lines = source.split(/\r?\n/);
-	const declaredNames = collectDeclaredNames(ts, sourceFile);
-	const fetchIsShadowed = declaredNames.has("fetch");
+	const scopeBindings = collectScopeBindings(ts, sourceFile);
 	const raw: RuntimeBoundaryFinding[] = [];
 	const seen = new Set<string>();
 
@@ -407,7 +522,11 @@ export function analyzeRuntimeBoundary(
 				}
 			}
 			// fetch(...) / globalThis.fetch(...)
-			if (ts.isIdentifier(callee) && callee.text === "fetch" && !fetchIsShadowed) {
+			if (
+				ts.isIdentifier(callee) &&
+				callee.text === "fetch" &&
+				!isBindingInScope(scopeBindings, node, "fetch")
+			) {
 				record(DIRECT_FETCH_CALL_RULE, node, "fetch()");
 			} else if (
 				(ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) &&
