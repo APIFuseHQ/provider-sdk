@@ -1903,7 +1903,7 @@ function errorLocaleKeyDiagnostic(
 				rule: "error-locale-key-malformed",
 				level: "error",
 				field,
-				message: `Locale key ${JSON.stringify(key)} on ${owner} is not a locale dot path such as "errors.upstreamSchema.message"; the SDK skips it at serve time and the caller gets the English literal instead.`,
+				message: `Locale key ${JSON.stringify(key)} on ${owner} is not a locale dot path such as "errors.upstreamSchema.message" or "errors.UPSTREAM_SCHEMA_ERROR.message"; segments are camelCase, an array index, or — directly under "errors" — the error code itself; the SDK skips a malformed key at serve time and the caller gets the English literal instead.`,
 			}
 		: {
 				rule: "error-locale-key-missing",

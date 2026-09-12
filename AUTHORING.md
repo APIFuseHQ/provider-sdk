@@ -749,6 +749,18 @@ a throw: the caller always gets text. Steps 2 and 3 do not apply to SDK-owned
 failures (transport, Zod, stateful deadline, SDK runtime codes) — a provider
 catalog must not be able to relabel `Request timed out`.
 
+**Key grammar.** A locale key is dot-separated segments. Every segment is
+camelCase (`upstreamSchema`, `whenToUse`) or an array index (`0`), and the
+first segment is always a camelCase namespace. The one exception is the segment
+directly under `errors`, which may also be the error code spelled the way it is
+thrown — `errors.UPSTREAM_SCHEMA_ERROR.message`, `errors.BLOCKED.fix`,
+`errors.reauth_required.message`. Both spellings work, so
+`errors.upstreamSchema.message` and `errors.UPSTREAM_SCHEMA_ERROR.message` are
+equally legal keys; write the code form when you want the key to match the
+derived path in step 3. Nothing else loosens: a space, a dot inside a segment,
+an empty segment, a mixed-case or hyphenated code, and a leading digit are all
+still malformed.
+
 Locale negotiation reads `Accept-Language` from the request envelope's
 `headers` map first (the gateway stamps the flow's locale there) and then from
 the HTTP header, honours quality values, matches on the primary subtag, and
@@ -782,7 +794,7 @@ to its English literal.
 - `error-locale-key-missing` / `error-locale-key-malformed` (**error**) — a
   literal `messageKey`/`fixKey`, on a throw site or on an `errorCodes[]` entry,
   that `locales/en.json` does not resolve to non-empty text, or that is not a
-  legal locale dot path.
+  legal locale dot path (see **Key grammar** above).
 - `thrown-error-message-not-localized` (**warn**) — a throw site whose declared
   code has no key anywhere and no `errors.<code>.message` in `en`, so it is
   served untranslated. Warning during the migration; promoted to error per
