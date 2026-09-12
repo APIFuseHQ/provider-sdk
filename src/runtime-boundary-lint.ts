@@ -344,8 +344,18 @@ function collectScopeBindings(ts: TypeScriptModule, sourceFile: TsSourceFile): S
 			if (ts.isBindingElement(element)) bindPattern(scope, element.name);
 		}
 	};
-	const blockScopeOf = (node: TsNode) =>
-		nearestAncestor(node, sourceFile, (candidate) => isBlockScopeContainer(ts, candidate));
+	const blockScopeOf = (node: TsNode) => {
+		const container = nearestAncestor(node, sourceFile, (candidate) =>
+			isBlockScopeContainer(ts, candidate),
+		);
+		// A for-in/for-of binding is visible in the loop body only; the iterable
+		// expression is evaluated before it exists (`for (const fetch of
+		// fetch(url))` reaches past the loop binding).
+		if (ts.isForInStatement(container) || ts.isForOfStatement(container)) {
+			return container.statement;
+		}
+		return container;
+	};
 	const functionScopeOf = (node: TsNode) => {
 		const container = nearestAncestor(node, sourceFile, (candidate) =>
 			isFunctionScopeContainer(ts, candidate),
