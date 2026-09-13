@@ -10,6 +10,7 @@ import {
 	HandleError,
 	type HandleKind,
 	type HandleKindDeclaration,
+	handleRecoverySentence,
 	type HandleTelemetryEvent,
 	pick,
 	type ResultOf,
@@ -179,6 +180,168 @@ describe("handle kinds", () => {
 		});
 		expect(defaulted.fieldName).toBe("cart_token");
 		expect(defaulted.resultTtl).toBe("24h");
+	});
+
+	describe("directional fieldName", () => {
+		it("accepts { input, output } and carries both names on the kind and the meta", () => {
+			const page = defineCursor({
+				name: "page",
+				fieldName: { input: "cursor", output: "next_cursor" },
+				schema: PageSchema,
+				ttl: "10m",
+				issuedBy: "search",
+			});
+
+			expect(page.fieldName).toBe("cursor");
+			expect(page.outputFieldName).toBe("next_cursor");
+			expect(page.field().meta()?.[APIFUSE_HANDLE_META_KEY]).toMatchObject({
+				kind: "page",
+				type: "cursor",
+				fieldName: "cursor",
+				outputFieldName: "next_cursor",
+			});
+		});
+
+		it("works for drafts too", () => {
+			const draft = defineDraft({
+				name: "cart",
+				fieldName: { input: "cart_id", output: "new_cart_id" },
+				schema: z.object({}),
+				ttl: { idle: "5m", max: "1h" },
+			});
+
+			expect(draft.fieldName).toBe("cart_id");
+			expect(draft.outputFieldName).toBe("new_cart_id");
+		});
+
+		it("emits the historical single-name meta when both directions agree", () => {
+			// A one-name kind must serialize byte-identically to before this option
+			// existed, so no fleet contract churns on upgrade.
+			const string = defineCursor({
+				name: "page",
+				fieldName: "page_token",
+				schema: PageSchema,
+				ttl: "10m",
+			});
+			const object = defineCursor({
+				name: "page",
+				fieldName: { input: "page_token", output: "page_token" },
+				schema: PageSchema,
+				ttl: "10m",
+			});
+
+			expect(string.outputFieldName).toBeUndefined();
+			expect(object.outputFieldName).toBeUndefined();
+			expect(string.field().meta()?.[APIFUSE_HANDLE_META_KEY]).toEqual(
+				object.field().meta()?.[APIFUSE_HANDLE_META_KEY],
+			);
+			expect(
+				Object.hasOwn(
+					string.field().meta()?.[APIFUSE_HANDLE_META_KEY] as object,
+					"outputFieldName",
+				),
+			).toBe(false);
+		});
+
+		it("rejects a half-declared pair, extra keys, and non-identifier names", () => {
+			// The types already reject these shapes; the runtime guards exist because
+			// a provider's `handles.ts` is also read by untyped tooling, and because a
+			// half-declaration would otherwise default the other side to `page_token`.
+			const base = { name: "page", schema: PageSchema, ttl: "10m" } as const;
+
+			// test-invalid: only one direction declared.
+			expect(() => defineCursor({ ...base, fieldName: { input: "cursor" } as never })).toThrow(
+				/must declare both "input" and "output"/,
+			);
+			// test-invalid: only one direction declared.
+			expect(() =>
+				defineCursor({ ...base, fieldName: { output: "next_cursor" } as never }),
+			).toThrow(/must declare both "input" and "output"/);
+			// test-invalid: a third key the option does not define.
+			expect(() =>
+				defineCursor({
+					...base,
+					fieldName: { input: "cursor", output: "next_cursor", both: "x" } as never,
+				}),
+			).toThrow(/accepts only "input" and "output"/);
+			expect(() =>
+				defineCursor({ ...base, fieldName: { input: "next cursor", output: "next_cursor" } }),
+			).toThrow(/fieldName\.input must be a plain identifier/);
+			expect(() =>
+				defineCursor({ ...base, fieldName: { input: "cursor", output: "next-cursor" } }),
+			).toThrow(/fieldName\.output must be a plain identifier/);
+			// test-invalid: a list is neither a key nor the { input, output } pair.
+			expect(() => defineCursor({ ...base, fieldName: ["cursor"] as never })).toThrow(
+				/must be a property key or \{ input, output \}/,
+			);
+		});
+
+		it("names both keys in the collapsed public error, identically for every failure", async () => {
+			// The public collapse must stay indistinguishable across invalid /
+			// expired / not-found, but "a new one" is useless when the caller has to
+			// read a field it was never told about.
+			const DirectionalPublicPage = defineCursor({
+				name: "page",
+				fieldName: { input: "cursor", output: "next_cursor" },
+				schema: PageSchema,
+				ttl: "10m",
+				access: "public",
+				maxEntries: 100,
+				issuedBy: "search",
+			});
+			const expected =
+				"`cursor` is not valid or has expired. Call `search` again and pass the new `next_cursor` back as `cursor`, exactly as returned.";
+
+			const clock = fakeClock();
+			const ctx = createTestHandleContext({ nowMs: clock.nowMs });
+			const live = await ctx.create(DirectionalPublicPage, { query: "q", page: 1 });
+
+			const malformed = await expectHandleError(
+				ctx.read(DirectionalPublicPage, "page_not-a-handle"),
+				"HANDLE_INVALID",
+			);
+			const absent = await expectHandleError(
+				ctx.read(DirectionalPublicPage, "page_visor-anagram-abnormal-request"),
+				"HANDLE_INVALID",
+			);
+			clock.advance(11 * MINUTE);
+			const expired = await expectHandleError(
+				ctx.read(DirectionalPublicPage, live),
+				"HANDLE_INVALID",
+			);
+
+			expect(malformed.message).toBe(expected);
+			expect(absent.message).toBe(expected);
+			expect(expired.message).toBe(expected);
+		});
+
+		it("names the output key to read and the input key to write in the recovery sentence", () => {
+			const directional = defineCursor({
+				name: "page",
+				fieldName: { input: "cursor", output: "next_cursor" },
+				schema: PageSchema,
+				ttl: "10m",
+				issuedBy: "search",
+			});
+			const single = defineCursor({
+				name: "page",
+				fieldName: "page_token",
+				schema: PageSchema,
+				ttl: "10m",
+				issuedBy: "search",
+			});
+
+			expect(handleRecoverySentence(directional)).toBe(
+				"Call `search` again and pass the new `next_cursor` back as `cursor`, exactly as returned.",
+			);
+			expect(handleRecoverySentence({ ...directional, issuedBy: undefined })).toBe(
+				"Request a new `next_cursor` and pass it back as `cursor`, exactly as returned.",
+			);
+			// Unchanged wording for the one-name majority of the fleet.
+			expect(handleRecoverySentence(single)).toBe(
+				"Call `search` again and pass the new `page_token` exactly as returned.",
+			);
+		});
 	});
 
 	it("uses 5 words for public cursors with strength high or ttl > 1h", () => {

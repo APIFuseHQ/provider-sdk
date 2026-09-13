@@ -166,6 +166,8 @@ export {
 	APIFUSE_HANDLE_META_KEY,
 	HANDLE_KIND_NAME_PATTERN,
 	handleFieldDescription,
+	handleFieldNameFor,
+	handleHasDirectionalFieldNames,
 	isHandleFieldMeta,
 } from "./handle-meta.js";
 export {

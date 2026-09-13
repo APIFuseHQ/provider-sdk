@@ -1127,7 +1127,7 @@ export function defineCursor<TSchema extends ZodType>(options: DefineCursorOptio
 // @public (undocumented)
 export interface DefineCursorOptions<TSchema extends ZodType> {
     readonly access?: HandleAccess;
-    readonly fieldName?: string;
+    readonly fieldName?: string | HandleFieldNames;
     readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
@@ -1161,8 +1161,7 @@ export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodTy
 // @public (undocumented)
 export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema extends ZodType | undefined> {
     readonly access?: HandleAccess;
-    // (undocumented)
-    readonly fieldName?: string;
+    readonly fieldName?: string | HandleFieldNames;
     readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
@@ -1530,6 +1529,9 @@ export type HandleErrorOptions = Omit<ProviderErrorOptions, "code"> & {
 export function handleFieldDescription(meta: Pick<HandleFieldMeta, "issuedBy">): string;
 
 // @public
+export type HandleFieldDirection = "input" | "output";
+
+// @public
 export interface HandleFieldMeta {
     // (undocumented)
     readonly fieldName: string;
@@ -1538,8 +1540,24 @@ export interface HandleFieldMeta {
     // (undocumented)
     readonly kind: string;
     // (undocumented)
+    readonly outputFieldName?: string;
+    // (undocumented)
     readonly type: HandleKindType;
 }
+
+// @public
+export function handleFieldNameFor(kind: Pick<HandleKindDeclaration, "fieldName" | "outputFieldName">, direction: HandleFieldDirection): string;
+
+// @public
+export interface HandleFieldNames {
+    // (undocumented)
+    readonly input: string;
+    // (undocumented)
+    readonly output: string;
+}
+
+// @public
+export function handleHasDirectionalFieldNames(kind: Pick<HandleKindDeclaration, "fieldName" | "outputFieldName">): boolean;
 
 // @public
 export type HandleIssuedBy = string | readonly string[];
@@ -1566,6 +1584,8 @@ export interface HandleKindDeclaration {
     readonly issuedBy?: HandleIssuedBy;
     // (undocumented)
     readonly name: string;
+    // (undocumented)
+    readonly outputFieldName?: string;
     // (undocumented)
     readonly type: HandleKindType;
 }
@@ -1599,6 +1619,7 @@ export interface HandleRecord<K extends HandleKind> {
 // @public
 export function handleRecoverySentence(kind: {
     readonly fieldName: string;
+    readonly outputFieldName?: string;
     readonly issuedBy?: HandleIssuedBy;
 }): string;
 

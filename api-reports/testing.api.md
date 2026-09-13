@@ -768,6 +768,8 @@ interface HandleKindDeclaration {
     readonly issuedBy?: HandleIssuedBy;
     // (undocumented)
     readonly name: string;
+    // (undocumented)
+    readonly outputFieldName?: string;
     // Warning: (ae-forgotten-export) The symbol "HandleKindType" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
