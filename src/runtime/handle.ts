@@ -27,7 +27,7 @@ import {
 	isDraftKind,
 	type ResultOf,
 } from "../handle.js";
-import { formatHandleIssuers } from "../handle-meta.js";
+import { formatHandleIssuers, handleHasDirectionalFieldNames } from "../handle-meta.js";
 import type {
 	ProviderRequestContext,
 	ProviderRuntimeState,
@@ -248,6 +248,14 @@ export function formatNormalizationClasses(classes: readonly string[]): string {
 // ---------------------------------------------------------------------------
 
 function publicCollapsedMessage(kind: HandleKind): string {
+	// "a new one" is unambiguous only while the kind has one name. When it is
+	// issued under `next_cursor` and accepted under `cursor`, the caller has to
+	// be told which field to read, so use the full recovery sentence — it names
+	// both keys and is identical for invalid / expired / not-found, which is
+	// what keeps the public collapse indistinguishable.
+	if (handleHasDirectionalFieldNames(kind)) {
+		return `\`${kind.fieldName}\` is not valid or has expired. ${handleRecoverySentence(kind)}`;
+	}
 	const issuers = formatHandleIssuers(kind.issuedBy);
 	const again = issuers ? `Call ${issuers} again to get a new one.` : "Request a new one.";
 	return `\`${kind.fieldName}\` is not valid or has expired. ${again}`;

@@ -276,6 +276,45 @@ describe("handle kinds", () => {
 			);
 		});
 
+		it("names both keys in the collapsed public error, identically for every failure", async () => {
+			// The public collapse must stay indistinguishable across invalid /
+			// expired / not-found, but "a new one" is useless when the caller has to
+			// read a field it was never told about.
+			const DirectionalPublicPage = defineCursor({
+				name: "page",
+				fieldName: { input: "cursor", output: "next_cursor" },
+				schema: PageSchema,
+				ttl: "10m",
+				access: "public",
+				maxEntries: 100,
+				issuedBy: "search",
+			});
+			const expected =
+				"`cursor` is not valid or has expired. Call `search` again and pass the new `next_cursor` back as `cursor`, exactly as returned.";
+
+			const clock = fakeClock();
+			const ctx = createTestHandleContext({ nowMs: clock.nowMs });
+			const live = await ctx.create(DirectionalPublicPage, { query: "q", page: 1 });
+
+			const malformed = await expectHandleError(
+				ctx.read(DirectionalPublicPage, "page_not-a-handle"),
+				"HANDLE_INVALID",
+			);
+			const absent = await expectHandleError(
+				ctx.read(DirectionalPublicPage, "page_visor-anagram-abnormal-request"),
+				"HANDLE_INVALID",
+			);
+			clock.advance(11 * MINUTE);
+			const expired = await expectHandleError(
+				ctx.read(DirectionalPublicPage, live),
+				"HANDLE_INVALID",
+			);
+
+			expect(malformed.message).toBe(expected);
+			expect(absent.message).toBe(expected);
+			expect(expired.message).toBe(expected);
+		});
+
 		it("names the output key to read and the input key to write in the recovery sentence", () => {
 			const directional = defineCursor({
 				name: "page",
