@@ -12,6 +12,8 @@ import {
 	type HandleFieldMeta,
 	type HandleKindDeclaration,
 	handleFieldDescription,
+	handleFieldNameFor,
+	handleHasDirectionalFieldNames,
 	handleIssuerList,
 	isHandleFieldMeta,
 	isHandleIssuedBy,
@@ -2008,6 +2010,7 @@ function readHandleKindDeclarations(value: unknown): HandleKindDeclaration[] {
 			typeof record.name === "string" &&
 			(record.type === "cursor" || record.type === "draft") &&
 			typeof record.fieldName === "string" &&
+			(record.outputFieldName === undefined || typeof record.outputFieldName === "string") &&
 			(record.issuedBy === undefined || isHandleIssuedBy(record.issuedBy))
 		);
 	});
@@ -2053,7 +2056,13 @@ function lintHandleDeclarations(provider: {
 		for (const { side, fields } of positions) {
 			for (const occurrence of fields) {
 				const field = `operations.${operationKey}.${occurrence.path}`;
-				const { kind, fieldName } = occurrence.meta;
+				const { kind } = occurrence.meta;
+				// A kind may name one handle differently in each direction (the canon's
+				// `cursor` in, `next_cursor` out). The rule is still exact: each side
+				// must use the key declared for THAT side, so the handle's identity
+				// stays readable from the property key and the round trip has exactly
+				// one edge — read `output`, send back under `input`.
+				const expected = handleFieldNameFor(occurrence.meta, side);
 
 				if (!kindByName.has(kind)) {
 					diagnostics.push({
@@ -2064,12 +2073,16 @@ function lintHandleDeclarations(provider: {
 					});
 				}
 
-				if (occurrence.key !== fieldName) {
+				if (occurrence.key !== expected) {
+					const directional = handleHasDirectionalFieldNames(occurrence.meta);
+					const advice = directional
+						? `Use the kind's ${side} fieldName on every ${side} schema; its ${side === "input" ? "output" : "input"} fieldName is "${handleFieldNameFor(occurrence.meta, side === "input" ? "output" : "input")}".`
+						: "Use the same key in every schema so the LLM sees one name.";
 					diagnostics.push({
 						rule: "handle-field-name",
 						level: "error",
 						field,
-						message: `${providerLabel} operation "${operationKey}" ${side} declares handle kind "${kind}" under property "${occurrence.key}" but the kind's fieldName is "${fieldName}". Use the same key in every schema so the LLM sees one name.`,
+						message: `${providerLabel} operation "${operationKey}" ${side} declares handle kind "${kind}" under property "${occurrence.key}" but the kind's ${directional ? `${side} ` : ""}fieldName is "${expected}". ${advice}`,
 					});
 				}
 
@@ -2098,7 +2111,7 @@ function lintHandleDeclarations(provider: {
 				rule: "handle-field-parity",
 				level: "error",
 				field,
-				message: `${providerLabel} handle kind "${kind.name}" is never issued: no operation output contains its field "${kind.fieldName}". Add ${kind.name}.field() to the issuing operation's output.`,
+				message: `${providerLabel} handle kind "${kind.name}" is never issued: no operation output contains its field "${handleFieldNameFor(kind, "output")}". Add ${kind.name}.field() to the issuing operation's output.`,
 			});
 		}
 		if (!accepted) {
@@ -2106,7 +2119,7 @@ function lintHandleDeclarations(provider: {
 				rule: "handle-field-parity",
 				level: "error",
 				field,
-				message: `${providerLabel} handle kind "${kind.name}" is never accepted: no operation input contains its field "${kind.fieldName}". Add ${kind.name}.field() to the consuming operation's input.`,
+				message: `${providerLabel} handle kind "${kind.name}" is never accepted: no operation input contains its field "${handleFieldNameFor(kind, "input")}". Add ${kind.name}.field() to the consuming operation's input.`,
 			});
 		}
 
@@ -2132,7 +2145,7 @@ function lintHandleDeclarations(provider: {
 				rule: "handle-issued-by",
 				level: "error",
 				field,
-				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${known[0]}", but that operation's output has no "${kind.fieldName}" handle field.`,
+				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${known[0]}", but that operation's output has no "${handleFieldNameFor(kind, "output")}" handle field.`,
 			});
 		} else {
 			diagnostics.push({
@@ -2143,7 +2156,7 @@ function lintHandleDeclarations(provider: {
 					.map((operationKey) => `"${operationKey}"`)
 					.join(
 						", ",
-					)}, but none of those operations' outputs has a "${kind.fieldName}" handle field. At least one listed issuer must output it.`,
+					)}, but none of those operations' outputs has a "${handleFieldNameFor(kind, "output")}" handle field. At least one listed issuer must output it.`,
 			});
 		}
 	}

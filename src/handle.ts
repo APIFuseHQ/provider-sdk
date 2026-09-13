@@ -18,9 +18,12 @@ import {
 	APIFUSE_HANDLE_META_KEY,
 	formatHandleIssuers,
 	handleFieldDescription,
+	handleHasDirectionalFieldNames,
 	HANDLE_KIND_NAME_PATTERN,
 	type HandleAccess,
+	type HandleFieldDirection,
 	type HandleFieldMeta,
+	type HandleFieldNames,
 	type HandleIssuedBy,
 	type HandleKindDeclaration,
 	type HandleKindType,
@@ -36,7 +39,9 @@ import type { ProviderStateDurationString } from "./types.js";
 
 export type {
 	HandleAccess,
+	HandleFieldDirection,
 	HandleFieldMeta,
+	HandleFieldNames,
 	HandleIssuedBy,
 	HandleKindDeclaration,
 	HandleKindType,
@@ -69,6 +74,10 @@ export interface HandleKindBase<TSchema extends ZodType = ZodType> extends Handl
 	/**
 	 * Schema for the handle field, usable in output and input positions. Carries
 	 * the `x-apifuse-handle` meta and an SDK-owned English description.
+	 *
+	 * One schema serves both directions even when the kind declares separate
+	 * `input` / `output` property keys: the meta carries both names and lint
+	 * checks the key against the side the field actually appears on.
 	 */
 	field(): ZodString;
 }
@@ -259,9 +268,20 @@ export function isHandleError(value: unknown): value is HandleError {
  */
 export function handleRecoverySentence(kind: {
 	readonly fieldName: string;
+	readonly outputFieldName?: string;
 	readonly issuedBy?: HandleIssuedBy;
 }): string {
 	const issuers = formatHandleIssuers(kind.issuedBy);
+	// When the kind is issued under one key and accepted under another, naming
+	// only one of them tells the LLM to look for a field that is not there. Name
+	// the output key it reads and the input key it writes, in that order.
+	if (handleHasDirectionalFieldNames(kind)) {
+		const issued = kind.outputFieldName as string;
+		if (issuers) {
+			return `Call ${issuers} again and pass the new \`${issued}\` back as \`${kind.fieldName}\`, exactly as returned.`;
+		}
+		return `Request a new \`${issued}\` and pass it back as \`${kind.fieldName}\`, exactly as returned.`;
+	}
 	if (issuers) {
 		return `Call ${issuers} again and pass the new \`${kind.fieldName}\` exactly as returned.`;
 	}
@@ -317,8 +337,16 @@ export function parseHandleDurationMs(value: ProviderStateDurationString, label:
 export interface DefineCursorOptions<TSchema extends ZodType> {
 	/** Kind name, `/^[a-z]{2,12}$/`; becomes the handle prefix. */
 	readonly name: string;
-	/** Schema property key carrying the handle. Default `${name}_token`. */
-	readonly fieldName?: string;
+	/**
+	 * Schema property key carrying the handle. Default `${name}_token`.
+	 *
+	 * Pass `{ input, output }` when the caller-facing contract names the same
+	 * handle differently in each direction — the canon's `{ input: "cursor",
+	 * output: "next_cursor" }`. Both keys must be given; the handle's identity
+	 * stays the kind, so a value issued under `output` is still only valid when
+	 * sent back under `input`.
+	 */
+	readonly fieldName?: string | HandleFieldNames;
 	readonly schema: TSchema;
 	readonly ttl: ProviderStateDurationString;
 	/** `"bound"` (default): connection-scoped, 2 words. `"public"`: provider-scoped, 4-5 words. */
@@ -338,7 +366,12 @@ export interface DefineDraftOptions<
 	TResultSchema extends ZodType | undefined,
 > {
 	readonly name: string;
-	readonly fieldName?: string;
+	/**
+	 * Schema property key carrying the handle. Default `${name}_token`. Accepts
+	 * `{ input, output }` for a contract that names the handle differently in
+	 * each direction; see {@link DefineCursorOptions.fieldName}.
+	 */
+	readonly fieldName?: string | HandleFieldNames;
 	readonly schema: TSchema;
 	/** Optional schema of the commit result (type-level). */
 	readonly result?: TResultSchema;
@@ -372,12 +405,59 @@ function assertKindName(name: unknown, define: string): asserts name is string {
 	}
 }
 
-function assertFieldName(fieldName: string, define: string): void {
-	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(fieldName)) {
+function assertFieldName(
+	fieldName: unknown,
+	define: string,
+	label: string,
+): asserts fieldName is string {
+	if (typeof fieldName !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(fieldName)) {
 		throw new Error(
-			`${define}: fieldName must be a plain identifier usable as a schema property key; received ${JSON.stringify(fieldName)}.`,
+			`${define}: ${label} must be a plain identifier usable as a schema property key; received ${JSON.stringify(fieldName)}.`,
 		);
 	}
+}
+
+/**
+ * Resolves the `fieldName` option to the input key and, when the two differ,
+ * the output key.
+ *
+ * The string form names one key for both directions and is unchanged. The
+ * object form requires BOTH keys: a half-declaration would leave one side
+ * silently defaulting to `${name}_token`, which is the kind of mismatch this
+ * option exists to make explicit. `outputFieldName` is left undefined when the
+ * two keys are equal so a one-name kind emits exactly the meta it always did.
+ */
+function resolveFieldNames(
+	value: string | HandleFieldNames | undefined,
+	define: string,
+	name: string,
+): { fieldName: string; outputFieldName?: string } {
+	if (value === undefined) return { fieldName: `${name}_token` };
+	if (typeof value === "string") {
+		assertFieldName(value, define, "fieldName");
+		return { fieldName: value };
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(
+			`${define}: "${name}" fieldName must be a property key or { input, output }; received ${JSON.stringify(value)}.`,
+		);
+	}
+	const record = value as unknown as Record<string, unknown>;
+	const extra = Object.keys(record).filter((key) => key !== "input" && key !== "output");
+	if (extra.length > 0) {
+		throw new Error(
+			`${define}: "${name}" fieldName accepts only "input" and "output"; received extra ${extra.map((key) => JSON.stringify(key)).join(", ")}.`,
+		);
+	}
+	if (record.input === undefined || record.output === undefined) {
+		throw new Error(
+			`${define}: "${name}" fieldName must declare both "input" and "output" when the two directions differ; declaring one would leave the other defaulting to "${name}_token".`,
+		);
+	}
+	assertFieldName(record.input, define, "fieldName.input");
+	assertFieldName(record.output, define, "fieldName.output");
+	if (record.input === record.output) return { fieldName: record.input };
+	return { fieldName: record.input, outputFieldName: record.output };
 }
 
 function assertPositiveInteger(value: number, label: string, define: string): void {
@@ -442,8 +522,7 @@ export function defineCursor<TSchema extends ZodType>(
 ): CursorKind<TSchema> {
 	const define = "defineCursor";
 	assertKindName(options.name, define);
-	const fieldName = options.fieldName ?? `${options.name}_token`;
-	assertFieldName(fieldName, define);
+	const { fieldName, outputFieldName } = resolveFieldNames(options.fieldName, define, options.name);
 	const access: unknown = options.access ?? "bound";
 	assertAccess(access, define);
 	const ttlMs = parseHandleDurationMs(options.ttl, `"${options.name}" ttl`);
@@ -464,12 +543,14 @@ export function defineCursor<TSchema extends ZodType>(
 		kind: options.name,
 		type: "cursor",
 		fieldName,
+		...(outputFieldName ? { outputFieldName } : {}),
 		...(issuedBy ? { issuedBy } : {}),
 	};
 	return Object.freeze({
 		name: options.name,
 		type: "cursor",
 		fieldName,
+		outputFieldName,
 		access,
 		issuedBy,
 		schema: options.schema,
@@ -494,8 +575,7 @@ export function defineDraft<
 >(options: DefineDraftOptions<TSchema, TResultSchema>): DraftKind<TSchema, TResultSchema> {
 	const define = "defineDraft";
 	assertKindName(options.name, define);
-	const fieldName = options.fieldName ?? `${options.name}_token`;
-	assertFieldName(fieldName, define);
+	const { fieldName, outputFieldName } = resolveFieldNames(options.fieldName, define, options.name);
 	if (!options.ttl || typeof options.ttl !== "object") {
 		throw new Error(`${define}: draft "${options.name}" ttl must be { idle, max }.`);
 	}
@@ -533,12 +613,14 @@ export function defineDraft<
 		kind: options.name,
 		type: "draft",
 		fieldName,
+		...(outputFieldName ? { outputFieldName } : {}),
 		...(issuedBy ? { issuedBy } : {}),
 	};
 	return Object.freeze({
 		name: options.name,
 		type: "draft",
 		fieldName,
+		outputFieldName,
 		access,
 		strength,
 		issuedBy,

@@ -165,6 +165,96 @@ describe("handle lint rules", () => {
 			// The mis-keyed field still counts toward parity; it is a naming error only.
 			expect(byRule(diagnostics, "handle-field-parity")).toEqual([]);
 		});
+
+		// A kind may spell one handle differently per direction (the canon's
+		// `cursor` in, `next_cursor` out). The rule stays exact per side: it is
+		// about the handle's identity, not about a single spelling.
+		describe("directional fieldName", () => {
+			const PAGE_KIND: HandleKindDeclaration = {
+				name: "page",
+				type: "cursor",
+				fieldName: "cursor",
+				outputFieldName: "next_cursor",
+				access: "public",
+				issuedBy: "page-search",
+			};
+			const PAGE_META: HandleFieldMeta = {
+				kind: PAGE_KIND.name,
+				type: PAGE_KIND.type,
+				fieldName: PAGE_KIND.fieldName,
+				outputFieldName: PAGE_KIND.outputFieldName,
+				issuedBy: PAGE_KIND.issuedBy,
+			};
+
+			function pagingProvider(
+				inputKey: string,
+				outputKey: string,
+			): ReturnType<typeof validProvider> {
+				const provider = validProvider();
+				provider.handle = [WAITING_KIND, PAGE_KIND];
+				provider.operations["page-search"] = operation(
+					{ [inputKey]: handleField(PAGE_META) },
+					{ [outputKey]: handleField(PAGE_META) },
+				);
+				return provider;
+			}
+
+			it("accepts the canon shape: `cursor` on input, `next_cursor` on output", () => {
+				const diagnostics = lintProvider(pagingProvider("cursor", "next_cursor"));
+
+				expect(rulesOf(diagnostics, "handle-")).toEqual([]);
+			});
+
+			it("still rejects the names used on the wrong side", () => {
+				// Swapping them is the failure the single-name rule was really
+				// guarding: the caller would read a value keyed as the thing it is
+				// supposed to send, and the round trip loses its one direction.
+				const diagnostics = lintProvider(pagingProvider("next_cursor", "cursor"));
+
+				expect(
+					byRule(diagnostics, "handle-field-name")
+						.map((diagnostic) => diagnostic.field)
+						.sort(),
+				).toEqual([
+					"operations.page-search.input.next_cursor",
+					"operations.page-search.output.cursor",
+				]);
+				expect(byRule(diagnostics, "handle-field-name")[0]?.message).toContain(
+					'the kind\'s input fieldName is "cursor"',
+				);
+			});
+
+			it("still rejects a third name on either side", () => {
+				expect(
+					byRule(lintProvider(pagingProvider("token", "next_cursor")), "handle-field-name").map(
+						(diagnostic) => diagnostic.field,
+					),
+				).toEqual(["operations.page-search.input.token"]);
+				expect(
+					byRule(lintProvider(pagingProvider("cursor", "page_token")), "handle-field-name").map(
+						(diagnostic) => diagnostic.field,
+					),
+				).toEqual(["operations.page-search.output.page_token"]);
+			});
+
+			it("quotes the output name in the never-issued and issued-by diagnostics", () => {
+				const provider = validProvider();
+				provider.handle = [WAITING_KIND, PAGE_KIND];
+				provider.operations["page-search"] = operation(
+					{ cursor: handleField(PAGE_META) },
+					{ total: described(z.number(), "fields.total") },
+				);
+
+				const diagnostics = lintProvider(provider);
+
+				expect(byRule(diagnostics, "handle-field-parity")[0]?.message).toContain(
+					'its field "next_cursor"',
+				);
+				expect(byRule(diagnostics, "handle-issued-by")[0]?.message).toContain(
+					'no "next_cursor" handle field',
+				);
+			});
+		});
 	});
 
 	describe("handle-field-parity", () => {

@@ -19,11 +19,34 @@ export type HandleAccess = "bound" | "public";
  */
 export type HandleIssuedBy = string | readonly string[];
 
-/** Value stored under {@link APIFUSE_HANDLE_META_KEY} on a handle field. */
+/** The schema side a handle field appears on. */
+export type HandleFieldDirection = "input" | "output";
+
+/**
+ * Direction-specific property keys for one handle kind, for the operations
+ * whose caller-facing contract names the same handle differently coming in and
+ * going out (the platform canon's `cursor` in, `next_cursor` out). The two keys
+ * are two spellings of ONE handle: the value a caller reads from `output` is
+ * the value it must send back under `input`, unedited.
+ */
+export interface HandleFieldNames {
+	readonly input: string;
+	readonly output: string;
+}
+
+/**
+ * Value stored under {@link APIFUSE_HANDLE_META_KEY} on a handle field.
+ *
+ * `fieldName` is the INPUT property key — the name a caller sends the handle
+ * back under, and the name every runtime error message quotes. `outputFieldName`
+ * is present only when the output key differs, so a kind with one name emits
+ * exactly the meta it always did.
+ */
 export interface HandleFieldMeta {
 	readonly kind: string;
 	readonly type: HandleKindType;
 	readonly fieldName: string;
+	readonly outputFieldName?: string;
 	readonly issuedBy?: HandleIssuedBy;
 }
 
@@ -31,13 +54,39 @@ export interface HandleFieldMeta {
  * Structural view of a handle kind as seen by the provider declaration
  * (`handle: [WaitingDraft, PageCursor]`), lint, and the registry. The runtime
  * kinds returned by `defineCursor` / `defineDraft` satisfy this shape.
+ *
+ * `fieldName` / `outputFieldName` follow the {@link HandleFieldMeta} rule:
+ * `fieldName` is the input key, `outputFieldName` is set only when the output
+ * key differs.
  */
 export interface HandleKindDeclaration {
 	readonly name: string;
 	readonly type: HandleKindType;
 	readonly fieldName: string;
+	readonly outputFieldName?: string;
 	readonly access: HandleAccess;
 	readonly issuedBy?: HandleIssuedBy;
+}
+
+/**
+ * The property key a handle kind claims on one side of an operation.
+ *
+ * This is the single place that resolves a direction to a key, so lint, the
+ * runtime, and error text cannot disagree about which name belongs where.
+ */
+export function handleFieldNameFor(
+	kind: Pick<HandleKindDeclaration, "fieldName" | "outputFieldName">,
+	direction: HandleFieldDirection,
+): string {
+	if (direction === "input") return kind.fieldName;
+	return kind.outputFieldName ?? kind.fieldName;
+}
+
+/** True when a kind names the same handle differently on input and output. */
+export function handleHasDirectionalFieldNames(
+	kind: Pick<HandleKindDeclaration, "fieldName" | "outputFieldName">,
+): boolean {
+	return kind.outputFieldName !== undefined && kind.outputFieldName !== kind.fieldName;
 }
 
 /** Kind names are lowercase letters only so they never fuse with the word body. */
@@ -77,6 +126,7 @@ export function isHandleFieldMeta(value: unknown): value is HandleFieldMeta {
 		typeof record.kind === "string" &&
 		(record.type === "cursor" || record.type === "draft") &&
 		typeof record.fieldName === "string" &&
+		(record.outputFieldName === undefined || typeof record.outputFieldName === "string") &&
 		(record.issuedBy === undefined || isHandleIssuedBy(record.issuedBy))
 	);
 }

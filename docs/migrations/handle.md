@@ -128,6 +128,45 @@ least one of them outputs the field.
 > two handle fields to lint, and the second key fails `handle-field-name`. Call
 > `Kind.field()` once per property (or accept that only `fieldName` is legal).
 
+### A different name coming in and going out
+
+Some contracts name the same handle differently per direction — the platform
+canon asks list operations to accept `cursor` and return `next_cursor`. Declare
+both keys and the kind claims one per side:
+
+```ts
+export const SearchPage = defineCursor({
+  name: "page",
+  fieldName: { input: "cursor", output: "next_cursor" },
+  schema: PageStateSchema,
+  ttl: "10m",
+  access: "public",
+  maxEntries: 100_000,
+  issuedBy: "search",
+});
+
+input:  z.object({ cursor: SearchPage.field().optional() }),
+output: z.object({ items: /* … */, next_cursor: SearchPage.field().nullable() }),
+// recovery sentence: "Call `search` again and pass the new `next_cursor` back as `cursor`, exactly as returned."
+```
+
+`field()` is the same helper on both sides; the meta carries both names and
+`handle-field-name` checks the property key against the side the field is on.
+The rule has not loosened — it is about the handle's **identity**, not about one
+spelling:
+
+- Only the two declared keys are legal; a third name still fails.
+- The keys are not interchangeable. `next_cursor` on an input, or `cursor` on an
+  output, still fails — the round trip keeps exactly one direction, so the value
+  a caller reads under `output` is the value it sends back under `input`, and
+  the handle's kind is still what makes it valid (`HANDLE_KIND_MISMATCH`
+  otherwise).
+- Both keys are required together. Declaring only one throws, because the other
+  would silently fall back to `${name}_token`.
+
+A plain string stays the one-name form and emits exactly the meta it always did,
+so nothing in the fleet churns by upgrading.
+
 ## 3. The pattern: one handle per offer, plain picks
 
 The unit that gets a handle is the **offer** (the list the user chooses from),
@@ -287,7 +326,9 @@ export const SearchPage = defineCursor({
   issuedBy: "search",
 });
 
-// schema: same helper on both sides; optional because the first page has none
+// schema: same helper on both sides; optional because the first page has none.
+// Use `fieldName: { input: "cursor", output: "next_cursor" }` (§2) when the
+// contract names the two directions differently.
 input:  z.object({ query: z.string().describeKey("search.query"), cursor: SearchPage.field().optional() }),
 output: z.object({ items: /* … */, cursor: SearchPage.field().optional() }),
 
@@ -545,7 +586,9 @@ asserted a synchronous `string` return from inline `issue` become `await`.
 5. Replace `consume: "explicit"` + replay-record code with `commit`. Delete the
    provider-owned dedup namespace once nothing reads it.
 6. Put `Kind.field()` on both the output and the input; make sure the property
-   key equals `fieldName` (lint `handle-field-name`, `handle-field-parity`).
+   key equals `fieldName` on each side (lint `handle-field-name`,
+   `handle-field-parity`). When the contract needs two names, declare
+   `fieldName: { input, output }` (§2) rather than reusing one.
    Remove hand-written `.describeKey()` on those fields and the now-unused
    locale keys.
 7. Add `handle: [...]` and `state: {}` to `defineProvider`; delete `choice: true`.
