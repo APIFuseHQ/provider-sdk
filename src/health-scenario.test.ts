@@ -7,6 +7,7 @@ import {
 	type HealthJourneyDefinition,
 	type HealthCheckCase,
 	type HealthScenario,
+	type OperationResult,
 	type ProviderDefinition,
 } from "./index.js";
 import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
@@ -552,6 +553,58 @@ describe("declarative health scenarios", () => {
 		const duplicateResult = validScenario();
 		duplicateResult.steps[1].result = duplicateResult.steps[0].result;
 		expect(() => defineHealthScenario(duplicateResult)).toThrow(/duplicate result binding/);
+	});
+
+	it("authors a stale-cache freshness guard against the operation step result", () => {
+		// A provider that reads its upstream through `staleIfErrorMs` answers an
+		// upstream outage with a 200 whose body satisfies every `data` assertion.
+		// `served_stale_cache` is the only operand that separates that from a live
+		// read, so the authoring surface has to carry it and the closed AST has to
+		// accept a guard pointed at it.
+		const staleCacheField: keyof OperationResult = "served_stale_cache";
+		const projected: OperationResult = {
+			kind: "operation_result",
+			status_code: 200,
+			data: {},
+			request_id: "req-1",
+			duration_ms: 1,
+			served_stale_cache: false,
+		};
+		expect(projected[staleCacheField]).toBe(false);
+
+		const base = validScenario();
+		const scenario: HealthScenario = {
+			...base,
+			steps: [
+				...base.steps,
+				{
+					id: "guard-freshness",
+					result: "freshness-guarded",
+					kind: "guard",
+					condition: {
+						kind: "predicate",
+						operator: "not_equals",
+						actual: {
+							ref: { namespace: "steps", binding: "ping-result", path: ["served_stale_cache"] },
+						},
+						expected: true,
+					},
+					onFail: {
+						attribute: [
+							{
+								operationId: "ping",
+								status: "degraded",
+								reasonCode: "expected_absence",
+								reasonKey: "health.ping.servedStaleCache",
+							},
+						],
+						stop: "scenario",
+					},
+				},
+			],
+		};
+		const parsed = defineHealthScenario(scenario);
+		expect(JSON.parse(JSON.stringify(parsed))).toEqual(parsed);
 	});
 
 	it("round-trips v2 additions through JSON unchanged", () => {
