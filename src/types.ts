@@ -796,6 +796,16 @@ export type HealthCheckCase<TInput = unknown, TOutput = unknown> = {
 			 *
 			 * MUST NOT access scheduler, recorder, or any runtime type — pure data
 			 * + lambda only.
+			 *
+			 * NOTE: a closure cannot cross the registry's serialization boundary, so
+			 * the platform health monitor cannot execute this hook — it runs a case's
+			 * serialized `scenario` and nothing else. A case that carries only
+			 * `assertions` is still published as a probe, but its outcome is
+			 * permanently `unknown` / `monitoring_unavailable`, so the operation
+			 * reads as monitored while nothing is being checked. This hook runs only
+			 * in the provider runtime's own self-test
+			 * (`/internal/health/self-test`). Express anything that must be
+			 * monitored in production as a `scenario`.
 			 */
 			assertions: (
 				ctx: HealthCheckAssertionContext<TOutput>,

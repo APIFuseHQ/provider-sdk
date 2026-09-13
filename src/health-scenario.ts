@@ -545,6 +545,44 @@ export type OperationResult = {
 	data: JsonValue;
 	request_id: string;
 	duration_ms: number;
+	/**
+	 * Whether the monitor's operation step was answered from a stale-if-error
+	 * cache serve — the runtime's projection of the response envelope's
+	 * `meta.stale`.
+	 *
+	 * An operation that reads its upstream through `ctx.cache.getOrSet(...,
+	 * { staleIfErrorMs })` answers an upstream outage with HTTP 200 and a
+	 * well-formed, fully schema-valid body for the whole stale window. Every
+	 * assertion over `status_code` and `data` therefore passes, and the probe
+	 * rolls up `ok` while the upstream is down. This boolean is the only thing
+	 * in the step result that separates that from a live read.
+	 *
+	 * Always present, so a reference to it resolves to `false` rather than
+	 * raising `reference_unresolvable`; a response whose `meta` is malformed
+	 * fails the step rather than projecting as fresh.
+	 *
+	 * Providers that serve stale-if-error should guard on it, so an outage the
+	 * cache is absorbing stops reading as green:
+	 *
+	 * ```ts
+	 * {
+	 *   id: "guard-freshness",
+	 *   result: "freshness-guarded",
+	 *   kind: "guard",
+	 *   condition: {
+	 *     kind: "predicate",
+	 *     operator: "not_equals",
+	 *     actual: { ref: { namespace: "steps", binding: "case", path: ["served_stale_cache"] } },
+	 *     expected: true,
+	 *   },
+	 *   onFail: {
+	 *     attribute: [{ operationId, status: "degraded", reasonCode: "expected_absence", reasonKey }],
+	 *     stop: "scenario",
+	 *   },
+	 * }
+	 * ```
+	 */
+	served_stale_cache: boolean;
 	candidate?: { attempts: number; selected_index: number | null };
 };
 export type ExtractResult<T extends JsonValue = JsonValue> = {
