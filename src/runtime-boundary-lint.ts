@@ -86,7 +86,7 @@ export function isBootstrapEnvName(name: string): boolean {
 const BOOTSTRAP_ENTRYPOINT_FILE_PATTERN = /^(?:dev|start|deploy)\.[cm]?[jt]sx?$/;
 /** Operator tooling directories at the provider root (fixture recorders, smoke scripts). */
 const TOOLING_DIRECTORY_PATTERN = /^(?:scripts|tools|bin)\//;
-const TEST_SOURCE_FILE_PATTERN =
+export const TEST_SOURCE_FILE_PATTERN =
 	/(?:^|\/)(?:__tests__|__mocks__|tests)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const RECORDED_FIXTURE_SOURCE_FILE_PATTERN =
 	/(?:^|\/)__fixtures__(?:\/|$)|(?:^|\/)__tests__\/fixtures(?:\/|$)/;
