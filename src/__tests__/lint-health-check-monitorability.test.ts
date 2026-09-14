@@ -1348,6 +1348,29 @@ describe("health-check monitorability lint", () => {
 		).toEqual([]);
 	});
 
+	it("ignores tooling, bootstrap and non-JavaScript sources", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"scripts/record.ts": STALE_CLIENT,
+							"tools/seed.ts": STALE_CLIENT,
+							"bin/run.ts": STALE_CLIENT,
+							"start.ts": STALE_CLIENT,
+							"entrypoint.sh": STALE_CLIENT,
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(

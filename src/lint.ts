@@ -3037,8 +3037,21 @@ const SERVED_STALE_CACHE_OPERAND = "served_stale_cache";
 const NON_SERVING_SOURCE_FILE_PATTERN =
 	/(?:^|\/)(?:__tests__|__mocks__|__fixtures__|tests|fixtures)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
+/**
+ * Operator tooling and bootstrap entrypoints, mirroring
+ * `runtime-boundary-lint.ts`: a cache option used by a fixture recorder or a
+ * start script is not the request path a probe reads through.
+ */
+const NON_SERVING_TOOLING_DIRECTORY_PATTERN = /^(?:scripts|tools|bin)\//;
+const NON_SERVING_BOOTSTRAP_FILE_PATTERN = /^(?:dev|start|deploy)\.[cm]?[jt]sx?$/;
+
 function isServingProviderSourcePath(relativePath: string): boolean {
-	return !NON_SERVING_SOURCE_FILE_PATTERN.test(relativePath);
+	return (
+		JAVASCRIPT_SOURCE_FILE_PATTERN.test(relativePath) &&
+		!NON_SERVING_SOURCE_FILE_PATTERN.test(relativePath) &&
+		!NON_SERVING_TOOLING_DIRECTORY_PATTERN.test(relativePath) &&
+		!NON_SERVING_BOOTSTRAP_FILE_PATTERN.test(relativePath)
+	);
 }
 
 function isLintRecord(value: unknown): value is Record<string, unknown> {
