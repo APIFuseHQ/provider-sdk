@@ -903,7 +903,10 @@ and Bun globals bypass `allowedHosts`, proxy policy, retries, redaction, the
 secret presence gate, and telemetry. `apifuse check` reports them at **error**
 level — a finding fails `apifuse check` and `apifuse submit-check`, in the
 official and the bounty `standalone` mode alike (the level was `warn` for one
-release as a migration window; the fleet is clean, so the window is closed):
+release as a migration window; the window closed once the fleet's request-path
+hits were fixed or acknowledged — a provider that still carries one sees
+`apifuse check` fail on its next SDK bump and fixes or acknowledges it in that
+same PR):
 
 - `process-env-direct-read` — `process.env.X`, `process.env["X"]`, a bare
   `process.env` object use, `Bun.env`. The `APIFUSE__RUNTIME__*` bootstrap
