@@ -1247,6 +1247,46 @@ describe("health-check monitorability lint", () => {
 		).toHaveLength(1);
 	});
 
+	it("does not treat an unrelated call's options object as cache configuration", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"await buildUpstreamPayload({ staleIfErrorMs: body.staleIfErrorMs });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("resolves a cache policy spread into a cache call", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"const STALE_CACHE_OPTIONS = { staleIfErrorMs: 300_000 };\nawait ctx.cache.getOrSet(key, load, { ...STALE_CACHE_OPTIONS });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(

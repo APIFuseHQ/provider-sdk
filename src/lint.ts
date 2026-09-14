@@ -2915,6 +2915,36 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 	 * with the sibling-option test this covers the real shapes, while an upstream
 	 * payload that merely carries a field of the same name does not count.
 	 */
+	/**
+	 * A callee that writes the provider cache: `ctx.cache.getOrSet(...)`,
+	 * `ctx.cache.set(...)`, and the `cachedContent` / `cachedJson` helpers built
+	 * on them. An unrelated call receiving an object that happens to carry the
+	 * name is not cache configuration.
+	 */
+	const isCacheCallee = (expression: import("typescript").Expression): boolean => {
+		if (ts.isIdentifier(expression)) return /^cached[A-Z]/.test(expression.text);
+		if (!ts.isPropertyAccessExpression(expression)) return false;
+		if (expression.name.text === "getOrSet") return true;
+		return (
+			(expression.name.text === "set" || expression.name.text === "write") &&
+			ts.isPropertyAccessExpression(expression.expression) &&
+			expression.expression.name.text === "cache"
+		);
+	};
+	/** `const POLICY = { ... }` object literals, for a spread of one. */
+	const literalsByName = new Map<string, import("typescript").ObjectLiteralExpression>();
+	const collect = (node: import("typescript").Node): void => {
+		if (
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.initializer !== undefined &&
+			ts.isObjectLiteralExpression(node.initializer)
+		) {
+			literalsByName.set(node.name.text, node.initializer);
+		}
+		ts.forEachChild(node, collect);
+	};
+	collect(file);
 	const visit = (node: import("typescript").Node, inCallArgument: boolean): void => {
 		if (found || isTypeOnly(node)) return;
 		if (ts.isObjectLiteralExpression(node)) {
@@ -2922,6 +2952,18 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 			let declaresOption = false;
 			let hasSibling = false;
 			for (const property of node.properties) {
+				// `{ ...POLICY }` inside a cache call: resolve the policy in this file
+				// and judge it as if it had been written inline.
+				if (ts.isSpreadAssignment(property) && inCallArgument) {
+					const spread = ts.isIdentifier(property.expression)
+						? literalsByName.get(property.expression.text)
+						: ts.isObjectLiteralExpression(property.expression)
+							? property.expression
+							: undefined;
+					if (spread !== undefined) visit(spread, true);
+					if (found) return;
+					continue;
+				}
 				if (ts.isShorthandPropertyAssignment(property)) {
 					if (property.name.text === STALE_IF_ERROR_OPTION) declaresOption = true;
 					else if (siblingCacheOptions.has(property.name.text)) hasSibling = true;
@@ -2946,8 +2988,9 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 			}
 		}
 		if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+			const cacheCall = isCacheCallee(node.expression);
 			visit(node.expression, false);
-			for (const argument of node.arguments ?? []) visit(argument, true);
+			for (const argument of node.arguments ?? []) visit(argument, cacheCall);
 			return;
 		}
 		ts.forEachChild(node, (child) => visit(child, false));
