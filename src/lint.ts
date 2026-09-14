@@ -2252,19 +2252,24 @@ function lintLegacyChoiceUsage(provider: ProviderSourceLike): LintDiagnostic[] {
 }
 
 /**
- * A `staleIfErrorMs` option being SET on a cache read. The trailing colon is
- * required so that documenting the absence of stale caching — the comment
- * `// staleIfErrorMs intentionally not used` — is not read as configuring it;
- * comments are stripped first so a commented-out option does not count either.
+ * A `staleIfErrorMs` cache option in EXECUTABLE source. The bare identifier is
+ * matched, not `staleIfErrorMs:`, because the shorthand property form
+ * `{ ttlMs, staleIfErrorMs }` is as common as the explicit one and refactoring
+ * between them must not change the verdict. Comments are stripped first, so a
+ * provider documenting that it deliberately does NOT serve stale — the comment
+ * `// staleIfErrorMs intentionally not used` — is not read as configuring it.
  */
-const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\s*:/;
+const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\b/;
 const LINE_COMMENT_PATTERN = /(^|[^:/])\/\/[^\n]*/g;
 const BLOCK_COMMENT_PATTERN = /\/\*[\s\S]*?\*\//g;
 
+function executableSource(source: string): string {
+	if (!source.includes("staleIfErrorMs")) return "";
+	return source.replace(BLOCK_COMMENT_PATTERN, " ").replace(LINE_COMMENT_PATTERN, "$1");
+}
+
 function servesStaleIfError(source: string): boolean {
-	if (!source.includes("staleIfErrorMs")) return false;
-	const executable = source.replace(BLOCK_COMMENT_PATTERN, " ").replace(LINE_COMMENT_PATTERN, "$1");
-	return STALE_IF_ERROR_PATTERN.test(executable);
+	return STALE_IF_ERROR_PATTERN.test(executableSource(source));
 }
 
 /** The operation-step field that distinguishes a stale-if-error serve. */
@@ -2324,21 +2329,20 @@ function operationStepBindings(steps: readonly unknown[], operationId: string): 
 }
 
 /**
- * Whether an assertion tree reads the operand off an operation step result.
+ * Whether an operand is the operand: the runtime's `served_stale_cache`
+ * projection on an operation step result for the probe's own operation.
  *
- * Structural and exact on three counts, because each looser form is a way to
- * silence the rule without checking cache provenance: a literal
- * `"served_stale_cache"` in an `inputTemplate` or a `reasonKey` is not a
- * reference at all; `["data", "served_stale_cache"]` is an upstream payload
- * field the provider happens to have named that way, not the runtime's
- * projection of `meta.stale`; and a reference bound to an `extract` result is
- * not the operation step this probe invoked.
+ * Exact on three counts, because each looser form is a way to silence the rule
+ * without checking cache provenance: a literal `"served_stale_cache"` in an
+ * `inputTemplate` or a `reasonKey` is not a reference at all;
+ * `["data", "served_stale_cache"]` is an upstream payload field the provider
+ * happens to have named that way; and a reference bound to an `extract` result
+ * is not the operation step this probe invoked.
  */
-function readsStaleCacheOperand(node: unknown, bindings: ReadonlySet<string>): boolean {
-	if (Array.isArray(node)) return node.some((child) => readsStaleCacheOperand(child, bindings));
-	if (!isLintRecord(node)) return false;
-	const reference = node.ref;
-	if (
+function isStaleCacheOperand(operand: unknown, bindings: ReadonlySet<string>): boolean {
+	if (!isLintRecord(operand)) return false;
+	const reference = operand.ref;
+	return (
 		isLintRecord(reference) &&
 		reference.namespace === "steps" &&
 		typeof reference.binding === "string" &&
@@ -2346,10 +2350,53 @@ function readsStaleCacheOperand(node: unknown, bindings: ReadonlySet<string>): b
 		Array.isArray(reference.path) &&
 		reference.path.length === 1 &&
 		reference.path[0] === SERVED_STALE_CACHE_OPERAND
-	) {
-		return true;
+	);
+}
+
+/**
+ * Whether a single predicate over the operand is FALSE for a stale serve, under
+ * `negated` negation depth. `served_stale_cache` is always present and always a
+ * boolean, so `exists` and `type_is: "boolean"` pass for a stale serve too —
+ * reading the operand is not the same as rejecting it.
+ */
+function predicateRejectsStaleServe(
+	predicate: Record<string, unknown>,
+	bindings: ReadonlySet<string>,
+	negated: boolean,
+): boolean {
+	if (!isStaleCacheOperand(predicate.actual, bindings)) return false;
+	const { operator, expected } = predicate;
+	const failsWhenStale =
+		(operator === "not_equals" && expected === true) ||
+		(operator === "equals" && expected === false);
+	const holdsWhenStale =
+		operator === "is_true" ||
+		(operator === "equals" && expected === true) ||
+		(operator === "not_equals" && expected === false);
+	return negated ? holdsWhenStale : failsWhenStale;
+}
+
+/**
+ * Whether an assertion expression evaluates FALSE when the operation step was
+ * answered from a stale cache — the only thing that makes a guard degrade or an
+ * assert fail. A clause under `any` only counts if every sibling branch also
+ * rejects the stale serve, because `any` is satisfied by the branch that still
+ * passes (`status_2xx` on a stale 200 being the obvious one).
+ */
+function rejectsStaleServe(node: unknown, bindings: ReadonlySet<string>, negated = false): boolean {
+	if (!isLintRecord(node)) return false;
+	if (node.kind === "not") return rejectsStaleServe(node.clause, bindings, !negated);
+	if (node.kind === "all" || node.kind === "any") {
+		if (!Array.isArray(node.clauses)) return false;
+		// `all` fails if ANY clause fails; `any` fails only if EVERY clause fails.
+		// Negation swaps which of the two the operator behaves like.
+		const conjunctive = negated ? node.kind === "any" : node.kind === "all";
+		return conjunctive
+			? node.clauses.some((clause) => rejectsStaleServe(clause, bindings, negated))
+			: node.clauses.every((clause) => rejectsStaleServe(clause, bindings, negated));
 	}
-	return Object.values(node).some((child) => readsStaleCacheOperand(child, bindings));
+	if (node.kind === "predicate") return predicateRejectsStaleServe(node, bindings, negated);
+	return false;
 }
 
 /**
@@ -2364,8 +2411,8 @@ function scenarioChecksFreshness(scenario: unknown, operationId: string): boolea
 	if (bindings.size === 0) return false;
 	return scenario.steps.some((step) => {
 		if (!isLintRecord(step)) return false;
-		if (step.kind === "guard") return readsStaleCacheOperand(step.condition, bindings);
-		if (step.kind === "assert") return readsStaleCacheOperand(step.expression, bindings);
+		if (step.kind === "guard") return rejectsStaleServe(step.condition, bindings);
+		if (step.kind === "assert") return rejectsStaleServe(step.expression, bindings);
 		return false;
 	});
 }
@@ -2456,16 +2503,21 @@ function lintHealthCheckMonitorability(provider: {
 		if (!isServingProviderSourcePath(filePath) || !servesStaleIfError(source)) continue;
 		sources.add(filePath);
 		// `apifuse check` passes every provider file, so the file that declares a
-		// handler carries that handler's own cache call. Recognising it keeps the
+		// handler carries that handler's own cache call; recognising it keeps the
 		// exact attribution instead of degrading the whole provider to "shared".
-		const declaringOperation = [...handlerSourceByOperation].find(([, handlerSource]) =>
-			source.includes(handlerSource),
-		)?.[0];
-		if (declaringOperation === undefined) {
-			unattributed = true;
-		} else {
-			operationsServingStale.add(declaringOperation);
+		// Subtract every already-attributed handler's text and re-test: a file that
+		// also holds a shared helper, or a second handler's call, still has a
+		// residual occurrence and stays unattributed.
+		let residual = source;
+		for (const [operationKey, handlerSource] of handlerSourceByOperation) {
+			if (!operationsServingStale.has(operationKey)) continue;
+			// Exactly one occurrence per handler: a second copy of the same text is
+			// another call site this handler does not account for.
+			const at = residual.indexOf(handlerSource);
+			if (at < 0) continue;
+			residual = `${residual.slice(0, at)} ${residual.slice(at + handlerSource.length)}`;
 		}
+		if (servesStaleIfError(residual)) unattributed = true;
 	}
 	if (sources.size === 0) return diagnostics;
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import type { HealthScenario, HealthStep } from "../health-scenario.js";
+import type { AssertionExpression, HealthScenario, HealthStep } from "../health-scenario.js";
 import { type LintDiagnostic, lintProvider } from "../lint.js";
 import { describeKey } from "../schema.js";
 
@@ -134,6 +134,27 @@ function rowsGuard(operationId: string, reasonKey: string): HealthStep {
 		},
 		onFail: {
 			attribute: [{ operationId, status: "degraded", reasonCode: "expected_absence", reasonKey }],
+			stop: "scenario",
+		},
+	};
+}
+
+/** A guard whose condition is supplied by the test. */
+function conditionGuard(condition: AssertionExpression): HealthStep {
+	return {
+		id: "guard-condition",
+		result: "condition-guarded",
+		kind: "guard",
+		condition,
+		onFail: {
+			attribute: [
+				{
+					operationId: OPERATION_KEY,
+					status: "degraded",
+					reasonCode: "expected_absence",
+					reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
+				},
+			],
 			stop: "scenario",
 		},
 	};
@@ -571,6 +592,187 @@ describe("health-check monitorability lint", () => {
 		);
 
 		expect(diagnostics[0]?.message).toContain("The cache call is in shared source");
+	});
+
+	it("recognises the shorthand cache option", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"const staleIfErrorMs = 300_000;\nawait ctx.cache.getOrSet(key, load, { ttlMs, staleIfErrorMs });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
+	it("stays unattributed when a shared helper shares a file with a handler", () => {
+		// Removing the attributed handler's own text still leaves the helper's
+		// call, so the sibling operation's uncovered probe must still be listed.
+		const diagnostics = rules(
+			lintFleet(
+				{
+					staleOp: {
+						...operation({
+							interval: "1h",
+							cases: [
+								{
+									name: "stale",
+									input: {},
+									scenario: scenario([readStep("staleOp"), freshnessGuard("staleOp")], "staleOp"),
+								},
+							],
+						}),
+						source: STALE_CLIENT,
+					},
+					siblingOp: {
+						...operation({
+							interval: "1h",
+							cases: [
+								{
+									name: "sibling",
+									input: {},
+									scenario: scenario([readStep("siblingOp")], "siblingOp"),
+								},
+							],
+						}),
+						source: "return sharedRead(input);",
+					},
+				},
+				{
+					"upstream/client.ts": `${STALE_CLIENT}\nexport const sharedRead = async () => ${STALE_CLIENT}`,
+				},
+			),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain('siblingOp "sibling"');
+		expect(diagnostics[0]?.message).toContain("The cache call is in shared source");
+	});
+
+	it("rejects a freshness clause that passes for a stale serve", () => {
+		const weakConditions: AssertionExpression[] = [
+			{
+				kind: "predicate",
+				operator: "exists",
+				actual: {
+					ref: {
+						namespace: "steps",
+						binding: `${OPERATION_KEY}-response`,
+						path: ["served_stale_cache"],
+					},
+				},
+			},
+			{
+				kind: "predicate",
+				operator: "type_is",
+				actual: {
+					ref: {
+						namespace: "steps",
+						binding: `${OPERATION_KEY}-response`,
+						path: ["served_stale_cache"],
+					},
+				},
+				expected: "boolean",
+			},
+			{
+				kind: "any",
+				clauses: [
+					{
+						kind: "predicate",
+						operator: "status_2xx",
+						actual: {
+							ref: {
+								namespace: "steps",
+								binding: `${OPERATION_KEY}-response`,
+								path: ["status_code"],
+							},
+						},
+					},
+					{
+						kind: "predicate",
+						operator: "not_equals",
+						actual: {
+							ref: {
+								namespace: "steps",
+								binding: `${OPERATION_KEY}-response`,
+								path: ["served_stale_cache"],
+							},
+						},
+						expected: true,
+					},
+				],
+			},
+		];
+		for (const condition of weakConditions) {
+			const weak = scenario([READ_STEP, conditionGuard(condition)]);
+
+			expect(
+				rules(
+					lint(
+						{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: weak }] },
+						{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+					),
+					UNGUARDED_STALE,
+				),
+			).toHaveLength(1);
+		}
+	});
+
+	it("accepts the equivalent forms that do reject a stale serve", () => {
+		const operand = {
+			ref: {
+				namespace: "steps" as const,
+				binding: `${OPERATION_KEY}-response`,
+				path: ["served_stale_cache"],
+			},
+		};
+		const strongConditions: AssertionExpression[] = [
+			{ kind: "predicate", operator: "equals", actual: operand, expected: false },
+			{
+				kind: "not",
+				clause: { kind: "predicate", operator: "is_true", actual: operand },
+			},
+			{
+				kind: "all",
+				clauses: [
+					{
+						kind: "predicate",
+						operator: "status_2xx",
+						actual: {
+							ref: {
+								namespace: "steps",
+								binding: `${OPERATION_KEY}-response`,
+								path: ["status_code"],
+							},
+						},
+					},
+					{ kind: "predicate", operator: "not_equals", actual: operand, expected: true },
+				],
+			},
+		];
+		for (const condition of strongConditions) {
+			const strong = scenario([READ_STEP, conditionGuard(condition)]);
+
+			expect(
+				rules(
+					lint(
+						{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: strong }] },
+						{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+					),
+					UNGUARDED_STALE,
+				),
+			).toEqual([]);
+		}
 	});
 
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
