@@ -29,12 +29,12 @@ import {
 } from "./runtime/stealth-owned-headers.js";
 import {
 	lintRuntimeBoundary,
-	scriptKindForSourceFile,
 	// This module already has a narrower TEST_SOURCE_FILE_PATTERN of its own,
 	// used by the older source rules; it does not cover a plain `tests/`
 	// directory. Aliased rather than merged because consolidating the two would
 	// silently change what those rules scan.
 	TEST_SOURCE_FILE_PATTERN as SHARED_TEST_SOURCE_FILE_PATTERN,
+	scriptKindForSourceFile,
 } from "./runtime-boundary-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
@@ -2836,25 +2836,36 @@ function lintProviderMetaNarrowing(provider: ProviderSourceLike): LintDiagnostic
 	return diagnostics;
 }
 
-/**
- * A `staleIfErrorMs` cache option in EXECUTABLE source. The bare identifier is
- * matched, not `staleIfErrorMs:`, because the shorthand property form
- * `{ ttlMs, staleIfErrorMs }` is as common as the explicit one and refactoring
- * between them must not change the verdict. Comments are stripped first, so a
- * provider documenting that it deliberately does NOT serve stale — the comment
- * `// staleIfErrorMs intentionally not used` — is not read as configuring it.
- */
 const STALE_IF_ERROR_OPTION = "staleIfErrorMs";
 const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\b/;
 
 /**
- * Identifier occurrence in executable code, via the TypeScript AST when it is
- * available — the same approach `findLegacyChoiceUsage` uses, and for the same
- * reason: comments and string literals must not count, and a regex over raw
- * text cannot tell them apart (an `Accept: "*​/*"` header literal opens a block
- * comment to a stripping regex and swallows the cache call after it). Falls
- * back to the raw identifier match when TypeScript is not installed, which is
- * the fail-closed direction for this rule: it warns rather than goes quiet.
+ * Whether a property assignment's initializer leaves no stale window.
+ * `staleIfErrorMs: 0` makes `staleUntil` equal `freshUntil` in
+ * `runtime/cache.ts`, so a loader failure propagates instead of being answered
+ * from cache — a provider deliberately turning stale serving OFF must not be
+ * told its probes conceal outages.
+ */
+function disablesStaleWindow(
+	ts: typeof import("typescript"),
+	initializer: import("typescript").Expression,
+): boolean {
+	if (ts.isNumericLiteral(initializer)) return Number(initializer.text) === 0;
+	return ts.isIdentifier(initializer) && initializer.text === "undefined";
+}
+
+/**
+ * Whether executable source configures a stale-if-error window.
+ *
+ * Parsed, not matched: comments and unrelated string literals must not count,
+ * and a regex cannot tell them apart (an `Accept: "*​/*"` header literal opens a
+ * block comment to a stripping regex and swallows the cache call after it).
+ * This is the approach `findLegacyChoiceUsage` already uses here. All three
+ * spellings of the option count — `staleIfErrorMs: n`, the shorthand
+ * `{ ttlMs, staleIfErrorMs }`, and the quoted `"staleIfErrorMs": n` — because
+ * refactoring between them must not change the verdict. Falls back to the raw
+ * identifier match when TypeScript is not installed, which is the fail-closed
+ * direction for this rule: it warns rather than goes quiet.
  */
 function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 	if (!source.includes(STALE_IF_ERROR_OPTION)) return false;
@@ -2874,6 +2885,19 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 	let found = false;
 	const visit = (node: import("typescript").Node): void => {
 		if (found) return;
+		if (ts.isPropertyAssignment(node)) {
+			const name = node.name;
+			const named =
+				(ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === STALE_IF_ERROR_OPTION;
+			if (named) {
+				if (!disablesStaleWindow(ts, node.initializer)) {
+					found = true;
+					return;
+				}
+				// A disabled window: do not let the name inside it match below.
+				return;
+			}
+		}
 		if (ts.isIdentifier(node) && node.text === STALE_IF_ERROR_OPTION) {
 			found = true;
 			return;
@@ -3049,7 +3073,12 @@ function scenarioChecksFreshness(scenario: unknown, operationId: string): boolea
 	// twice with different inputs has two chances to serve stale, and one fresh
 	// read must not conceal the other.
 	return bindings.every((binding) =>
-		resultBindingChecksFreshness(scenario.steps as readonly unknown[], binding, operationId),
+		resultBindingChecksFreshness(
+			scenario.steps as readonly unknown[],
+			binding,
+			operationId,
+			bindings,
+		),
 	);
 }
 
@@ -3057,6 +3086,7 @@ function resultBindingChecksFreshness(
 	steps: readonly unknown[],
 	binding: string,
 	operationId: string,
+	siblingBindings: readonly string[],
 ): boolean {
 	const operand = new Set([binding]);
 	let produced = false;
@@ -3068,11 +3098,21 @@ function resultBindingChecksFreshness(
 			continue;
 		}
 		if (step.kind === "assert" && rejectsStaleServe(step.expression, operand)) return true;
-		if (step.kind === "guard") {
-			return (
-				rejectsStaleServe(step.condition, operand) && guardAttributesTo(step.onFail, operationId)
-			);
+		if (step.kind !== "guard") continue;
+		if (rejectsStaleServe(step.condition, operand)) {
+			return guardAttributesTo(step.onFail, operationId);
 		}
+		// A freshness guard for ANOTHER read of the same operation is not a row or
+		// emptiness guard masking the cause: it degrades on exactly this concern,
+		// so `read A, read B, guard A, guard B` covers both. Anything else stops
+		// the scenario first and shadows a later freshness guard.
+		const coversSibling = siblingBindings.some(
+			(sibling) =>
+				sibling !== binding &&
+				rejectsStaleServe(step.condition, new Set([sibling])) &&
+				guardAttributesTo(step.onFail, operationId),
+		);
+		if (!coversSibling) return false;
 	}
 	return false;
 }

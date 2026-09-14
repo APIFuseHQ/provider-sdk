@@ -1011,6 +1011,87 @@ describe("health-check monitorability lint", () => {
 		).toHaveLength(1);
 	});
 
+	it("accepts freshness guards for two reads ordered after both reads", () => {
+		const firstRead: HealthStep = {
+			id: "read-first",
+			result: "first-response",
+			kind: "operation",
+			operationId: OPERATION_KEY,
+			inputTemplate: { page: 1 },
+		};
+		const secondRead: HealthStep = {
+			id: "read-second",
+			result: "second-response",
+			kind: "operation",
+			operationId: OPERATION_KEY,
+			inputTemplate: { page: 2 },
+		};
+		const guardFor = (binding: string): HealthStep =>
+			conditionGuard({
+				kind: "predicate",
+				operator: "not_equals",
+				actual: { ref: { namespace: "steps" as const, binding, path: ["served_stale_cache"] } },
+				expected: true,
+			});
+		const interleaved = scenario([
+			firstRead,
+			secondRead,
+			guardFor("first-response"),
+			guardFor("second-response"),
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: interleaved }] },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("recognises a quoted cache-option property name", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								'await ctx.cache.getOrSet(key, load, { ttlMs: 1000, "staleIfErrorMs": 300000 });',
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
+	it("ignores a stale window that is explicitly disabled", () => {
+		for (const value of ["0", "undefined"]) {
+			expect(
+				rules(
+					lint(
+						{
+							interval: "1h",
+							cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+						},
+						{
+							providerSourceFiles: {
+								"upstream/client.ts": `await ctx.cache.getOrSet(key, load, { ttlMs: 1000, staleIfErrorMs: ${value} });`,
+							},
+						},
+					),
+					UNGUARDED_STALE,
+				),
+			).toEqual([]);
+		}
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(
