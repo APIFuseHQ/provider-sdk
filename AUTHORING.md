@@ -136,6 +136,8 @@ Hosted runtime settings are engine-owned as well: every `APIFUSE__CDP_POOL__*`
 variable, the Cloudflare OCR/STT tokens and account identifier,
 `APIFUSE__OCR__API_KEY`, and `APIFUSE__CACHE__KEY_PEPPER`. `defineProvider`
 rejects them in `secrets`; the engine reads them from its own environment.
+Provider code must not probe those names either — to learn whether OCR is
+configured, read `ctx.ocr.available` (see the OCR section below).
 
 ### Engine mode
 
@@ -455,6 +457,40 @@ Best-practice rules:
 - Submission checks and health checks must not invoke live STT by default.
   Provide explicit smoke evidence when a provider depends on audio OTP behavior.
 
+### OCR runtime capability: availability is the SDK's verdict
+
+Declare `ocr: { mode: "required" | "optional" }` and call `ctx.ocr` from
+operation handlers or auth-flow handlers. Whether a working backend is wired
+in is decided by the SDK, never by provider code: `ctx.ocr.available` is
+`true` when `createOcrClientFromEnv` found a configured backend and `false`
+for the unsupported/error client that undeclared or misconfigured providers
+receive. Branch on that flag for behavior that depends on OCR being present
+(for example, whether a CAPTCHA field is required from the user), and keep the
+`OCR_UNAVAILABLE` / `UNSUPPORTED_OCR_BACKEND` error fallback for the call
+itself: `available: true` promises a configured backend, not a successful
+upstream call.
+
+```ts
+async start(ctx) {
+  const image = await fetchCaptcha(ctx);
+  return ctx.auth.nextForm({
+    turnId: "credentials",
+    fields: {
+      captchaText: { type: "string", required: !ctx.ocr.available, /* ... */ },
+    },
+    data: { captchaImage: image, ocrConfigured: ctx.ocr.available },
+  });
+}
+```
+
+Do not re-implement the predicate by reading `APIFUSE__OCR__*` or
+`APIFUSE__CLOUDFLARE__ACCOUNT_ID`: those names are engine-owned, the
+runtime-boundary lint reports the read, and a drift between the copy and the
+SDK's own selection logic downgrades every login to the manual path silently.
+
+A custom `OcrContext` override (`serve({ ocr })`, `createFlowContext({ ocr })`,
+or a hand-written test double) must set `available` explicitly as a plain data
+property; the SDK's own clients do, and `bindOcrTelemetry` preserves it.
 
 ### Health journey DX for SMS/payment flows
 

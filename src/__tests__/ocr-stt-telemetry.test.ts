@@ -42,6 +42,7 @@ describe("ocr and stt telemetry", () => {
 		const ocr = new OcrTelemetryCollector();
 		const ocrContext = bindOcrTelemetry(
 			{
+				available: true,
 				recognize: async () => ({ text: "ok", model: "m" }),
 				extractCaptchaText: async () => ({
 					text: "ok",
@@ -86,6 +87,7 @@ describe("ocr and stt telemetry", () => {
 		}>({
 			trace,
 			ocr: {
+				available: true,
 				recognize: async () => ({ text: "ok", model: "m" }),
 				extractCaptchaText: async () => ({
 					text: "ok",

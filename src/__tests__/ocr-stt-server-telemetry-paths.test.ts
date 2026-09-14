@@ -110,6 +110,7 @@ async function probe(
 			...(source === "host"
 				? {
 						ocr: {
+							available: true,
 							recognize: async () => {
 								calls.ocr++;
 								if (failed) throw upstreamError;

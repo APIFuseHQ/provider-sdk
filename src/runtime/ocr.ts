@@ -86,6 +86,10 @@ function createErrorOcrClient(options: ErrorOcrClientOptions): OcrContext {
 	};
 	return tagCapability(
 		{
+			// Own data property: `bindOcrTelemetry` re-spreads the context, so a
+			// getter or prototype member would silently vanish before reaching
+			// provider code.
+			available: false,
 			async recognize() {
 				return unavailable();
 			},
@@ -355,6 +359,7 @@ function createOcrClient(
 	recognize: (request: OcrRecognizeRequest) => Promise<OcrResult>,
 ): OcrContext {
 	return {
+		available: true,
 		recognize,
 		async extractCaptchaText(image, options = {}): Promise<OcrCaptchaResult> {
 			const result = await recognize({ image, hint: "captcha" });

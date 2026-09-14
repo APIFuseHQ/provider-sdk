@@ -169,6 +169,7 @@ async function runOcr(scenario: (typeof ocrScenarios)[number], observed: boolean
 	let optionsSeen: unknown;
 	let methodCalls = 0;
 	const host: OcrContext = {
+		available: true,
 		async recognize(input) {
 			methodCalls++;
 			inputSeen = input;

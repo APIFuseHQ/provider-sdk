@@ -108,6 +108,7 @@ it("all OCR/STT record hooks match the HTTP six-case guard and never reject unha
 				} else {
 					const client = bindOcrTelemetry(
 						{
+							available: true,
 							recognize: async () => {
 								if (operation.endsWith("error")) throw failure;
 								return { text: "ok", model: "m" };
@@ -155,6 +156,7 @@ it("all OCR/STT record hooks match the HTTP six-case guard and never reject unha
 				} else {
 					const client = bindOcrTelemetry(
 						{
+							available: true,
 							recognize: async () => ({ text: "ok", model: "m" }),
 							extractCaptchaText: async () => ({
 								text: "ok",

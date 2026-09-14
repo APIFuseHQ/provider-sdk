@@ -136,6 +136,7 @@ internally; that is layering, not merging, and does not change either surface.
 
 ```ts
 export interface OcrContext {
+	readonly available: boolean; // amendment 2026-09-14, see below
 	recognize(request: OcrRecognizeRequest): Promise<OcrResult>;
 	extractCaptchaText(
 		image: OcrImageInput,
@@ -143,6 +144,14 @@ export interface OcrContext {
 	): Promise<OcrCaptchaResult>;
 }
 ```
+
+*Amendment (2026-09-14):* `available: boolean` was added so that a provider can
+learn whether a configured backend is wired in without probing the engine-owned
+`APIFUSE__OCR__*` environment names (the only in-repo consumer, zozotown, had
+re-implemented `createOcrClientFromEnv`'s selection logic against
+`process.env`). It is an own data property on every SDK-built client (`false`
+for the unsupported/error clients, `true` for a configured backend) and is
+preserved by `bindOcrTelemetry`; `true` does not promise a successful call.
 
 Two methods, not one. `recognize` is the general capability; `extractCaptchaText`
 carries the constraint and candidate handling that Decisions 4 and 5 justify.
