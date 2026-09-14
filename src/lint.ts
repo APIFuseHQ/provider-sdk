@@ -2251,6 +2251,122 @@ function lintLegacyChoiceUsage(provider: ProviderSourceLike): LintDiagnostic[] {
 	});
 }
 
+/** A `staleIfErrorMs` option on a cache read, in executable provider source. */
+const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\b/;
+
+/** The operation-step field that distinguishes a stale-if-error serve. */
+const SERVED_STALE_CACHE_OPERAND = "served_stale_cache";
+
+/** Test sources describe the behaviour rather than serving it. */
+function isServingProviderSourcePath(relativePath: string): boolean {
+	return (
+		!relativePath.includes("__tests__/") && !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relativePath)
+	);
+}
+
+/**
+ * Reads `healthCheck.cases` structurally. The lint input is the loaded provider
+ * declaration, which `defineProvider` has already validated, but this rule must
+ * not throw on a shape it did not expect.
+ */
+function readHealthCheckCases(healthCheck: unknown): Record<string, unknown>[] {
+	if (!healthCheck || typeof healthCheck !== "object" || Array.isArray(healthCheck)) return [];
+	const cases = (healthCheck as { cases?: unknown }).cases;
+	if (!Array.isArray(cases)) return [];
+	return cases.filter(
+		(entry): entry is Record<string, unknown> =>
+			!!entry && typeof entry === "object" && !Array.isArray(entry),
+	);
+}
+
+function scenarioReferencesStaleCacheOperand(scenario: unknown): boolean {
+	try {
+		return JSON.stringify(scenario)?.includes(SERVED_STALE_CACHE_OPERAND) === true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Health-check cases the platform monitor cannot execute, and stale-if-error
+ * serves no probe can see.
+ *
+ * The monitor runs a case's SERIALIZED `scenario` and nothing else — a closure
+ * cannot cross the registry's serialization boundary. A case carrying only
+ * `assertions` is still published as a probe, but the registry projects it as
+ * `legacy_function_assertions_not_serializable` and the monitor answers
+ * `unknown` / `monitoring_unavailable` for it forever: the operation reads as
+ * monitored on the status page while nothing is checked.
+ *
+ * A provider that reads its upstream through `ctx.cache.getOrSet(..., {
+ * staleIfErrorMs })` answers an upstream outage with HTTP 200 and a
+ * schema-valid body for the whole stale window, so every clause over
+ * `status_code` and `data` passes and the probe rolls up `ok` through the
+ * outage. `served_stale_cache` on the operation step result is the only operand
+ * that separates that from a live read.
+ *
+ * Both are warnings while the fleet migrates; they become errors once no
+ * repository carries an unmonitored case.
+ */
+function lintHealthCheckMonitorability(provider: {
+	id?: string;
+	providerSourceFiles?: Record<string, string>;
+	operations?: Record<string, { handler?: unknown; source?: string; healthCheck?: unknown }>;
+}): LintDiagnostic[] {
+	const diagnostics: LintDiagnostic[] = [];
+	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
+	let caseCount = 0;
+	let staleCacheGuarded = false;
+
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const cases = readHealthCheckCases(operation.healthCheck);
+		caseCount += cases.length;
+		const unmonitored: string[] = [];
+		for (const [caseIndex, healthCase] of cases.entries()) {
+			if (healthCase.scenario === undefined) {
+				unmonitored.push(
+					typeof healthCase.name === "string" && healthCase.name.length > 0
+						? `"${healthCase.name}"`
+						: `[${caseIndex}]`,
+				);
+				continue;
+			}
+			if (scenarioReferencesStaleCacheOperand(healthCase.scenario)) staleCacheGuarded = true;
+		}
+		if (unmonitored.length > 0) {
+			diagnostics.push({
+				rule: "health-check-assertions-not-monitored",
+				level: "warn",
+				field: `operations.${operationKey}.healthCheck.cases`,
+				message: `${providerLabel} operation "${operationKey}" health-check ${unmonitored.length === 1 ? "case" : "cases"} ${unmonitored.join(", ")} declare assertions without a scenario. The platform health monitor executes only a case's serialized scenario, so this operation publishes a probe whose outcome is permanently unknown/monitoring_unavailable — it reads as monitored while nothing is checked. Express the checks as scenario: defineHealthScenario({ ... }).`,
+			});
+		}
+	}
+
+	if (caseCount === 0 || staleCacheGuarded) return diagnostics;
+
+	const staleSources = new Set<string>();
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
+		if (isServingProviderSourcePath(filePath) && STALE_IF_ERROR_PATTERN.test(source)) {
+			staleSources.add(filePath);
+		}
+	}
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		if (STALE_IF_ERROR_PATTERN.test(getOperationSource(operation))) {
+			staleSources.add(`operations.${operationKey} handler`);
+		}
+	}
+	if (staleSources.size === 0) return diagnostics;
+
+	diagnostics.push({
+		rule: "health-check-stale-serve-unguarded",
+		level: "warn",
+		field: "healthCheck",
+		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...staleSources].sort().join(", ")}) but no health-check scenario guards ${SERVED_STALE_CACHE_OPERAND}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and the probe reports ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.`,
+	});
+	return diagnostics;
+}
+
 export function lintOperation(op: {
 	descriptionKey?: string;
 	whenToUseKeys?: readonly string[];
@@ -2402,6 +2518,8 @@ export function lintProvider(
 				fixtures?: unknown;
 				handler?: unknown;
 				source?: string;
+				/** Read structurally by the health-check monitorability rules. */
+				healthCheck?: unknown;
 				errorCodes?: ReadonlyArray<{
 					code: string;
 					status?: number;
@@ -2443,6 +2561,7 @@ export function lintProviderWithInformation(
 		...lintErrorMessageLocalization(provider),
 		...lintLegacyChoiceUsage(provider),
 		...lintHandleDeclarations(provider),
+		...lintHealthCheckMonitorability(provider),
 	];
 	// Runtime boundary rules (process.env, node:fs/net/child_process, raw
 	// fetch) also yield information entries for `@apifuse-allow` acknowledgements.
