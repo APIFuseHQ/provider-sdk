@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import ts from "typescript";
 import { z } from "zod";
 import { lintProvider, lintProviderWithInformation } from "../lint.js";
 import {
@@ -10,6 +11,7 @@ import {
 	RUNTIME_BOUNDARY_RULES,
 } from "../runtime-boundary-lint.js";
 import type { OperationRiskClass } from "../types.js";
+import type { TypeScriptCompilerModuleLike } from "../typescript-module.js";
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
 const RUNTIME_BOUNDARY_RULE_SET: ReadonlySet<string> = new Set(RUNTIME_BOUNDARY_RULES);
@@ -79,7 +81,7 @@ describe("runtime boundary lint: scope", () => {
 });
 
 describe(`runtime boundary lint: ${PROCESS_ENV_DIRECT_READ_RULE}`, () => {
-	it("warns once per file listing every read, with the env name and line", () => {
+	it("reports once per file listing every read, with the env name and line", () => {
 		const diagnostics = boundaryDiagnostics({
 			"index.ts": [
 				"export function fakeLogin() {",
@@ -96,7 +98,7 @@ describe(`runtime boundary lint: ${PROCESS_ENV_DIRECT_READ_RULE}`, () => {
 		const [diagnostic] = diagnostics;
 		expect(diagnostic).toMatchObject({
 			rule: PROCESS_ENV_DIRECT_READ_RULE,
-			level: "warn",
+			level: "error",
 			field: "sourceFiles.index.ts",
 		});
 		expect(diagnostic?.message).toContain("process.env.APIFUSE__E2E__FAKE_LOGIN (line 2)");
@@ -158,7 +160,7 @@ describe(`runtime boundary lint: ${PROCESS_ENV_DIRECT_READ_RULE}`, () => {
 });
 
 describe(`runtime boundary lint: ${NODE_RUNTIME_MODULE_IMPORT_RULE}`, () => {
-	it("warns on value imports of fs, net, child_process and the http family in every import shape", () => {
+	it("reports value imports of fs, net, child_process and the http family in every import shape", () => {
 		const diagnostics = boundaryDiagnostics({
 			"upstream/booking.ts": [
 				'import { mkdir, writeFile } from "node:fs/promises";',
@@ -189,7 +191,7 @@ describe(`runtime boundary lint: ${NODE_RUNTIME_MODULE_IMPORT_RULE}`, () => {
 		expect(message).not.toContain("node:crypto");
 		expect(diagnostics[0]).toMatchObject({
 			rule: NODE_RUNTIME_MODULE_IMPORT_RULE,
-			level: "warn",
+			level: "error",
 			field: "sourceFiles.upstream/booking.ts",
 		});
 	});
@@ -231,7 +233,7 @@ describe(`runtime boundary lint: ${NODE_RUNTIME_MODULE_IMPORT_RULE}`, () => {
 		}
 	});
 
-	it("warns on the Bun process and file equivalents", () => {
+	it("reports the Bun process and file equivalents", () => {
 		const diagnostics = boundaryDiagnostics({
 			"index.ts": [
 				'const proc = Bun.spawn(["ffmpeg", "-i", inputPath]);',
@@ -254,7 +256,7 @@ describe(`runtime boundary lint: ${NODE_RUNTIME_MODULE_IMPORT_RULE}`, () => {
 });
 
 describe(`runtime boundary lint: ${DIRECT_FETCH_CALL_RULE}`, () => {
-	it("warns on the global fetch and its globalThis/window forms", () => {
+	it("reports the global fetch and its globalThis/window forms", () => {
 		const diagnostics = boundaryDiagnostics({
 			"auth.ts": [
 				"export async function fetchIdentity(input, init) {",
@@ -267,7 +269,7 @@ describe(`runtime boundary lint: ${DIRECT_FETCH_CALL_RULE}`, () => {
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]).toMatchObject({
 			rule: DIRECT_FETCH_CALL_RULE,
-			level: "warn",
+			level: "error",
 			field: "sourceFiles.auth.ts",
 		});
 		expect(diagnostics[0]?.message).toContain("fetch() (line 2)");
@@ -421,7 +423,7 @@ describe("runtime boundary lint: @apifuse-allow acknowledgement", () => {
 });
 
 describe("runtime boundary lint: severity", () => {
-	it("never raises an error-level diagnostic in this release", () => {
+	it("raises every finding at error level so apifuse check fails on it", () => {
 		const diagnostics = boundaryDiagnostics({
 			"index.ts": [
 				'import { readFileSync } from "node:fs";',
@@ -430,7 +432,7 @@ describe("runtime boundary lint: severity", () => {
 			].join("\n"),
 		});
 		expect(diagnostics).toHaveLength(3);
-		expect(diagnostics.every((diagnostic) => diagnostic.level === "warn")).toBe(true);
+		expect(diagnostics.every((diagnostic) => diagnostic.level === "error")).toBe(true);
 		expect(diagnostics.map((diagnostic) => diagnostic.rule).sort()).toEqual(
 			[...RUNTIME_BOUNDARY_RULES].sort(),
 		);
@@ -463,9 +465,9 @@ describe("runtime boundary lint: lintRuntimeBoundarySources", () => {
 		expect(
 			result.diagnostics.map((diagnostic) => [diagnostic.rule, diagnostic.level, diagnostic.field]),
 		).toEqual([
-			[PROCESS_ENV_DIRECT_READ_RULE, "warn", "sourceFiles.index.ts"],
-			[DIRECT_FETCH_CALL_RULE, "warn", "sourceFiles.index.ts"],
-			[NODE_RUNTIME_MODULE_IMPORT_RULE, "warn", "sourceFiles.upstream/booking.ts"],
+			[PROCESS_ENV_DIRECT_READ_RULE, "error", "sourceFiles.index.ts"],
+			[DIRECT_FETCH_CALL_RULE, "error", "sourceFiles.index.ts"],
+			[NODE_RUNTIME_MODULE_IMPORT_RULE, "error", "sourceFiles.upstream/booking.ts"],
 		]);
 		expect(result.diagnostics[0]?.message).toContain(
 			"process.env.APIFUSE__E2E__FAKE_LOGIN (line 1)",
@@ -496,6 +498,33 @@ describe("runtime boundary lint: lintRuntimeBoundarySources", () => {
 
 	it("returns an empty result for an empty source map", () => {
 		expect(lintRuntimeBoundarySources({})).toEqual({ diagnostics: [], information: [] });
+	});
+
+	it("parses with an injected TypeScript compiler module", () => {
+		let parsedFiles = 0;
+		const observed = new Proxy(ts, {
+			get(target, property, receiver) {
+				if (property === "createSourceFile") {
+					return (...parameters: Parameters<typeof ts.createSourceFile>) => {
+						parsedFiles += 1;
+						return target.createSourceFile(...parameters);
+					};
+				}
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const result = lintRuntimeBoundarySources(files, { typescript: observed });
+		expect(result).toEqual(lintRuntimeBoundarySources(files));
+		// Only in-scope files are parsed: index.ts, upstream/booking.ts, lib/runtime-port.ts.
+		expect(parsedFiles).toBe(3);
+	});
+
+	it("rejects an injected module without the compiler API instead of failing mid-parse", () => {
+		// What `typescript@7` exports: a version shell without the parser.
+		const typescript7Shell: TypeScriptCompilerModuleLike = { version: "7.0.2" };
+		expect(() => lintRuntimeBoundarySources(files, { typescript: typescript7Shell })).toThrow(
+			/options\.typescript must be a loaded TypeScript compiler API module/,
+		);
 	});
 
 	it("tells the author that ctx.env only sees declared secrets and that env: true is the capability gate", () => {

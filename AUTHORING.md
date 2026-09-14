@@ -900,8 +900,13 @@ Provider runtime code reaches the outside world through the context only:
 `ctx.env.get()` / `ctx.credential` for configuration and secrets, `ctx.files` /
 `ctx.cache` / `ctx.state` for data that must outlive a request. Ambient Node
 and Bun globals bypass `allowedHosts`, proxy policy, retries, redaction, the
-secret presence gate, and telemetry. `apifuse check` reports them (**warn** in
-this release; the level is raised once the fleet is clean):
+secret presence gate, and telemetry. `apifuse check` reports them at **error**
+level — a finding fails `apifuse check` and `apifuse submit-check`, in the
+official and the bounty `standalone` mode alike (the level was `warn` for one
+release as a migration window; the window closed once the fleet's request-path
+hits were fixed or acknowledged — a provider that still carries one sees
+`apifuse check` fail on its next SDK bump and fixes or acknowledges it in that
+same PR):
 
 - `process-env-direct-read` — `process.env.X`, `process.env["X"]`, a bare
   `process.env` object use, `Bun.env`. The `APIFUSE__RUNTIME__*` bootstrap
@@ -931,11 +936,14 @@ Scope is runtime source only: tests, recorded fixtures, `.d.ts`, the root
 `dev.ts` / `start.ts` / `deploy.ts` entrypoints, and the `scripts/`, `tools/`,
 `bin/` directories at the provider root are not scanned. Keep fixture
 recorders, smoke scripts, and other operator tooling under `scripts/`, and do
-not import from there in request-path modules.
+not import from there in request-path modules. `apifuse check` also leaves out
+any directory that is itself a git checkout (a linked worktree such as
+`.worktree/<branch>/`, a nested clone, an initialised submodule): its files are
+another revision, checked in that checkout, not this provider's runtime source.
 
 Acknowledge a deliberate exception on the finding line or the comment-only
 line above it with `// @apifuse-allow <rule>: <reason>`; the finding then
-appears as an `INFO` audit line instead of a warning.
+appears as an `INFO` audit line instead of an error, and the check passes.
 
 ```ts
 // Before: request-path module reads the ambient environment and the disk

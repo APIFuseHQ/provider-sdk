@@ -3,8 +3,12 @@
  * through the SDK context (`ctx.http`, `ctx.stealth`, `ctx.env`,
  * `ctx.credential`, `ctx.browser`), not through ambient Node/Bun globals.
  *
- * Three rules, all reported at `warn` level in this first release so the
- * fleet can migrate before the level is raised:
+ * Three rules, reported at `error` level: a finding fails `apifuse check` and
+ * `apifuse submit-check` (official and standalone mode alike). The first
+ * release reported them at `warn` as a migration window; the window closed once
+ * the fleet's request-path hits were fixed or acknowledged. A deliberate
+ * exception is acknowledged in code (see below), never through a hidden
+ * allowlist.
  *
  * - `process-env-direct-read`: `process.env.X`, `process.env["X"]`, a bare
  *   `process.env` object use, and the `Bun.env` equivalents. Runtime bootstrap
@@ -44,9 +48,13 @@
  */
 
 import type { LintDiagnostic, ProviderLintInformation, ProviderLintResult } from "./lint.js";
-import { getTypeScript } from "./typescript-module.js";
+import {
+	getTypeScript,
+	isTypeScriptCompilerModule,
+	type TypeScriptCompilerModuleLike,
+	type TypeScriptModule,
+} from "./typescript-module.js";
 
-type TypeScriptModule = typeof import("typescript");
 type TsNode = import("typescript").Node;
 type TsSourceFile = import("typescript").SourceFile;
 
@@ -78,7 +86,7 @@ export function isBootstrapEnvName(name: string): boolean {
 const BOOTSTRAP_ENTRYPOINT_FILE_PATTERN = /^(?:dev|start|deploy)\.[cm]?[jt]sx?$/;
 /** Operator tooling directories at the provider root (fixture recorders, smoke scripts). */
 const TOOLING_DIRECTORY_PATTERN = /^(?:scripts|tools|bin)\//;
-const TEST_SOURCE_FILE_PATTERN =
+export const TEST_SOURCE_FILE_PATTERN =
 	/(?:^|\/)(?:__tests__|__mocks__|tests)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const RECORDED_FIXTURE_SOURCE_FILE_PATTERN =
 	/(?:^|\/)__fixtures__(?:\/|$)|(?:^|\/)__tests__\/fixtures(?:\/|$)/;
@@ -591,7 +599,7 @@ export type RuntimeBoundaryLintInput = {
 };
 
 /**
- * Lint the provider runtime boundary. Returns warn-level diagnostics (one per
+ * Lint the provider runtime boundary. Returns error-level diagnostics (one per
  * file and rule, listing every line) and information entries for findings
  * acknowledged with `@apifuse-allow`.
  */
@@ -640,7 +648,7 @@ export function lintRuntimeBoundary(
 			if (findings.length > 0) {
 				diagnostics.push({
 					rule,
-					level: "warn",
+					level: "error",
 					field,
 					message: `${describeSubjects(findings)}: ${remediation(rule)}`,
 				});
@@ -657,6 +665,19 @@ export function lintRuntimeBoundary(
 	return { diagnostics, information };
 }
 
+export type LintRuntimeBoundarySourcesOptions = {
+	/**
+	 * A loaded TypeScript compiler API module to parse with (`typescript` 6.x
+	 * or `@typescript/typescript6`). When omitted the SDK resolves one from its
+	 * own install location, trying `typescript` first and falling back to
+	 * `@typescript/typescript6` when `typescript` is the 7.x native shell
+	 * without `createSourceFile`. A caller whose dependency tree pins its own
+	 * compiler module (the APIFuse monorepo contract check) passes it here so
+	 * the parse does not depend on what hoists next to the SDK.
+	 */
+	typescript?: TypeScriptCompilerModuleLike;
+};
+
 /**
  * Lint provider runtime source files for the runtime boundary rules without a
  * provider definition: `files` maps provider-root-relative paths to source
@@ -667,12 +688,20 @@ export function lintRuntimeBoundary(
  * `field: "sourceFiles.<path>"`; `@apifuse-allow` acknowledgements come back
  * as `information`.
  *
- * Parses with the `typescript` package resolved from the installed SDK, so the
- * caller's dependency tree must provide it (the SDK lists it as a
- * devDependency only). This is the entry point the platform contract check
- * uses to apply the rules with the monorepo's SDK pin instead of each
- * provider's own pin.
+ * Parses with `options.typescript` when given, otherwise with the compiler
+ * module resolved from the installed SDK (see `getTypeScript`). This is the
+ * entry point the platform contract check uses to apply the rules with the
+ * monorepo's SDK pin instead of each provider's own pin.
  */
-export function lintRuntimeBoundarySources(files: Record<string, string>): ProviderLintResult {
-	return lintRuntimeBoundary(getTypeScript(), { providerSourceFiles: files }, () => "");
+export function lintRuntimeBoundarySources(
+	files: Record<string, string>,
+	options: LintRuntimeBoundarySourcesOptions = {},
+): ProviderLintResult {
+	const ts = options.typescript ?? getTypeScript();
+	if (!isTypeScriptCompilerModule(ts)) {
+		throw new TypeError(
+			"lintRuntimeBoundarySources: options.typescript must be a loaded TypeScript compiler API module (typescript 6.x or @typescript/typescript6) exposing createSourceFile.",
+		);
+	}
+	return lintRuntimeBoundary(ts, { providerSourceFiles: files }, () => "");
 }

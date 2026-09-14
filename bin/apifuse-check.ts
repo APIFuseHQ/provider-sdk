@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { z } from "zod";
@@ -226,6 +226,21 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 	);
 }
 
+/**
+ * A directory under the provider root that is itself a git checkout — a linked
+ * worktree (`.worktree/<branch>/`, whose `.git` is a file pointing at the main
+ * repository), a nested clone (`.git` directory), or an initialised submodule.
+ * Its files are another revision of some repository, not this provider's
+ * runtime source: an older copy of `upstream/` or `scripts/` there would be
+ * linted as if it were request-path code at the root (the tooling-directory
+ * exemption is anchored at the provider root), and its `apifuse check` is run
+ * in that checkout, not here. Git refuses to track a path named `.git`, so the
+ * marker cannot be planted in a committed tree to hide a file from the scan.
+ */
+function isNestedCheckout(directory: string): boolean {
+	return existsSync(join(directory, ".git"));
+}
+
 function collectProviderSourceFiles(providerRoot: string): Record<string, string> {
 	const sources: Record<string, string> = {};
 	// `.agents`/`.apifuse` are deliberately not skipped: managed content there
@@ -236,7 +251,7 @@ function collectProviderSourceFiles(providerRoot: string): Record<string, string
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
 			const path = resolve(directory, entry.name);
 			if (entry.isDirectory()) {
-				if (!skipDirectories.has(entry.name)) {
+				if (!skipDirectories.has(entry.name) && !isNestedCheckout(path)) {
 					visit(path);
 				}
 				continue;
