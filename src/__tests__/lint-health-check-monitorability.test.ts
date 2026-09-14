@@ -504,7 +504,7 @@ describe("health-check monitorability lint", () => {
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]?.message).toContain(`operations.${OPERATION_KEY} handler`);
 		// Handler evidence names the serving operation exactly, so no caveat.
-		expect(diagnostics[0]?.message).not.toContain("shared source");
+		expect(diagnostics[0]?.message).not.toContain("cannot attribute to one operation");
 	});
 
 	it("lists only the operations whose own handler serves stale", () => {
@@ -537,10 +537,12 @@ describe("health-check monitorability lint", () => {
 		expect(diagnostics[0]?.message).not.toContain('plainOp "plain"');
 	});
 
-	it("keeps the exact attribution when the handler's own file is also scanned", () => {
-		// `apifuse check` passes every provider file, so the file that declares the
-		// handler carries that handler's cache call. Seeing it there must not
-		// degrade the provider to the unattributable case.
+	it("degrades to provider-wide when any file also carries the cache call", () => {
+		// `getOperationSource` returns the runtime's `handler.toString()`, which
+		// type erasure and reformatting make textually unequal to the TypeScript
+		// on disk, so a file cannot be matched back to the handler that declares
+		// it. File evidence therefore widens the listing, with the caveat saying
+		// so — over-listing at warn level, never a silent pass.
 		const diagnostics = rules(
 			lintFleet(
 				{
@@ -578,8 +580,8 @@ describe("health-check monitorability lint", () => {
 
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]?.message).toContain('staleOp "stale"');
-		expect(diagnostics[0]?.message).not.toContain('plainOp "plain"');
-		expect(diagnostics[0]?.message).not.toContain("shared source");
+		expect(diagnostics[0]?.message).toContain('plainOp "plain"');
+		expect(diagnostics[0]?.message).toContain("cannot attribute to one operation");
 	});
 
 	it("says so when a helper the linter cannot attribute carries the cache call", () => {
@@ -591,7 +593,7 @@ describe("health-check monitorability lint", () => {
 			UNGUARDED_STALE,
 		);
 
-		expect(diagnostics[0]?.message).toContain("The cache call is in shared source");
+		expect(diagnostics[0]?.message).toContain("cannot attribute to one operation");
 	});
 
 	it("recognises the shorthand cache option", () => {
@@ -656,7 +658,7 @@ describe("health-check monitorability lint", () => {
 
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]?.message).toContain('siblingOp "sibling"');
-		expect(diagnostics[0]?.message).toContain("The cache call is in shared source");
+		expect(diagnostics[0]?.message).toContain("cannot attribute to one operation");
 	});
 
 	it("rejects a freshness clause that passes for a stale serve", () => {
@@ -890,6 +892,119 @@ describe("health-check monitorability lint", () => {
 						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP, misattributed]) }],
 					},
 					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
+	it("requires a freshness check for each read when the scenario invokes twice", () => {
+		const firstRead: HealthStep = {
+			id: "read-first",
+			result: "first-response",
+			kind: "operation",
+			operationId: OPERATION_KEY,
+			inputTemplate: { page: 1 },
+		};
+		const secondRead: HealthStep = {
+			id: "read-second",
+			result: "second-response",
+			kind: "operation",
+			operationId: OPERATION_KEY,
+			inputTemplate: { page: 2 },
+		};
+		const staleRef = (binding: string) => ({
+			ref: { namespace: "steps" as const, binding, path: ["served_stale_cache"] },
+		});
+		// Guarding only the first read, and an `any` over both, each pass whenever
+		// EITHER response is fresh — the second read can still be stale.
+		const onlyFirst = scenario([
+			firstRead,
+			conditionGuard({
+				kind: "predicate",
+				operator: "not_equals",
+				actual: staleRef("first-response"),
+				expected: true,
+			}),
+			secondRead,
+		]);
+		const eitherOne = scenario([
+			firstRead,
+			secondRead,
+			conditionGuard({
+				kind: "any",
+				clauses: [
+					{
+						kind: "predicate",
+						operator: "not_equals",
+						actual: staleRef("first-response"),
+						expected: true,
+					},
+					{
+						kind: "predicate",
+						operator: "not_equals",
+						actual: staleRef("second-response"),
+						expected: true,
+					},
+				],
+			}),
+		]);
+
+		for (const partial of [onlyFirst, eitherOne]) {
+			expect(
+				rules(
+					lint(
+						{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: partial }] },
+						{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+					),
+					UNGUARDED_STALE,
+				),
+			).toHaveLength(1);
+		}
+
+		const both = scenario([
+			firstRead,
+			conditionGuard({
+				kind: "predicate",
+				operator: "not_equals",
+				actual: staleRef("first-response"),
+				expected: true,
+			}),
+			secondRead,
+			conditionGuard({
+				kind: "predicate",
+				operator: "not_equals",
+				actual: staleRef("second-response"),
+				expected: true,
+			}),
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: both }] },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("is not blinded by a string literal that looks like a comment opener", () => {
+		// `"*/*"` opens a block comment to a stripping regex, which would swallow
+		// the cache call that follows it.
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts": `const headers = { Accept: "*/*" };\n${STALE_CLIENT}\n/* cache policy reviewed 2026-09 */`,
+						},
+					},
 				),
 				UNGUARDED_STALE,
 			),

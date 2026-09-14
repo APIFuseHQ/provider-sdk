@@ -2259,17 +2259,44 @@ function lintLegacyChoiceUsage(provider: ProviderSourceLike): LintDiagnostic[] {
  * provider documenting that it deliberately does NOT serve stale — the comment
  * `// staleIfErrorMs intentionally not used` — is not read as configuring it.
  */
+const STALE_IF_ERROR_OPTION = "staleIfErrorMs";
 const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\b/;
-const LINE_COMMENT_PATTERN = /(^|[^:/])\/\/[^\n]*/g;
-const BLOCK_COMMENT_PATTERN = /\/\*[\s\S]*?\*\//g;
 
-function executableSource(source: string): string {
-	if (!source.includes("staleIfErrorMs")) return "";
-	return source.replace(BLOCK_COMMENT_PATTERN, " ").replace(LINE_COMMENT_PATTERN, "$1");
-}
-
-function servesStaleIfError(source: string): boolean {
-	return STALE_IF_ERROR_PATTERN.test(executableSource(source));
+/**
+ * Identifier occurrence in executable code, via the TypeScript AST when it is
+ * available — the same approach `findLegacyChoiceUsage` uses, and for the same
+ * reason: comments and string literals must not count, and a regex over raw
+ * text cannot tell them apart (an `Accept: "*​/*"` header literal opens a block
+ * comment to a stripping regex and swallows the cache call after it). Falls
+ * back to the raw identifier match when TypeScript is not installed, which is
+ * the fail-closed direction for this rule: it warns rather than goes quiet.
+ */
+function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
+	if (!source.includes(STALE_IF_ERROR_OPTION)) return false;
+	let ts: typeof import("typescript");
+	try {
+		ts = getTypeScript();
+	} catch {
+		return STALE_IF_ERROR_PATTERN.test(source);
+	}
+	const file = ts.createSourceFile(
+		fileName,
+		source,
+		ts.ScriptTarget.Latest,
+		false,
+		scriptKindForSourceFile(ts, fileName),
+	);
+	let found = false;
+	const visit = (node: import("typescript").Node): void => {
+		if (found) return;
+		if (ts.isIdentifier(node) && node.text === STALE_IF_ERROR_OPTION) {
+			found = true;
+			return;
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(file);
+	return found;
 }
 
 /** The operation-step field that distinguishes a stale-if-error serve. */
@@ -2431,14 +2458,34 @@ function guardAttributesTo(onFail: unknown, operationId: string): boolean {
  */
 function scenarioChecksFreshness(scenario: unknown, operationId: string): boolean {
 	if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) return false;
-	const bindings = operationStepBindings(scenario.steps, operationId);
-	if (bindings.size === 0) return false;
-	for (const step of scenario.steps) {
+	const bindings = [...operationStepBindings(scenario.steps, operationId)];
+	if (bindings.length === 0) return false;
+	// EVERY read of the operation must be checked. A scenario that invokes it
+	// twice with different inputs has two chances to serve stale, and one fresh
+	// read must not conceal the other.
+	return bindings.every((binding) =>
+		resultBindingChecksFreshness(scenario.steps as readonly unknown[], binding, operationId),
+	);
+}
+
+function resultBindingChecksFreshness(
+	steps: readonly unknown[],
+	binding: string,
+	operationId: string,
+): boolean {
+	const operand = new Set([binding]);
+	let produced = false;
+	for (const step of steps) {
 		if (!isLintRecord(step)) continue;
-		if (step.kind === "assert" && rejectsStaleServe(step.expression, bindings)) return true;
+		if (!produced) {
+			// Nothing before the read can have checked its freshness.
+			produced = step.kind === "operation" && step.result === binding;
+			continue;
+		}
+		if (step.kind === "assert" && rejectsStaleServe(step.expression, operand)) return true;
 		if (step.kind === "guard") {
 			return (
-				rejectsStaleServe(step.condition, bindings) && guardAttributesTo(step.onFail, operationId)
+				rejectsStaleServe(step.condition, operand) && guardAttributesTo(step.onFail, operationId)
 			);
 		}
 	}
@@ -2510,42 +2557,27 @@ function lintHealthCheckMonitorability(provider: {
 
 	if (uncoveredByOperation.size === 0) return diagnostics;
 
-	// Attribution. A handler that carries the cache call itself names exactly the
-	// operation that serves stale; a shared helper does not, and the linter
-	// cannot follow the call graph into it. Prefer the precise evidence, and when
-	// an unattributable source exists, say so in the message rather than implying
-	// every listed probe reads through that cache.
-	const handlerSourceByOperation = new Map<string, string>();
+	// Attribution. A handler that carries the cache call in its OWN source names
+	// exactly the operation that serves stale. A file does not: the linter cannot
+	// follow the call graph, and it cannot reliably tell a handler's own file
+	// from a shared helper either — `getOperationSource` returns the runtime's
+	// `handler.toString()`, which type erasure and reformatting make textually
+	// unequal to the TypeScript on disk. So any file-level evidence degrades the
+	// verdict to "somewhere in this provider", and the message says so instead of
+	// implying every listed probe reads through that cache.
 	const sources = new Set<string>();
 	const operationsServingStale = new Set<string>();
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-		const handlerSource = getOperationSource(operation);
-		if (handlerSource.length > 0) handlerSourceByOperation.set(operationKey, handlerSource);
-		if (servesStaleIfError(handlerSource)) {
+		if (servesStaleIfError(getOperationSource(operation), `${operationKey}.ts`)) {
 			sources.add(`operations.${operationKey} handler`);
 			operationsServingStale.add(operationKey);
 		}
 	}
 	let unattributed = false;
 	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
-		if (!isServingProviderSourcePath(filePath) || !servesStaleIfError(source)) continue;
+		if (!isServingProviderSourcePath(filePath) || !servesStaleIfError(source, filePath)) continue;
 		sources.add(filePath);
-		// `apifuse check` passes every provider file, so the file that declares a
-		// handler carries that handler's own cache call; recognising it keeps the
-		// exact attribution instead of degrading the whole provider to "shared".
-		// Subtract every already-attributed handler's text and re-test: a file that
-		// also holds a shared helper, or a second handler's call, still has a
-		// residual occurrence and stays unattributed.
-		let residual = source;
-		for (const [operationKey, handlerSource] of handlerSourceByOperation) {
-			if (!operationsServingStale.has(operationKey)) continue;
-			// Exactly one occurrence per handler: a second copy of the same text is
-			// another call site this handler does not account for.
-			const at = residual.indexOf(handlerSource);
-			if (at < 0) continue;
-			residual = `${residual.slice(0, at)} ${residual.slice(at + handlerSource.length)}`;
-		}
-		if (servesStaleIfError(residual)) unattributed = true;
+		unattributed = true;
 	}
 	if (sources.size === 0) return diagnostics;
 
@@ -2562,7 +2594,7 @@ function lintHealthCheckMonitorability(provider: {
 		.concat(elided > 0 ? `, and ${elided} more` : "");
 	const caveat = attributable
 		? ""
-		: ` The cache call is in shared source, so which operations reach it is not visible here — skip any listed probe whose operation does not read through it.`;
+		: ` The cache call is in provider source the linter cannot attribute to one operation, so every uncovered probe is listed — skip any whose operation does not read through that cache.`;
 	diagnostics.push({
 		rule: "health-check-stale-serve-unguarded",
 		level: "warn",
