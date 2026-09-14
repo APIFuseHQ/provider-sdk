@@ -2279,9 +2279,13 @@ function readHealthCheckCases(healthCheck: unknown): Record<string, unknown>[] {
 	);
 }
 
+/**
+ * Whether a serialized scenario reads the operand anywhere. Matched quoted so a
+ * `reasonKey` such as `...servedStaleCache` never counts as the guard itself.
+ */
 function scenarioReferencesStaleCacheOperand(scenario: unknown): boolean {
 	try {
-		return JSON.stringify(scenario)?.includes(SERVED_STALE_CACHE_OPERAND) === true;
+		return JSON.stringify(scenario)?.includes(`"${SERVED_STALE_CACHE_OPERAND}"`) === true;
 	} catch {
 		return false;
 	}
@@ -2315,12 +2319,14 @@ function lintHealthCheckMonitorability(provider: {
 }): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [];
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	let caseCount = 0;
-	let staleCacheGuarded = false;
+	// Freshness is judged per operation: one guarded probe must not silence the
+	// rule for the provider's other stale-if-error operations.
+	const operationsWithCases: string[] = [];
+	const operationsGuardingFreshness: string[] = [];
 
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		const cases = readHealthCheckCases(operation.healthCheck);
-		caseCount += cases.length;
+		if (cases.length > 0) operationsWithCases.push(operationKey);
 		const unmonitored: string[] = [];
 		for (const [caseIndex, healthCase] of cases.entries()) {
 			if (healthCase.scenario === undefined) {
@@ -2331,7 +2337,12 @@ function lintHealthCheckMonitorability(provider: {
 				);
 				continue;
 			}
-			if (scenarioReferencesStaleCacheOperand(healthCase.scenario)) staleCacheGuarded = true;
+			if (
+				scenarioReferencesStaleCacheOperand(healthCase.scenario) &&
+				!operationsGuardingFreshness.includes(operationKey)
+			) {
+				operationsGuardingFreshness.push(operationKey);
+			}
 		}
 		if (unmonitored.length > 0) {
 			diagnostics.push({
@@ -2343,7 +2354,10 @@ function lintHealthCheckMonitorability(provider: {
 		}
 	}
 
-	if (caseCount === 0 || staleCacheGuarded) return diagnostics;
+	const unguarded = operationsWithCases.filter(
+		(operationKey) => !operationsGuardingFreshness.includes(operationKey),
+	);
+	if (unguarded.length === 0) return diagnostics;
 
 	const staleSources = new Set<string>();
 	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
@@ -2362,7 +2376,7 @@ function lintHealthCheckMonitorability(provider: {
 		rule: "health-check-stale-serve-unguarded",
 		level: "warn",
 		field: "healthCheck",
-		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...staleSources].sort().join(", ")}) but no health-check scenario guards ${SERVED_STALE_CACHE_OPERAND}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and the probe reports ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.`,
+		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...staleSources].sort().join(", ")}) and no scenario on ${unguarded.map((operationKey) => `"${operationKey}"`).join(", ")} guards ${SERVED_STALE_CACHE_OPERAND}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.`,
 	});
 	return diagnostics;
 }

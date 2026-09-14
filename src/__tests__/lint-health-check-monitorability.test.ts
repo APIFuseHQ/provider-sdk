@@ -180,11 +180,79 @@ describe("health-check monitorability lint", () => {
 		).toEqual([]);
 	});
 
+	it("keeps warning about the operations a sibling guard does not cover", () => {
+		const guarded = operation(
+			{
+				interval: "1h",
+				cases: [{ name: "guarded", input: {}, scenario: scenario([READ_STEP, FRESHNESS_GUARD]) }],
+			},
+			undefined,
+		);
+		const bare = operation(
+			{ interval: "1h", cases: [{ name: "bare", input: {}, scenario: scenario([READ_STEP]) }] },
+			undefined,
+		);
+		const diagnostics = rules(
+			lintProvider({
+				id: "demo",
+				allowedHosts: ["example.com"],
+				reviewed: "2026-09-14",
+				providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" },
+				operations: { guardedOp: guarded, bareOp: bare },
+			}),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain('"bareOp"');
+		expect(diagnostics[0]?.message).not.toContain('"guardedOp"');
+	});
+
+	it("does not accept a reasonKey that merely mentions the operand as the guard", () => {
+		const near = scenario([
+			READ_STEP,
+			{
+				id: "guard-rows",
+				result: "rows-guarded",
+				kind: "guard",
+				condition: {
+					kind: "predicate",
+					operator: "array_length_gte",
+					actual: { ref: { namespace: "steps", binding: "response", path: ["data", "items"] } },
+					expected: 1,
+				},
+				onFail: {
+					attribute: [
+						{
+							operationId: OPERATION_KEY,
+							status: "degraded",
+							reasonCode: "expected_absence",
+							reasonKey: "health.operations.listItems.probe.served_stale_cacheish",
+						},
+					],
+					stop: "scenario",
+				},
+			},
+		]);
+		const diagnostics = rules(
+			lint(
+				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: near }] },
+				{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+			),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+	});
+
 	it("ignores staleIfErrorMs that only appears in test sources", () => {
 		expect(
 			rules(
 				lint(
-					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
 					{
 						providerSourceFiles: {
 							"__tests__/client.test.ts": "expect(options.staleIfErrorMs).toBe(300_000);",
