@@ -204,13 +204,65 @@ describe("health-check monitorability lint", () => {
 		);
 
 		expect(diagnostics).toHaveLength(1);
-		expect(diagnostics[0]?.message).toContain('"bareOp"');
-		expect(diagnostics[0]?.message).not.toContain('"guardedOp"');
+		expect(diagnostics[0]?.message).toContain('bareOp "bare"');
+		expect(diagnostics[0]?.message).not.toContain('guardedOp "guarded"');
 	});
 
-	it("does not accept a reasonKey that merely mentions the operand as the guard", () => {
-		const near = scenario([
+	it("keeps warning about an unguarded sibling CASE on the same operation", () => {
+		const diagnostics = rules(
+			lint(
+				{
+					interval: "1h",
+					cases: [
+						{ name: "guarded", input: {}, scenario: scenario([READ_STEP, FRESHNESS_GUARD]) },
+						{ name: "bare", input: {}, scenario: scenario([READ_STEP]) },
+					],
+				},
+				{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+			),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain(`${OPERATION_KEY} "bare"`);
+		expect(diagnostics[0]?.message).not.toContain(`${OPERATION_KEY} "guarded"`);
+	});
+
+	it("accepts an assert step on the operand as freshness coverage", () => {
+		const asserted = scenario([
 			READ_STEP,
+			{
+				id: "verify",
+				result: "verified",
+				kind: "assert",
+				coversOperations: [OPERATION_KEY],
+				expression: {
+					kind: "predicate",
+					operator: "not_equals",
+					actual: {
+						ref: { namespace: "steps", binding: "response", path: ["served_stale_cache"] },
+					},
+					expected: true,
+				},
+			},
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: asserted }] },
+					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("does not accept the operand as a literal outside an executed verdict", () => {
+		// An `inputTemplate` value and a `reasonKey` both carry the exact string.
+		// A substring search over the serialized scenario would call this guarded.
+		const decoy = scenario([
+			{ ...READ_STEP, inputTemplate: { marker: "served_stale_cache" } },
 			{
 				id: "guard-rows",
 				result: "rows-guarded",
@@ -227,25 +279,26 @@ describe("health-check monitorability lint", () => {
 							operationId: OPERATION_KEY,
 							status: "degraded",
 							reasonCode: "expected_absence",
-							reasonKey: "health.operations.listItems.probe.served_stale_cacheish",
+							reasonKey: "health.operations.listItems.probe.served_stale_cache",
 						},
 					],
 					stop: "scenario",
 				},
 			},
 		]);
-		const diagnostics = rules(
-			lint(
-				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: near }] },
-				{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
-			),
-			UNGUARDED_STALE,
-		);
 
-		expect(diagnostics).toHaveLength(1);
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: decoy }] },
+					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
 	});
 
-	it("ignores staleIfErrorMs that only appears in test sources", () => {
+	it("ignores staleIfErrorMs that only appears in non-serving sources", () => {
 		expect(
 			rules(
 				lint(
@@ -257,6 +310,8 @@ describe("health-check monitorability lint", () => {
 						providerSourceFiles: {
 							"__tests__/client.test.ts": "expect(options.staleIfErrorMs).toBe(300_000);",
 							"upstream/client.spec.ts": "staleIfErrorMs",
+							"tests/cache.ts": "staleIfErrorMs: 300_000",
+							"__mocks__/cache.ts": "staleIfErrorMs: 300_000",
 						},
 					},
 				),

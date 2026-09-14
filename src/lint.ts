@@ -2257,11 +2257,22 @@ const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\b/;
 /** The operation-step field that distinguishes a stale-if-error serve. */
 const SERVED_STALE_CACHE_OPERAND = "served_stale_cache";
 
-/** Test sources describe the behaviour rather than serving it. */
+/**
+ * Sources that describe behaviour rather than serve it. Mirrors the broadest
+ * test-source predicate in the repository (`runtime-boundary-lint.ts:82`, which
+ * covers a plain `tests/` directory and `__mocks__/` as well as `__tests__/`)
+ * and adds recorded-fixture directories, so a mock that mentions
+ * `staleIfErrorMs` cannot raise a warning about code the runtime never serves.
+ */
+const NON_SERVING_SOURCE_FILE_PATTERN =
+	/(?:^|\/)(?:__tests__|__mocks__|__fixtures__|tests|fixtures)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
 function isServingProviderSourcePath(relativePath: string): boolean {
-	return (
-		!relativePath.includes("__tests__/") && !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relativePath)
-	);
+	return !NON_SERVING_SOURCE_FILE_PATTERN.test(relativePath);
+}
+
+function isLintRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 /**
@@ -2270,26 +2281,51 @@ function isServingProviderSourcePath(relativePath: string): boolean {
  * not throw on a shape it did not expect.
  */
 function readHealthCheckCases(healthCheck: unknown): Record<string, unknown>[] {
-	if (!healthCheck || typeof healthCheck !== "object" || Array.isArray(healthCheck)) return [];
-	const cases = (healthCheck as { cases?: unknown }).cases;
+	if (!isLintRecord(healthCheck)) return [];
+	const cases = healthCheck.cases;
 	if (!Array.isArray(cases)) return [];
-	return cases.filter(
-		(entry): entry is Record<string, unknown> =>
-			!!entry && typeof entry === "object" && !Array.isArray(entry),
-	);
+	return cases.filter(isLintRecord);
 }
 
 /**
- * Whether a serialized scenario reads the operand anywhere. Matched quoted so a
- * `reasonKey` such as `...servedStaleCache` never counts as the guard itself.
+ * Whether an assertion tree reads the operand through a validated reference
+ * (`{ ref: { namespace, binding, path } }`). Structural on purpose: a literal
+ * `"served_stale_cache"` sitting in an `inputTemplate` value or a `reasonKey`
+ * is not a freshness check, and a substring search over the serialized scenario
+ * would accept it and silence the rule.
  */
-function scenarioReferencesStaleCacheOperand(scenario: unknown): boolean {
-	try {
-		return JSON.stringify(scenario)?.includes(`"${SERVED_STALE_CACHE_OPERAND}"`) === true;
-	} catch {
-		return false;
+function readsStaleCacheOperand(node: unknown): boolean {
+	if (Array.isArray(node)) return node.some(readsStaleCacheOperand);
+	if (!isLintRecord(node)) return false;
+	const reference = node.ref;
+	if (
+		isLintRecord(reference) &&
+		Array.isArray(reference.path) &&
+		reference.path.includes(SERVED_STALE_CACHE_OPERAND)
+	) {
+		return true;
 	}
+	return Object.values(node).some(readsStaleCacheOperand);
 }
+
+/**
+ * Whether a scenario reaches a verdict on freshness: a `guard` condition
+ * (degraded, the shape this rule recommends) or an `assert` expression (down,
+ * harsher but still real coverage). Any other position — an extract selector,
+ * an operation input — is not a verdict.
+ */
+function scenarioChecksFreshness(scenario: unknown): boolean {
+	if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) return false;
+	return scenario.steps.some((step) => {
+		if (!isLintRecord(step)) return false;
+		if (step.kind === "guard") return readsStaleCacheOperand(step.condition);
+		if (step.kind === "assert") return readsStaleCacheOperand(step.expression);
+		return false;
+	});
+}
+
+/** How many uncovered probes the stale-serve message names before eliding. */
+const STALE_SERVE_MESSAGE_PROBE_LIMIT = 8;
 
 /**
  * Health-check cases the platform monitor cannot execute, and stale-if-error
@@ -2319,29 +2355,24 @@ function lintHealthCheckMonitorability(provider: {
 }): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [];
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	// Freshness is judged per operation: one guarded probe must not silence the
-	// rule for the provider's other stale-if-error operations.
-	const operationsWithCases: string[] = [];
-	const operationsGuardingFreshness: string[] = [];
+	// Freshness is judged per CASE. Operation-level bookkeeping would let one
+	// guarded case silence its unguarded siblings, which still report `ok`
+	// through a stale serve — the same fail-open this rule exists to close.
+	const probesWithoutFreshnessCheck: string[] = [];
 
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		const cases = readHealthCheckCases(operation.healthCheck);
-		if (cases.length > 0) operationsWithCases.push(operationKey);
 		const unmonitored: string[] = [];
 		for (const [caseIndex, healthCase] of cases.entries()) {
+			const caseLabel =
+				typeof healthCase.name === "string" && healthCase.name.length > 0
+					? `"${healthCase.name}"`
+					: `[${caseIndex}]`;
 			if (healthCase.scenario === undefined) {
-				unmonitored.push(
-					typeof healthCase.name === "string" && healthCase.name.length > 0
-						? `"${healthCase.name}"`
-						: `[${caseIndex}]`,
-				);
-				continue;
+				unmonitored.push(caseLabel);
 			}
-			if (
-				scenarioReferencesStaleCacheOperand(healthCase.scenario) &&
-				!operationsGuardingFreshness.includes(operationKey)
-			) {
-				operationsGuardingFreshness.push(operationKey);
+			if (!scenarioChecksFreshness(healthCase.scenario)) {
+				probesWithoutFreshnessCheck.push(`${operationKey} ${caseLabel}`);
 			}
 		}
 		if (unmonitored.length > 0) {
@@ -2354,10 +2385,7 @@ function lintHealthCheckMonitorability(provider: {
 		}
 	}
 
-	const unguarded = operationsWithCases.filter(
-		(operationKey) => !operationsGuardingFreshness.includes(operationKey),
-	);
-	if (unguarded.length === 0) return diagnostics;
+	if (probesWithoutFreshnessCheck.length === 0) return diagnostics;
 
 	const staleSources = new Set<string>();
 	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
@@ -2372,11 +2400,16 @@ function lintHealthCheckMonitorability(provider: {
 	}
 	if (staleSources.size === 0) return diagnostics;
 
+	const elided = probesWithoutFreshnessCheck.length - STALE_SERVE_MESSAGE_PROBE_LIMIT;
+	const named = probesWithoutFreshnessCheck
+		.slice(0, STALE_SERVE_MESSAGE_PROBE_LIMIT)
+		.join(", ")
+		.concat(elided > 0 ? `, and ${elided} more` : "");
 	diagnostics.push({
 		rule: "health-check-stale-serve-unguarded",
 		level: "warn",
 		field: "healthCheck",
-		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...staleSources].sort().join(", ")}) and no scenario on ${unguarded.map((operationKey) => `"${operationKey}"`).join(", ")} guards ${SERVED_STALE_CACHE_OPERAND}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.`,
+		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...staleSources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.`,
 	});
 	return diagnostics;
 }
