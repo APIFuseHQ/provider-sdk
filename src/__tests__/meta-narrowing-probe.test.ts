@@ -138,11 +138,50 @@ const declSatisfies = {
 	meta: metaConst,
 } satisfies ProviderDeclaration;
 
+// H: `Pick` names an explicit key subset, so the authored keys survive.
+const declPick: Pick<
+	ProviderDeclaration,
+	"id" | "version" | "runtime" | "http" | "auth" | "allowedHosts" | "meta"
+> = {
+	id: "meta-narrowing-probe",
+	version: "1.0.0",
+	runtime: "standard",
+	http: {},
+	auth: { mode: "none" },
+	allowedHosts: ["example.com"],
+	meta: metaConst,
+};
+// I: an intersection still carries every optional capability key.
+const declIntersection: ProviderDeclaration & { http: Record<string, never> } = {
+	id: "meta-narrowing-probe",
+	version: "1.0.0",
+	runtime: "standard",
+	http: {},
+	auth: { mode: "none" },
+	allowedHosts: ["example.com"],
+	meta: metaConst,
+};
+
 const buildDeclAnnotated = defineProvider(declAnnotated);
 const buildDeclSatisfies = defineProvider(declSatisfies);
+const buildDeclPick = defineProvider(declPick);
+const buildDeclIntersection = defineProvider(declIntersection);
+// J: an explicit type argument pins TConfig, so `const` inference never runs.
+const buildPinned = defineProvider<ProviderDeclaration>({
+	id: "meta-narrowing-probe",
+	version: "1.0.0",
+	runtime: "standard",
+	http: {},
+	auth: { mode: "none" },
+	allowedHosts: ["example.com"],
+	meta: metaConst,
+});
 
 declare const ctxDeclAnnotated: ProviderContextOf<typeof buildDeclAnnotated>;
 declare const ctxDeclSatisfies: ProviderContextOf<typeof buildDeclSatisfies>;
+declare const ctxDeclPick: ProviderContextOf<typeof buildDeclPick>;
+declare const ctxDeclIntersection: ProviderContextOf<typeof buildDeclIntersection>;
+declare const ctxPinned: ProviderContextOf<typeof buildPinned>;
 
 declare const ctxBare: ProviderContextOf<typeof buildBare>;
 declare const ctxBarePlain: ProviderContextOf<typeof buildBarePlain>;
@@ -173,6 +212,14 @@ function probe(): void {
 
 	// @ts-expect-error test-invalid: G — `satisfies` keeps the authored key set, so `files` is absent.
 	void ctxDeclSatisfies.files;
+	// @ts-expect-error test-invalid: H — `Pick` names an explicit key subset, so `files` is absent.
+	void ctxDeclPick.files;
+
+	// I and J — DEGENERATE AND SILENT, like F. An intersection keeps every
+	// optional capability key of ProviderDeclaration, and an explicit type
+	// argument pins TConfig so `const` inference never runs. Both calls compile.
+	void ctxDeclIntersection.files;
+	void ctxPinned.files;
 
 	// All of them declare `http`, so this side is uniform.
 	void ctxBare.http;
@@ -180,6 +227,9 @@ function probe(): void {
 	void ctxConst.http;
 	void ctxSatisfies.http;
 	void ctxAnnotated.http;
+	void ctxDeclPick.http;
+	void ctxDeclIntersection.http;
+	void ctxPinned.http;
 }
 
 describe("meta narrowing probe", () => {

@@ -28,6 +28,9 @@ still narrow, and `tsc` is the assertion.
 | `meta = {...}`, no literal-typed field | ok | narrowed | **warn** |
 | `meta = {...}` with a literal-typed field | TS2322 | degenerate | **warn** |
 | `decl: ProviderDeclaration = {...}` | **ok** | **degenerate** | **error** |
+| `decl: Pick<ProviderDeclaration, …> = {...}` | ok | narrowed | — |
+| `decl: ProviderDeclaration & {…} = {...}` | **ok** | **degenerate** | **error** |
+| `defineProvider<ProviderDeclaration>({...})` | **ok** | **degenerate** | **error** |
 | `decl = {...} satisfies ProviderDeclaration` | ok | narrowed | — |
 
 **error** is reserved for the silent row. Annotating the whole declaration with
@@ -53,8 +56,11 @@ its own `as const`).
 
 The silent row is matched through the syntax it actually appears in: the
 annotation, an `as ProviderDeclaration` assertion (on the binding or written at
-the call), a renamed import, and a local `type Decl = ProviderDeclaration`
-alias. The callee is resolved to the SDK's `defineProvider` binding, so an
+the call), an intersection that keeps its keys, an explicit type argument that
+pins `TConfig` outright, a `satisfies` or `as const` wrapped around an
+already-widened binding, a widened binding spread into the call literal, a
+renamed import, and a local `type Decl = ProviderDeclaration` alias. `Pick` is
+not reported: it names an explicit key subset, and the context stays narrow. The callee is resolved to the SDK's `defineProvider` binding, so an
 unrelated local helper of the same name is not reported and an SDK import under
 another name is. Test sources are skipped — they build throwaway declarations on
 purpose, several of them with exactly this annotation.

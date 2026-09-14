@@ -2289,6 +2289,9 @@ const META_AS_CONST_RULE = "meta-requires-as-const";
  * | `meta = { ... }`, no literal-typed field     | ok          | narrowed          |
  * | `meta = { ... }` with a literal-typed field  | **TS2322**  | **degenerate**    |
  * | `decl: ProviderDeclaration = { ... }`        | **ok**      | **degenerate**    |
+ * | `decl: Pick<ProviderDeclaration, …>`         | ok          | narrowed          |
+ * | `decl: ProviderDeclaration & { … }`          | **ok**      | **degenerate**    |
+ * | `defineProvider<ProviderDeclaration>({…})`   | **ok**      | **degenerate**    |
  *
  * The last two rows are the rule, and they fail differently.
  *
@@ -2350,10 +2353,24 @@ function erasesDeclarationKeys(
 	node: import("typescript").TypeNode,
 	declarationTypeNames: ReadonlySet<string>,
 ): boolean {
+	if (ts.isParenthesizedTypeNode(node)) {
+		return erasesDeclarationKeys(ts, node.type, declarationTypeNames);
+	}
+	// `ProviderDeclaration & { http: true }` still carries every optional
+	// capability key, so an intersection is erasing when any constituent is.
+	if (ts.isIntersectionTypeNode(node) || ts.isUnionTypeNode(node)) {
+		return node.types.some((member) => erasesDeclarationKeys(ts, member, declarationTypeNames));
+	}
 	if (ts.isIndexedAccessTypeNode(node)) return false;
 	if (ts.isTypeReferenceNode(node)) {
 		const name = ts.isIdentifier(node.typeName) ? node.typeName.text : node.typeName.right.text;
 		if (declarationTypeNames.has(name)) return true;
+		// `Pick<ProviderDeclaration, "id" | "http">` names an explicit key subset,
+		// so the authored keys survive and the context stays narrow — measured.
+		// Every other transformation over the declaration (`Omit` keeps all the
+		// keys but one, `Partial`/`Readonly`/`Required` keep them all) leaves the
+		// optional capability keys in place and is erasing.
+		if (name === "Pick") return false;
 		return (node.typeArguments ?? []).some((argument) =>
 			erasesDeclarationKeys(ts, argument, declarationTypeNames),
 		);
@@ -2435,7 +2452,32 @@ function defineProviderNamesIn(
 		// member name.
 		if (ts.isNamespaceImport(bindings)) names.add("defineProvider");
 	}
-	return names.size > 0 ? names : new Set(["defineProvider"]);
+	if (names.size > 0) return names;
+	// No SDK import in this file. The bare name is the right fallback for an
+	// in-repo fixture, but not when the file declares or imports a
+	// `defineProvider` of its own — passing a ProviderDeclaration to an
+	// unrelated local helper is not an SDK call and must not fail a check.
+	for (const statement of file.statements) {
+		if (ts.isFunctionDeclaration(statement) && statement.name?.text === "defineProvider") {
+			return names;
+		}
+		if (ts.isVariableStatement(statement)) {
+			for (const declaration of statement.declarationList.declarations) {
+				if (ts.isIdentifier(declaration.name) && declaration.name.text === "defineProvider") {
+					return names;
+				}
+			}
+		}
+		if (ts.isImportDeclaration(statement)) {
+			const bindings = statement.importClause?.namedBindings;
+			if (bindings && ts.isNamedImports(bindings)) {
+				for (const element of bindings.elements) {
+					if (element.name.text === "defineProvider") return names;
+				}
+			}
+		}
+	}
+	return new Set(["defineProvider"]);
 }
 
 function normalizeSourcePath(path: string): string {
@@ -2480,7 +2522,7 @@ function resolveProviderModule(
 function isConstAssertion(
 	ts: typeof import("typescript"),
 	node: import("typescript").Node,
-): boolean {
+): node is import("typescript").AsExpression {
 	return (
 		ts.isAsExpression(node) &&
 		ts.isTypeReferenceNode(node.type) &&
@@ -2644,7 +2686,14 @@ function findWidenedDefineProviderArguments(
 	const check = (subject: "meta" | "declaration", expression: import("typescript").Expression) => {
 		let current = expression;
 		while (ts.isParenthesizedExpression(current)) current = current.expression;
-		if (ts.isSatisfiesExpression(current) || isConstAssertion(ts, current)) return;
+		// `satisfies` and `as const` narrow a literal written HERE; neither can
+		// re-narrow a binding that widened at its own declaration, and neither
+		// re-narrows a value spread in from one. Unwrap and keep looking rather
+		// than treating the wrapper as proof.
+		while (ts.isSatisfiesExpression(current) || isConstAssertion(ts, current)) {
+			current = current.expression;
+			while (ts.isParenthesizedExpression(current)) current = current.expression;
+		}
 		// `defineProvider({...} as ProviderDeclaration)` and
 		// `defineProvider(declaration as ProviderDeclaration)` erase the key set
 		// at the call itself, without any widened binding to resolve to.
@@ -2688,6 +2737,23 @@ function findWidenedDefineProviderArguments(
 	const visit = (node: import("typescript").Node): void => {
 		const callee = ts.isCallExpression(node) ? calleeName(node) : undefined;
 		if (ts.isCallExpression(node) && callee !== undefined && calleeNames.has(callee)) {
+			// `defineProvider<ProviderDeclaration>({...})` pins TConfig explicitly,
+			// so the `const` type parameter never infers anything and even an inline
+			// literal gets the full optional-key set. The value argument looks
+			// perfect; the type argument is the whole defect.
+			const pinned = (node.typeArguments ?? []).find((argument) =>
+				erasesDeclarationKeys(ts, argument, declarationTypeNames),
+			);
+			if (pinned) {
+				findings.push({
+					subject: "declaration",
+					name: `${callee}<${pinned.getText(file)}>`,
+					reason: `the call pins its type parameter with \`<${pinned.getText(file)}>\`, so the \`const TConfig\` inference never runs and every capability is an OPTIONAL key of ProviderDeclaration`,
+					silent: true,
+				});
+				ts.forEachChild(node, visit);
+				return;
+			}
 			const argument = node.arguments[0];
 			if (argument) {
 				let current: import("typescript").Expression = argument;

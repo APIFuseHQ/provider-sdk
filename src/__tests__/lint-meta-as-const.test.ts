@@ -345,6 +345,116 @@ export const buildProvider = defineProvider(declaration);`;
 		expect(findings({ ...widened, "index.ts": call })).toHaveLength(1);
 	});
 
+	// Second review round. Two false positives that would have failed
+	// `apifuse check` on safe providers, and three more spellings of the silent
+	// erasure.
+
+	it("accepts `Pick<ProviderDeclaration, …>` — it names an explicit key subset", () => {
+		expect(
+			findings({
+				"index.ts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = defineProvider(declaration);`,
+				"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: Pick<ProviderDeclaration, "id" | "http"> = { id: "demo", http: {} };`,
+			}),
+		).toEqual([]);
+	});
+
+	it("ERRORS on `Omit` and `Partial` of the declaration — the capability keys survive", () => {
+		for (const annotation of ['Omit<ProviderDeclaration, "auth">', "Partial<ProviderDeclaration>"]) {
+			expect(
+				findings({
+					"index.ts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = defineProvider(declaration);`,
+					"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ${annotation} = { id: "demo", http: {} };`,
+				}),
+			).toHaveLength(1);
+		}
+	});
+
+	it("ERRORS on an intersection that keeps the declaration's keys", () => {
+		const diagnostics = findings({
+			"index.ts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = defineProvider(declaration);`,
+			"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ProviderDeclaration & { http: {} } = { id: "demo", http: {} };`,
+		});
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.level).toBe("error");
+	});
+
+	it("ERRORS on an explicit type argument, which skips const inference entirely", () => {
+		const diagnostics = findings({
+			"index.ts": `import { defineProvider, type ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+const buildProvider = defineProvider<ProviderDeclaration>({ id: "demo", http: {} });`,
+		});
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.level).toBe("error");
+		expect(diagnostics[0]?.message).toContain("pins its type parameter");
+	});
+
+	it("sees through `satisfies` and `as const` wrapped around an already-widened binding", () => {
+		const widened = {
+			"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ProviderDeclaration = { id: "demo", http: {} };`,
+		};
+		for (const call of [
+			"defineProvider(declaration satisfies ProviderDeclaration)",
+			"defineProvider(declaration as const)",
+		]) {
+			const diagnostics = findings({
+				...widened,
+				"index.ts": `import { defineProvider, type ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = ${call};`,
+			});
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0]?.level).toBe("error");
+		}
+	});
+
+	it("sees a widened binding spread into an `as const` declaration literal", () => {
+		const diagnostics = findings({
+			"index.ts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { base } from "./declaration";
+const buildProvider = defineProvider({ ...base, id: "demo" } as const);`,
+			"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const base: ProviderDeclaration = { id: "demo", http: {} };`,
+		});
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.level).toBe("error");
+	});
+
+	it("leaves an unrelated local defineProvider alone when no SDK import names it", () => {
+		expect(
+			findings({
+				"index.ts": `import { declaration } from "./declaration";
+function defineProvider(value: unknown) { return value; }
+const unrelated = defineProvider(declaration);`,
+				"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ProviderDeclaration = { id: "demo", http: {} };`,
+			}),
+		).toEqual([]);
+
+		expect(
+			findings({
+				"index.ts": `import { defineProvider } from "./local";
+import { declaration } from "./declaration";
+const unrelated = defineProvider(declaration);`,
+				"local.ts": `export function defineProvider(value: unknown) { return value; }`,
+				"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ProviderDeclaration = { id: "demo", http: {} };`,
+			}),
+		).toEqual([]);
+	});
+
 	it("resolves a `.js` specifier to its `.mts` counterpart", () => {
 		const diagnostics = findings({
 			"index.mts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
