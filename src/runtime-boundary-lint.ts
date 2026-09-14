@@ -3,8 +3,11 @@
  * through the SDK context (`ctx.http`, `ctx.stealth`, `ctx.env`,
  * `ctx.credential`, `ctx.browser`), not through ambient Node/Bun globals.
  *
- * Three rules, all reported at `warn` level in this first release so the
- * fleet can migrate before the level is raised:
+ * Three rules, reported at `error` level: a finding fails `apifuse check` and
+ * `apifuse submit-check` (official and standalone mode alike). The first
+ * release reported them at `warn` as a migration window; the fleet is clean, so
+ * the window is closed. A deliberate exception is acknowledged in code (see
+ * below), never through a hidden allowlist.
  *
  * - `process-env-direct-read`: `process.env.X`, `process.env["X"]`, a bare
  *   `process.env` object use, and the `Bun.env` equivalents. Runtime bootstrap
@@ -595,7 +598,7 @@ export type RuntimeBoundaryLintInput = {
 };
 
 /**
- * Lint the provider runtime boundary. Returns warn-level diagnostics (one per
+ * Lint the provider runtime boundary. Returns error-level diagnostics (one per
  * file and rule, listing every line) and information entries for findings
  * acknowledged with `@apifuse-allow`.
  */
@@ -644,7 +647,7 @@ export function lintRuntimeBoundary(
 			if (findings.length > 0) {
 				diagnostics.push({
 					rule,
-					level: "warn",
+					level: "error",
 					field,
 					message: `${describeSubjects(findings)}: ${remediation(rule)}`,
 				});

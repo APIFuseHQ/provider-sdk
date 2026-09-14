@@ -13,6 +13,8 @@ import {
 } from "../../bin/apifuse-check.js";
 import { PROMPT_ASSET_MANIFEST_PATH, syncPromptAssets } from "../cli/prompt-assets.js";
 
+const AUTHORING_LINT_CHECK_MESSAGE = "Provider authoring lint has no error-level diagnostics";
+
 const tempDirs: string[] = [];
 const tempRoot = join(process.cwd(), ".tmp-provider-sdk-tests");
 
@@ -126,6 +128,67 @@ describe("apifuse check", () => {
 		);
 
 		expect(index?.passed).toBe(false);
+	});
+
+	it("fails on a runtime boundary finding in request-path source", async () => {
+		const providerDir = makeProviderDir("apifuse-check-runtime-boundary-error-");
+		writeValidLocaleCatalogs(providerDir);
+		writeReviewReadyProviderIndex(providerDir);
+		mkdirSync(join(providerDir, "upstream"), { recursive: true });
+		writeFileSync(
+			join(providerDir, "upstream", "session.ts"),
+			"export const token = process.env.EXAMPLE_SESSION_TOKEN;\n",
+		);
+
+		const results = await runChecks(providerDir);
+		const lint = results.find((result) => result.message === AUTHORING_LINT_CHECK_MESSAGE);
+
+		expect(lint?.passed).toBe(false);
+		expect(lint?.details).toEqual([
+			expect.stringContaining(
+				"ERROR process-env-direct-read sourceFiles.upstream/session.ts: process.env.EXAMPLE_SESSION_TOKEN (line 1)",
+			),
+		]);
+	});
+
+	it("does not scan a nested git checkout as this provider's runtime source", async () => {
+		const providerDir = makeProviderDir("apifuse-check-nested-checkout-");
+		writeValidLocaleCatalogs(providerDir);
+		writeReviewReadyProviderIndex(providerDir);
+		// A linked worktree left under the root: `.git` is a file pointing at the
+		// main repository, and its `scripts/` is not at *this* provider's root.
+		const worktree = join(providerDir, ".worktree", "stale-branch");
+		mkdirSync(join(worktree, "scripts"), { recursive: true });
+		writeFileSync(join(worktree, ".git"), "gitdir: ../../.git/worktrees/stale-branch\n");
+		writeFileSync(
+			join(worktree, "scripts", "record.ts"),
+			"export const tap = process.env.EXAMPLE_TAP_DIR;\n",
+		);
+		// A nested clone (or initialised submodule): `.git` is a directory.
+		const clone = join(providerDir, "vendor", "nested-clone");
+		mkdirSync(join(clone, ".git"), { recursive: true });
+		writeFileSync(
+			join(clone, "index.ts"),
+			'export const page = await fetch("https://api.example.com");\n',
+		);
+		// A plain nested directory without the marker stays in scope.
+		mkdirSync(join(providerDir, "vendor", "plain"), { recursive: true });
+		writeFileSync(
+			join(providerDir, "vendor", "plain", "helper.ts"),
+			'export const page = await fetch("https://api.example.com");\n',
+		);
+
+		const results = await runChecks(providerDir);
+		const lint = results.find((result) => result.message === AUTHORING_LINT_CHECK_MESSAGE);
+
+		expect(lint?.passed).toBe(false);
+		expect(lint?.details).toEqual([
+			expect.stringContaining(
+				"ERROR direct-fetch-call sourceFiles.vendor/plain/helper.ts: fetch() (line 1)",
+			),
+		]);
+		expect(lint?.details?.join("\n")).not.toContain(".worktree/");
+		expect(lint?.details?.join("\n")).not.toContain("nested-clone");
 	});
 
 	it("warns on a legacy deploy.ts without failing the check", async () => {
@@ -402,48 +465,7 @@ export default {
 	it("passes public authoring lint for a review-ready provider", async () => {
 		const providerDir = makeProviderDir("apifuse-check-lint-pass-");
 		writeValidLocaleCatalogs(providerDir);
-		writeFileSync(
-			join(providerDir, "index.ts"),
-			`
-import { describeKey, z } from "@apifuse/provider-sdk";
-
-const input = describeKey(
-  z.object({
-    q: describeKey(z.string(), "operations.lookup.fields.q.description"),
-  }),
-  "operations.lookup.input.description",
-);
-
-const output = describeKey(
-  z.object({
-    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),
-  }),
-  "operations.lookup.output.description",
-);
-
-export default {
-  id: "good-provider",
-  version: "1.0.0",
-  runtime: "standard",
-  allowedHosts: ["api.example.com"],
-  reviewed: "community",
-  auth: { mode: "none" },
-  meta: { displayName: "Good Provider", category: "other" },
-  operations: {
-    lookup: {
-      descriptionKey: "operations.lookup.description",
-      connectionMode: "required",
-      riskClass: "read",
-      input,
-      output,
-      handler: async () => ({ ok: true }),
-      fixtures: { request: { q: "btc" }, response: { ok: true } },
-      healthCheckUnsupported: { reason: "Unit test operation." },
-    },
-  },
-};
-`,
-		);
+		writeReviewReadyProviderIndex(providerDir);
 
 		const results = await runChecks(providerDir);
 		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
@@ -876,6 +898,51 @@ export default {
   auth: { mode: "none" },
   meta: { displayName: "Runtime Recognition Provider", category: "other" },
   operations: {},
+};
+`,
+	);
+}
+
+function writeReviewReadyProviderIndex(providerDir: string): void {
+	writeFileSync(
+		join(providerDir, "index.ts"),
+		`
+import { describeKey, z } from "@apifuse/provider-sdk";
+
+const input = describeKey(
+  z.object({
+    q: describeKey(z.string(), "operations.lookup.fields.q.description"),
+  }),
+  "operations.lookup.input.description",
+);
+
+const output = describeKey(
+  z.object({
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),
+  }),
+  "operations.lookup.output.description",
+);
+
+export default {
+  id: "good-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  allowedHosts: ["api.example.com"],
+  reviewed: "community",
+  auth: { mode: "none" },
+  meta: { displayName: "Good Provider", category: "other" },
+  operations: {
+    lookup: {
+      descriptionKey: "operations.lookup.description",
+      connectionMode: "required",
+      riskClass: "read",
+      input,
+      output,
+      handler: async () => ({ ok: true }),
+      fixtures: { request: { q: "btc" }, response: { ok: true } },
+      healthCheckUnsupported: { reason: "Unit test operation." },
+    },
+  },
 };
 `,
 	);
