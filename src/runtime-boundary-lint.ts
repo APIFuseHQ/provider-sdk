@@ -43,7 +43,8 @@
  * `apifuse check` still lists them.
  */
 
-import type { LintDiagnostic, ProviderLintInformation } from "./lint.js";
+import type { LintDiagnostic, ProviderLintInformation, ProviderLintResult } from "./lint.js";
+import { getTypeScript } from "./typescript-module.js";
 
 type TypeScriptModule = typeof import("typescript");
 type TsNode = import("typescript").Node;
@@ -575,7 +576,7 @@ function describeSubjects(findings: readonly RuntimeBoundaryFinding[]): string {
 function remediation(rule: RuntimeBoundaryRule): string {
 	switch (rule) {
 		case PROCESS_ENV_DIRECT_READ_RULE:
-			return `Provider runtime source reads the ambient environment directly. Declare the value in defineProvider (secrets: [{ name, required }] for credentials, env: true for plain settings) and read it with ctx.env.get(name) so the SDK presence gate, redaction, and Doppler projection see it. Only the ${BOOTSTRAP_ENV_NAME_PREFIX}* bootstrap family may be read from process.env, and only dev.ts/start.ts/deploy.ts and scripts/, tools/, bin/ are outside this rule. Acknowledge a deliberate exception with \`// @apifuse-allow ${PROCESS_ENV_DIRECT_READ_RULE}: <reason>\`.`;
+			return `Provider runtime source reads the ambient environment directly. ctx.env.get(name) sees only the names declared in defineProvider secrets[].name (engine-owned names excluded); declare the value there so the SDK presence gate, redaction, and Doppler projection see it. env: true only enables the ctx.env capability (type and runtime gate) and does not widen the readable names. Test/E2E toggles are not secrets and cannot move to ctx.env: replace them with test doubles (inject ctx.env / ctx.http) or recorded fixtures. Only the ${BOOTSTRAP_ENV_NAME_PREFIX}* bootstrap family may be read from process.env, and only dev.ts/start.ts/deploy.ts and scripts/, tools/, bin/ are outside this rule. Acknowledge a deliberate exception with \`// @apifuse-allow ${PROCESS_ENV_DIRECT_READ_RULE}: <reason>\`.`;
 		case NODE_RUNTIME_MODULE_IMPORT_RULE:
 			return `Provider runtime source reaches the filesystem, the network, or child processes on its own. Use ctx.http / ctx.stealth for HTTP, ctx.browser for browser work, ctx.files / ctx.cache / ctx.state for data that must persist, and keep recorder or smoke tooling under scripts/. Acknowledge a deliberate exception with \`// @apifuse-allow ${NODE_RUNTIME_MODULE_IMPORT_RULE}: <reason>\`.`;
 		case DIRECT_FETCH_CALL_RULE:
@@ -654,4 +655,24 @@ export function lintRuntimeBoundary(
 		}
 	}
 	return { diagnostics, information };
+}
+
+/**
+ * Lint provider runtime source files for the runtime boundary rules without a
+ * provider definition: `files` maps provider-root-relative paths to source
+ * text (the same shape `apifuse check` collects as `providerSourceFiles`).
+ * Out-of-scope paths (tests, recorded fixtures, `.d.ts`, the root
+ * `dev.ts`/`start.ts`/`deploy.ts`, `scripts/`, `tools/`, `bin/`) are skipped
+ * with `isRuntimeBoundarySourceFile`. Diagnostics carry
+ * `field: "sourceFiles.<path>"`; `@apifuse-allow` acknowledgements come back
+ * as `information`.
+ *
+ * Parses with the `typescript` package resolved from the installed SDK, so the
+ * caller's dependency tree must provide it (the SDK lists it as a
+ * devDependency only). This is the entry point the platform contract check
+ * uses to apply the rules with the monorepo's SDK pin instead of each
+ * provider's own pin.
+ */
+export function lintRuntimeBoundarySources(files: Record<string, string>): ProviderLintResult {
+	return lintRuntimeBoundary(getTypeScript(), { providerSourceFiles: files }, () => "");
 }

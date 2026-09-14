@@ -127,7 +127,14 @@ export {
 	type LintDiagnostic,
 	lintOperation,
 	lintProvider,
+	type ProviderLintInformation,
+	type ProviderLintResult,
 } from "./lint.js";
+export {
+	lintRuntimeBoundarySources,
+	RUNTIME_BOUNDARY_RULES,
+	type RuntimeBoundaryRule,
+} from "./runtime-boundary-lint.js";
 export * from "./recipes/gov-api.js";
 export * from "./recipes/rest-api.js";
 export { createFlowContext, createScratchpad } from "./runtime/auth-flow.js";

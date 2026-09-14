@@ -1,5 +1,3 @@
-import { createRequire } from "node:module";
-
 import type { ZodType } from "zod";
 
 import {
@@ -32,17 +30,7 @@ import {
 import { lintRuntimeBoundary, scriptKindForSourceFile } from "./runtime-boundary-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
-
-const requireModule = createRequire(import.meta.url);
-// `typeof import(...)` keeps the type without emitting a static import: the
-// typescript package is a CLI-only dependency and src/lint.ts is production
-// runtime, which the typescript-import-boundary test enforces.
-let typeScriptModule: typeof import("typescript") | undefined;
-
-function getTypeScript(): typeof import("typescript") {
-	typeScriptModule ??= requireModule("typescript") as typeof import("typescript");
-	return typeScriptModule;
-}
+import { getTypeScript } from "./typescript-module.js";
 
 type AuthModeLike =
 	| "none"
@@ -205,12 +193,17 @@ type ProviderLintOptions = {
 	mode?: ProviderLintMode;
 };
 
+/**
+ * A non-blocking audit line: a finding the author acknowledged with
+ * `// @apifuse-allow <rule>: <reason>`, kept visible in `apifuse check` output.
+ */
 export interface ProviderLintInformation {
 	rule: string;
 	message: string;
 	field?: string;
 }
 
+/** Diagnostics plus the acknowledged findings that accompany them. */
 export interface ProviderLintResult {
 	diagnostics: LintDiagnostic[];
 	information: ProviderLintInformation[];

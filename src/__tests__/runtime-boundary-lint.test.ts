@@ -4,6 +4,7 @@ import { lintProvider, lintProviderWithInformation } from "../lint.js";
 import {
 	DIRECT_FETCH_CALL_RULE,
 	isRuntimeBoundarySourceFile,
+	lintRuntimeBoundarySources,
 	NODE_RUNTIME_MODULE_IMPORT_RULE,
 	PROCESS_ENV_DIRECT_READ_RULE,
 	RUNTIME_BOUNDARY_RULES,
@@ -433,5 +434,82 @@ describe("runtime boundary lint: severity", () => {
 		expect(diagnostics.map((diagnostic) => diagnostic.rule).sort()).toEqual(
 			[...RUNTIME_BOUNDARY_RULES].sort(),
 		);
+	});
+});
+
+describe("runtime boundary lint: lintRuntimeBoundarySources", () => {
+	const files = {
+		"index.ts": [
+			'const fakeLogin = process.env.APIFUSE__E2E__FAKE_LOGIN === "1";',
+			'export const page = await fetch("https://api.example.com/page");',
+		].join("\n"),
+		"upstream/booking.ts": [
+			'import { writeFile } from "node:fs/promises";',
+			"// @apifuse-allow node-runtime-module-import: fixture recorder shim, removed in #42",
+			'import { mkdir } from "node:fs";',
+		].join("\n"),
+		"lib/runtime-port.ts":
+			"export const port = Number(process.env.APIFUSE__RUNTIME__PORT) || 3000;",
+		// Out of scope: bootstrap entrypoint, operator tooling, tests, fixtures, declarations.
+		"start.ts": "const port = process.env.PORT;",
+		"scripts/record-fixtures.ts": 'import { writeFile } from "node:fs/promises";',
+		"__tests__/index.test.ts": 'const raw = await fetch("https://api.example.com");',
+		"upstream/__fixtures__/page.ts": "export const html = process.env.FIXTURE_HTML;",
+		"types.d.ts": "declare const token: typeof process.env.TOKEN;",
+	};
+
+	it("lints a source map without a provider definition, keeping the check scope", () => {
+		const result = lintRuntimeBoundarySources(files);
+		expect(
+			result.diagnostics.map((diagnostic) => [diagnostic.rule, diagnostic.level, diagnostic.field]),
+		).toEqual([
+			[PROCESS_ENV_DIRECT_READ_RULE, "warn", "sourceFiles.index.ts"],
+			[DIRECT_FETCH_CALL_RULE, "warn", "sourceFiles.index.ts"],
+			[NODE_RUNTIME_MODULE_IMPORT_RULE, "warn", "sourceFiles.upstream/booking.ts"],
+		]);
+		expect(result.diagnostics[0]?.message).toContain(
+			"process.env.APIFUSE__E2E__FAKE_LOGIN (line 1)",
+		);
+		expect(result.diagnostics[2]?.message).toContain("node:fs/promises (line 1)");
+		expect(result.diagnostics[2]?.message).not.toContain("node:fs (line 3)");
+		expect(result.information).toEqual([
+			{
+				rule: NODE_RUNTIME_MODULE_IMPORT_RULE,
+				field: "sourceFiles.upstream/booking.ts",
+				message: "Acknowledged node:fs at line 3. Reason: fixture recorder shim, removed in #42",
+			},
+		]);
+	});
+
+	it("matches the provider-definition path of lintProviderWithInformation", () => {
+		const viaProvider = lintProviderWithInformation(providerWithFiles(files));
+		const standalone = lintRuntimeBoundarySources(files);
+		expect(standalone.diagnostics).toEqual(
+			viaProvider.diagnostics.filter((diagnostic) =>
+				RUNTIME_BOUNDARY_RULE_SET.has(diagnostic.rule),
+			),
+		);
+		expect(standalone.information).toEqual(
+			viaProvider.information.filter((entry) => RUNTIME_BOUNDARY_RULE_SET.has(entry.rule)),
+		);
+	});
+
+	it("returns an empty result for an empty source map", () => {
+		expect(lintRuntimeBoundarySources({})).toEqual({ diagnostics: [], information: [] });
+	});
+
+	it("tells the author that ctx.env only sees declared secrets and that env: true is the capability gate", () => {
+		const [diagnostic] = lintRuntimeBoundarySources({
+			"index.ts": "const debug = process.env.KAKAOTALK_DEBUG_LOCO_PACKETS;",
+		}).diagnostics;
+		expect(diagnostic?.rule).toBe(PROCESS_ENV_DIRECT_READ_RULE);
+		expect(diagnostic?.message).toContain(
+			"only the names declared in defineProvider secrets[].name",
+		);
+		expect(diagnostic?.message).toContain(
+			"env: true only enables the ctx.env capability (type and runtime gate)",
+		);
+		expect(diagnostic?.message).toContain("Test/E2E toggles are not secrets");
+		expect(diagnostic?.message).not.toContain("plain settings");
 	});
 });
