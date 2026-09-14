@@ -909,9 +909,12 @@ if (process.env.EXAMPLE_DIAG_TAP_DIR) {
   await writeFile(`${process.env.EXAMPLE_DIAG_TAP_DIR}/booking.json`, JSON.stringify(response));
 }
 
-// After: the credential is a declared secret read through the context
-// (defineProvider({ secrets: [{ name: "APIFUSE__PROVIDER__EXAMPLE__SERVICE_KEY", required: true }] })),
-// and the ad-hoc diagnostic tap is deleted — a toggle that is not a secret has
+// After: the credential is a declared secret read through the context —
+// defineProvider({
+//   env: true, // turns the ctx.env capability on (type + runtime gate)
+//   secrets: [{ name: "APIFUSE__PROVIDER__EXAMPLE__SERVICE_KEY", required: true }], // the readable names
+// })
+// — and the ad-hoc diagnostic tap is deleted: a toggle that is not a secret has
 // no place in ctx.env; observability goes through ctx.trace instead.
 const serviceKey = ctx.env.get("APIFUSE__PROVIDER__EXAMPLE__SERVICE_KEY");
 const response = await ctx.trace.span("booking.confirm", () => confirmBooking(ctx, serviceKey));
