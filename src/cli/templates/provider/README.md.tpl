@@ -158,8 +158,14 @@ Every operation must declare exactly one of:
 The generated `ping` operation uses `healthCheckUnsupported` only because it is
 a local scaffold check, not a real upstream API probe.
 
-`healthCheck.cases[].assertions` receives `{ data, status, durationMs, meta }`.
-`data` is the parsed operation output. Use this shape in real operations:
+A case carries either `scenario` or `assertions`, and only `scenario` is
+executed in production: the platform health monitor runs a case's serialized
+scenario and nothing else, because a closure cannot cross the registry's
+serialization boundary. A case with only `assertions` still publishes a probe,
+but its outcome is permanently `unknown` / `monitoring_unavailable` — the
+operation reads as monitored while nothing is checked, and `apifuse check`
+warns about it (`health-check-assertions-not-monitored`). Use this shape in
+real operations:
 
 ```ts
 healthCheck: {
@@ -167,11 +173,13 @@ healthCheck: {
   cases: [{
     name: "lookup baseline",
     input: { q: "btc" },
-    assertions: ({ data, status, durationMs }) => {
-      if (status !== 200 || data.results.length === 0 || durationMs > 3000) {
-        return { status: "degraded", label: "lookup baseline changed" };
-      }
-    },
+    scenario: lookupBaselineScenario, // defineHealthScenario({ ... })
   }],
 }
 ```
+
+If the operation reads through `ctx.cache.getOrSet(..., { staleIfErrorMs })`,
+add a guard step on the operation step result's `served_stale_cache` as well —
+otherwise an upstream outage is answered with a schema-valid 200 and the probe
+reports `ok` for the whole stale window. See
+`.agents/skills/health-checks-and-fail-closed/SKILL.md` for both shapes.

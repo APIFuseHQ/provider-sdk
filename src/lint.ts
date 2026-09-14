@@ -29,12 +29,12 @@ import {
 } from "./runtime/stealth-owned-headers.js";
 import {
 	lintRuntimeBoundary,
-	scriptKindForSourceFile,
 	// This module already has a narrower TEST_SOURCE_FILE_PATTERN of its own,
 	// used by the older source rules; it does not cover a plain `tests/`
 	// directory. Aliased rather than merged because consolidating the two would
 	// silently change what those rules scan.
 	TEST_SOURCE_FILE_PATTERN as SHARED_TEST_SOURCE_FILE_PATTERN,
+	scriptKindForSourceFile,
 } from "./runtime-boundary-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
@@ -2836,6 +2836,543 @@ function lintProviderMetaNarrowing(provider: ProviderSourceLike): LintDiagnostic
 	return diagnostics;
 }
 
+const STALE_IF_ERROR_OPTION = "staleIfErrorMs";
+const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\b/;
+
+/**
+ * Whether a property assignment's initializer leaves no stale window.
+ * `staleIfErrorMs: 0` makes `staleUntil` equal `freshUntil` in
+ * `runtime/cache.ts`, so a loader failure propagates instead of being answered
+ * from cache — a provider deliberately turning stale serving OFF must not be
+ * told its probes conceal outages.
+ */
+function disablesStaleWindow(
+	ts: typeof import("typescript"),
+	initializer: import("typescript").Expression,
+): boolean {
+	if (ts.isNumericLiteral(initializer)) return Number(initializer.text) === 0;
+	return ts.isIdentifier(initializer) && initializer.text === "undefined";
+}
+
+/**
+ * Whether executable source configures a stale-if-error window.
+ *
+ * Parsed, not matched: comments and unrelated string literals must not count,
+ * and a regex cannot tell them apart (an `Accept: "*​/*"` header literal opens a
+ * block comment to a stripping regex and swallows the cache call after it).
+ * This is the approach `findLegacyChoiceUsage` already uses here. All three
+ * spellings of the option count — `staleIfErrorMs: n`, the shorthand
+ * `{ ttlMs, staleIfErrorMs }`, and the quoted `"staleIfErrorMs": n` — because
+ * refactoring between them must not change the verdict. Falls back to the raw
+ * identifier match when TypeScript is not installed, which is the fail-closed
+ * direction for this rule: it warns rather than goes quiet.
+ */
+function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
+	if (!source.includes(STALE_IF_ERROR_OPTION)) return false;
+	let ts: typeof import("typescript");
+	try {
+		ts = getTypeScript();
+	} catch {
+		return STALE_IF_ERROR_PATTERN.test(source);
+	}
+	const file = ts.createSourceFile(
+		fileName,
+		source,
+		ts.ScriptTarget.Latest,
+		false,
+		scriptKindForSourceFile(ts, fileName),
+	);
+	/** The statically known name of a property, however it is written. */
+	const propertyName = (name: import("typescript").PropertyName): string | undefined => {
+		if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+		if (ts.isComputedPropertyName(name) && ts.isStringLiteral(name.expression)) {
+			return name.expression.text;
+		}
+		return undefined;
+	};
+	/**
+	 * A type declaring the option is not a cache call setting it. Skipping these
+	 * whole subtrees also stops a `CachePolicy` interface from overriding the
+	 * disabled-window exemption for a provider whose only real call passes 0.
+	 */
+	const isTypeOnly = (node: import("typescript").Node): boolean =>
+		ts.isInterfaceDeclaration(node) ||
+		ts.isTypeAliasDeclaration(node) ||
+		ts.isTypeLiteralNode(node) ||
+		ts.isPropertySignature(node) ||
+		ts.isTypeReferenceNode(node) ||
+		ts.isTypeParameterDeclaration(node);
+	/**
+	 * The cache write options that travel with `staleIfErrorMs`
+	 * (`ProviderCacheWriteOptions`). An object literal carrying one of these
+	 * alongside the option is a cache configuration wherever it is declared.
+	 */
+	const siblingCacheOptions = new Set(["ttlMs", "jitterPct"]);
+	/**
+	 * A callee that writes the provider cache: `ctx.cache.getOrSet(...)`,
+	 * `ctx.cache.set(...)`, and the `cached*` helpers built on them. An unrelated
+	 * call receiving an object that happens to carry the name is not cache
+	 * configuration. Every one of these takes its options LAST.
+	 */
+	const isCacheCallee = (expression: import("typescript").Expression): boolean => {
+		if (ts.isIdentifier(expression)) return /^cached[A-Z]/.test(expression.text);
+		if (!ts.isPropertyAccessExpression(expression)) return false;
+		if (expression.name.text === "getOrSet") return true;
+		return (
+			(expression.name.text === "set" || expression.name.text === "write") &&
+			ts.isPropertyAccessExpression(expression.expression) &&
+			expression.expression.name.text === "cache"
+		);
+	};
+	/**
+	 * `const POLICY = { ... }` object literals, so `{ ...POLICY }` can be judged.
+	 * Keyed by name file-wide: a shadowed name may resolve to the wrong literal,
+	 * which at warning level is a mis-nudge rather than a wrong build — but the
+	 * expansion below still has to be cycle-safe, because shadowing can make the
+	 * resolution circular in valid source.
+	 */
+	const literalsByName = new Map<string, import("typescript").ObjectLiteralExpression>();
+	const collect = (node: import("typescript").Node): void => {
+		if (
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.initializer !== undefined &&
+			ts.isObjectLiteralExpression(node.initializer)
+		) {
+			literalsByName.set(node.name.text, node.initializer);
+		}
+		ts.forEachChild(node, collect);
+	};
+	collect(file);
+
+	type OptionReading = { window: "enabled" | "disabled" | undefined; hasSibling: boolean };
+
+	/**
+	 * The EFFECTIVE stale-window setting of an object literal, spreads expanded
+	 * and later properties overriding earlier ones the way JavaScript does — so
+	 * `{ ...policy, staleIfErrorMs: 0 }` reads as disabled even when `policy`
+	 * enables it.
+	 */
+	const readOptions = (
+		literal: import("typescript").ObjectLiteralExpression,
+		seen: Set<import("typescript").ObjectLiteralExpression>,
+	): OptionReading => {
+		if (seen.has(literal)) return { window: undefined, hasSibling: false };
+		seen.add(literal);
+		let window: OptionReading["window"];
+		let hasSibling = false;
+		for (const property of literal.properties) {
+			if (ts.isSpreadAssignment(property)) {
+				const target = ts.isIdentifier(property.expression)
+					? literalsByName.get(property.expression.text)
+					: ts.isObjectLiteralExpression(property.expression)
+						? property.expression
+						: undefined;
+				if (target === undefined) continue;
+				const inner = readOptions(target, seen);
+				if (inner.window !== undefined) window = inner.window;
+				hasSibling ||= inner.hasSibling;
+				continue;
+			}
+			if (ts.isShorthandPropertyAssignment(property)) {
+				if (property.name.text === STALE_IF_ERROR_OPTION) window = "enabled";
+				else if (siblingCacheOptions.has(property.name.text)) hasSibling = true;
+				continue;
+			}
+			if (!ts.isPropertyAssignment(property)) continue;
+			const name = propertyName(property.name);
+			if (name === STALE_IF_ERROR_OPTION) {
+				window = disablesStaleWindow(ts, property.initializer) ? "disabled" : "enabled";
+			} else if (name !== undefined && siblingCacheOptions.has(name)) {
+				hasSibling = true;
+			}
+		}
+		seen.delete(literal);
+		return { window, hasSibling };
+	};
+
+	let found = false;
+	/**
+	 * `inOptionsArgument` is the second way to recognise a cache configuration:
+	 * the literal is the options argument of a cache call. Together with the
+	 * sibling-option test this covers the real shapes, while an upstream payload
+	 * that merely carries a field of the same name does not count.
+	 */
+	const visit = (node: import("typescript").Node, inOptionsArgument: boolean): void => {
+		if (found || isTypeOnly(node)) return;
+		if (ts.isObjectLiteralExpression(node)) {
+			const { window, hasSibling } = readOptions(node, new Set());
+			if (window === "enabled" && (hasSibling || inOptionsArgument)) {
+				found = true;
+				return;
+			}
+		}
+		if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+			const argumentList = node.arguments ?? [];
+			// Options come last on every cache API; the earlier arguments are the
+			// key, the loader, or the value being cached.
+			const optionsIndex = isCacheCallee(node.expression) ? argumentList.length - 1 : -1;
+			visit(node.expression, false);
+			for (const [index, argument] of [...argumentList].entries()) {
+				visit(argument, index === optionsIndex);
+			}
+			return;
+		}
+		ts.forEachChild(node, (child) => visit(child, false));
+	};
+	visit(file, false);
+	return found;
+}
+
+/** The operation-step field that distinguishes a stale-if-error serve. */
+const SERVED_STALE_CACHE_OPERAND = "served_stale_cache";
+
+/**
+ * Sources that describe behaviour rather than serve it. Mirrors the broadest
+ * test-source predicate in the repository (`runtime-boundary-lint.ts:82`, which
+ * covers a plain `tests/` directory and `__mocks__/` as well as `__tests__/`)
+ * and adds recorded-fixture directories, so a mock that mentions
+ * `staleIfErrorMs` cannot raise a warning about code the runtime never serves.
+ */
+const NON_SERVING_SOURCE_FILE_PATTERN =
+	/(?:^|\/)(?:__tests__|__mocks__|__fixtures__|tests|fixtures)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
+/**
+ * Operator tooling and bootstrap entrypoints, mirroring
+ * `runtime-boundary-lint.ts`: a cache option used by a fixture recorder or a
+ * start script is not the request path a probe reads through.
+ */
+const NON_SERVING_TOOLING_DIRECTORY_PATTERN = /^(?:scripts|tools|bin)\//;
+const NON_SERVING_BOOTSTRAP_FILE_PATTERN = /^(?:dev|start|deploy)\.[cm]?[jt]sx?$/;
+
+function isServingProviderSourcePath(relativePath: string): boolean {
+	return (
+		JAVASCRIPT_SOURCE_FILE_PATTERN.test(relativePath) &&
+		!NON_SERVING_SOURCE_FILE_PATTERN.test(relativePath) &&
+		!NON_SERVING_TOOLING_DIRECTORY_PATTERN.test(relativePath) &&
+		!NON_SERVING_BOOTSTRAP_FILE_PATTERN.test(relativePath)
+	);
+}
+
+function isLintRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Reads `healthCheck.cases` structurally. The lint input is the loaded provider
+ * declaration, which `defineProvider` has already validated, but this rule must
+ * not throw on a shape it did not expect.
+ */
+function readHealthCheckCases(healthCheck: unknown): Record<string, unknown>[] {
+	if (!isLintRecord(healthCheck)) return [];
+	const cases = healthCheck.cases;
+	if (!Array.isArray(cases)) return [];
+	return cases.filter(isLintRecord);
+}
+
+/**
+ * The `result` bindings of the `operation` steps that invoke `operationId`.
+ *
+ * Scoped to the probe's own operation on purpose: a scenario may invoke a
+ * preparatory read before the operation the case is about, and a guard on the
+ * preparation's result says nothing about whether the checked operation was
+ * answered from a stale cache.
+ */
+function operationStepBindings(steps: readonly unknown[], operationId: string): Set<string> {
+	const bindings = new Set<string>();
+	for (const step of steps) {
+		if (
+			isLintRecord(step) &&
+			step.kind === "operation" &&
+			step.operationId === operationId &&
+			typeof step.result === "string"
+		) {
+			bindings.add(step.result);
+		}
+	}
+	return bindings;
+}
+
+/**
+ * Whether an operand is the operand: the runtime's `served_stale_cache`
+ * projection on an operation step result for the probe's own operation.
+ *
+ * Exact on three counts, because each looser form is a way to silence the rule
+ * without checking cache provenance: a literal `"served_stale_cache"` in an
+ * `inputTemplate` or a `reasonKey` is not a reference at all;
+ * `["data", "served_stale_cache"]` is an upstream payload field the provider
+ * happens to have named that way; and a reference bound to an `extract` result
+ * is not the operation step this probe invoked.
+ */
+function isStaleCacheOperand(operand: unknown, bindings: ReadonlySet<string>): boolean {
+	if (!isLintRecord(operand)) return false;
+	const reference = operand.ref;
+	return (
+		isLintRecord(reference) &&
+		reference.namespace === "steps" &&
+		typeof reference.binding === "string" &&
+		bindings.has(reference.binding) &&
+		Array.isArray(reference.path) &&
+		reference.path.length === 1 &&
+		reference.path[0] === SERVED_STALE_CACHE_OPERAND
+	);
+}
+
+/**
+ * Whether a single predicate over the operand is FALSE for a stale serve, under
+ * `negated` negation depth. `served_stale_cache` is always present and always a
+ * boolean, so `exists` and `type_is: "boolean"` pass for a stale serve too —
+ * reading the operand is not the same as rejecting it.
+ */
+function predicateRejectsStaleServe(
+	predicate: Record<string, unknown>,
+	bindings: ReadonlySet<string>,
+	negated: boolean,
+): boolean {
+	// `equals`/`not_equals` are symmetric and the schema allows a reference on
+	// either side, so `equals(actual: false, expected: <ref>)` is the same check
+	// written the other way round.
+	const onActual = isStaleCacheOperand(predicate.actual, bindings);
+	const onExpected = isStaleCacheOperand(predicate.expected, bindings);
+	if (!onActual && !onExpected) return false;
+	const { operator } = predicate;
+	const literal = onActual ? predicate.expected : predicate.actual;
+	const failsWhenStale =
+		(operator === "not_equals" && literal === true) || (operator === "equals" && literal === false);
+	const holdsWhenStale =
+		(operator === "is_true" && onActual) ||
+		(operator === "equals" && literal === true) ||
+		(operator === "not_equals" && literal === false);
+	return negated ? holdsWhenStale : failsWhenStale;
+}
+
+/**
+ * Whether an assertion expression evaluates FALSE when the operation step was
+ * answered from a stale cache — the only thing that makes a guard degrade or an
+ * assert fail. A clause under `any` only counts if every sibling branch also
+ * rejects the stale serve, because `any` is satisfied by the branch that still
+ * passes (`status_2xx` on a stale 200 being the obvious one).
+ */
+function rejectsStaleServe(node: unknown, bindings: ReadonlySet<string>, negated = false): boolean {
+	if (!isLintRecord(node)) return false;
+	if (node.kind === "not") return rejectsStaleServe(node.clause, bindings, !negated);
+	if (node.kind === "all" || node.kind === "any") {
+		if (!Array.isArray(node.clauses)) return false;
+		// `all` fails if ANY clause fails; `any` fails only if EVERY clause fails.
+		// Negation swaps which of the two the operator behaves like.
+		const conjunctive = negated ? node.kind === "any" : node.kind === "all";
+		return conjunctive
+			? node.clauses.some((clause) => rejectsStaleServe(clause, bindings, negated))
+			: node.clauses.every((clause) => rejectsStaleServe(clause, bindings, negated));
+	}
+	if (node.kind === "predicate") return predicateRejectsStaleServe(node, bindings, negated);
+	return false;
+}
+
+/**
+ * Whether a guard's degrade lands on the operation the case is about. A guard
+ * whose condition reads the checked operation's freshness but attributes the
+ * failure to a different operation leaves the checked one green through the
+ * stale serve — covered on paper, not on the status page.
+ */
+/**
+ * Whether an assert records its verdict against the checked operation. Same
+ * concern as `guardAttributesTo`: an assertion that covers only some other
+ * operation fails that one, not this one.
+ */
+function assertCoversOperation(coversOperations: unknown, operationId: string): boolean {
+	return Array.isArray(coversOperations) && coversOperations.includes(operationId);
+}
+
+function guardAttributesTo(onFail: unknown, operationId: string): boolean {
+	if (!isLintRecord(onFail) || !Array.isArray(onFail.attribute)) return false;
+	return onFail.attribute.some((entry) => isLintRecord(entry) && entry.operationId === operationId);
+}
+
+/**
+ * Whether a scenario reaches a verdict on freshness: a `guard` condition
+ * (degraded, the shape this rule recommends) or an `assert` expression (down,
+ * harsher but still real coverage). Any other position — an extract selector,
+ * an operation input — is not a verdict.
+ *
+ * Order matters, and this is the rule the guidance states: the freshness
+ * verdict must come before any OTHER guard. Every guard stops the scenario when
+ * it fires, so a row or emptiness guard placed first answers a stale serve that
+ * happens to be empty with its own reason and the freshness guard never runs —
+ * the probe degrades for the wrong cause and the tenant reads "no rows" during
+ * an upstream outage. Asserts before it are fine; they are the evidence clauses
+ * and only stop the scenario by failing it outright.
+ */
+function scenarioChecksFreshness(scenario: unknown, operationId: string): boolean {
+	if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) return false;
+	const bindings = [...operationStepBindings(scenario.steps, operationId)];
+	if (bindings.length === 0) return false;
+	// EVERY read of the operation must be checked. A scenario that invokes it
+	// twice with different inputs has two chances to serve stale, and one fresh
+	// read must not conceal the other.
+	return bindings.every((binding) =>
+		resultBindingChecksFreshness(
+			scenario.steps as readonly unknown[],
+			binding,
+			operationId,
+			bindings,
+		),
+	);
+}
+
+function resultBindingChecksFreshness(
+	steps: readonly unknown[],
+	binding: string,
+	operationId: string,
+	siblingBindings: readonly string[],
+): boolean {
+	const operand = new Set([binding]);
+	let produced = false;
+	for (const step of steps) {
+		if (!isLintRecord(step)) continue;
+		if (!produced) {
+			// Nothing before the read can have checked its freshness.
+			produced = step.kind === "operation" && step.result === binding;
+			continue;
+		}
+		if (
+			step.kind === "assert" &&
+			rejectsStaleServe(step.expression, operand) &&
+			assertCoversOperation(step.coversOperations, operationId)
+		) {
+			return true;
+		}
+		if (step.kind !== "guard") continue;
+		if (rejectsStaleServe(step.condition, operand)) {
+			return guardAttributesTo(step.onFail, operationId);
+		}
+		// A freshness guard for ANOTHER read of the same operation is not a row or
+		// emptiness guard masking the cause: it degrades on exactly this concern,
+		// so `read A, read B, guard A, guard B` covers both. Anything else stops
+		// the scenario first and shadows a later freshness guard.
+		const coversSibling = siblingBindings.some(
+			(sibling) =>
+				sibling !== binding &&
+				rejectsStaleServe(step.condition, new Set([sibling])) &&
+				guardAttributesTo(step.onFail, operationId),
+		);
+		if (!coversSibling) return false;
+	}
+	return false;
+}
+
+/** How many uncovered probes the stale-serve message names before eliding. */
+const STALE_SERVE_MESSAGE_PROBE_LIMIT = 8;
+
+/**
+ * Health-check cases the platform monitor cannot execute, and stale-if-error
+ * serves no probe can see.
+ *
+ * The monitor runs a case's SERIALIZED `scenario` and nothing else — a closure
+ * cannot cross the registry's serialization boundary. A case carrying only
+ * `assertions` is still published as a probe, but the registry projects it as
+ * `legacy_function_assertions_not_serializable` and the monitor answers
+ * `unknown` / `monitoring_unavailable` for it forever: the operation reads as
+ * monitored on the status page while nothing is checked.
+ *
+ * A provider that reads its upstream through `ctx.cache.getOrSet(..., {
+ * staleIfErrorMs })` answers an upstream outage with HTTP 200 and a
+ * schema-valid body for the whole stale window, so every clause over
+ * `status_code` and `data` passes and the probe rolls up `ok` through the
+ * outage. `served_stale_cache` on the operation step result is the only operand
+ * that separates that from a live read.
+ *
+ * Both are warnings while the fleet migrates; they become errors once no
+ * repository carries an unmonitored case.
+ */
+function lintHealthCheckMonitorability(provider: {
+	id?: string;
+	providerSourceFiles?: Record<string, string>;
+	operations?: Record<string, { handler?: unknown; source?: string; healthCheck?: unknown }>;
+}): LintDiagnostic[] {
+	const diagnostics: LintDiagnostic[] = [];
+	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
+	// Freshness is judged per CASE. Operation-level bookkeeping would let one
+	// guarded case silence its unguarded siblings, which still report `ok`
+	// through a stale serve — the same fail-open this rule exists to close.
+	const uncoveredByOperation = new Map<string, string[]>();
+
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const cases = readHealthCheckCases(operation.healthCheck);
+		const unmonitored: string[] = [];
+		for (const [caseIndex, healthCase] of cases.entries()) {
+			const caseLabel =
+				typeof healthCase.name === "string" && healthCase.name.length > 0
+					? `"${healthCase.name}"`
+					: `[${caseIndex}]`;
+			if (healthCase.scenario === undefined) {
+				unmonitored.push(caseLabel);
+			}
+			if (!scenarioChecksFreshness(healthCase.scenario, operationKey)) {
+				const uncovered = uncoveredByOperation.get(operationKey) ?? [];
+				uncovered.push(`${operationKey} ${caseLabel}`);
+				uncoveredByOperation.set(operationKey, uncovered);
+			}
+		}
+		if (unmonitored.length > 0) {
+			diagnostics.push({
+				rule: "health-check-assertions-not-monitored",
+				level: "warn",
+				field: `operations.${operationKey}.healthCheck.cases`,
+				message: `${providerLabel} operation "${operationKey}" health-check ${unmonitored.length === 1 ? "case" : "cases"} ${unmonitored.join(", ")} declare assertions without a scenario. The platform health monitor executes only a case's serialized scenario, so this operation publishes a probe whose outcome is permanently unknown/monitoring_unavailable — it reads as monitored while nothing is checked. Express the checks as scenario: defineHealthScenario({ ... }).`,
+			});
+		}
+	}
+
+	if (uncoveredByOperation.size === 0) return diagnostics;
+
+	// Attribution. A handler that carries the cache call in its OWN source names
+	// exactly the operation that serves stale. A file does not: the linter cannot
+	// follow the call graph, and it cannot reliably tell a handler's own file
+	// from a shared helper either — `getOperationSource` returns the runtime's
+	// `handler.toString()`, which type erasure and reformatting make textually
+	// unequal to the TypeScript on disk. So any file-level evidence degrades the
+	// verdict to "somewhere in this provider", and the message says so instead of
+	// implying every listed probe reads through that cache.
+	const sources = new Set<string>();
+	const operationsServingStale = new Set<string>();
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		if (servesStaleIfError(getOperationSource(operation), `${operationKey}.ts`)) {
+			sources.add(`operations.${operationKey} handler`);
+			operationsServingStale.add(operationKey);
+		}
+	}
+	let unattributed = false;
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
+		if (!isServingProviderSourcePath(filePath) || !servesStaleIfError(source, filePath)) continue;
+		sources.add(filePath);
+		unattributed = true;
+	}
+	if (sources.size === 0) return diagnostics;
+
+	const attributable = !unattributed;
+	const uncovered = [...uncoveredByOperation]
+		.filter(([operationKey]) => !attributable || operationsServingStale.has(operationKey))
+		.flatMap(([, probes]) => probes);
+	if (uncovered.length === 0) return diagnostics;
+
+	const elided = uncovered.length - STALE_SERVE_MESSAGE_PROBE_LIMIT;
+	const named = uncovered
+		.slice(0, STALE_SERVE_MESSAGE_PROBE_LIMIT)
+		.join(", ")
+		.concat(elided > 0 ? `, and ${elided} more` : "");
+	const caveat = attributable
+		? ""
+		: ` The cache call is in provider source the linter cannot attribute to one operation, so every uncovered probe is listed — skip any whose operation does not read through that cache.`;
+	diagnostics.push({
+		rule: "health-check-stale-serve-unguarded",
+		level: "warn",
+		field: "healthCheck",
+		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...sources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.${caveat}`,
+	});
+	return diagnostics;
+}
+
 export function lintOperation(op: {
 	descriptionKey?: string;
 	whenToUseKeys?: readonly string[];
@@ -2987,6 +3524,8 @@ export function lintProvider(
 				fixtures?: unknown;
 				handler?: unknown;
 				source?: string;
+				/** Read structurally by the health-check monitorability rules. */
+				healthCheck?: unknown;
 				errorCodes?: ReadonlyArray<{
 					code: string;
 					status?: number;
@@ -3029,6 +3568,7 @@ export function lintProviderWithInformation(
 		...lintLegacyChoiceUsage(provider),
 		...lintProviderMetaNarrowing(provider),
 		...lintHandleDeclarations(provider),
+		...lintHealthCheckMonitorability(provider),
 	];
 	// Runtime boundary rules (process.env, node:fs/net/child_process, raw
 	// fetch) also yield information entries for `@apifuse-allow` acknowledgements.
