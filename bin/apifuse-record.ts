@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 
 import {
 	createBypassProviderCache,
+	createCredentialContext,
 	createHttpClient,
 	createInProcessProviderEngine,
 	createOcrClientFromEnv,
@@ -27,6 +28,13 @@ import {
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
+import {
+	type LocalConnection,
+	LOCAL_CONNECTION_ID,
+	LOCAL_CONNECTION_SECRETS_ENV,
+	providerRequiresConnection,
+	resolveLocalConnection,
+} from "../src/cli/local-connection.js";
 import { createCliResolverRuntime } from "../src/cli/resolver-runtime.js";
 import { assertProcessEngineModeSupported } from "../src/runtime/engine-mode.js";
 import type { JsonValue } from "../src/contract-json.js";
@@ -71,6 +79,10 @@ type CliArgs = {
 	operation?: string;
 	params: string;
 	sanitize: boolean;
+	/** Repeated `--credential key=value`, in order. */
+	credentials: string[];
+	/** `--no-credential`: run without a connection even when auth declares one. */
+	noCredential: boolean;
 };
 
 type ProviderRuntime = ProviderDefinition;
@@ -94,7 +106,17 @@ Options:
   --append                 preserve the existing fixture and append this capture
   --sanitize               redact common token/header fields (default)
   --no-sanitize            disable common-field redaction (sensitiveParams are always redacted)
+  --credential <k>=<v>     credential the gateway would inject (repeatable)
+  --no-credential          record without a credential even when auth declares one
   --help, -h               show this help
+
+Credentials:
+  A provider whose auth.mode is not "none" reads a credential the gateway
+  resolves and injects at invocation time -- for "platform-managed" that is the
+  platform-owned key, which is not a provider secret and is not in the
+  checkout. Supply it with --credential, or with
+  ${LOCAL_CONNECTION_SECRETS_ENV}='{"<key>":"<value>"}'. The keys are the ones
+  the provider passes to ctx.credential.get(...).
 
 Example:
   apifuse record providers/korea-air-quality --operation realtime --params '{"stationName":"jongno"}'`;
@@ -111,10 +133,13 @@ export async function main() {
 		const operation = provider.operations[operationName];
 		const parsedParams = await parseParams(operation, args.params);
 
+		const connection = resolveRecordConnection(provider, args);
+
 		capture = createCaptureContext(
 			provider,
 			resolveOperationBaseUrl(provider, operationName),
 			args.sanitize,
+			connection,
 		);
 
 		console.log(`[apifuse record] Calling ${operationName} on ${provider.id}...`);
@@ -181,6 +206,41 @@ export async function main() {
 	}
 }
 
+/**
+ * The connection this run attaches, or a hard failure when the provider needs
+ * one and none is configured.
+ *
+ * Failing here rather than at the handler is the whole point. Before this, a
+ * platform-managed provider recorded with `credential: { mode: "none" }`, so
+ * `ctx.credential.get(...)` returned `undefined` and the run died on the
+ * provider's own `MISSING_SECRET` — indistinguishable, to the author, from an
+ * upstream outage or a bad key. It reported as a capability the recorder
+ * lacked only if you already knew to look.
+ */
+function resolveRecordConnection(
+	provider: ProviderRuntime,
+	args: CliArgs,
+): LocalConnection | undefined {
+	if (args.noCredential) {
+		if (providerRequiresConnection(provider)) {
+			console.warn(
+				`[apifuse record] --no-credential: recording ${provider.id} without the credential its auth.mode "${provider.auth?.mode}" declares.`,
+			);
+		}
+		return undefined;
+	}
+
+	const resolution = resolveLocalConnection(provider, {
+		overrides: args.credentials,
+	});
+	if (!resolution.ok)
+		throw new ProviderError(resolution.reason, {
+			code: "CREDENTIAL_UNAVAILABLE",
+			fix: "Supply the credential with --credential or the environment variable named above.",
+		});
+	return resolution.connection;
+}
+
 function normalizeArgs(argv: string[]): string[] {
 	return argv[0] === "record" ? argv.slice(1) : argv;
 }
@@ -191,6 +251,8 @@ function parseArgs(argv: string[]): CliArgs {
 	let params = "{}";
 	let sanitize = true;
 	let append = false;
+	const credentials: string[] = [];
+	let noCredential = false;
 
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
@@ -247,6 +309,26 @@ function parseArgs(argv: string[]): CliArgs {
 			continue;
 		}
 
+		if (arg === "--credential") {
+			const value = argv[index + 1];
+			if (!value) {
+				throw new Error("Missing value for --credential.");
+			}
+			credentials.push(value);
+			index += 1;
+			continue;
+		}
+
+		if (arg.startsWith("--credential=")) {
+			credentials.push(arg.slice("--credential=".length));
+			continue;
+		}
+
+		if (arg === "--no-credential") {
+			noCredential = true;
+			continue;
+		}
+
 		if (arg.startsWith("-")) {
 			throw new Error(`Unknown option: ${arg}`);
 		}
@@ -259,7 +341,15 @@ function parseArgs(argv: string[]): CliArgs {
 		throw new Error(`Unexpected argument: ${arg}`);
 	}
 
-	return { append, providerPath, operation, params, sanitize };
+	return {
+		append,
+		providerPath,
+		operation,
+		params,
+		sanitize,
+		credentials,
+		noCredential,
+	};
 }
 
 /**
@@ -459,6 +549,7 @@ export function createCaptureContext(
 	provider: ProviderRuntime,
 	baseUrl: string,
 	sanitize: boolean,
+	connection?: LocalConnection,
 ) {
 	let nextCaptureOrder = 0;
 	let nextStreamOrdinal = 0;
@@ -477,6 +568,25 @@ export function createCaptureContext(
 		provider,
 		cache,
 	);
+	// The injected credential is the most sensitive value in the run, and the
+	// recorder prints provider errors and writes fixtures. Seed its VALUES into
+	// the redaction set before anything can execute, so an upstream error that
+	// echoes the key, and any fixture that captured it, are redacted by the same
+	// machinery that already covers declared query secrets.
+	//
+	// Values only, never the key names: `sensitiveParamNames` means "declared
+	// query-key position", and `redactFixture` deliberately skips common-field
+	// sanitization for a key that appears in it. Seeding `access_token` there
+	// would therefore write a *newly issued* upstream `access_token` — which
+	// does not equal the injected value — to raw.json in plaintext. A credential
+	// key that really is a query parameter is added to the name set by
+	// `captureSensitiveRequestValues` when the provider sends it, which is the
+	// only place that claim is true.
+	for (const value of Object.values(connection?.secrets ?? {})) {
+		if (value.length > 0) sensitiveParamValues.add(value);
+	}
+	registerSensitiveValues([...sensitiveParamValues]);
+
 	const captureSensitiveParams = (url: string, options?: SensitiveRequestOptions) => {
 		try {
 			captureSensitiveRequestValues(url, options, sensitiveParamNames, sensitiveParamValues);
@@ -550,18 +660,21 @@ export function createCaptureContext(
 		provider.secrets?.map((secret) => secret.name) ?? [],
 	);
 	const env = { get: (key: string) => readDiagnosticEnv(key, providerEnvironment) };
-	const credential = {
-		mode: "none" as const,
-		get: () => undefined,
-		getAll: () => ({}),
-		getAccessToken: () => undefined,
-		getScopes: () => [],
-	};
+	// Built exactly the way `serve` builds it from a gateway-supplied
+	// `request.connection`, so the provider takes its production branch rather
+	// than the always-undefined one a stub credential forces.
+	const credential = createCredentialContext({
+		...(provider.credential?.keys ? { allowedKeys: provider.credential.keys } : {}),
+		...(connection ? { mode: connection.mode, values: connection.secrets } : {}),
+	});
 	const state = createMemoryProviderRuntimeState();
 	const candidates: ProviderEngineBindingCandidates = {
 		env,
 		credential,
-		request: { headers: {}, connectionId: "local-record" },
+		request: {
+			headers: {},
+			connectionId: connection ? LOCAL_CONNECTION_ID : "local-record",
+		},
 		http,
 		cache,
 		state,
@@ -595,7 +708,10 @@ export function createCaptureContext(
 		resolver,
 		handle: createHandleContext({
 			providerId: provider.id,
-			request: { headers: {}, connectionId: "local-record" },
+			request: {
+				headers: {},
+				connectionId: connection ? LOCAL_CONNECTION_ID : "local-record",
+			},
 			state,
 		}),
 	};
