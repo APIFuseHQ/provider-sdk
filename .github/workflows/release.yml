@@ -88,6 +88,8 @@ jobs:
         continue-on-error: true
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          DOPPLER_PROJECT: apifuse
+          DOPPLER_CONFIG: prd
           RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
@@ -105,14 +107,48 @@ jobs:
           else
             DIST_TAG="latest"
           fi
-          payload=$(curl -fsS \
-            -H "Authorization: Bearer ${DOPPLER_TOKEN}" \
-            -H "Accept: application/json" \
-            "https://api.doppler.com/v3/configs/config/secrets/download?project=apifuse&config=prd&format=json&include_dynamic_secrets=false")
-          app_id=$(jq -er '.APIFUSE__BOUNTY__GITHUB_APP_ID // empty' <<<"${payload}")
-          private_key=$(jq -er '.APIFUSE__BOUNTY__GITHUB_APP_PRIVATE_KEY // empty' <<<"${payload}")
+          # Per-key reads (rule "reads are per key", apifuse wave5 R4-02): one GET
+          # per secret NAME; the whole config is never downloaded into the job.
+          # Byte-for-byte the monorepo's canonical inline reader
+          # (apifuse/.github/workflows/gitops-write.yml, provider-sdk-auto-bump.yml)
+          # minus its monorepo-only rollback hint. Measured Doppler contract
+          # (2026-09-12): an absent NAME is HTTP 200 with null raw/computed, which
+          # yields an empty value and trips the non-empty guard below; any non-2xx
+          # (404 config/project not found, 400 "does not have access" from a
+          # config-scoped service token, 401/403, 5xx) means the STORE is unreadable
+          # and fails here naming the config — never "key absent". The one-time
+          # preflight also refuses a branch config (root=false inherits every root
+          # secret, so a split config would be a silent no-op).
+          doppler_get() {
+            local response
+            response="$(curl -sS --max-time 20 -w $'\n%{http_code}' -H "Authorization: Bearer ${DOPPLER_TOKEN}" -H "Accept: application/json" "$1")" || response=$'\n000'
+            DOPPLER_HTTP_CODE="${response##*$'\n'}"
+            DOPPLER_HTTP_BODY="${response%$'\n'*}"
+          }
+          doppler_config_preflight() {
+            doppler_get "https://api.doppler.com/v3/configs/config?project=${DOPPLER_PROJECT}&config=${DOPPLER_CONFIG}"
+            if [ "${DOPPLER_HTTP_CODE}" != "200" ]; then
+              echo "::error::Doppler config ${DOPPLER_PROJECT}/${DOPPLER_CONFIG} is not readable with this token (HTTP ${DOPPLER_HTTP_CODE}); check the DOPPLER_TOKEN service token access." >&2
+              return 1
+            fi
+            if [ "$(printf '%s' "${DOPPLER_HTTP_BODY}" | jq -r '.config.root')" != "true" ]; then
+              echo "::error::Doppler config ${DOPPLER_PROJECT}/${DOPPLER_CONFIG} is a branch config (root=false); it inherits every root secret, so the split would be a silent no-op. Use a root config in its own environment." >&2
+              return 1
+            fi
+          }
+          read_secret() {
+            doppler_get "https://api.doppler.com/v3/configs/config/secret?project=${DOPPLER_PROJECT}&config=${DOPPLER_CONFIG}&name=$1"
+            if [ "${DOPPLER_HTTP_CODE}" != "200" ]; then
+              echo "::error::Doppler read of $1 from ${DOPPLER_PROJECT}/${DOPPLER_CONFIG} failed (HTTP ${DOPPLER_HTTP_CODE}); an absent key would be HTTP 200 with a null value, so this is an unreadable store, not a missing key." >&2
+              return 1
+            fi
+            printf '%s' "${DOPPLER_HTTP_BODY}" | jq -r '.value.computed // .value.raw // empty'
+          }
+          doppler_config_preflight
+          app_id=$(read_secret APIFUSE__BOUNTY__GITHUB_APP_ID)
+          private_key=$(read_secret APIFUSE__BOUNTY__GITHUB_APP_PRIVATE_KEY)
           if [ -z "${app_id}" ] || [ -z "${private_key}" ]; then
-            echo "::warning::GitHub App credentials missing in Doppler; skipping dispatch."
+            echo "::warning::APIFUSE__BOUNTY__GITHUB_APP_ID and APIFUSE__BOUNTY__GITHUB_APP_PRIVATE_KEY are missing in Doppler ${DOPPLER_PROJECT}/${DOPPLER_CONFIG}; skipping dispatch."
             exit 1
           fi
           # ::add-mask:: is a line-oriented workflow command. Feeding it a

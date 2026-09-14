@@ -27,6 +27,14 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v6
+      - name: Forbid whole-config Doppler downloads in workflows
+        # Reads are per key (apifuse wave5 R4-02): the monorepo's lint does not
+        # cover this repo, so the one rule lives here as a grep.
+        run: |
+          if git grep -n -E 'secrets/downloa[d]|doppler secrets downloa[d]|doppler secrets --jso[n]' -- .github; then
+            echo "::error::Whole-config Doppler downloads are forbidden; read one NAME at a time via /v3/configs/config/secret."
+            exit 1
+          fi
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
