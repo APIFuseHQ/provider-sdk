@@ -12,6 +12,11 @@ import type TS from "typescript";
 import { z } from "zod";
 
 import packageJson from "../package.json";
+import {
+	LOCAL_CONNECTION_SECRETS_ENV,
+	providerRequiresConnection,
+	resolveLocalConnection,
+} from "../src/cli/local-connection.js";
 import { formatPromptAssetIssues, verifyPromptAssets } from "../src/cli/prompt-assets.js";
 import {
 	loadProviderLocaleCatalogs,
@@ -125,6 +130,25 @@ export type SmokeResult = {
 	healthOk: boolean;
 	bootError?: string;
 	operations: SmokeOperationOutcome[];
+	/**
+	 * Whether the provider's declared auth mode needs a gateway-injected
+	 * credential, and whether this run had one. Recorded so a provider that
+	 * could not be exercised at all says so, instead of scoring as "ran, but
+	 * saw no live success" — the two are not the same evidence.
+	 */
+	credential?: {
+		required: boolean;
+		supplied: boolean;
+		mode: string;
+		/**
+		 * Why the local credential could not be resolved — a malformed
+		 * `APIFUSE__LOCAL_CONNECTION__SECRETS`, a non-string value, a bad
+		 * `--credential`. Distinct from "not configured": a misconfiguration
+		 * reported as an absence sends the author looking for a key they already
+		 * set.
+		 */
+		error?: string;
+	};
 };
 
 type SourceFinding = {
@@ -156,7 +180,9 @@ const HELP_TEXT = `Usage: apifuse submit-check [path] [--tier bronze|silver|gold
 Alias: apifuse bounty-check [path]
 Default: apifuse submit-check .
 
-Smoke: --smoke boots the provider dev server, checks /health, and POSTs every operation fixture. APIFUSE__PROVIDER__* env vars enable live upstream calls; without them, structured provider errors can still verify runtime routing. --smoke-note is deprecated and ignored for scoring.`;
+Smoke: --smoke boots the provider dev server, checks /health, and POSTs every operation fixture. APIFUSE__PROVIDER__* env vars enable live upstream calls; without them, structured provider errors can still verify runtime routing. --smoke-note is deprecated and ignored for scoring.
+
+A provider whose auth.mode is not "none" reads a credential the gateway injects at invocation time; smoke attaches the same connection from ${LOCAL_CONNECTION_SECRETS_ENV}='{"<key>":"<value>"}', keyed as the provider reads them through ctx.credential.get(...). Without it no operation reaches the upstream, and the smoke check says so rather than scoring it as a missing live success.`;
 
 export async function main() {
 	try {
@@ -1007,11 +1033,9 @@ function countAsAssertions(providerRoot: string): {
 
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const content = readFileSync(filePath, "utf8");
-		const lines = maskCommentsAndStrings(
-			content,
-			toRelativeProviderPath(providerRoot, filePath),
-			{ blankPropertyKeys: true },
-		).split(/\r?\n/);
+		const lines = maskCommentsAndStrings(content, toRelativeProviderPath(providerRoot, filePath), {
+			blankPropertyKeys: true,
+		}).split(/\r?\n/);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
 			if (
@@ -2017,18 +2041,13 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	);
 	if (opaqueSpread !== undefined) {
 		const spreadLine = offsetToLine(source, opaqueSpread.getStart(sourceFile));
-		return escapeHatchResult(
-			providerRoot,
-			ruleId,
-			[{ file: indexRelPath, line: spreadLine }],
-			{
-				blockerMessage:
-					"The defineProvider implementation uses a non-enumerable spread that could override operations.",
-				remediation:
-					"Declare operations directly with a static object literal. Implementation spreads must be inline static object literals so the provider-registry AST gate can enumerate every property name.",
-				passMessage: "defineProvider declares operations as a static object literal.",
-			},
-		);
+		return escapeHatchResult(providerRoot, ruleId, [{ file: indexRelPath, line: spreadLine }], {
+			blockerMessage:
+				"The defineProvider implementation uses a non-enumerable spread that could override operations.",
+			remediation:
+				"Declare operations directly with a static object literal. Implementation spreads must be inline static object literals so the provider-registry AST gate can enumerate every property name.",
+			passMessage: "defineProvider declares operations as a static object literal.",
+		});
 	}
 
 	// Determine the effective initializer expression to classify. The alias may
@@ -2079,11 +2098,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			});
 
 			const declRe = new RegExp(aliasDecl.source, "g");
-			for (
-				let m = declRe.exec(maskedFileSource);
-				m !== null;
-				m = declRe.exec(maskedFileSource)
-			) {
+			for (let m = declRe.exec(maskedFileSource); m !== null; m = declRe.exec(maskedFileSource)) {
 				const valueStart = m.index + m[0].length;
 				const expr = unwrapParens(balancedExpressionSlice(fileSource, valueStart, relPath));
 				const isFactory =
@@ -2133,9 +2148,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			const maskedIndexSource = maskCommentsAndStrings(source, indexRelPath, {
 				blankPropertyKeys: true,
 			});
-			const importMatch = new RegExp(
-				`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`,
-			).exec(maskedIndexSource);
+			const importMatch = new RegExp(`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`).exec(
+				maskedIndexSource,
+			);
 			if (importMatch) {
 				const raw = `${aliasName}(`;
 				effective = { raw, masked: raw };
@@ -3303,12 +3318,7 @@ function findVendorKeyLeakFindings(providerRoot: string): SourceFinding[] {
 			if (!zObjectAppearsPublicOutput(sourceFile, zObject, relPath)) {
 				continue;
 			}
-			for (const keyFinding of vendorKeyFindingsForObject(
-				source,
-				sourceFile,
-				zObject,
-				bindings,
-			)) {
+			for (const keyFinding of vendorKeyFindingsForObject(source, sourceFile, zObject, bindings)) {
 				const key = `${relPath}:${keyFinding.line}:${keyFinding.key}`;
 				if (!seen.has(key)) {
 					seen.add(key);
@@ -4088,11 +4098,7 @@ export function maskCommentsAndStrings(
 	return masked;
 }
 
-function computeMaskedSource(
-	source: string,
-	fileName: string,
-	blankPropertyKeys: boolean,
-): string {
+function computeMaskedSource(source: string, fileName: string, blankPropertyKeys: boolean): string {
 	const transpiled = ts.transpileModule(source, {
 		// Declaration files trigger an internal TypeScript Debug Failure when
 		// passed to transpileModule. Parsing is all we need here, so always use a
@@ -4125,10 +4131,7 @@ function computeMaskedSource(
 			// by LF, CRLF, or lone CR) and every line terminator, so masked
 			// string bodies remain syntactically valid and the mask output can
 			// be re-parsed (mask(mask(x)) === mask(x)).
-			if (
-				source[index] === "\\" &&
-				(source[index + 1] === "\n" || source[index + 1] === "\r")
-			) {
+			if (source[index] === "\\" && (source[index + 1] === "\n" || source[index + 1] === "\r")) {
 				continue;
 			}
 			if (chars[index] !== "\n" && chars[index] !== "\r") chars[index] = " ";
@@ -4150,8 +4153,7 @@ function computeMaskedSource(
 			// Preserve quoted property keys ("response": ...) by default so range/key
 			// scanners can still match them. Line scanners opt into blanking key bodies
 			// as well, preventing key text from looking like executable source.
-			const isQuotedPropertyKey =
-				ts.isPropertyAssignment(node.parent) && node.parent.name === node;
+			const isQuotedPropertyKey = ts.isPropertyAssignment(node.parent) && node.parent.name === node;
 			if (blankPropertyKeys || !isQuotedPropertyKey) {
 				maskRange(start + 1, node.end - 1);
 			} else {
@@ -5026,7 +5028,7 @@ function isAstNode(value: unknown): value is acorn.AnyNode {
 	);
 }
 
-function scoreSmoke(
+export function scoreSmoke(
 	smokeResult: SmokeResult | undefined,
 	smokeNote: string | undefined,
 ): SubmitCheck {
@@ -5048,8 +5050,22 @@ function scoreSmoke(
 		};
 	}
 
+	const credential = smokeResult.credential;
+	// An invalid configuration is reported even for a provider that needs no
+	// credential: the operator set something, and silence would read as accepted.
+	const credentialEvidence =
+		credential?.required === true || credential?.error !== undefined
+			? [
+					credential.supplied
+						? `credential: supplied for auth.mode "${credential.mode}"`
+						: credential.error
+							? `credential: CONFIGURED BUT INVALID — ${credential.error}`
+							: `credential: NOT supplied; auth.mode "${credential.mode}" needs one the gateway injects at invocation time, so every credentialed operation failed before reaching the upstream`,
+				]
+			: [];
 	const evidence = [
 		`/health: ${smokeResult.healthOk ? "ok" : "failed"}`,
+		...credentialEvidence,
 		...smokeResult.operations.map(
 			(outcome) =>
 				`${outcome.operationId}: ${outcome.status}${outcome.httpStatus ? ` HTTP ${outcome.httpStatus}` : ""} - ${outcome.message}`,
@@ -5069,6 +5085,31 @@ function scoreSmoke(
 			remediation:
 				"Fix the dev server boot, `/health`, or incoherent operation responses, then rerun `bun run submit-check -- --smoke`.",
 			evidence: smokeResult.bootError ? [`boot: ${smokeResult.bootError}`, ...evidence] : evidence,
+			details: smokeResult,
+		};
+	}
+
+	// Checked BEFORE the success branch. A provider that needs a
+	// gateway-injected credential and did not get one never exercised its
+	// credentialed path, so a schema-valid success from some other operation --
+	// an unauthenticated one, or a fixture-shaped response -- must not buy full
+	// smoke points. Saying "verified" would credit the run with evidence it does
+	// not have.
+	if (credential?.required === true && !credential.supplied) {
+		return {
+			id: "local-smoke",
+			category: "smoke",
+			level: "warn",
+			status: "warn",
+			points: 7,
+			maxPoints: CATEGORY_MAX_POINTS.smoke,
+			message: credential.error
+				? `Runtime path was verified, but the configured local credential could not be used, so the provider's credentialed operations never reached the upstream.`
+				: `Runtime path was verified, but auth.mode "${credential.mode}" needs a credential this run did not have, so the provider's credentialed operations never reached the upstream.`,
+			remediation: credential.error
+				? `Fix the local credential configuration and rerun \`bun run submit-check -- --smoke\`: ${credential.error}`
+				: `Supply the credential the gateway injects and rerun \`bun run submit-check -- --smoke\`: ${LOCAL_CONNECTION_SECRETS_ENV}='{"<key>":"<value>"}', where the keys are the ones the provider passes to ctx.credential.get(...). For platform-managed providers that value is the platform-owned key an operator holds; it is not in the checkout.`,
+			evidence,
 			details: smokeResult,
 		};
 	}
@@ -5143,6 +5184,12 @@ export async function runSubmitCheckSmoke(
 				operations: [],
 			};
 		}
+		// The gateway attaches a resolved credential to every invocation of a
+		// provider whose auth.mode is not "none". Smoke POSTed an envelope with
+		// no `connection` at all, so every platform-managed provider answered
+		// MISSING_SECRET and scored as "runtime verified, no live success" —
+		// a capability gap wearing the costume of an ordinary upstream miss.
+		const connection = resolveLocalConnection(loadedProvider);
 		const operations: SmokeOperationOutcome[] = [];
 		for (const [operationId, operation] of Object.entries(loadedProvider.operations)) {
 			operations.push(
@@ -5150,10 +5197,21 @@ export async function runSubmitCheckSmoke(
 					requestId: `req_submit_check_smoke_${operationId}`,
 					input: operation.fixtures?.request ?? {},
 					headers: {},
+					...(connection.ok && connection.connection ? { connection: connection.connection } : {}),
 				}),
 			);
 		}
-		return { measured: true, healthOk: true, operations };
+		return {
+			measured: true,
+			healthOk: true,
+			operations,
+			credential: {
+				required: providerRequiresConnection(loadedProvider),
+				supplied: connection.ok && connection.connection !== undefined,
+				mode: loadedProvider.auth?.mode ?? "none",
+				...(connection.ok ? {} : { error: connection.reason }),
+			},
+		};
 	} finally {
 		await stopSmokeServer(server);
 	}
@@ -5994,8 +6052,7 @@ function sanitizeLoadErrorText(value: string, providerRoot: string): string {
 			const pathCandidate = rawPath.replace(/[),.;:!?]+$/u, "");
 			const relativePath = relative(providerRoot, resolve(pathCandidate));
 			const insideProvider =
-				relativePath === "" ||
-				(relativePath !== ".." && !relativePath.startsWith(`..${sep}`));
+				relativePath === "" || (relativePath !== ".." && !relativePath.startsWith(`..${sep}`));
 			return `${prefix}${insideProvider ? relativePath || "." : "[REDACTED_PATH]"}`;
 		},
 	);
