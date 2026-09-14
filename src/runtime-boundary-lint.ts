@@ -44,9 +44,13 @@
  */
 
 import type { LintDiagnostic, ProviderLintInformation, ProviderLintResult } from "./lint.js";
-import { getTypeScript } from "./typescript-module.js";
+import {
+	getTypeScript,
+	isTypeScriptCompilerModule,
+	type TypeScriptCompilerModuleLike,
+	type TypeScriptModule,
+} from "./typescript-module.js";
 
-type TypeScriptModule = typeof import("typescript");
 type TsNode = import("typescript").Node;
 type TsSourceFile = import("typescript").SourceFile;
 
@@ -657,6 +661,19 @@ export function lintRuntimeBoundary(
 	return { diagnostics, information };
 }
 
+export type LintRuntimeBoundarySourcesOptions = {
+	/**
+	 * A loaded TypeScript compiler API module to parse with (`typescript` 6.x
+	 * or `@typescript/typescript6`). When omitted the SDK resolves one from its
+	 * own install location, trying `typescript` first and falling back to
+	 * `@typescript/typescript6` when `typescript` is the 7.x native shell
+	 * without `createSourceFile`. A caller whose dependency tree pins its own
+	 * compiler module (the APIFuse monorepo contract check) passes it here so
+	 * the parse does not depend on what hoists next to the SDK.
+	 */
+	typescript?: TypeScriptCompilerModuleLike;
+};
+
 /**
  * Lint provider runtime source files for the runtime boundary rules without a
  * provider definition: `files` maps provider-root-relative paths to source
@@ -667,12 +684,20 @@ export function lintRuntimeBoundary(
  * `field: "sourceFiles.<path>"`; `@apifuse-allow` acknowledgements come back
  * as `information`.
  *
- * Parses with the `typescript` package resolved from the installed SDK, so the
- * caller's dependency tree must provide it (the SDK lists it as a
- * devDependency only). This is the entry point the platform contract check
- * uses to apply the rules with the monorepo's SDK pin instead of each
- * provider's own pin.
+ * Parses with `options.typescript` when given, otherwise with the compiler
+ * module resolved from the installed SDK (see `getTypeScript`). This is the
+ * entry point the platform contract check uses to apply the rules with the
+ * monorepo's SDK pin instead of each provider's own pin.
  */
-export function lintRuntimeBoundarySources(files: Record<string, string>): ProviderLintResult {
-	return lintRuntimeBoundary(getTypeScript(), { providerSourceFiles: files }, () => "");
+export function lintRuntimeBoundarySources(
+	files: Record<string, string>,
+	options: LintRuntimeBoundarySourcesOptions = {},
+): ProviderLintResult {
+	const ts = options.typescript ?? getTypeScript();
+	if (!isTypeScriptCompilerModule(ts)) {
+		throw new TypeError(
+			"lintRuntimeBoundarySources: options.typescript must be a loaded TypeScript compiler API module (typescript 6.x or @typescript/typescript6) exposing createSourceFile.",
+		);
+	}
+	return lintRuntimeBoundary(ts, { providerSourceFiles: files }, () => "");
 }
