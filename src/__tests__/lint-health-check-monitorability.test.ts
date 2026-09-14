@@ -6,12 +6,25 @@ import { type LintDiagnostic, lintProvider } from "../lint.js";
 import { describeKey } from "../schema.js";
 
 const OPERATION_KEY = "listItems";
+const UNMONITORED = "health-check-assertions-not-monitored";
+const UNGUARDED_STALE = "health-check-stale-serve-unguarded";
+const STALE_CLIENT =
+	"await ctx.cache.getOrSet(key, load, { ttlMs: 60_000, staleIfErrorMs: 300_000 });";
 
 function described<TSchema extends z.ZodType>(schema: TSchema, key: string): TSchema {
 	return describeKey(schema, key);
 }
 
-function operation(healthCheck?: unknown, source?: string) {
+type OperationFixture = {
+	descriptionKey: string;
+	input: z.ZodType;
+	output: z.ZodType;
+	fixtures: { request: unknown; response: unknown };
+	source?: string;
+	healthCheck?: unknown;
+};
+
+function operation(healthCheck?: unknown, source?: string): OperationFixture {
 	return {
 		descriptionKey: `operations.${OPERATION_KEY}.description`,
 		input: described(z.object({}), `operations.${OPERATION_KEY}.input.description`),
@@ -22,71 +35,112 @@ function operation(healthCheck?: unknown, source?: string) {
 	};
 }
 
-function lint(
-	healthCheck?: unknown,
-	extra: { providerSourceFiles?: Record<string, string>; operationSource?: string } = {},
+function lintFleet(
+	operations: Record<string, OperationFixture>,
+	providerSourceFiles?: Record<string, string>,
 ): LintDiagnostic[] {
 	return lintProvider({
 		id: "demo",
 		allowedHosts: ["example.com"],
 		reviewed: "2026-09-14",
-		providerSourceFiles: extra.providerSourceFiles,
-		operations: { [OPERATION_KEY]: operation(healthCheck, extra.operationSource) },
+		providerSourceFiles,
+		operations,
 	});
+}
+
+function lint(
+	healthCheck?: unknown,
+	extra: { providerSourceFiles?: Record<string, string>; operationSource?: string } = {},
+): LintDiagnostic[] {
+	return lintFleet(
+		{ [OPERATION_KEY]: operation(healthCheck, extra.operationSource) },
+		extra.providerSourceFiles,
+	);
 }
 
 function rules(diagnostics: LintDiagnostic[], rule: string): LintDiagnostic[] {
 	return diagnostics.filter((diagnostic) => diagnostic.rule === rule);
 }
 
-const UNMONITORED = "health-check-assertions-not-monitored";
-const UNGUARDED_STALE = "health-check-stale-serve-unguarded";
-
-/** Minimal scenario; only whether a step names the operand matters here. */
-function scenario(steps: [HealthStep, ...HealthStep[]]): HealthScenario {
+function scenario(
+	steps: [HealthStep, ...HealthStep[]],
+	operationId = OPERATION_KEY,
+): HealthScenario {
 	return {
 		scenarioVersion: 2,
-		id: `${OPERATION_KEY}.probe`,
-		display: { titleKey: `health.operations.${OPERATION_KEY}.probe.title` },
+		id: `${operationId}.probe`,
+		display: { titleKey: `health.operations.${operationId}.probe.title` },
 		schedule: { kind: "interval", intervalMs: 3_600_000, jitterMs: 0 },
 		timeoutMs: 15_000,
-		coversOperations: [OPERATION_KEY],
+		coversOperations: [operationId],
 		credentialRefs: [],
 		steps,
 	};
 }
 
-const READ_STEP: HealthStep = {
-	id: "read",
-	result: "response",
-	kind: "operation",
-	operationId: OPERATION_KEY,
-	inputTemplate: {},
-};
+/**
+ * The operation step a probe is about. Its `operationId` and `result` both
+ * matter: the lint only accepts a freshness reference bound to the result of a
+ * step that invoked the case's own operation.
+ */
+function readStep(operationId: string): HealthStep {
+	return {
+		id: `read-${operationId}`,
+		result: `${operationId}-response`,
+		kind: "operation",
+		operationId,
+		inputTemplate: {},
+	};
+}
 
 /** The shape provider-sdk#331 documents and apifuse-provider-han-river#24 ships. */
-const FRESHNESS_GUARD: HealthStep = {
-	id: "guard-freshness",
-	result: "freshness-guarded",
-	kind: "guard",
-	condition: {
-		kind: "predicate",
-		operator: "not_equals",
-		actual: { ref: { namespace: "steps", binding: "response", path: ["served_stale_cache"] } },
-		expected: true,
-	},
-	onFail: {
-		attribute: [
-			{
-				operationId: OPERATION_KEY,
-				status: "degraded",
-				reasonCode: "expected_absence",
-				reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
+function freshnessGuard(operationId: string, binding = `${operationId}-response`): HealthStep {
+	return {
+		id: `guard-${operationId}-freshness`,
+		result: `${operationId}-freshness-guarded`,
+		kind: "guard",
+		condition: {
+			kind: "predicate",
+			operator: "not_equals",
+			actual: { ref: { namespace: "steps", binding, path: ["served_stale_cache"] } },
+			expected: true,
+		},
+		onFail: {
+			attribute: [
+				{
+					operationId,
+					status: "degraded",
+					reasonCode: "expected_absence",
+					reasonKey: `health.operations.${operationId}.probe.servedStaleCache`,
+				},
+			],
+			stop: "scenario",
+		},
+	};
+}
+
+function rowsGuard(operationId: string, reasonKey: string): HealthStep {
+	return {
+		id: `guard-${operationId}-rows`,
+		result: `${operationId}-rows-guarded`,
+		kind: "guard",
+		condition: {
+			kind: "predicate",
+			operator: "array_length_gte",
+			actual: {
+				ref: { namespace: "steps", binding: `${operationId}-response`, path: ["data", "items"] },
 			},
-		],
-		stop: "scenario",
-	},
-};
+			expected: 1,
+		},
+		onFail: {
+			attribute: [{ operationId, status: "degraded", reasonCode: "expected_absence", reasonKey }],
+			stop: "scenario",
+		},
+	};
+}
+
+const READ_STEP = readStep(OPERATION_KEY);
+const FRESHNESS_GUARD = freshnessGuard(OPERATION_KEY);
 
 describe("health-check monitorability lint", () => {
 	it("warns that an assertions-only case is published but never executed", () => {
@@ -138,12 +192,7 @@ describe("health-check monitorability lint", () => {
 		const diagnostics = rules(
 			lint(
 				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
-				{
-					providerSourceFiles: {
-						"upstream/client.ts":
-							"await ctx.cache.getOrSet(key, load, { ttlMs: 60_000, staleIfErrorMs: 300_000 });",
-					},
-				},
+				{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 			),
 			UNGUARDED_STALE,
 		);
@@ -155,51 +204,47 @@ describe("health-check monitorability lint", () => {
 		expect(diagnostics[0]?.message).toContain("expected_absence");
 	});
 
-	it("clears once any scenario guards served_stale_cache", () => {
+	it("clears once the case guards served_stale_cache", () => {
 		expect(
 			rules(
 				lint(
 					{
 						interval: "1h",
-						cases: [
-							{
-								name: "dense",
-								input: {},
-								scenario: scenario([READ_STEP, FRESHNESS_GUARD]),
-							},
-						],
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP, FRESHNESS_GUARD]) }],
 					},
-					{
-						providerSourceFiles: {
-							"upstream/client.ts": "{ ttlMs: 60_000, staleIfErrorMs: 300_000 }",
-						},
-					},
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 				),
 				UNGUARDED_STALE,
 			),
 		).toEqual([]);
 	});
 
-	it("keeps warning about the operations a sibling guard does not cover", () => {
-		const guarded = operation(
-			{
-				interval: "1h",
-				cases: [{ name: "guarded", input: {}, scenario: scenario([READ_STEP, FRESHNESS_GUARD]) }],
-			},
-			undefined,
-		);
-		const bare = operation(
-			{ interval: "1h", cases: [{ name: "bare", input: {}, scenario: scenario([READ_STEP]) }] },
-			undefined,
-		);
+	it("keeps warning about the operation a sibling operation's guard does not cover", () => {
 		const diagnostics = rules(
-			lintProvider({
-				id: "demo",
-				allowedHosts: ["example.com"],
-				reviewed: "2026-09-14",
-				providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" },
-				operations: { guardedOp: guarded, bareOp: bare },
-			}),
+			lintFleet(
+				{
+					guardedOp: operation({
+						interval: "1h",
+						cases: [
+							{
+								name: "guarded",
+								input: {},
+								scenario: scenario(
+									[readStep("guardedOp"), freshnessGuard("guardedOp")],
+									"guardedOp",
+								),
+							},
+						],
+					}),
+					bareOp: operation({
+						interval: "1h",
+						cases: [
+							{ name: "bare", input: {}, scenario: scenario([readStep("bareOp")], "bareOp") },
+						],
+					}),
+				},
+				{ "upstream/client.ts": STALE_CLIENT },
+			),
 			UNGUARDED_STALE,
 		);
 
@@ -218,7 +263,7 @@ describe("health-check monitorability lint", () => {
 						{ name: "bare", input: {}, scenario: scenario([READ_STEP]) },
 					],
 				},
-				{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+				{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 			),
 			UNGUARDED_STALE,
 		);
@@ -226,6 +271,23 @@ describe("health-check monitorability lint", () => {
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]?.message).toContain(`${OPERATION_KEY} "bare"`);
 		expect(diagnostics[0]?.message).not.toContain(`${OPERATION_KEY} "guarded"`);
+	});
+
+	it("does not accept a guard on a preparatory step as coverage for the checked operation", () => {
+		// The scenario reads `prepareIds` first and guards THAT result's freshness,
+		// then invokes the operation the case is about. The checked read is still
+		// unguarded.
+		const prepared = scenario([readStep("prepareIds"), freshnessGuard("prepareIds"), READ_STEP]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: prepared }] },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
 	});
 
 	it("accepts an assert step on the operand as freshness coverage", () => {
@@ -240,7 +302,11 @@ describe("health-check monitorability lint", () => {
 					kind: "predicate",
 					operator: "not_equals",
 					actual: {
-						ref: { namespace: "steps", binding: "response", path: ["served_stale_cache"] },
+						ref: {
+							namespace: "steps",
+							binding: `${OPERATION_KEY}-response`,
+							path: ["served_stale_cache"],
+						},
 					},
 					expected: true,
 				},
@@ -251,7 +317,7 @@ describe("health-check monitorability lint", () => {
 			rules(
 				lint(
 					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: asserted }] },
-					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 				),
 				UNGUARDED_STALE,
 			),
@@ -259,119 +325,28 @@ describe("health-check monitorability lint", () => {
 	});
 
 	it("does not accept the operand as a literal outside an executed verdict", () => {
-		// An `inputTemplate` value and a `reasonKey` both carry the exact string.
-		// A substring search over the serialized scenario would call this guarded.
+		// An `inputTemplate` value and a `reasonKey` both carry the exact string;
+		// a substring search over the serialized scenario would call this guarded.
+		const markedRead: HealthStep = {
+			...readStep(OPERATION_KEY),
+			kind: "operation",
+			operationId: OPERATION_KEY,
+			inputTemplate: { marker: "served_stale_cache" },
+		};
 		const decoy = scenario([
-			{ ...READ_STEP, inputTemplate: { marker: "served_stale_cache" } },
-			{
-				id: "guard-rows",
-				result: "rows-guarded",
-				kind: "guard",
-				condition: {
-					kind: "predicate",
-					operator: "array_length_gte",
-					actual: { ref: { namespace: "steps", binding: "response", path: ["data", "items"] } },
-					expected: 1,
-				},
-				onFail: {
-					attribute: [
-						{
-							operationId: OPERATION_KEY,
-							status: "degraded",
-							reasonCode: "expected_absence",
-							reasonKey: "health.operations.listItems.probe.served_stale_cache",
-						},
-					],
-					stop: "scenario",
-				},
-			},
+			markedRead,
+			rowsGuard(OPERATION_KEY, `health.operations.${OPERATION_KEY}.probe.served_stale_cache`),
 		]);
 
 		expect(
 			rules(
 				lint(
 					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: decoy }] },
-					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 				),
 				UNGUARDED_STALE,
 			),
 		).toHaveLength(1);
-	});
-
-	it("ignores staleIfErrorMs that only appears in non-serving sources", () => {
-		expect(
-			rules(
-				lint(
-					{
-						interval: "1h",
-						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
-					},
-					{
-						providerSourceFiles: {
-							"__tests__/client.test.ts": "expect(options.staleIfErrorMs).toBe(300_000);",
-							"upstream/client.spec.ts": "staleIfErrorMs",
-							"tests/cache.ts": "staleIfErrorMs: 300_000",
-							"__mocks__/cache.ts": "staleIfErrorMs: 300_000",
-						},
-					},
-				),
-				UNGUARDED_STALE,
-			),
-		).toEqual([]);
-	});
-
-	it("reads staleIfErrorMs out of the operation handler source too", () => {
-		const diagnostics = rules(
-			lint(
-				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
-				{ operationSource: "ctx.cache.getOrSet(k, l, { staleIfErrorMs: 300_000 })" },
-			),
-			UNGUARDED_STALE,
-		);
-
-		expect(diagnostics).toHaveLength(1);
-		expect(diagnostics[0]?.message).toContain(`operations.${OPERATION_KEY} handler`);
-		// Handler evidence names the serving operation exactly, so no caveat.
-		expect(diagnostics[0]?.message).not.toContain("shared source");
-	});
-
-	it("lists only the operations whose own handler serves stale, when that is provable", () => {
-		const stale = operation({
-			interval: "1h",
-			cases: [{ name: "stale", input: {}, scenario: scenario([READ_STEP]) }],
-		});
-		const plain = operation({
-			interval: "1h",
-			cases: [{ name: "plain", input: {}, scenario: scenario([READ_STEP]) }],
-		});
-		const diagnostics = rules(
-			lintProvider({
-				id: "demo",
-				allowedHosts: ["example.com"],
-				reviewed: "2026-09-14",
-				operations: {
-					staleOp: { ...stale, source: "ctx.cache.getOrSet(k, l, { staleIfErrorMs: 300_000 })" },
-					plainOp: { ...plain, source: "return upstream.read(input);" },
-				},
-			}),
-			UNGUARDED_STALE,
-		);
-
-		expect(diagnostics).toHaveLength(1);
-		expect(diagnostics[0]?.message).toContain('staleOp "stale"');
-		expect(diagnostics[0]?.message).not.toContain('plainOp "plain"');
-	});
-
-	it("says so when only a shared helper carries the cache call", () => {
-		const diagnostics = rules(
-			lint(
-				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
-				{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
-			),
-			UNGUARDED_STALE,
-		);
-
-		expect(diagnostics[0]?.message).toContain("The cache call is in shared source");
 	});
 
 	it("does not accept a payload field that happens to be named the same", () => {
@@ -387,7 +362,7 @@ describe("health-check monitorability lint", () => {
 					actual: {
 						ref: {
 							namespace: "steps",
-							binding: "response",
+							binding: `${OPERATION_KEY}-response`,
 							path: ["data", "served_stale_cache"],
 						},
 					},
@@ -411,7 +386,7 @@ describe("health-check monitorability lint", () => {
 			rules(
 				lint(
 					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: payloadRef }] },
-					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 				),
 				UNGUARDED_STALE,
 			),
@@ -425,7 +400,11 @@ describe("health-check monitorability lint", () => {
 				id: "pull",
 				result: "extracted",
 				kind: "extract",
-				from: { namespace: "steps", binding: "response", path: ["data"] },
+				from: {
+					namespace: "steps",
+					binding: `${OPERATION_KEY}-response`,
+					path: ["data"],
+				},
 				selector: {
 					root: "$",
 					segments: [
@@ -436,49 +415,168 @@ describe("health-check monitorability lint", () => {
 				valueType: "object",
 				required: true,
 			},
-			{
-				id: "guard-extracted",
-				result: "extract-guarded",
-				kind: "guard",
-				condition: {
-					kind: "predicate",
-					operator: "not_equals",
-					actual: {
-						ref: { namespace: "steps", binding: "extracted", path: ["served_stale_cache"] },
-					},
-					expected: true,
-				},
-				onFail: {
-					attribute: [
-						{
-							operationId: OPERATION_KEY,
-							status: "degraded",
-							reasonCode: "expected_absence",
-							reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
-						},
-					],
-					stop: "scenario",
-				},
-			},
+			freshnessGuard(OPERATION_KEY, "extracted"),
 		]);
 
 		expect(
 			rules(
 				lint(
 					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: extractRef }] },
-					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 				),
 				UNGUARDED_STALE,
 			),
 		).toHaveLength(1);
 	});
 
+	it("ignores staleIfErrorMs that only appears in non-serving sources", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"__tests__/client.test.ts": "expect(options.staleIfErrorMs).toBe(300_000);",
+							"upstream/client.spec.ts": "staleIfErrorMs: 300_000",
+							"tests/cache.ts": "staleIfErrorMs: 300_000",
+							"__mocks__/cache.ts": "staleIfErrorMs: 300_000",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("ignores a comment documenting that stale-if-error is deliberately unused", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"// staleIfErrorMs intentionally not used: an alert feed must never answer stale.\n/* staleIfErrorMs: 300_000 was removed in #12 */\nawait ctx.cache.getOrSet(key, load, { ttlMs: 60_000 });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("reads staleIfErrorMs out of the operation handler source too", () => {
+		const diagnostics = rules(
+			lint(
+				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
+				{ operationSource: STALE_CLIENT },
+			),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain(`operations.${OPERATION_KEY} handler`);
+		// Handler evidence names the serving operation exactly, so no caveat.
+		expect(diagnostics[0]?.message).not.toContain("shared source");
+	});
+
+	it("lists only the operations whose own handler serves stale", () => {
+		const diagnostics = rules(
+			lintFleet({
+				staleOp: {
+					...operation({
+						interval: "1h",
+						cases: [
+							{ name: "stale", input: {}, scenario: scenario([readStep("staleOp")], "staleOp") },
+						],
+					}),
+					source: STALE_CLIENT,
+				},
+				plainOp: {
+					...operation({
+						interval: "1h",
+						cases: [
+							{ name: "plain", input: {}, scenario: scenario([readStep("plainOp")], "plainOp") },
+						],
+					}),
+					source: "return upstream.read(input);",
+				},
+			}),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain('staleOp "stale"');
+		expect(diagnostics[0]?.message).not.toContain('plainOp "plain"');
+	});
+
+	it("keeps the exact attribution when the handler's own file is also scanned", () => {
+		// `apifuse check` passes every provider file, so the file that declares the
+		// handler carries that handler's cache call. Seeing it there must not
+		// degrade the provider to the unattributable case.
+		const diagnostics = rules(
+			lintFleet(
+				{
+					staleOp: {
+						...operation({
+							interval: "1h",
+							cases: [
+								{
+									name: "stale",
+									input: {},
+									scenario: scenario([readStep("staleOp")], "staleOp"),
+								},
+							],
+						}),
+						source: STALE_CLIENT,
+					},
+					plainOp: {
+						...operation({
+							interval: "1h",
+							cases: [
+								{
+									name: "plain",
+									input: {},
+									scenario: scenario([readStep("plainOp")], "plainOp"),
+								},
+							],
+						}),
+						source: "return upstream.read(input);",
+					},
+				},
+				{ "operations/stale-op.ts": `export const handler = async () => {\n${STALE_CLIENT}\n};` },
+			),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain('staleOp "stale"');
+		expect(diagnostics[0]?.message).not.toContain('plainOp "plain"');
+		expect(diagnostics[0]?.message).not.toContain("shared source");
+	});
+
+	it("says so when a helper the linter cannot attribute carries the cache call", () => {
+		const diagnostics = rules(
+			lint(
+				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
+				{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+			),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics[0]?.message).toContain("The cache call is in shared source");
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(
-				lint(undefined, {
-					providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" },
-				}),
+				lint(undefined, { providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } }),
 				UNGUARDED_STALE,
 			),
 		).toEqual([]);
@@ -487,7 +585,7 @@ describe("health-check monitorability lint", () => {
 	it("keeps both rules warning-level so the migrating fleet does not go red", () => {
 		const diagnostics = lint(
 			{ interval: "1h", cases: [{ name: "dense", input: {}, assertions: () => {} }] },
-			{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+			{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
 		);
 
 		const health = diagnostics.filter((diagnostic) =>

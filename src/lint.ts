@@ -2251,8 +2251,21 @@ function lintLegacyChoiceUsage(provider: ProviderSourceLike): LintDiagnostic[] {
 	});
 }
 
-/** A `staleIfErrorMs` option on a cache read, in executable provider source. */
-const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\b/;
+/**
+ * A `staleIfErrorMs` option being SET on a cache read. The trailing colon is
+ * required so that documenting the absence of stale caching — the comment
+ * `// staleIfErrorMs intentionally not used` — is not read as configuring it;
+ * comments are stripped first so a commented-out option does not count either.
+ */
+const STALE_IF_ERROR_PATTERN = /\bstaleIfErrorMs\s*:/;
+const LINE_COMMENT_PATTERN = /(^|[^:/])\/\/[^\n]*/g;
+const BLOCK_COMMENT_PATTERN = /\/\*[\s\S]*?\*\//g;
+
+function servesStaleIfError(source: string): boolean {
+	if (!source.includes("staleIfErrorMs")) return false;
+	const executable = source.replace(BLOCK_COMMENT_PATTERN, " ").replace(LINE_COMMENT_PATTERN, "$1");
+	return STALE_IF_ERROR_PATTERN.test(executable);
+}
 
 /** The operation-step field that distinguishes a stale-if-error serve. */
 const SERVED_STALE_CACHE_OPERAND = "served_stale_cache";
@@ -2287,11 +2300,23 @@ function readHealthCheckCases(healthCheck: unknown): Record<string, unknown>[] {
 	return cases.filter(isLintRecord);
 }
 
-/** The `result` binding of every `operation` step in a scenario. */
-function operationStepBindings(steps: readonly unknown[]): Set<string> {
+/**
+ * The `result` bindings of the `operation` steps that invoke `operationId`.
+ *
+ * Scoped to the probe's own operation on purpose: a scenario may invoke a
+ * preparatory read before the operation the case is about, and a guard on the
+ * preparation's result says nothing about whether the checked operation was
+ * answered from a stale cache.
+ */
+function operationStepBindings(steps: readonly unknown[], operationId: string): Set<string> {
 	const bindings = new Set<string>();
 	for (const step of steps) {
-		if (isLintRecord(step) && step.kind === "operation" && typeof step.result === "string") {
+		if (
+			isLintRecord(step) &&
+			step.kind === "operation" &&
+			step.operationId === operationId &&
+			typeof step.result === "string"
+		) {
 			bindings.add(step.result);
 		}
 	}
@@ -2333,9 +2358,9 @@ function readsStaleCacheOperand(node: unknown, bindings: ReadonlySet<string>): b
  * harsher but still real coverage). Any other position — an extract selector,
  * an operation input — is not a verdict.
  */
-function scenarioChecksFreshness(scenario: unknown): boolean {
+function scenarioChecksFreshness(scenario: unknown, operationId: string): boolean {
 	if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) return false;
-	const bindings = operationStepBindings(scenario.steps);
+	const bindings = operationStepBindings(scenario.steps, operationId);
 	if (bindings.size === 0) return false;
 	return scenario.steps.some((step) => {
 		if (!isLintRecord(step)) return false;
@@ -2392,7 +2417,7 @@ function lintHealthCheckMonitorability(provider: {
 			if (healthCase.scenario === undefined) {
 				unmonitored.push(caseLabel);
 			}
-			if (!scenarioChecksFreshness(healthCase.scenario)) {
+			if (!scenarioChecksFreshness(healthCase.scenario, operationKey)) {
 				const uncovered = uncoveredByOperation.get(operationKey) ?? [];
 				uncovered.push(`${operationKey} ${caseLabel}`);
 				uncoveredByOperation.set(operationKey, uncovered);
@@ -2413,26 +2438,38 @@ function lintHealthCheckMonitorability(provider: {
 	// Attribution. A handler that carries the cache call itself names exactly the
 	// operation that serves stale; a shared helper does not, and the linter
 	// cannot follow the call graph into it. Prefer the precise evidence, and when
-	// only the shared kind exists, say so in the message rather than implying
+	// an unattributable source exists, say so in the message rather than implying
 	// every listed probe reads through that cache.
-	const sharedSources = new Set<string>();
-	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
-		if (isServingProviderSourcePath(filePath) && STALE_IF_ERROR_PATTERN.test(source)) {
-			sharedSources.add(filePath);
-		}
-	}
-	const handlerSources = new Set<string>();
+	const handlerSourceByOperation = new Map<string, string>();
+	const sources = new Set<string>();
 	const operationsServingStale = new Set<string>();
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-		if (STALE_IF_ERROR_PATTERN.test(getOperationSource(operation))) {
-			handlerSources.add(`operations.${operationKey} handler`);
+		const handlerSource = getOperationSource(operation);
+		if (handlerSource.length > 0) handlerSourceByOperation.set(operationKey, handlerSource);
+		if (servesStaleIfError(handlerSource)) {
+			sources.add(`operations.${operationKey} handler`);
 			operationsServingStale.add(operationKey);
 		}
 	}
-	if (sharedSources.size === 0 && handlerSources.size === 0) return diagnostics;
+	let unattributed = false;
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
+		if (!isServingProviderSourcePath(filePath) || !servesStaleIfError(source)) continue;
+		sources.add(filePath);
+		// `apifuse check` passes every provider file, so the file that declares a
+		// handler carries that handler's own cache call. Recognising it keeps the
+		// exact attribution instead of degrading the whole provider to "shared".
+		const declaringOperation = [...handlerSourceByOperation].find(([, handlerSource]) =>
+			source.includes(handlerSource),
+		)?.[0];
+		if (declaringOperation === undefined) {
+			unattributed = true;
+		} else {
+			operationsServingStale.add(declaringOperation);
+		}
+	}
+	if (sources.size === 0) return diagnostics;
 
-	const attributable = sharedSources.size === 0;
-	const sources = attributable ? handlerSources : new Set([...sharedSources, ...handlerSources]);
+	const attributable = !unattributed;
 	const uncovered = [...uncoveredByOperation]
 		.filter(([operationKey]) => !attributable || operationsServingStale.has(operationKey))
 		.flatMap(([, probes]) => probes);
