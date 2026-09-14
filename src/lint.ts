@@ -2364,15 +2364,20 @@ function predicateRejectsStaleServe(
 	bindings: ReadonlySet<string>,
 	negated: boolean,
 ): boolean {
-	if (!isStaleCacheOperand(predicate.actual, bindings)) return false;
-	const { operator, expected } = predicate;
+	// `equals`/`not_equals` are symmetric and the schema allows a reference on
+	// either side, so `equals(actual: false, expected: <ref>)` is the same check
+	// written the other way round.
+	const onActual = isStaleCacheOperand(predicate.actual, bindings);
+	const onExpected = isStaleCacheOperand(predicate.expected, bindings);
+	if (!onActual && !onExpected) return false;
+	const { operator } = predicate;
+	const literal = onActual ? predicate.expected : predicate.actual;
 	const failsWhenStale =
-		(operator === "not_equals" && expected === true) ||
-		(operator === "equals" && expected === false);
+		(operator === "not_equals" && literal === true) || (operator === "equals" && literal === false);
 	const holdsWhenStale =
-		operator === "is_true" ||
-		(operator === "equals" && expected === true) ||
-		(operator === "not_equals" && expected === false);
+		(operator === "is_true" && onActual) ||
+		(operator === "equals" && literal === true) ||
+		(operator === "not_equals" && literal === false);
 	return negated ? holdsWhenStale : failsWhenStale;
 }
 
@@ -2404,17 +2409,25 @@ function rejectsStaleServe(node: unknown, bindings: ReadonlySet<string>, negated
  * (degraded, the shape this rule recommends) or an `assert` expression (down,
  * harsher but still real coverage). Any other position — an extract selector,
  * an operation input — is not a verdict.
+ *
+ * Order matters, and this is the rule the guidance states: the freshness
+ * verdict must come before any OTHER guard. Every guard stops the scenario when
+ * it fires, so a row or emptiness guard placed first answers a stale serve that
+ * happens to be empty with its own reason and the freshness guard never runs —
+ * the probe degrades for the wrong cause and the tenant reads "no rows" during
+ * an upstream outage. Asserts before it are fine; they are the evidence clauses
+ * and only stop the scenario by failing it outright.
  */
 function scenarioChecksFreshness(scenario: unknown, operationId: string): boolean {
 	if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) return false;
 	const bindings = operationStepBindings(scenario.steps, operationId);
 	if (bindings.size === 0) return false;
-	return scenario.steps.some((step) => {
-		if (!isLintRecord(step)) return false;
+	for (const step of scenario.steps) {
+		if (!isLintRecord(step)) continue;
+		if (step.kind === "assert" && rejectsStaleServe(step.expression, bindings)) return true;
 		if (step.kind === "guard") return rejectsStaleServe(step.condition, bindings);
-		if (step.kind === "assert") return rejectsStaleServe(step.expression, bindings);
-		return false;
-	});
+	}
+	return false;
 }
 
 /** How many uncovered probes the stale-serve message names before eliding. */

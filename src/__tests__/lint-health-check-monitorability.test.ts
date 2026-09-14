@@ -775,6 +775,73 @@ describe("health-check monitorability lint", () => {
 		}
 	});
 
+	it("does not accept a freshness guard placed after another guard", () => {
+		// A row guard firing first stops the scenario and attributes a stale,
+		// empty serve to "no rows" — the reason the guidance orders freshness
+		// first. A later freshness guard is shadowed and is not coverage.
+		const misordered = scenario([
+			READ_STEP,
+			rowsGuard(OPERATION_KEY, `health.operations.${OPERATION_KEY}.probe.noRows`),
+			FRESHNESS_GUARD,
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: misordered }] },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
+	it("accepts the freshness guard placed before a row guard", () => {
+		const ordered = scenario([
+			READ_STEP,
+			FRESHNESS_GUARD,
+			rowsGuard(OPERATION_KEY, `health.operations.${OPERATION_KEY}.probe.noRows`),
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: ordered }] },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("accepts the freshness reference written on the expected side", () => {
+		const mirrored = conditionGuard({
+			kind: "predicate",
+			operator: "equals",
+			actual: false,
+			expected: {
+				ref: {
+					namespace: "steps",
+					binding: `${OPERATION_KEY}-response`,
+					path: ["served_stale_cache"],
+				},
+			},
+		});
+
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP, mirrored]) }],
+					},
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(
