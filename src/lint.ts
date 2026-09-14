@@ -2908,18 +2908,11 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 	 * alongside the option is a cache configuration wherever it is declared.
 	 */
 	const siblingCacheOptions = new Set(["ttlMs", "jitterPct"]);
-	let found = false;
-	/**
-	 * `inCallArgument` is the second way to recognise a cache configuration: the
-	 * literal is being passed somewhere (`getOrSet(key, load, { ... })`). Together
-	 * with the sibling-option test this covers the real shapes, while an upstream
-	 * payload that merely carries a field of the same name does not count.
-	 */
 	/**
 	 * A callee that writes the provider cache: `ctx.cache.getOrSet(...)`,
-	 * `ctx.cache.set(...)`, and the `cachedContent` / `cachedJson` helpers built
-	 * on them. An unrelated call receiving an object that happens to carry the
-	 * name is not cache configuration.
+	 * `ctx.cache.set(...)`, and the `cached*` helpers built on them. An unrelated
+	 * call receiving an object that happens to carry the name is not cache
+	 * configuration. Every one of these takes its options LAST.
 	 */
 	const isCacheCallee = (expression: import("typescript").Expression): boolean => {
 		if (ts.isIdentifier(expression)) return /^cached[A-Z]/.test(expression.text);
@@ -2931,7 +2924,13 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 			expression.expression.name.text === "cache"
 		);
 	};
-	/** `const POLICY = { ... }` object literals, for a spread of one. */
+	/**
+	 * `const POLICY = { ... }` object literals, so `{ ...POLICY }` can be judged.
+	 * Keyed by name file-wide: a shadowed name may resolve to the wrong literal,
+	 * which at warning level is a mis-nudge rather than a wrong build — but the
+	 * expansion below still has to be cycle-safe, because shadowing can make the
+	 * resolution circular in valid source.
+	 */
 	const literalsByName = new Map<string, import("typescript").ObjectLiteralExpression>();
 	const collect = (node: import("typescript").Node): void => {
 		if (
@@ -2945,52 +2944,78 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 		ts.forEachChild(node, collect);
 	};
 	collect(file);
-	const visit = (node: import("typescript").Node, inCallArgument: boolean): void => {
+
+	type OptionReading = { window: "enabled" | "disabled" | undefined; hasSibling: boolean };
+
+	/**
+	 * The EFFECTIVE stale-window setting of an object literal, spreads expanded
+	 * and later properties overriding earlier ones the way JavaScript does — so
+	 * `{ ...policy, staleIfErrorMs: 0 }` reads as disabled even when `policy`
+	 * enables it.
+	 */
+	const readOptions = (
+		literal: import("typescript").ObjectLiteralExpression,
+		seen: Set<import("typescript").ObjectLiteralExpression>,
+	): OptionReading => {
+		if (seen.has(literal)) return { window: undefined, hasSibling: false };
+		seen.add(literal);
+		let window: OptionReading["window"];
+		let hasSibling = false;
+		for (const property of literal.properties) {
+			if (ts.isSpreadAssignment(property)) {
+				const target = ts.isIdentifier(property.expression)
+					? literalsByName.get(property.expression.text)
+					: ts.isObjectLiteralExpression(property.expression)
+						? property.expression
+						: undefined;
+				if (target === undefined) continue;
+				const inner = readOptions(target, seen);
+				if (inner.window !== undefined) window = inner.window;
+				hasSibling ||= inner.hasSibling;
+				continue;
+			}
+			if (ts.isShorthandPropertyAssignment(property)) {
+				if (property.name.text === STALE_IF_ERROR_OPTION) window = "enabled";
+				else if (siblingCacheOptions.has(property.name.text)) hasSibling = true;
+				continue;
+			}
+			if (!ts.isPropertyAssignment(property)) continue;
+			const name = propertyName(property.name);
+			if (name === STALE_IF_ERROR_OPTION) {
+				window = disablesStaleWindow(ts, property.initializer) ? "disabled" : "enabled";
+			} else if (name !== undefined && siblingCacheOptions.has(name)) {
+				hasSibling = true;
+			}
+		}
+		seen.delete(literal);
+		return { window, hasSibling };
+	};
+
+	let found = false;
+	/**
+	 * `inOptionsArgument` is the second way to recognise a cache configuration:
+	 * the literal is the options argument of a cache call. Together with the
+	 * sibling-option test this covers the real shapes, while an upstream payload
+	 * that merely carries a field of the same name does not count.
+	 */
+	const visit = (node: import("typescript").Node, inOptionsArgument: boolean): void => {
 		if (found || isTypeOnly(node)) return;
 		if (ts.isObjectLiteralExpression(node)) {
-			let optionValue: import("typescript").Expression | undefined;
-			let declaresOption = false;
-			let hasSibling = false;
-			for (const property of node.properties) {
-				// `{ ...POLICY }` inside a cache call: resolve the policy in this file
-				// and judge it as if it had been written inline.
-				if (ts.isSpreadAssignment(property) && inCallArgument) {
-					const spread = ts.isIdentifier(property.expression)
-						? literalsByName.get(property.expression.text)
-						: ts.isObjectLiteralExpression(property.expression)
-							? property.expression
-							: undefined;
-					if (spread !== undefined) visit(spread, true);
-					if (found) return;
-					continue;
-				}
-				if (ts.isShorthandPropertyAssignment(property)) {
-					if (property.name.text === STALE_IF_ERROR_OPTION) declaresOption = true;
-					else if (siblingCacheOptions.has(property.name.text)) hasSibling = true;
-					continue;
-				}
-				if (!ts.isPropertyAssignment(property)) continue;
-				const name = propertyName(property.name);
-				if (name === STALE_IF_ERROR_OPTION) {
-					declaresOption = true;
-					optionValue = property.initializer;
-				} else if (name !== undefined && siblingCacheOptions.has(name)) {
-					hasSibling = true;
-				}
-			}
-			if (
-				declaresOption &&
-				(hasSibling || inCallArgument) &&
-				(optionValue === undefined || !disablesStaleWindow(ts, optionValue))
-			) {
+			const { window, hasSibling } = readOptions(node, new Set());
+			if (window === "enabled" && (hasSibling || inOptionsArgument)) {
 				found = true;
 				return;
 			}
 		}
 		if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
-			const cacheCall = isCacheCallee(node.expression);
+			const argumentList = node.arguments ?? [];
+			// Options come last on every cache API; the earlier arguments are the
+			// key, the loader, or the value being cached.
+			const optionsIndex = isCacheCallee(node.expression) ? argumentList.length - 1 : -1;
 			visit(node.expression, false);
-			for (const argument of node.arguments ?? []) visit(argument, cacheCall);
+			for (const [index, argument] of [...argumentList].entries()) {
+				visit(argument, index === optionsIndex);
+			}
 			return;
 		}
 		ts.forEachChild(node, (child) => visit(child, false));

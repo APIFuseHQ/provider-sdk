@@ -1287,6 +1287,67 @@ describe("health-check monitorability lint", () => {
 		).toHaveLength(1);
 	});
 
+	it("terminates on a circular spread resolution instead of throwing", () => {
+		// Shadowing makes `defaults -> policy -> defaults` resolvable file-wide.
+		// Before the cycle guard this recursed until RangeError, taking
+		// `lintProvider` and `apifuse check` down with it.
+		const circular = [
+			"const defaults = { ttlMs: 1000 };",
+			"const policy = { ...defaults };",
+			"function read() {",
+			"  const defaults = { ...policy, staleIfErrorMs: 0 };",
+			"  return ctx.cache.getOrSet(key, load, { ...defaults });",
+			"}",
+		].join("\n");
+
+		expect(() =>
+			lint(
+				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
+				{ providerSourceFiles: { "upstream/client.ts": circular } },
+			),
+		).not.toThrow();
+	});
+
+	it("lets a later property override a spread that enables the window", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"const policy = { staleIfErrorMs: 300_000 };\nawait ctx.cache.getOrSet(key, load, { ...policy, ttlMs: 60_000, staleIfErrorMs: 0 });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("does not read a cached VALUE argument as cache options", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"await ctx.cache.set(key, { staleIfErrorMs: body.staleIfErrorMs }, { ttlMs: 60_000 });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(
