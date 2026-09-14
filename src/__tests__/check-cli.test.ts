@@ -326,6 +326,63 @@ export default {
 		expect(providerJson?.details?.join("\n")).toContain("unexpected");
 	});
 
+	it("accepts the declared locale coverage block the fleet codemod writes", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-i18n-");
+		writeProviderJson(providerDir, { i18n: { primaryMarket: "kr" } });
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(true);
+		expect(providerJson?.details).toContain("locale coverage: primaryMarket kr");
+	});
+
+	it("accepts an explicit locale list that overrides the market default", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-i18n-locales-");
+		writeProviderJson(providerDir, { i18n: { primaryMarket: "kr", locales: ["en", "ko", "ja"] } });
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(true);
+		expect(providerJson?.details).toContain(
+			"locale coverage: primaryMarket kr (locales: en, ko, ja)",
+		);
+	});
+
+	it("rejects an unknown field inside the locale coverage block", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-i18n-unknown-");
+		writeProviderJson(providerDir, { i18n: { primaryMarket: "kr", primaryLocale: "ko" } });
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(false);
+		expect(providerJson?.details?.join("\n")).toContain("primaryLocale");
+	});
+
+	it("rejects an unknown primary market", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-i18n-market-");
+		writeProviderJson(providerDir, { i18n: { primaryMarket: "jp-JP" } });
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(false);
+		expect(providerJson?.details?.join("\n")).toContain("primaryMarket");
+	});
+
+	it("rejects a locale list that drops the baseline locale", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-i18n-baseline-");
+		writeProviderJson(providerDir, { i18n: { primaryMarket: "kr", locales: ["ko"] } });
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(false);
+		expect(providerJson?.details?.join("\n")).toContain("fallback every other locale resolves");
+	});
+
 	it("rejects an invalid provider.json lifecycle", async () => {
 		const providerDir = makeProviderDir("apifuse-check-provider-json-lifecycle-");
 		writeProviderJson(providerDir, { lifecycle: "deprecated" });

@@ -588,12 +588,56 @@ function checkPackageJson(packageJsonPath: string): CheckResult {
 
 export const PROVIDER_JSON_CHECK_MESSAGE = "provider.json exists with a valid declaration";
 
+/**
+ * Markets a provider may declare as its primary, and the locales the platform
+ * catalogs can carry.
+ *
+ * These mirror `scripts/provider-deploy/provider-locale-coverage.mjs` in the
+ * APIFuse monorepo, which is the policy's source of truth. The duplication is
+ * deliberate and bounded: the monorepo cannot be imported from a provider
+ * checkout, and a *closed* mirror is the point — it keeps a typo
+ * (`primaryMarket: "jp-JP"`) a local failure instead of one that only surfaces
+ * in the monorepo's contract validator days later.
+ */
+const PROVIDER_PRIMARY_MARKETS = ["jp", "kr", "global"] as const;
+const PROVIDER_COVERAGE_LOCALES = ["en", "ko", "ja"] as const;
+const PROVIDER_BASELINE_LOCALE = "en";
+
+/**
+ * Declared locale coverage, optional at schemaVersion 1.
+ *
+ * `apifuse provider declare-locale-coverage` writes this block, and the
+ * monorepo declaration schema has accepted it since the rollout landed. This
+ * check used to close `provider.json` over four keys, which made the only
+ * documented way to clear the monorepo's `LOCALE_COVERAGE_UNDECLARED` finding
+ * turn a green `bun run check` red — the declaration was unfixable from either
+ * side. The fix is to mirror the monorepo schema rather than to stop
+ * validating: the block stays closed over its own two keys so a misspelled
+ * field is still caught here, at authoring time.
+ */
+const providerI18nDeclarationSchema = z
+	.object({
+		primaryMarket: z.enum(PROVIDER_PRIMARY_MARKETS),
+		locales: z
+			.array(z.enum(PROVIDER_COVERAGE_LOCALES))
+			.nonempty()
+			.refine((locales) => new Set(locales).size === locales.length, {
+				message: "i18n.locales must not repeat a locale",
+			})
+			.refine((locales) => locales.includes(PROVIDER_BASELINE_LOCALE), {
+				message: `i18n.locales must include "${PROVIDER_BASELINE_LOCALE}": it is the fallback every other locale resolves through`,
+			})
+			.optional(),
+	})
+	.strict();
+
 const providerDeclarationSchema = z
 	.object({
 		schemaVersion: z.literal(1),
 		providerId: z.string(),
 		owner: z.string(),
 		lifecycle: z.enum(["draft", "ready", "live", "retired"]),
+		i18n: providerI18nDeclarationSchema.optional(),
 	})
 	.strict();
 
@@ -624,7 +668,17 @@ function checkProviderJson(providerJsonPath: string, packageJsonPath: string): C
 		return {
 			message: PROVIDER_JSON_CHECK_MESSAGE,
 			passed: true,
-			details: [`providerId: ${declaration.providerId}`, `lifecycle: ${declaration.lifecycle}`],
+			details: [
+				`providerId: ${declaration.providerId}`,
+				`lifecycle: ${declaration.lifecycle}`,
+				...(declaration.i18n
+					? [
+							`locale coverage: primaryMarket ${declaration.i18n.primaryMarket}${
+								declaration.i18n.locales ? ` (locales: ${declaration.i18n.locales.join(", ")})` : ""
+							}`,
+						]
+					: []),
+			],
 		};
 	} catch (error) {
 		return {
