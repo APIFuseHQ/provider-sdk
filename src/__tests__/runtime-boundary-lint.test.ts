@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import ts from "typescript";
 import { z } from "zod";
 import { lintProvider, lintProviderWithInformation } from "../lint.js";
 import {
@@ -10,6 +11,7 @@ import {
 	RUNTIME_BOUNDARY_RULES,
 } from "../runtime-boundary-lint.js";
 import type { OperationRiskClass } from "../types.js";
+import type { TypeScriptCompilerModuleLike } from "../typescript-module.js";
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
 const RUNTIME_BOUNDARY_RULE_SET: ReadonlySet<string> = new Set(RUNTIME_BOUNDARY_RULES);
@@ -496,6 +498,33 @@ describe("runtime boundary lint: lintRuntimeBoundarySources", () => {
 
 	it("returns an empty result for an empty source map", () => {
 		expect(lintRuntimeBoundarySources({})).toEqual({ diagnostics: [], information: [] });
+	});
+
+	it("parses with an injected TypeScript compiler module", () => {
+		let parsedFiles = 0;
+		const observed = new Proxy(ts, {
+			get(target, property, receiver) {
+				if (property === "createSourceFile") {
+					return (...parameters: Parameters<typeof ts.createSourceFile>) => {
+						parsedFiles += 1;
+						return target.createSourceFile(...parameters);
+					};
+				}
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const result = lintRuntimeBoundarySources(files, { typescript: observed });
+		expect(result).toEqual(lintRuntimeBoundarySources(files));
+		// Only in-scope files are parsed: index.ts, upstream/booking.ts, lib/runtime-port.ts.
+		expect(parsedFiles).toBe(3);
+	});
+
+	it("rejects an injected module without the compiler API instead of failing mid-parse", () => {
+		// What `typescript@7` exports: a version shell without the parser.
+		const typescript7Shell: TypeScriptCompilerModuleLike = { version: "7.0.2" };
+		expect(() => lintRuntimeBoundarySources(files, { typescript: typescript7Shell })).toThrow(
+			/options\.typescript must be a loaded TypeScript compiler API module/,
+		);
 	});
 
 	it("tells the author that ctx.env only sees declared secrets and that env: true is the capability gate", () => {

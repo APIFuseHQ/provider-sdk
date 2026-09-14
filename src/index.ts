@@ -131,10 +131,15 @@ export {
 	type ProviderLintResult,
 } from "./lint.js";
 export {
+	type LintRuntimeBoundarySourcesOptions,
 	lintRuntimeBoundarySources,
 	RUNTIME_BOUNDARY_RULES,
 	type RuntimeBoundaryRule,
 } from "./runtime-boundary-lint.js";
+export {
+	TYPESCRIPT_COMPILER_MODULE_SPECIFIERS,
+	type TypeScriptCompilerModuleLike,
+} from "./typescript-module.js";
 export * from "./recipes/gov-api.js";
 export * from "./recipes/rest-api.js";
 export { createFlowContext, createScratchpad } from "./runtime/auth-flow.js";

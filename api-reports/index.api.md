@@ -3202,7 +3202,12 @@ export function lintProvider(provider: {
 }, options?: ProviderLintOptions): LintDiagnostic[];
 
 // @public
-export function lintRuntimeBoundarySources(files: Record<string, string>): ProviderLintResult;
+export function lintRuntimeBoundarySources(files: Record<string, string>, options?: LintRuntimeBoundarySourcesOptions): ProviderLintResult;
+
+// @public (undocumented)
+export type LintRuntimeBoundarySourcesOptions = {
+    typescript?: TypeScriptCompilerModuleLike;
+};
 
 // @public
 export function listMissingRequiredSecrets(provider: ProviderDefinition, env: EnvContext): string[];
@@ -8527,6 +8532,16 @@ export function truncate(str: string, maxLength: number, suffix?: string): strin
 export class TurnValidationError extends ProviderError {
     constructor(message: string, options?: ProviderErrorOptions);
 }
+
+// @public
+export const TYPESCRIPT_COMPILER_MODULE_SPECIFIERS: readonly ["typescript", "@typescript/typescript6"];
+
+// @public
+export type TypeScriptCompilerModuleLike = {
+    readonly createSourceFile?: (...parameters: never[]) => unknown;
+    readonly ScriptTarget?: object;
+    readonly version?: string;
+};
 
 // @public (undocumented)
 export class UnsupportedProviderStateError extends ProviderError {

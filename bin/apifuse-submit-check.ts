@@ -25,18 +25,22 @@ import {
 	hasStreamEvidenceMarker,
 	parseStreamEvidenceRecord,
 } from "../src/stream-evidence.js";
+import { getTypeScript } from "../src/typescript-module.js";
 import { type CheckResult, PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "./apifuse-check.js";
 import { hasSubstantiveDelimitedTextStructure } from "./submit-check-delimited-text.js";
 import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
 
-const ts: typeof import("typescript") = await loadTypeScript();
+const ts: typeof import("typescript") = loadTypeScript();
 
-async function loadTypeScript(): Promise<typeof import("typescript")> {
+// Shares the lint rules' loader so a workspace whose `typescript` is the 7.x
+// native shell (no compiler API) falls back to `@typescript/typescript6`
+// instead of failing inside the first parse.
+function loadTypeScript(): typeof import("typescript") {
 	try {
-		return await import("typescript");
-	} catch {
+		return getTypeScript();
+	} catch (error) {
 		console.error(
-			"apifuse submit-check requires typescript; install it in the workspace running the CLI (bun add -d typescript)",
+			`apifuse submit-check requires the TypeScript compiler API; install it in the workspace running the CLI (bun add -d typescript). ${error instanceof Error ? error.message : String(error)}`,
 		);
 		process.exit(1);
 	}
