@@ -2405,6 +2405,17 @@ function rejectsStaleServe(node: unknown, bindings: ReadonlySet<string>, negated
 }
 
 /**
+ * Whether a guard's degrade lands on the operation the case is about. A guard
+ * whose condition reads the checked operation's freshness but attributes the
+ * failure to a different operation leaves the checked one green through the
+ * stale serve — covered on paper, not on the status page.
+ */
+function guardAttributesTo(onFail: unknown, operationId: string): boolean {
+	if (!isLintRecord(onFail) || !Array.isArray(onFail.attribute)) return false;
+	return onFail.attribute.some((entry) => isLintRecord(entry) && entry.operationId === operationId);
+}
+
+/**
  * Whether a scenario reaches a verdict on freshness: a `guard` condition
  * (degraded, the shape this rule recommends) or an `assert` expression (down,
  * harsher but still real coverage). Any other position — an extract selector,
@@ -2425,7 +2436,11 @@ function scenarioChecksFreshness(scenario: unknown, operationId: string): boolea
 	for (const step of scenario.steps) {
 		if (!isLintRecord(step)) continue;
 		if (step.kind === "assert" && rejectsStaleServe(step.expression, bindings)) return true;
-		if (step.kind === "guard") return rejectsStaleServe(step.condition, bindings);
+		if (step.kind === "guard") {
+			return (
+				rejectsStaleServe(step.condition, bindings) && guardAttributesTo(step.onFail, operationId)
+			);
+		}
 	}
 	return false;
 }

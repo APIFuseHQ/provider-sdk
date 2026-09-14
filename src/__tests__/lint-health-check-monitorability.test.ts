@@ -842,6 +842,60 @@ describe("health-check monitorability lint", () => {
 		).toEqual([]);
 	});
 
+	it("does not accept a freshness guard that degrades a different operation", () => {
+		const misattributed: HealthStep = {
+			...conditionGuard({
+				kind: "predicate",
+				operator: "not_equals",
+				actual: {
+					ref: {
+						namespace: "steps",
+						binding: `${OPERATION_KEY}-response`,
+						path: ["served_stale_cache"],
+					},
+				},
+				expected: true,
+			}),
+			kind: "guard",
+			condition: {
+				kind: "predicate",
+				operator: "not_equals",
+				actual: {
+					ref: {
+						namespace: "steps",
+						binding: `${OPERATION_KEY}-response`,
+						path: ["served_stale_cache"],
+					},
+				},
+				expected: true,
+			},
+			onFail: {
+				attribute: [
+					{
+						operationId: "someOtherOperation",
+						status: "degraded",
+						reasonCode: "expected_absence",
+						reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
+					},
+				],
+				stop: "scenario",
+			},
+		};
+
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP, misattributed]) }],
+					},
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(
