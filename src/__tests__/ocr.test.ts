@@ -19,6 +19,9 @@ import {
 	extractCaptchaCandidates,
 	OPENAI_COMPATIBLE_OCR_BACKEND,
 } from "../runtime/ocr.js";
+import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
+import { bindOcrTelemetry, OcrTelemetryCollector } from "../runtime/ocr-telemetry.js";
+import { createTraceContext, type TraceContext } from "../runtime/trace.js";
 import { createServerApp } from "../server/serve.js";
 import type { HttpClient, OcrContext, StealthClient } from "../types.js";
 
@@ -204,10 +207,68 @@ describe("OCR runtime clients", () => {
 
 	it("unsupported OCR client throws on every method without fake success", async () => {
 		const ocr = createUnsupportedOcrClient();
+		expect(ocr.available).toBe(false);
 		await expect(ocr.recognize({ image })).rejects.toMatchObject({ code: "OCR_UNAVAILABLE" });
 		await expect(ocr.extractCaptchaText(image)).rejects.toMatchObject({
 			code: "OCR_UNAVAILABLE",
 		});
+	});
+
+	it("reports availability as the SDK verdict, mirroring the env-selected client", () => {
+		const cloudflareEnv = {
+			[CLOUDFLARE_ACCOUNT_ID_ENV]: "account-123",
+			[APIFUSE__OCR__CLOUDFLARE_API_TOKEN_ENV]: "token-123",
+		};
+		expect(createOcrClientFromEnv({ mode: "optional" }, cloudflareEnv).available).toBe(true);
+		expect(
+			createOcrClientFromEnv(
+				{ mode: "optional" },
+				{
+					[APIFUSE__OCR__BACKEND_ENV]: OPENAI_COMPATIBLE_OCR_BACKEND,
+					[APIFUSE__OCR__BASE_URL_ENV]: "https://ocr.example.test/v1",
+					[APIFUSE__OCR__MODEL_ENV]: "zai-org/GLM-OCR",
+				},
+			).available,
+		).toBe(true);
+		// Undeclared, missing credentials, missing model, and unknown backend all
+		// hand back a client whose verdict is false without any process.env probe.
+		expect(createOcrClientFromEnv(undefined, cloudflareEnv).available).toBe(false);
+		expect(createOcrClientFromEnv({ mode: "required" }, {}).available).toBe(false);
+		expect(
+			createOcrClientFromEnv(
+				{ mode: "optional" },
+				{
+					[APIFUSE__OCR__BACKEND_ENV]: OPENAI_COMPATIBLE_OCR_BACKEND,
+					[APIFUSE__OCR__BASE_URL_ENV]: "https://ocr.example.test/v1",
+				},
+			).available,
+		).toBe(false);
+		expect(
+			createOcrClientFromEnv({ mode: "optional" }, { [APIFUSE__OCR__BACKEND_ENV]: "tesseract" })
+				.available,
+		).toBe(false);
+	});
+
+	it("keeps availability as an own data property that wrappers preserve", async () => {
+		const unavailable = createUnsupportedOcrClient();
+		const configured = createCloudflareWorkersAiOcrClient({
+			accountId: "account-123",
+			apiToken: "token-123",
+		});
+		for (const [client, expected] of [
+			[unavailable, false],
+			[configured, true],
+		] as const) {
+			const descriptor = Object.getOwnPropertyDescriptor(client, "available");
+			expect(descriptor).toMatchObject({ value: expected, enumerable: true });
+			expect(descriptor?.get).toBeUndefined();
+			expect(bindOcrTelemetry(client, new OcrTelemetryCollector()).available).toBe(expected);
+			const ctx = wrapWithInstrumentation<{ trace: TraceContext; ocr: OcrContext }>({
+				trace: createTraceContext(),
+				ocr: bindOcrTelemetry(client, new OcrTelemetryCollector()),
+			});
+			expect(ctx.ocr.available).toBe(expected);
+		}
 	});
 
 	it("adds the required gemma thinking-disabled payload option", async () => {
@@ -621,6 +682,7 @@ describe("OCR Provider SDK context integration", () => {
 			allowedKeys: [],
 		});
 
+		expect(context.ocr.available).toBe(false);
 		await expect(context.ocr.recognize({ image })).rejects.toMatchObject({
 			code: "OCR_UNAVAILABLE",
 		});
@@ -628,6 +690,7 @@ describe("OCR Provider SDK context integration", () => {
 
 	it("provider server injects an OCR override into operation and auth contexts", async () => {
 		const ocr: OcrContext = {
+			available: true,
 			async recognize() {
 				return { text: "aB3dEf78", model: "test-model" };
 			},

@@ -8,6 +8,7 @@ async function runFakeConstructionSite(ocrTelemetry: OcrTelemetryCollector | nul
 	const ledger = new RequestTelemetry(createTraceContext());
 	if (ocrTelemetry) ledger.register(ocrTelemetry);
 	const base = {
+		available: true,
 		recognize: async () => ({ text: "ok", model: "fixture" }),
 		extractCaptchaText: async () => ({
 			text: "ok",

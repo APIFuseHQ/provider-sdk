@@ -246,6 +246,25 @@ export interface OcrCaptchaResult {
 }
 
 export interface OcrContext {
+	/**
+	 * Whether this context is backed by a configured OCR backend.
+	 *
+	 * The SDK owns this verdict: clients built by `createOcrClientFromEnv` for a
+	 * configured backend report `true`; the unsupported/error clients handed to
+	 * undeclared or misconfigured providers report `false`. Providers branch on
+	 * this flag (for example, "require manual CAPTCHA input") instead of probing
+	 * the engine-owned `APIFUSE__OCR__*` environment names themselves.
+	 *
+	 * `true` promises a configured backend, not a successful call: upstream
+	 * failures still surface as errors from `recognize` / `extractCaptchaText`.
+	 *
+	 * Implementations must expose this as an own enumerable data property (not a
+	 * getter or prototype member) so that wrappers which spread the context, such
+	 * as `bindOcrTelemetry`, preserve it. Custom `OcrContext` overrides passed to
+	 * `serve({ ocr })`, `createFlowContext({ ocr })`, or test contexts must set it
+	 * explicitly.
+	 */
+	readonly available: boolean;
 	recognize(request: OcrRecognizeRequest): Promise<OcrResult>;
 	extractCaptchaText(
 		image: OcrImageInput,

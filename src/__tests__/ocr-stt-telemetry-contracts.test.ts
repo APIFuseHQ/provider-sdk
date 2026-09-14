@@ -22,6 +22,7 @@ import { resolveServerTraceContextOptions } from "../server/trace-output.js";
 const index = { spans: [], byName: new Map(), count: () => 0, durationMs: () => 0 };
 const image = { kind: "base64", data: "cGF5bG9hZA==" } as const;
 const ocrHost = {
+	available: true,
 	recognize: async () => ({ text: "ok", model: "custom" }),
 	extractCaptchaText: async () => ({
 		text: "ok",
