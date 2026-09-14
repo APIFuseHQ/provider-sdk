@@ -1092,6 +1092,47 @@ describe("health-check monitorability lint", () => {
 		}
 	});
 
+	it("recognises a computed cache-option property name", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								'await ctx.cache.getOrSet(key, load, { ttlMs: 1000, ["staleIfErrorMs"]: 300000 });',
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
+	it("does not treat a type declaring the option as a cache call setting it", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/policy.ts": "export interface CachePolicy { staleIfErrorMs?: number }",
+							"upstream/client.ts":
+								"await ctx.cache.getOrSet(key, load, { ttlMs: 1000, staleIfErrorMs: 0 });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(

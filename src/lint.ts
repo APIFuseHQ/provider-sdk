@@ -2882,14 +2882,31 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 		false,
 		scriptKindForSourceFile(ts, fileName),
 	);
+	/** The statically known name of a property, however it is written. */
+	const propertyName = (name: import("typescript").PropertyName): string | undefined => {
+		if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+		if (ts.isComputedPropertyName(name) && ts.isStringLiteral(name.expression)) {
+			return name.expression.text;
+		}
+		return undefined;
+	};
+	/**
+	 * A type declaring the option is not a cache call setting it. Skipping these
+	 * whole subtrees also stops a `CachePolicy` interface from overriding the
+	 * disabled-window exemption for a provider whose only real call passes 0.
+	 */
+	const isTypeOnly = (node: import("typescript").Node): boolean =>
+		ts.isInterfaceDeclaration(node) ||
+		ts.isTypeAliasDeclaration(node) ||
+		ts.isTypeLiteralNode(node) ||
+		ts.isPropertySignature(node) ||
+		ts.isTypeReferenceNode(node) ||
+		ts.isTypeParameterDeclaration(node);
 	let found = false;
 	const visit = (node: import("typescript").Node): void => {
-		if (found) return;
+		if (found || isTypeOnly(node)) return;
 		if (ts.isPropertyAssignment(node)) {
-			const name = node.name;
-			const named =
-				(ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === STALE_IF_ERROR_OPTION;
-			if (named) {
+			if (propertyName(node.name) === STALE_IF_ERROR_OPTION) {
 				if (!disablesStaleWindow(ts, node.initializer)) {
 					found = true;
 					return;
