@@ -248,6 +248,115 @@ const buildProvider = defineProvider({ id: "demo", meta: buildMeta() });`,
 		expect(findings({})).toEqual([]);
 	});
 
+	// Regressions from the review of this rule. Each of these is the SAME silent
+	// key erasure wearing different syntax; missing any one of them would let the
+	// exact defect the rule exists for through.
+
+	it("ERRORS on an assertion written at the call itself", () => {
+		for (const call of [
+			'defineProvider({ id: "demo", http: {} } as ProviderDeclaration)',
+			"defineProvider(declaration as ProviderDeclaration)",
+		]) {
+			const diagnostics = findings({
+				"index.ts": `import { defineProvider, type ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = ${call};`,
+				"declaration.ts": `export const declaration = { id: "demo", http: {} } as const;`,
+			});
+
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0]?.level).toBe("error");
+			expect(diagnostics[0]?.message).toContain("asserted `as ProviderDeclaration` at the call");
+		}
+	});
+
+	it("ERRORS through a renamed import of the declaration type", () => {
+		const diagnostics = findings({
+			"index.ts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = defineProvider(declaration);`,
+			"declaration.ts": `import type { ProviderDeclaration as Decl } from "@apifuse/provider-sdk/provider";
+export const declaration: Decl = { id: "demo", http: {} };`,
+		});
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.level).toBe("error");
+	});
+
+	it("ERRORS through a local type alias of the declaration type", () => {
+		const diagnostics = findings({
+			"index.ts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = defineProvider(declaration);`,
+			"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+type Decl = ProviderDeclaration;
+export const declaration: Decl = { id: "demo", http: {} };`,
+		});
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.level).toBe("error");
+	});
+
+	it("follows the SDK's defineProvider when it is imported under another name", () => {
+		const diagnostics = findings({
+			"index.ts": `import { defineProvider as declareProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+const buildProvider = declareProvider(declaration);`,
+			"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ProviderDeclaration = { id: "demo", http: {} };`,
+		});
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.level).toBe("error");
+	});
+
+	it("ignores an unrelated local helper that happens to be called defineProvider", () => {
+		expect(
+			findings({
+				"index.ts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+import { defineProvider as localDefineProvider } from "./local";
+const unrelated = localDefineProvider(declaration);
+const buildProvider = defineProvider({ id: "demo", http: {}, meta: { displayName: "d" } });`,
+				"local.ts": `export function defineProvider(value: unknown) { return value; }`,
+				"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ProviderDeclaration = { id: "demo", http: {} };`,
+			}),
+		).toEqual([]);
+	});
+
+	it("does not fire on test sources — they build throwaway declarations on purpose", () => {
+		const widened = {
+			"declaration.ts": `import type { ProviderDeclaration } from "@apifuse/provider-sdk/provider";
+export const declaration: ProviderDeclaration = { id: "demo", http: {} };`,
+		};
+		const call = `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { declaration } from "./declaration";
+export const buildProvider = defineProvider(declaration);`;
+
+		for (const testPath of [
+			"__tests__/index.test.ts",
+			"tests/shape.ts",
+			"src/provider.spec.ts",
+		]) {
+			expect(findings({ ...widened, [testPath]: call })).toEqual([]);
+		}
+		// …but the same call in runtime source still errors.
+		expect(findings({ ...widened, "index.ts": call })).toHaveLength(1);
+	});
+
+	it("resolves a `.js` specifier to its `.mts` counterpart", () => {
+		const diagnostics = findings({
+			"index.mts": `import { defineProvider } from "@apifuse/provider-sdk/provider";
+import { providerMeta } from "./meta.js";
+const buildProvider = defineProvider({ id: "demo", meta: providerMeta });`,
+			"meta.mts": `export const providerMeta = { displayName: "Demo" };`,
+		});
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.field).toBe("meta");
+	});
+
 	it("skips declaration files and non-TypeScript sources", () => {
 		expect(
 			findings({

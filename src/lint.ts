@@ -27,7 +27,15 @@ import {
 	isStealthOwnedHeaderName,
 	SDK_OWNED_CHROME_HEADER_PREFIX,
 } from "./runtime/stealth-owned-headers.js";
-import { lintRuntimeBoundary, scriptKindForSourceFile } from "./runtime-boundary-lint.js";
+import {
+	lintRuntimeBoundary,
+	scriptKindForSourceFile,
+	// This module already has a narrower TEST_SOURCE_FILE_PATTERN of its own,
+	// used by the older source rules; it does not cover a plain `tests/`
+	// directory. Aliased rather than merged because consolidating the two would
+	// silently change what those rules scan.
+	TEST_SOURCE_FILE_PATTERN as SHARED_TEST_SOURCE_FILE_PATTERN,
+} from "./runtime-boundary-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 import { getTypeScript } from "./typescript-module.js";
@@ -2340,15 +2348,94 @@ type NarrowingVerdict =
 function erasesDeclarationKeys(
 	ts: typeof import("typescript"),
 	node: import("typescript").TypeNode,
-	file: import("typescript").SourceFile,
+	declarationTypeNames: ReadonlySet<string>,
 ): boolean {
 	if (ts.isIndexedAccessTypeNode(node)) return false;
 	if (ts.isTypeReferenceNode(node)) {
 		const name = ts.isIdentifier(node.typeName) ? node.typeName.text : node.typeName.right.text;
-		if (name === "ProviderDeclaration") return true;
-		return (node.typeArguments ?? []).some((argument) => erasesDeclarationKeys(ts, argument, file));
+		if (declarationTypeNames.has(name)) return true;
+		return (node.typeArguments ?? []).some((argument) =>
+			erasesDeclarationKeys(ts, argument, declarationTypeNames),
+		);
 	}
 	return false;
+}
+
+/** True for an `@apifuse/provider-sdk` (or subpath) module specifier. */
+function isSdkSpecifier(specifier: string): boolean {
+	return specifier === "@apifuse/provider-sdk" || specifier.startsWith("@apifuse/provider-sdk/");
+}
+
+/**
+ * Local names that denote `ProviderDeclaration` inside one file.
+ *
+ * The type is usually imported under its own name, but `import type
+ * { ProviderDeclaration as Decl }` and `type Decl = ProviderDeclaration` are
+ * the same type wearing another word, and annotating with either erases the
+ * key set just as thoroughly. Comparing the written name alone would miss both.
+ */
+function declarationTypeNamesIn(
+	ts: typeof import("typescript"),
+	file: import("typescript").SourceFile,
+): Set<string> {
+	const names = new Set<string>(["ProviderDeclaration"]);
+	for (const statement of file.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			const bindings = statement.importClause?.namedBindings;
+			if (!bindings || !ts.isNamedImports(bindings)) continue;
+			if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+			if (!isSdkSpecifier(statement.moduleSpecifier.text)) continue;
+			for (const element of bindings.elements) {
+				if ((element.propertyName?.text ?? element.name.text) === "ProviderDeclaration") {
+					names.add(element.name.text);
+				}
+			}
+			continue;
+		}
+		if (
+			ts.isTypeAliasDeclaration(statement) &&
+			ts.isTypeReferenceNode(statement.type) &&
+			ts.isIdentifier(statement.type.typeName) &&
+			names.has(statement.type.typeName.text)
+		) {
+			names.add(statement.name.text);
+		}
+	}
+	return names;
+}
+
+/**
+ * Local names bound to the SDK's `defineProvider` inside one file.
+ *
+ * Restricting the callee match to these keeps an unrelated local helper called
+ * `defineProvider` out of the rule, and picks the SDK call up when it is
+ * imported under another name. A file with no SDK import at all falls back to
+ * the bare name, which is what an in-repo fixture looks like.
+ */
+function defineProviderNamesIn(
+	ts: typeof import("typescript"),
+	file: import("typescript").SourceFile,
+): Set<string> {
+	const names = new Set<string>();
+	for (const statement of file.statements) {
+		if (!ts.isImportDeclaration(statement)) continue;
+		if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+		if (!isSdkSpecifier(statement.moduleSpecifier.text)) continue;
+		const bindings = statement.importClause?.namedBindings;
+		if (!bindings) continue;
+		if (ts.isNamedImports(bindings)) {
+			for (const element of bindings.elements) {
+				if ((element.propertyName?.text ?? element.name.text) === "defineProvider") {
+					names.add(element.name.text);
+				}
+			}
+		}
+		// `import * as sdk from "@apifuse/provider-sdk"` reaches the call as
+		// `sdk.defineProvider`, and calleeName() already reduces that to the
+		// member name.
+		if (ts.isNamespaceImport(bindings)) names.add("defineProvider");
+	}
+	return names.size > 0 ? names : new Set(["defineProvider"]);
 }
 
 function normalizeSourcePath(path: string): string {
@@ -2370,13 +2457,16 @@ function resolveProviderModule(
 		else fromSegments.push(segment);
 	}
 	const joined = fromSegments.join("/");
+	// An ESM provider writes `./meta.js` and ships `meta.mts`; the extension in
+	// the specifier is the EMITTED one, so every TypeScript counterpart of the
+	// scan set has to be tried, not just `.ts`.
 	const withoutJs = joined.replace(/\.(js|mjs|cjs)$/, "");
 	const candidates = [
 		joined,
-		`${withoutJs}.ts`,
-		`${withoutJs}.tsx`,
-		`${withoutJs}/index.ts`,
-		`${withoutJs}/index.tsx`,
+		...["ts", "tsx", "mts", "cts"].flatMap((extension) => [
+			`${withoutJs}.${extension}`,
+			`${withoutJs}/index.${extension}`,
+		]),
 	];
 	const normalized = new Map(Object.keys(files).map((key) => [normalizeSourcePath(key), key]));
 	for (const candidate of candidates) {
@@ -2421,6 +2511,7 @@ function narrowingOfExportedConst(
 		true,
 		scriptKindForSourceFile(ts, fileName),
 	);
+	const declarationTypeNames = declarationTypeNamesIn(ts, file);
 
 	for (const statement of file.statements) {
 		if (ts.isVariableStatement(statement)) {
@@ -2432,7 +2523,7 @@ function narrowingOfExportedConst(
 				// the type named is the declaration itself, which replaces the
 				// authored key set with every optional capability key.
 				if (declaration.type) {
-					if (erasesDeclarationKeys(ts, declaration.type, file)) {
+					if (erasesDeclarationKeys(ts, declaration.type, declarationTypeNames)) {
 						return {
 							kind: "widened",
 							silent: true,
@@ -2449,7 +2540,7 @@ function narrowingOfExportedConst(
 				if (ts.isSatisfiesExpression(initializer)) return { kind: "narrowed" };
 				if (isConstAssertion(ts, initializer)) return { kind: "narrowed" };
 				if (ts.isAsExpression(initializer)) {
-					if (erasesDeclarationKeys(ts, initializer.type, file)) {
+					if (erasesDeclarationKeys(ts, initializer.type, declarationTypeNames)) {
 						return {
 							kind: "widened",
 							silent: true,
@@ -2547,11 +2638,29 @@ function findWidenedDefineProviderArguments(
 		scriptKindForSourceFile(ts, fileName),
 	);
 	const findings: MetaNarrowingFinding[] = [];
+	const declarationTypeNames = declarationTypeNamesIn(ts, file);
+	const calleeNames = defineProviderNamesIn(ts, file);
 
 	const check = (subject: "meta" | "declaration", expression: import("typescript").Expression) => {
 		let current = expression;
 		while (ts.isParenthesizedExpression(current)) current = current.expression;
 		if (ts.isSatisfiesExpression(current) || isConstAssertion(ts, current)) return;
+		// `defineProvider({...} as ProviderDeclaration)` and
+		// `defineProvider(declaration as ProviderDeclaration)` erase the key set
+		// at the call itself, without any widened binding to resolve to.
+		if (ts.isAsExpression(current)) {
+			if (erasesDeclarationKeys(ts, current.type, declarationTypeNames)) {
+				findings.push({
+					subject,
+					name: current.expression.getText(file).slice(0, 60),
+					reason: `it is asserted \`as ${current.type.getText(file)}\` at the call, and every capability is an OPTIONAL key of ProviderDeclaration, so \`keyof TConfig\` becomes all of them`,
+					silent: subject === "declaration",
+				});
+				return;
+			}
+			current = current.expression;
+			while (ts.isParenthesizedExpression(current)) current = current.expression;
+		}
 		if (ts.isObjectLiteralExpression(current)) {
 			// Written at the call: the `const` type parameter narrows it. Only a
 			// spread of an already-widened binding can still lose the literals.
@@ -2577,11 +2686,19 @@ function findWidenedDefineProviderArguments(
 	};
 
 	const visit = (node: import("typescript").Node): void => {
-		if (ts.isCallExpression(node) && calleeName(node) === "defineProvider") {
+		const callee = ts.isCallExpression(node) ? calleeName(node) : undefined;
+		if (ts.isCallExpression(node) && callee !== undefined && calleeNames.has(callee)) {
 			const argument = node.arguments[0];
 			if (argument) {
 				let current: import("typescript").Expression = argument;
 				while (ts.isParenthesizedExpression(current)) current = current.expression;
+				if (ts.isAsExpression(current)) {
+					// `defineProvider(x as T)`: check() decides whether T erases the
+					// key set, and unwraps to x when it does not.
+					check("declaration", current);
+					ts.forEachChild(node, visit);
+					return;
+				}
 				if (ts.isObjectLiteralExpression(current)) {
 					for (const property of current.properties) {
 						if (ts.isPropertyAssignment(property) && staticPropertyName(property.name) === "meta") {
@@ -2628,7 +2745,12 @@ function lintProviderMetaNarrowing(provider: ProviderSourceLike): LintDiagnostic
 	const diagnostics: LintDiagnostic[] = [];
 	for (const fileName of Object.keys(files)) {
 		const normalized = normalizeSourcePath(fileName);
-		if (!/\.(ts|tsx|mts|cts)$/.test(normalized) || normalized.endsWith(".d.ts")) continue;
+		if (!/\.(ts|tsx|mts|cts)$/.test(normalized) || /\.d\.(ts|mts|cts)$/.test(normalized)) continue;
+		// Test sources routinely build throwaway declarations to exercise a
+		// capability shape, and several do it with a `ProviderDeclaration`
+		// annotation on purpose. Reporting those would fail `apifuse check` over
+		// code that is not the provider's runtime contract.
+		if (SHARED_TEST_SOURCE_FILE_PATTERN.test(normalized)) continue;
 		for (const finding of findWidenedDefineProviderArguments(ts, files, fileName)) {
 			const what =
 				finding.subject === "meta"

@@ -51,6 +51,14 @@ repositories in the error bucket and three in the warn bucket (`kakaomap`,
 `nol`, `swing-taxi` — each safe today because every literal-union field carries
 its own `as const`).
 
+The silent row is matched through the syntax it actually appears in: the
+annotation, an `as ProviderDeclaration` assertion (on the binding or written at
+the call), a renamed import, and a local `type Decl = ProviderDeclaration`
+alias. The callee is resolved to the SDK's `defineProvider` binding, so an
+unrelated local helper of the same name is not reported and an SDK import under
+another name is. Test sources are skipped — they build throwaway declarations on
+purpose, several of them with exactly this annotation.
+
 An annotation that only names a member of the declaration type
 (`ProviderDeclaration["meta"]`) is not key-erasing and is not reported, so the
 `satisfies ProviderDeclaration["meta"]` convention already in the fleet keeps
