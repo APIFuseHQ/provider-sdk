@@ -2915,7 +2915,10 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 				return;
 			}
 		}
-		if (ts.isIdentifier(node) && node.text === STALE_IF_ERROR_OPTION) {
+		// Only the shorthand property form counts as a bare identifier: it is a
+		// cache option being passed. A `const staleIfErrorMs = 300_000`, an
+		// import, or a log line naming the variable configures nothing.
+		if (ts.isShorthandPropertyAssignment(node) && node.name.text === STALE_IF_ERROR_OPTION) {
 			found = true;
 			return;
 		}
@@ -3063,6 +3066,15 @@ function rejectsStaleServe(node: unknown, bindings: ReadonlySet<string>, negated
  * failure to a different operation leaves the checked one green through the
  * stale serve — covered on paper, not on the status page.
  */
+/**
+ * Whether an assert records its verdict against the checked operation. Same
+ * concern as `guardAttributesTo`: an assertion that covers only some other
+ * operation fails that one, not this one.
+ */
+function assertCoversOperation(coversOperations: unknown, operationId: string): boolean {
+	return Array.isArray(coversOperations) && coversOperations.includes(operationId);
+}
+
 function guardAttributesTo(onFail: unknown, operationId: string): boolean {
 	if (!isLintRecord(onFail) || !Array.isArray(onFail.attribute)) return false;
 	return onFail.attribute.some((entry) => isLintRecord(entry) && entry.operationId === operationId);
@@ -3114,7 +3126,13 @@ function resultBindingChecksFreshness(
 			produced = step.kind === "operation" && step.result === binding;
 			continue;
 		}
-		if (step.kind === "assert" && rejectsStaleServe(step.expression, operand)) return true;
+		if (
+			step.kind === "assert" &&
+			rejectsStaleServe(step.expression, operand) &&
+			assertCoversOperation(step.coversOperations, operationId)
+		) {
+			return true;
+		}
 		if (step.kind !== "guard") continue;
 		if (rejectsStaleServe(step.condition, operand)) {
 			return guardAttributesTo(step.onFail, operationId);

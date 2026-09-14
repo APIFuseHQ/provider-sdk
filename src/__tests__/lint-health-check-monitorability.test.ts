@@ -1133,6 +1133,80 @@ describe("health-check monitorability lint", () => {
 		).toEqual([]);
 	});
 
+	it("does not accept an assert that covers only another operation", () => {
+		const misattributed = scenario([
+			READ_STEP,
+			{
+				id: "verify",
+				result: "verified",
+				kind: "assert",
+				coversOperations: ["someOtherOperation"],
+				expression: {
+					kind: "predicate",
+					operator: "not_equals",
+					actual: {
+						ref: {
+							namespace: "steps",
+							binding: `${OPERATION_KEY}-response`,
+							path: ["served_stale_cache"],
+						},
+					},
+					expected: true,
+				},
+			},
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: misattributed }] },
+					{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
+	it("does not treat a mere reference to the option as a cache call", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"const staleIfErrorMs = 300_000;\nlogger.debug({ policy: staleIfErrorMs });\nawait ctx.cache.getOrSet(key, load, { ttlMs: 60_000 });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+	});
+
+	it("still counts the shorthand property form", () => {
+		expect(
+			rules(
+				lint(
+					{
+						interval: "1h",
+						cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }],
+					},
+					{
+						providerSourceFiles: {
+							"upstream/client.ts":
+								"const staleIfErrorMs = 300_000;\nawait ctx.cache.getOrSet(key, load, { ttlMs, staleIfErrorMs });",
+						},
+					},
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
 		expect(
 			rules(
