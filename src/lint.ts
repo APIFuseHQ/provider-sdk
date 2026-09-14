@@ -2902,29 +2902,57 @@ function servesStaleIfError(source: string, fileName = "provider.ts"): boolean {
 		ts.isPropertySignature(node) ||
 		ts.isTypeReferenceNode(node) ||
 		ts.isTypeParameterDeclaration(node);
+	/**
+	 * The cache write options that travel with `staleIfErrorMs`
+	 * (`ProviderCacheWriteOptions`). An object literal carrying one of these
+	 * alongside the option is a cache configuration wherever it is declared.
+	 */
+	const siblingCacheOptions = new Set(["ttlMs", "jitterPct"]);
 	let found = false;
-	const visit = (node: import("typescript").Node): void => {
+	/**
+	 * `inCallArgument` is the second way to recognise a cache configuration: the
+	 * literal is being passed somewhere (`getOrSet(key, load, { ... })`). Together
+	 * with the sibling-option test this covers the real shapes, while an upstream
+	 * payload that merely carries a field of the same name does not count.
+	 */
+	const visit = (node: import("typescript").Node, inCallArgument: boolean): void => {
 		if (found || isTypeOnly(node)) return;
-		if (ts.isPropertyAssignment(node)) {
-			if (propertyName(node.name) === STALE_IF_ERROR_OPTION) {
-				if (!disablesStaleWindow(ts, node.initializer)) {
-					found = true;
-					return;
+		if (ts.isObjectLiteralExpression(node)) {
+			let optionValue: import("typescript").Expression | undefined;
+			let declaresOption = false;
+			let hasSibling = false;
+			for (const property of node.properties) {
+				if (ts.isShorthandPropertyAssignment(property)) {
+					if (property.name.text === STALE_IF_ERROR_OPTION) declaresOption = true;
+					else if (siblingCacheOptions.has(property.name.text)) hasSibling = true;
+					continue;
 				}
-				// A disabled window: do not let the name inside it match below.
+				if (!ts.isPropertyAssignment(property)) continue;
+				const name = propertyName(property.name);
+				if (name === STALE_IF_ERROR_OPTION) {
+					declaresOption = true;
+					optionValue = property.initializer;
+				} else if (name !== undefined && siblingCacheOptions.has(name)) {
+					hasSibling = true;
+				}
+			}
+			if (
+				declaresOption &&
+				(hasSibling || inCallArgument) &&
+				(optionValue === undefined || !disablesStaleWindow(ts, optionValue))
+			) {
+				found = true;
 				return;
 			}
 		}
-		// Only the shorthand property form counts as a bare identifier: it is a
-		// cache option being passed. A `const staleIfErrorMs = 300_000`, an
-		// import, or a log line naming the variable configures nothing.
-		if (ts.isShorthandPropertyAssignment(node) && node.name.text === STALE_IF_ERROR_OPTION) {
-			found = true;
+		if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+			visit(node.expression, false);
+			for (const argument of node.arguments ?? []) visit(argument, true);
 			return;
 		}
-		ts.forEachChild(node, visit);
+		ts.forEachChild(node, (child) => visit(child, false));
 	};
-	visit(file);
+	visit(file, false);
 	return found;
 }
 
