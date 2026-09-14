@@ -2287,25 +2287,44 @@ function readHealthCheckCases(healthCheck: unknown): Record<string, unknown>[] {
 	return cases.filter(isLintRecord);
 }
 
+/** The `result` binding of every `operation` step in a scenario. */
+function operationStepBindings(steps: readonly unknown[]): Set<string> {
+	const bindings = new Set<string>();
+	for (const step of steps) {
+		if (isLintRecord(step) && step.kind === "operation" && typeof step.result === "string") {
+			bindings.add(step.result);
+		}
+	}
+	return bindings;
+}
+
 /**
- * Whether an assertion tree reads the operand through a validated reference
- * (`{ ref: { namespace, binding, path } }`). Structural on purpose: a literal
- * `"served_stale_cache"` sitting in an `inputTemplate` value or a `reasonKey`
- * is not a freshness check, and a substring search over the serialized scenario
- * would accept it and silence the rule.
+ * Whether an assertion tree reads the operand off an operation step result.
+ *
+ * Structural and exact on three counts, because each looser form is a way to
+ * silence the rule without checking cache provenance: a literal
+ * `"served_stale_cache"` in an `inputTemplate` or a `reasonKey` is not a
+ * reference at all; `["data", "served_stale_cache"]` is an upstream payload
+ * field the provider happens to have named that way, not the runtime's
+ * projection of `meta.stale`; and a reference bound to an `extract` result is
+ * not the operation step this probe invoked.
  */
-function readsStaleCacheOperand(node: unknown): boolean {
-	if (Array.isArray(node)) return node.some(readsStaleCacheOperand);
+function readsStaleCacheOperand(node: unknown, bindings: ReadonlySet<string>): boolean {
+	if (Array.isArray(node)) return node.some((child) => readsStaleCacheOperand(child, bindings));
 	if (!isLintRecord(node)) return false;
 	const reference = node.ref;
 	if (
 		isLintRecord(reference) &&
+		reference.namespace === "steps" &&
+		typeof reference.binding === "string" &&
+		bindings.has(reference.binding) &&
 		Array.isArray(reference.path) &&
-		reference.path.includes(SERVED_STALE_CACHE_OPERAND)
+		reference.path.length === 1 &&
+		reference.path[0] === SERVED_STALE_CACHE_OPERAND
 	) {
 		return true;
 	}
-	return Object.values(node).some(readsStaleCacheOperand);
+	return Object.values(node).some((child) => readsStaleCacheOperand(child, bindings));
 }
 
 /**
@@ -2316,10 +2335,12 @@ function readsStaleCacheOperand(node: unknown): boolean {
  */
 function scenarioChecksFreshness(scenario: unknown): boolean {
 	if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) return false;
+	const bindings = operationStepBindings(scenario.steps);
+	if (bindings.size === 0) return false;
 	return scenario.steps.some((step) => {
 		if (!isLintRecord(step)) return false;
-		if (step.kind === "guard") return readsStaleCacheOperand(step.condition);
-		if (step.kind === "assert") return readsStaleCacheOperand(step.expression);
+		if (step.kind === "guard") return readsStaleCacheOperand(step.condition, bindings);
+		if (step.kind === "assert") return readsStaleCacheOperand(step.expression, bindings);
 		return false;
 	});
 }
@@ -2358,7 +2379,7 @@ function lintHealthCheckMonitorability(provider: {
 	// Freshness is judged per CASE. Operation-level bookkeeping would let one
 	// guarded case silence its unguarded siblings, which still report `ok`
 	// through a stale serve — the same fail-open this rule exists to close.
-	const probesWithoutFreshnessCheck: string[] = [];
+	const uncoveredByOperation = new Map<string, string[]>();
 
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		const cases = readHealthCheckCases(operation.healthCheck);
@@ -2372,7 +2393,9 @@ function lintHealthCheckMonitorability(provider: {
 				unmonitored.push(caseLabel);
 			}
 			if (!scenarioChecksFreshness(healthCase.scenario)) {
-				probesWithoutFreshnessCheck.push(`${operationKey} ${caseLabel}`);
+				const uncovered = uncoveredByOperation.get(operationKey) ?? [];
+				uncovered.push(`${operationKey} ${caseLabel}`);
+				uncoveredByOperation.set(operationKey, uncovered);
 			}
 		}
 		if (unmonitored.length > 0) {
@@ -2385,31 +2408,49 @@ function lintHealthCheckMonitorability(provider: {
 		}
 	}
 
-	if (probesWithoutFreshnessCheck.length === 0) return diagnostics;
+	if (uncoveredByOperation.size === 0) return diagnostics;
 
-	const staleSources = new Set<string>();
+	// Attribution. A handler that carries the cache call itself names exactly the
+	// operation that serves stale; a shared helper does not, and the linter
+	// cannot follow the call graph into it. Prefer the precise evidence, and when
+	// only the shared kind exists, say so in the message rather than implying
+	// every listed probe reads through that cache.
+	const sharedSources = new Set<string>();
 	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
 		if (isServingProviderSourcePath(filePath) && STALE_IF_ERROR_PATTERN.test(source)) {
-			staleSources.add(filePath);
+			sharedSources.add(filePath);
 		}
 	}
+	const handlerSources = new Set<string>();
+	const operationsServingStale = new Set<string>();
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		if (STALE_IF_ERROR_PATTERN.test(getOperationSource(operation))) {
-			staleSources.add(`operations.${operationKey} handler`);
+			handlerSources.add(`operations.${operationKey} handler`);
+			operationsServingStale.add(operationKey);
 		}
 	}
-	if (staleSources.size === 0) return diagnostics;
+	if (sharedSources.size === 0 && handlerSources.size === 0) return diagnostics;
 
-	const elided = probesWithoutFreshnessCheck.length - STALE_SERVE_MESSAGE_PROBE_LIMIT;
-	const named = probesWithoutFreshnessCheck
+	const attributable = sharedSources.size === 0;
+	const sources = attributable ? handlerSources : new Set([...sharedSources, ...handlerSources]);
+	const uncovered = [...uncoveredByOperation]
+		.filter(([operationKey]) => !attributable || operationsServingStale.has(operationKey))
+		.flatMap(([, probes]) => probes);
+	if (uncovered.length === 0) return diagnostics;
+
+	const elided = uncovered.length - STALE_SERVE_MESSAGE_PROBE_LIMIT;
+	const named = uncovered
 		.slice(0, STALE_SERVE_MESSAGE_PROBE_LIMIT)
 		.join(", ")
 		.concat(elided > 0 ? `, and ${elided} more` : "");
+	const caveat = attributable
+		? ""
+		: ` The cache call is in shared source, so which operations reach it is not visible here — skip any listed probe whose operation does not read through it.`;
 	diagnostics.push({
 		rule: "health-check-stale-serve-unguarded",
 		level: "warn",
 		field: "healthCheck",
-		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...staleSources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.`,
+		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...sources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.${caveat}`,
 	});
 	return diagnostics;
 }

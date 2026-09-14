@@ -331,6 +331,146 @@ describe("health-check monitorability lint", () => {
 
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]?.message).toContain(`operations.${OPERATION_KEY} handler`);
+		// Handler evidence names the serving operation exactly, so no caveat.
+		expect(diagnostics[0]?.message).not.toContain("shared source");
+	});
+
+	it("lists only the operations whose own handler serves stale, when that is provable", () => {
+		const stale = operation({
+			interval: "1h",
+			cases: [{ name: "stale", input: {}, scenario: scenario([READ_STEP]) }],
+		});
+		const plain = operation({
+			interval: "1h",
+			cases: [{ name: "plain", input: {}, scenario: scenario([READ_STEP]) }],
+		});
+		const diagnostics = rules(
+			lintProvider({
+				id: "demo",
+				allowedHosts: ["example.com"],
+				reviewed: "2026-09-14",
+				operations: {
+					staleOp: { ...stale, source: "ctx.cache.getOrSet(k, l, { staleIfErrorMs: 300_000 })" },
+					plainOp: { ...plain, source: "return upstream.read(input);" },
+				},
+			}),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain('staleOp "stale"');
+		expect(diagnostics[0]?.message).not.toContain('plainOp "plain"');
+	});
+
+	it("says so when only a shared helper carries the cache call", () => {
+		const diagnostics = rules(
+			lint(
+				{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: scenario([READ_STEP]) }] },
+				{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+			),
+			UNGUARDED_STALE,
+		);
+
+		expect(diagnostics[0]?.message).toContain("The cache call is in shared source");
+	});
+
+	it("does not accept a payload field that happens to be named the same", () => {
+		const payloadRef = scenario([
+			READ_STEP,
+			{
+				id: "guard-payload",
+				result: "payload-guarded",
+				kind: "guard",
+				condition: {
+					kind: "predicate",
+					operator: "not_equals",
+					actual: {
+						ref: {
+							namespace: "steps",
+							binding: "response",
+							path: ["data", "served_stale_cache"],
+						},
+					},
+					expected: true,
+				},
+				onFail: {
+					attribute: [
+						{
+							operationId: OPERATION_KEY,
+							status: "degraded",
+							reasonCode: "expected_absence",
+							reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
+						},
+					],
+					stop: "scenario",
+				},
+			},
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: payloadRef }] },
+					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
+	});
+
+	it("does not accept the operand read off a non-operation step binding", () => {
+		const extractRef = scenario([
+			READ_STEP,
+			{
+				id: "pull",
+				result: "extracted",
+				kind: "extract",
+				from: { namespace: "steps", binding: "response", path: ["data"] },
+				selector: {
+					root: "$",
+					segments: [
+						{ kind: "property", name: "items" },
+						{ kind: "index", index: 0 },
+					],
+				},
+				valueType: "object",
+				required: true,
+			},
+			{
+				id: "guard-extracted",
+				result: "extract-guarded",
+				kind: "guard",
+				condition: {
+					kind: "predicate",
+					operator: "not_equals",
+					actual: {
+						ref: { namespace: "steps", binding: "extracted", path: ["served_stale_cache"] },
+					},
+					expected: true,
+				},
+				onFail: {
+					attribute: [
+						{
+							operationId: OPERATION_KEY,
+							status: "degraded",
+							reasonCode: "expected_absence",
+							reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
+						},
+					],
+					stop: "scenario",
+				},
+			},
+		]);
+
+		expect(
+			rules(
+				lint(
+					{ interval: "1h", cases: [{ name: "dense", input: {}, scenario: extractRef }] },
+					{ providerSourceFiles: { "upstream/client.ts": "staleIfErrorMs: 300_000" } },
+				),
+				UNGUARDED_STALE,
+			),
+		).toHaveLength(1);
 	});
 
 	it("does not ask for a freshness guard when the provider declares no health check", () => {
