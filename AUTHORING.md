@@ -870,8 +870,16 @@ this release; the level is raised once the fleet is clean):
 - `process-env-direct-read` — `process.env.X`, `process.env["X"]`, a bare
   `process.env` object use, `Bun.env`. The `APIFUSE__RUNTIME__*` bootstrap
   family (`APIFUSE__RUNTIME__PORT`, `…POD_ID`, `…POD_ENDPOINT`) is exempt
-  everywhere; every other value is declared in `defineProvider` (`secrets:
-  [{ name, required }]`, or `env: true`) and read with `ctx.env.get(name)`.
+  everywhere; every other value is declared in `defineProvider` under
+  `secrets: [{ name, required }]` and read with `ctx.env.get(name)`. The names
+  visible to `ctx.env.get` are exactly the declared `secrets[].name` (minus
+  engine-owned names; an `oauth2_proxied` auth flow additionally sees
+  `APIFUSE__AUTH_PROXY__URL`). `env: true` (or `env: {}`) is the capability
+  declaration that turns the `ctx.env` binding on — a type *and* runtime gate,
+  since touching `ctx.env` without it throws `PROVIDER_CAPABILITY_UNDECLARED`
+  — and does not widen the readable names. Test/E2E toggles are not secrets
+  and cannot move to `ctx.env`: replace them with test doubles (inject
+  `ctx.env` / `ctx.http`) or recorded fixtures.
 - `node-runtime-module-import` — value imports of `fs`, `fs/promises`, `net`,
   `tls`, `dgram`, `http`, `https`, `http2`, `child_process` (with or without
   `node:`), and `Bun.spawn` / `Bun.spawnSync` / ``Bun.$` ` `` / `Bun.file` /
@@ -896,11 +904,17 @@ appears as an `INFO` audit line instead of a warning.
 ```ts
 // Before: request-path module reads the ambient environment and the disk
 import { mkdir, writeFile } from "node:fs/promises";
-const tapDirectory = process.env.TABELOG_DIAG_TAP_DIR?.trim();
+const serviceKey = process.env.EXAMPLE_SERVICE_KEY;
+if (process.env.EXAMPLE_DIAG_TAP_DIR) {
+  await writeFile(`${process.env.EXAMPLE_DIAG_TAP_DIR}/booking.json`, JSON.stringify(response));
+}
 
-// After: declared configuration through the context; no filesystem in the pod
-const tapDirectory = ctx.env.get("APIFUSE__PROVIDER__TABELOG__DIAG_TAP_DIR")?.trim();
-// …and route diagnostics through ctx.trace / ctx.files instead of writing files.
+// After: the credential is a declared secret read through the context
+// (defineProvider({ secrets: [{ name: "APIFUSE__PROVIDER__EXAMPLE__SERVICE_KEY", required: true }] })),
+// and the ad-hoc diagnostic tap is deleted — a toggle that is not a secret has
+// no place in ctx.env; observability goes through ctx.trace instead.
+const serviceKey = ctx.env.get("APIFUSE__PROVIDER__EXAMPLE__SERVICE_KEY");
+const response = await ctx.trace.span("booking.confirm", () => confirmBooking(ctx, serviceKey));
 ```
 
 ### Credentials forced into query parameters
