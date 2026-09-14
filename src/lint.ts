@@ -2251,6 +2251,403 @@ function lintLegacyChoiceUsage(provider: ProviderSourceLike): LintDiagnostic[] {
 	});
 }
 
+// ---------------------------------------------------------------------------
+// meta-requires-as-const
+// ---------------------------------------------------------------------------
+
+const META_AS_CONST_RULE = "meta-requires-as-const";
+
+/**
+ * Why this is checked from source and not from the loaded provider.
+ *
+ * `defineProvider` is declared `<const TConfig extends ProviderDeclaration>`, so
+ * an object literal written AT the call keeps its literal types. A `const` type
+ * parameter cannot re-narrow a value that widened somewhere else: when the
+ * declaration — or its `meta` block — lives in its own module and is passed by
+ * name, the call sees that module's declared type. `as const` has no runtime
+ * trace at all (the loaded object is byte-identical with and without it), so
+ * only the syntax carries the narrowing, which is why this rule reads
+ * `providerSourceFiles` rather than the provider value.
+ *
+ * What is actually at stake, measured against this SDK rather than reasoned
+ * about (probe: declare `http` only, then read `ctx.files`):
+ *
+ * | how the extracted `meta` is declared        | at the call | ProviderContextOf |
+ * |---------------------------------------------|-------------|-------------------|
+ * | `meta` written inline in `defineProvider({...})` | ok       | narrowed          |
+ * | `meta = { ... } as const`                    | ok          | narrowed          |
+ * | `meta = { ... } satisfies ProviderMeta`      | ok          | narrowed          |
+ * | `meta: ProviderMeta = { ... }`               | ok          | narrowed          |
+ * | `meta = { ... }`, no literal-typed field     | ok          | narrowed          |
+ * | `meta = { ... }` with a literal-typed field  | **TS2322**  | **degenerate**    |
+ * | `decl: ProviderDeclaration = { ... }`        | **ok**      | **degenerate**    |
+ *
+ * The last two rows are the rule, and they fail differently.
+ *
+ * LOUD (`warn`). A widened `meta` is one property of the call literal, so it
+ * cannot change `keyof TConfig` by itself — rows 5 and 6 differ only in whether
+ * some widened value is still assignable. Once one is not
+ * (`contract.publicSchemaFieldNames` going from `"normalized"` to `string` is
+ * the one the fleet hits), inference for `TConfig` falls back to the constraint
+ * and the context degenerates — but `tsc` also rejects the call with TS2322, so
+ * nothing ships. It warns because row 5 is one added field away from row 6.
+ *
+ * SILENT (`error`). Annotating the WHOLE declaration
+ * (`const decl: ProviderDeclaration = { ... }; defineProvider(decl)`) is
+ * different in kind. It is perfectly assignable, so the call compiles; but
+ * every capability is an OPTIONAL key of `ProviderDeclaration`, so
+ * `keyof TConfig` is all of them at once. Every branch of `ProviderContext` is
+ * keyed on `"<capability>" extends keyof TConfig`, so the context hands
+ * `ctx.files`, `ctx.browser`, `ctx.state` and the rest to a provider that
+ * declared none of them, and no diagnostic anywhere points at it. `satisfies
+ * ProviderDeclaration` checks the same shape and keeps the key set.
+ *
+ * The rule is scoped to what is mechanically decidable from the provider's own
+ * sources. A `meta` written inline at the call is fine (the `const` type
+ * parameter does the work). A value passed by name is checked at its
+ * declaration, following at most {@link MODULE_HOP_LIMIT} re-export hops. An
+ * indexed access such as `ProviderDeclaration["meta"]` names one member and is
+ * not a key-erasing annotation. A value that cannot be resolved inside the
+ * provider tree (a bare-specifier import, a computed expression, a function
+ * call) is left alone rather than guessed at.
+ */
+const MODULE_HOP_LIMIT = 4;
+
+/**
+ * Narrowing verdict for one `const` declaration.
+ *
+ * `silent` separates the two failure modes measured in the table above. A
+ * declaration typed as `ProviderDeclaration` keeps every optional capability
+ * key, so `keyof TConfig` is the whole union, the context degenerates, and
+ * `tsc` says NOTHING — that is an error. A bare object literal degenerates only
+ * once one of its widened values stops being assignable, and when it does the
+ * call fails to compile — that is a warning.
+ */
+type NarrowingVerdict =
+	| { kind: "narrowed" }
+	| { kind: "widened"; reason: string; silent: boolean }
+	| { kind: "unresolved" };
+
+/**
+ * True for a type node that erases the authored key set to
+ * `keyof ProviderDeclaration` — the declaration type itself, or a mapped type
+ * over it (`Partial<ProviderDeclaration>`, `Omit<ProviderDeclaration, "auth">`).
+ *
+ * An indexed access into it (`ProviderDeclaration["meta"]`) is NOT this: it
+ * names one member's type and leaves the declaration's own key set alone, which
+ * is why `satisfies ProviderDeclaration["meta"]` is a safe and used convention.
+ */
+function erasesDeclarationKeys(
+	ts: typeof import("typescript"),
+	node: import("typescript").TypeNode,
+	file: import("typescript").SourceFile,
+): boolean {
+	if (ts.isIndexedAccessTypeNode(node)) return false;
+	if (ts.isTypeReferenceNode(node)) {
+		const name = ts.isIdentifier(node.typeName) ? node.typeName.text : node.typeName.right.text;
+		if (name === "ProviderDeclaration") return true;
+		return (node.typeArguments ?? []).some((argument) => erasesDeclarationKeys(ts, argument, file));
+	}
+	return false;
+}
+
+function normalizeSourcePath(path: string): string {
+	return path.replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+/** Resolves `./meta` (or `./meta.js`) from `index.ts` against the source map. */
+function resolveProviderModule(
+	fromFile: string,
+	specifier: string,
+	files: Record<string, string>,
+): string | undefined {
+	if (!specifier.startsWith(".")) return undefined;
+	const fromSegments = normalizeSourcePath(fromFile).split("/");
+	fromSegments.pop();
+	for (const segment of specifier.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") fromSegments.pop();
+		else fromSegments.push(segment);
+	}
+	const joined = fromSegments.join("/");
+	const withoutJs = joined.replace(/\.(js|mjs|cjs)$/, "");
+	const candidates = [
+		joined,
+		`${withoutJs}.ts`,
+		`${withoutJs}.tsx`,
+		`${withoutJs}/index.ts`,
+		`${withoutJs}/index.tsx`,
+	];
+	const normalized = new Map(Object.keys(files).map((key) => [normalizeSourcePath(key), key]));
+	for (const candidate of candidates) {
+		const match = normalized.get(candidate);
+		if (match !== undefined) return match;
+	}
+	return undefined;
+}
+
+/** True for `<expr> as const`. */
+function isConstAssertion(
+	ts: typeof import("typescript"),
+	node: import("typescript").Node,
+): boolean {
+	return (
+		ts.isAsExpression(node) &&
+		ts.isTypeReferenceNode(node.type) &&
+		ts.isIdentifier(node.type.typeName) &&
+		node.type.typeName.text === "const"
+	);
+}
+
+/**
+ * Decides whether `name`, as declared in `fileName`, still carries its literal
+ * types when it is read from another module. Follows `import`/`export ... from`
+ * re-exports up to {@link MODULE_HOP_LIMIT} hops.
+ */
+function narrowingOfExportedConst(
+	ts: typeof import("typescript"),
+	files: Record<string, string>,
+	fileName: string,
+	name: string,
+	hops = 0,
+): NarrowingVerdict {
+	if (hops > MODULE_HOP_LIMIT) return { kind: "unresolved" };
+	const source = files[fileName];
+	if (source === undefined) return { kind: "unresolved" };
+	const file = ts.createSourceFile(
+		fileName,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		scriptKindForSourceFile(ts, fileName),
+	);
+
+	for (const statement of file.statements) {
+		if (ts.isVariableStatement(statement)) {
+			for (const declaration of statement.declarationList.declarations) {
+				if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue;
+				// An annotation (`: ProviderMeta`) and a `satisfies` check both give
+				// the literal a contextual type whose literal-typed members stay
+				// literal. Measured: neither degenerates ProviderContextOf — UNLESS
+				// the type named is the declaration itself, which replaces the
+				// authored key set with every optional capability key.
+				if (declaration.type) {
+					if (erasesDeclarationKeys(ts, declaration.type, file)) {
+						return {
+							kind: "widened",
+							silent: true,
+							reason: `it is annotated \`: ${declaration.type.getText(file)}\`, and every capability is an OPTIONAL key of ProviderDeclaration, so \`keyof TConfig\` becomes all of them`,
+						};
+					}
+					return { kind: "narrowed" };
+				}
+				let initializer = declaration.initializer;
+				while (initializer && ts.isParenthesizedExpression(initializer)) {
+					initializer = initializer.expression;
+				}
+				if (!initializer) return { kind: "unresolved" };
+				if (ts.isSatisfiesExpression(initializer)) return { kind: "narrowed" };
+				if (isConstAssertion(ts, initializer)) return { kind: "narrowed" };
+				if (ts.isAsExpression(initializer)) {
+					if (erasesDeclarationKeys(ts, initializer.type, file)) {
+						return {
+							kind: "widened",
+							silent: true,
+							reason: `it is asserted \`as ${initializer.type.getText(file)}\`, and every capability is an OPTIONAL key of ProviderDeclaration, so \`keyof TConfig\` becomes all of them`,
+						};
+					}
+					return { kind: "narrowed" };
+				}
+				if (ts.isObjectLiteralExpression(initializer)) {
+					return {
+						kind: "widened",
+						silent: false,
+						reason:
+							"it is a bare object literal — no `as const`, no annotation, no `satisfies` — so TypeScript widens every literal in it before `defineProvider` ever sees it",
+					};
+				}
+				return { kind: "unresolved" };
+			}
+		}
+
+		// `export { providerMeta } from "./meta";` and
+		// `import { providerMeta } from "./meta"; export { providerMeta };`
+		if (ts.isExportDeclaration(statement) && statement.exportClause) {
+			if (!ts.isNamedExports(statement.exportClause)) continue;
+			for (const element of statement.exportClause.elements) {
+				if (element.name.text !== name) continue;
+				const origin = element.propertyName?.text ?? name;
+				const specifier =
+					statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
+						? statement.moduleSpecifier.text
+						: undefined;
+				if (specifier === undefined) {
+					return narrowingOfImportedName(ts, files, file, fileName, origin, hops + 1);
+				}
+				const target = resolveProviderModule(fileName, specifier, files);
+				if (target === undefined) return { kind: "unresolved" };
+				return narrowingOfExportedConst(ts, files, target, origin, hops + 1);
+			}
+		}
+	}
+
+	return narrowingOfImportedName(ts, files, file, fileName, name, hops + 1);
+}
+
+/** Follows `import { name } from "./x"` declared in `file` to its definition. */
+function narrowingOfImportedName(
+	ts: typeof import("typescript"),
+	files: Record<string, string>,
+	file: import("typescript").SourceFile,
+	fileName: string,
+	name: string,
+	hops: number,
+): NarrowingVerdict {
+	if (hops > MODULE_HOP_LIMIT) return { kind: "unresolved" };
+	for (const statement of file.statements) {
+		if (!ts.isImportDeclaration(statement)) continue;
+		const bindings = statement.importClause?.namedBindings;
+		if (!bindings || !ts.isNamedImports(bindings)) continue;
+		for (const element of bindings.elements) {
+			if (element.name.text !== name) continue;
+			if (!ts.isStringLiteral(statement.moduleSpecifier)) return { kind: "unresolved" };
+			const target = resolveProviderModule(fileName, statement.moduleSpecifier.text, files);
+			if (target === undefined) return { kind: "unresolved" };
+			return narrowingOfExportedConst(ts, files, target, element.propertyName?.text ?? name, hops);
+		}
+	}
+	return { kind: "unresolved" };
+}
+
+type MetaNarrowingFinding = {
+	/** `meta` when the meta block alone is widened, `declaration` for the whole call argument. */
+	subject: "meta" | "declaration";
+	name: string;
+	reason: string;
+	/** True when the degeneration compiles cleanly; see {@link NarrowingVerdict}. */
+	silent: boolean;
+};
+
+/**
+ * Finds every `defineProvider(...)` in one file and reports the arguments that
+ * reach it already widened.
+ */
+function findWidenedDefineProviderArguments(
+	ts: typeof import("typescript"),
+	files: Record<string, string>,
+	fileName: string,
+): MetaNarrowingFinding[] {
+	const source = files[fileName];
+	if (source === undefined) return [];
+	const file = ts.createSourceFile(
+		fileName,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		scriptKindForSourceFile(ts, fileName),
+	);
+	const findings: MetaNarrowingFinding[] = [];
+
+	const check = (subject: "meta" | "declaration", expression: import("typescript").Expression) => {
+		let current = expression;
+		while (ts.isParenthesizedExpression(current)) current = current.expression;
+		if (ts.isSatisfiesExpression(current) || isConstAssertion(ts, current)) return;
+		if (ts.isObjectLiteralExpression(current)) {
+			// Written at the call: the `const` type parameter narrows it. Only a
+			// spread of an already-widened binding can still lose the literals.
+			for (const property of current.properties) {
+				if (ts.isSpreadAssignment(property) && ts.isIdentifier(property.expression)) {
+					check(subject, property.expression);
+				}
+			}
+			return;
+		}
+		if (!ts.isIdentifier(current)) return;
+		const verdict = narrowingOfImportedName(ts, files, file, fileName, current.text, 1);
+		const resolved =
+			verdict.kind === "unresolved"
+				? narrowingOfExportedConst(ts, files, fileName, current.text, 1)
+				: verdict;
+		if (resolved.kind === "widened") {
+			// A widened `meta` is only ever the loud row: it is one property of the
+			// call literal, so it cannot change `keyof TConfig` by itself.
+			const silent = resolved.silent && subject === "declaration";
+			findings.push({ subject, name: current.text, reason: resolved.reason, silent });
+		}
+	};
+
+	const visit = (node: import("typescript").Node): void => {
+		if (ts.isCallExpression(node) && calleeName(node) === "defineProvider") {
+			const argument = node.arguments[0];
+			if (argument) {
+				let current: import("typescript").Expression = argument;
+				while (ts.isParenthesizedExpression(current)) current = current.expression;
+				if (ts.isObjectLiteralExpression(current)) {
+					for (const property of current.properties) {
+						if (ts.isPropertyAssignment(property) && staticPropertyName(property.name) === "meta") {
+							check("meta", property.initializer);
+						} else if (
+							ts.isShorthandPropertyAssignment(property) &&
+							property.name.text === "meta"
+						) {
+							check("meta", property.name);
+						} else if (ts.isSpreadAssignment(property)) {
+							check("declaration", property.expression);
+						}
+					}
+				} else {
+					check("declaration", argument);
+				}
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(file);
+	return findings;
+}
+
+/**
+ * `meta-requires-as-const`: the provider declaration, and its `meta` block in
+ * particular, should reach `defineProvider` with its literal types intact.
+ *
+ * See the table above {@link MODULE_HOP_LIMIT} for the measured consequences
+ * and for why this warns rather than errors.
+ */
+function lintProviderMetaNarrowing(provider: ProviderSourceLike): LintDiagnostic[] {
+	const files = provider.providerSourceFiles ?? {};
+	if (Object.keys(files).length === 0) return [];
+	let ts: typeof import("typescript");
+	try {
+		ts = getTypeScript();
+	} catch {
+		// No TypeScript in the consumer's tree: the other AST rules degrade the
+		// same way rather than guessing from raw text.
+		return [];
+	}
+
+	const diagnostics: LintDiagnostic[] = [];
+	for (const fileName of Object.keys(files)) {
+		const normalized = normalizeSourcePath(fileName);
+		if (!/\.(ts|tsx|mts|cts)$/.test(normalized) || normalized.endsWith(".d.ts")) continue;
+		for (const finding of findWidenedDefineProviderArguments(ts, files, fileName)) {
+			const what =
+				finding.subject === "meta"
+					? `The \`meta\` block passed to defineProvider (\`${finding.name}\`)`
+					: `The declaration passed to defineProvider (\`${finding.name}\`)`;
+			const consequence = finding.silent
+				? "ProviderContextOf<typeof buildProvider> is therefore ProviderContext<ProviderDeclaration>: ctx.files, ctx.browser, ctx.state and every other capability type-check in a provider that declared none of them, and nothing anywhere reports it — the call itself still compiles. Replace the annotation with `satisfies ProviderDeclaration`, which checks the same shape and leaves the authored key set intact."
+				: 'That is latent rather than broken today: a widened property of `meta` cannot change `keyof TConfig` on its own. It turns into a failure the moment one widened value stops being assignable to ProviderDeclaration — `contract.publicSchemaFieldNames` going from "normalized" to `string` is the one the fleet hits — and then the call fails with TS2322 and the context degenerates at the same time. Add `as const` to the declaration; `satisfies ProviderMeta`, an explicit annotation, or an `as const` on each literal-union field are equally sound.';
+			diagnostics.push({
+				rule: META_AS_CONST_RULE,
+				level: finding.silent ? "error" : "warn",
+				field: finding.subject,
+				message: `${what} reaches the call already widened: ${finding.reason}. ${consequence}`,
+			});
+		}
+	}
+	return diagnostics;
+}
+
 export function lintOperation(op: {
 	descriptionKey?: string;
 	whenToUseKeys?: readonly string[];
@@ -2442,6 +2839,7 @@ export function lintProviderWithInformation(
 		...lintErrorCodeDeclarationConflicts(provider),
 		...lintErrorMessageLocalization(provider),
 		...lintLegacyChoiceUsage(provider),
+		...lintProviderMetaNarrowing(provider),
 		...lintHandleDeclarations(provider),
 	];
 	// Runtime boundary rules (process.env, node:fs/net/child_process, raw
