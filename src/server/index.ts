@@ -115,6 +115,10 @@ export {
 	type ServeOptions,
 	serve,
 } from "./serve.js";
+export type {
+	ProviderStateBackendLogEvent,
+	ProviderStoreBackendReport,
+} from "./state-backend-report.js";
 export type { ProviderErrorObservability } from "../errors.js";
 export {
 	computeSelfTestPlanDigest,

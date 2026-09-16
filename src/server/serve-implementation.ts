@@ -216,6 +216,10 @@ import type {
 } from "../types.js";
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import type { SelfTestCancellationLogEvent } from "./self-test.js";
+import {
+	type ProviderStateBackendLogEvent,
+	providerStateBackendLogEvent,
+} from "./state-backend-report.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
 import {
 	collectStaticDiagnosticSensitiveValues,
@@ -1476,6 +1480,7 @@ export type ProviderServerLogEvent =
 			 */
 			warnings?: readonly string[];
 	  }
+	| ProviderStateBackendLogEvent
 	| SelfTestCancellationLogEvent;
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
@@ -4353,6 +4358,18 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 			engineSelection.resolution,
 			!isUnavailableProviderEngine(engineSelection.engine),
 		),
+	);
+	// Same contract for the stores: one line per process boot naming the state
+	// and cache backends this pod resolved, so "which Redis is this provider's
+	// state actually on" is a log grep instead of an inference from the
+	// Deployment spec (apifuse#2302).
+	logger(
+		providerStateBackendLogEvent({
+			providerId: provider.id,
+			sdkVersion: SDK_VERSION,
+			injectedState: options.state !== undefined,
+			allowMemoryFallback: options.allowMemoryStateFallback === true,
+		}),
 	);
 
 	const servers: BunServerHandle[] = [];
