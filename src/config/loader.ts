@@ -255,25 +255,63 @@ const SMARTPROXY_ALLOCATOR_RETRY_BASE_MS = 25;
 const SMARTPROXY_EXTRACTION_CACHE_TTL_MS = 15_000;
 const SMARTPROXY_EXTRACTION_SOFT_REFRESH_MS = 10_000;
 
+/** Env names that can supply a provider store's Redis URL. */
+export type ProviderRedisUrlEnvName =
+	| typeof PROVIDER_STATE_REDIS_URL_ENV
+	| typeof PROVIDER_CACHE_REDIS_URL_ENV
+	| typeof REDIS_URL_ENV;
+
+/** Which env name supplied a store's Redis URL, alongside the URL itself. */
+export type ProviderRedisUrlResolution = {
+	readonly url: string;
+	/** The env name that actually supplied `url`. */
+	readonly envName: ProviderRedisUrlEnvName;
+	/**
+	 * True when `url` came from a shared fallback env rather than the store's
+	 * own. A state store on `fallback: true` is sharing an instance that was
+	 * provisioned for something else (apifuse#2144).
+	 */
+	readonly fallback: boolean;
+};
+
+// Precedence is declared once here so the URL accessors, the boot report and
+// any future consumer can never disagree about which env wins.
+const CACHE_REDIS_URL_PRECEDENCE = [PROVIDER_CACHE_REDIS_URL_ENV, REDIS_URL_ENV] as const;
+const STATE_REDIS_URL_PRECEDENCE = [
+	PROVIDER_STATE_REDIS_URL_ENV,
+	PROVIDER_CACHE_REDIS_URL_ENV,
+	REDIS_URL_ENV,
+] as const;
+
+function resolveRedisUrlFromEnv(
+	precedence: readonly ProviderRedisUrlEnvName[],
+): ProviderRedisUrlResolution | undefined {
+	for (let index = 0; index < precedence.length; index += 1) {
+		const envName = precedence[index] as ProviderRedisUrlEnvName;
+		const url = readDiagnosticEnv(envName)?.trim();
+		if (url) return { url, envName, fallback: index > 0 };
+	}
+	return undefined;
+}
+
 function redisUrlFromEnv(): string | undefined {
-	return (
-		readDiagnosticEnv(PROVIDER_CACHE_REDIS_URL_ENV)?.trim() ||
-		readDiagnosticEnv(REDIS_URL_ENV)?.trim() ||
-		undefined
-	);
+	return providerCacheRedisResolutionFromEnv()?.url;
+}
+
+export function providerCacheRedisResolutionFromEnv(): ProviderRedisUrlResolution | undefined {
+	return resolveRedisUrlFromEnv(CACHE_REDIS_URL_PRECEDENCE);
+}
+
+export function providerStateRedisResolutionFromEnv(): ProviderRedisUrlResolution | undefined {
+	return resolveRedisUrlFromEnv(STATE_REDIS_URL_PRECEDENCE);
 }
 
 export function providerCacheRedisUrlFromEnv(): string | undefined {
-	return redisUrlFromEnv();
+	return providerCacheRedisResolutionFromEnv()?.url;
 }
 
 export function providerStateRedisUrlFromEnv(): string | undefined {
-	return (
-		readDiagnosticEnv(PROVIDER_STATE_REDIS_URL_ENV)?.trim() ||
-		readDiagnosticEnv(PROVIDER_CACHE_REDIS_URL_ENV)?.trim() ||
-		readDiagnosticEnv(REDIS_URL_ENV)?.trim() ||
-		undefined
-	);
+	return providerStateRedisResolutionFromEnv()?.url;
 }
 
 /** @internal Test-only hook for exercising shared proxy-cache behavior. */

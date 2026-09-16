@@ -3790,7 +3790,7 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     sdkVersion: string;
     runtimeTarget?: ProviderRuntimeTarget;
     warnings?: readonly string[];
-} | SelfTestCancellationLogEvent;
+} | ProviderStateBackendLogEvent | SelfTestCancellationLogEvent;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderRequestCost" needs to be exported by the entry point index.d.ts
 //
@@ -3906,6 +3906,17 @@ type ProviderServerStatefulOwnerFence = Readonly<Pick<ProviderServerStatefulForw
 // @public (undocumented)
 type ProviderServerStatefulOwnerFenceValidator = (fence: ProviderServerStatefulOwnerFence, signal: AbortSignal) => boolean | Promise<boolean>;
 
+// @public
+export type ProviderStateBackendLogEvent = {
+    readonly level: "info" | "warn";
+    readonly event: "provider_state_backend";
+    readonly providerId: string;
+    readonly state: ProviderStoreBackendReport;
+    readonly cache: ProviderStoreBackendReport;
+    readonly sdkVersion: string;
+    readonly warnings?: readonly string[];
+};
+
 // @public (undocumented)
 type ProviderStateDurationString = `${number}${"ms" | "s" | "m" | "h" | "d"}` | `PT${string}`;
 
@@ -3943,6 +3954,15 @@ type ProviderStealthConfig = StealthProfileSelection & {
     readonly challengeDetection?: {
         readonly akamaiSbsd?: boolean;
     };
+};
+
+// @public
+export type ProviderStoreBackendReport = {
+    readonly backend: "redis" | "memory" | "unsupported" | "injected";
+    readonly envName?: string;
+    readonly endpoint?: string;
+    readonly scheme?: string;
+    readonly fallback?: boolean;
 };
 
 // @public (undocumented)
@@ -5889,9 +5909,9 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:17:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:175:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:198:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:18:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:176:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:199:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:128:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:356:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:358:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point index.d.ts
