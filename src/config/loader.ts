@@ -286,8 +286,7 @@ const STATE_REDIS_URL_PRECEDENCE = [
 function resolveRedisUrlFromEnv(
 	precedence: readonly ProviderRedisUrlEnvName[],
 ): ProviderRedisUrlResolution | undefined {
-	for (let index = 0; index < precedence.length; index += 1) {
-		const envName = precedence[index] as ProviderRedisUrlEnvName;
+	for (const [index, envName] of precedence.entries()) {
 		const url = readDiagnosticEnv(envName)?.trim();
 		if (url) return { url, envName, fallback: index > 0 };
 	}
