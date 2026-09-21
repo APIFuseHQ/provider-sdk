@@ -98,11 +98,19 @@ Check for drift between this file and the live ruleset:
 ```sh
 RULESET_ID=$(gh api repos/APIFuseHQ/provider-sdk/rulesets \
   --jq '.[] | select(.name == "main-protection") | .id')
-diff <(jq -S '{name,target,enforcement,bypass_actors,rules}' \
+diff <(jq -S '{name,target,enforcement,conditions,bypass_actors,rules}' \
         .github/rulesets/main-protection.json) \
      <(gh api "repos/APIFuseHQ/provider-sdk/rulesets/$RULESET_ID" \
-        | jq -S '{name,target,enforcement,bypass_actors,rules}')
+        | jq -S '{name,target,enforcement,conditions,bypass_actors,rules}')
 ```
+
+`conditions` is in the projection deliberately. Without it the comparison
+cannot see *which* branches the live ruleset protects: retargeting the ruleset,
+or adding `refs/heads/main` to `conditions.ref_name.exclude`, removes all
+protection from `main` while leaving the rules identical — and a projection
+that drops `conditions` reports that as no drift (reproduced against this file
+on 2026-09-21: injecting that exclusion left the projected output byte-identical
+and the `diff` exited 0).
 
 Note that the live `bypass_actors[].actor_id` for `OrganizationAdmin` reads back
 as `null` rather than the `1` that is sent on write; that one field is expected
