@@ -142,6 +142,60 @@ describe("providerStateBackendLogEvent", () => {
 		});
 	});
 
+	// `createProviderRedisClient` hands the raw URL to `new Redis(url, …)` and
+	// ioredis lets the query override the authority, so `redis://state:6379
+	// ?path=/tmp/cache.sock` connects to a Unix socket while the authority says
+	// otherwise. A diagnostic that exists to answer "which Redis is this on"
+	// must not answer it wrongly; the query is never echoed.
+	it("withholds the endpoint when the URL's query can move it", async () => {
+		const event = await withEnv(
+			{
+				[PROVIDER_STATE_REDIS_URL_ENV]:
+					"redis://state.example:6379?path=/tmp/cache.sock",
+			},
+			() => bootEvent(),
+		);
+
+		expect(event.state).toEqual({
+			backend: "redis",
+			envName: PROVIDER_STATE_REDIS_URL_ENV,
+			scheme: "redis",
+		});
+		expect(event.warnings).toContain("state_redis_url_ambiguous_endpoint");
+		expect(event.warnings).not.toContain("state_redis_url_unparsed");
+		expect(JSON.stringify(event)).not.toContain("/tmp/cache.sock");
+		expect(JSON.stringify(event)).not.toContain("state.example");
+	});
+
+	// ioredis 5.11.1 finishes `parseURL` with `defaults(result, queryOptions)`,
+	// so a query key only applies where the authority supplied nothing. These
+	// URLs all connect to the authority, and withholding their endpoint would
+	// erase a correct answer and raise a false warning.
+	it.each([
+		["redis://state.example:6379?db=3", "state.example:6379"],
+		["redis://state.example:6379?port=6380", "state.example:6379"],
+		["redis://state.example:6379?host=other.example", "state.example:6379"],
+		["redis://state.example:6379?family=6", "state.example:6379"],
+	])("keeps the endpoint for %s, which ioredis ignores", async (url, endpoint) => {
+		const event = await withEnv({ [PROVIDER_STATE_REDIS_URL_ENV]: url }, () =>
+			bootEvent(),
+		);
+
+		expect(event.state.endpoint).toBe(endpoint);
+		expect(event.warnings).toBeUndefined();
+	});
+
+	// …but a query `port` DOES apply when the authority carries none.
+	it("withholds the endpoint when the query supplies the port the URL omits", async () => {
+		const event = await withEnv(
+			{ [PROVIDER_STATE_REDIS_URL_ENV]: "redis://state.example?port=6380" },
+			() => bootEvent(),
+		);
+
+		expect(event.state.endpoint).toBeUndefined();
+		expect(event.warnings).toContain("state_redis_url_ambiguous_endpoint");
+	});
+
 	it("contributes no endpoint for a URL it cannot parse, rather than a fragment of it", async () => {
 		const event = await withEnv(
 			{ [PROVIDER_STATE_REDIS_URL_ENV]: "provider-state-redis:6379" },

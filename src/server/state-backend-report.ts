@@ -23,7 +23,13 @@ export type ProviderStoreBackendReport = {
 	readonly backend: "redis" | "memory" | "unsupported" | "injected";
 	/** Env name that supplied the Redis URL. Present only for `redis`. */
 	readonly envName?: string;
-	/** `host:port` of the resolved Redis. Never includes credentials, path or query. */
+	/**
+	 * `host:port` of the resolved Redis. Never includes credentials, path or
+	 * query. Absent when the URL does not parse, or when its query carries an
+	 * ioredis option that moves the endpoint (`path`, `port`, `host`, `family`)
+	 * so the authority is not where the client connects — see
+	 * `state_redis_url_ambiguous_endpoint`.
+	 */
 	readonly endpoint?: string;
 	/** URL scheme, e.g. `redis` or `rediss`. Present only for `redis`. */
 	readonly scheme?: string;
@@ -48,13 +54,47 @@ export type ProviderStateBackendLogEvent = {
 	readonly sdkVersion: string;
 	/**
 	 * Non-fatal findings, e.g. `state_redis_url_fallback` (the state store is
-	 * sharing an instance provisioned for something else) or
-	 * `state_redis_url_unparsed`. Absent when the resolution was unambiguous.
+	 * sharing an instance provisioned for something else),
+	 * `state_redis_url_unparsed`, or `state_redis_url_ambiguous_endpoint` (the
+	 * URL's query carries an ioredis option that moves the endpoint, so the
+	 * authority is not reported as the endpoint). Absent when the resolution
+	 * was unambiguous.
 	 */
 	readonly warnings?: readonly string[];
 };
 
-function redisEndpoint(url: string): { endpoint?: string; scheme?: string } {
+/**
+ * Whether ioredis' own URL parsing would move the endpoint away from the
+ * authority this function can see. `createProviderRedisClient` hands the raw
+ * URL to `new Redis(url, …)`, and `parseURL` ends with
+ * `defaults(result, queryOptions)` — lodash `defaults`, so a query key only
+ * applies where the authority supplied nothing:
+ *
+ * - `path` is never derived from the authority of a `redis://` URL (that
+ *   pathname is the db index), so `?path=` always applies — and
+ *   `StandaloneConnector` connects to `options.path` INSTEAD of host/port.
+ *   The client is then on a Unix socket the authority says nothing about.
+ * - `port` applies only when the URL carries no explicit port.
+ * - `host` never applies here: we return early unless `parsed.hostname` is
+ *   set, so `result.host` is always already populated.
+ * - `family` selects an address family; it does not move `host:port`.
+ *
+ * Verified against the pinned ioredis 5.11.1. In those cases the endpoint is
+ * WITHHELD and the ambiguity named, rather than reported as the authority — a
+ * diagnostic whose whole job is to answer "which Redis is this provider on"
+ * must not answer it wrongly. The query is never echoed: it can carry a
+ * password, which is why `endpoint` is host-and-port only to begin with.
+ */
+function queryMovesEndpoint(parsed: URL): boolean {
+	if (parsed.searchParams.has("path")) return true;
+	return parsed.searchParams.has("port") && parsed.port === "";
+}
+
+function redisEndpoint(url: string): {
+	endpoint?: string;
+	scheme?: string;
+	ambiguous?: boolean;
+} {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
@@ -65,8 +105,10 @@ function redisEndpoint(url: string): { endpoint?: string; scheme?: string } {
 	// a bare `host:port`, which parses as a scheme). Report nothing rather than
 	// a fragment of a string whose parts we have not identified.
 	if (!parsed.hostname) return {};
+	const scheme = parsed.protocol.replace(/:$/, "");
+	if (queryMovesEndpoint(parsed)) return { scheme, ambiguous: true };
 	return {
-		scheme: parsed.protocol.replace(/:$/, ""),
+		scheme,
 		endpoint: parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname,
 	};
 }
@@ -74,10 +116,12 @@ function redisEndpoint(url: string): { endpoint?: string; scheme?: string } {
 function redisReport(resolution: ProviderRedisUrlResolution): {
 	report: ProviderStoreBackendReport;
 	parsed: boolean;
+	ambiguous: boolean;
 } {
-	const { endpoint, scheme } = redisEndpoint(resolution.url);
+	const { endpoint, scheme, ambiguous } = redisEndpoint(resolution.url);
 	return {
-		parsed: endpoint !== undefined,
+		parsed: endpoint !== undefined || ambiguous === true,
+		ambiguous: ambiguous === true,
 		report: {
 			backend: "redis",
 			envName: resolution.envName,
@@ -108,9 +152,10 @@ export function providerStateBackendLogEvent(input: {
 	} else {
 		const resolution = providerStateRedisResolutionFromEnv();
 		if (resolution) {
-			const { report, parsed } = redisReport(resolution);
+			const { report, parsed, ambiguous } = redisReport(resolution);
 			state = report;
 			if (!parsed) warnings.push("state_redis_url_unparsed");
+			if (ambiguous) warnings.push("state_redis_url_ambiguous_endpoint");
 			if (resolution.fallback) warnings.push("state_redis_url_fallback");
 		} else {
 			state = { backend: input.allowMemoryFallback ? "memory" : "unsupported" };
@@ -120,9 +165,10 @@ export function providerStateBackendLogEvent(input: {
 	const cacheResolution = providerCacheRedisResolutionFromEnv();
 	let cache: ProviderStoreBackendReport;
 	if (cacheResolution) {
-		const { report, parsed } = redisReport(cacheResolution);
+		const { report, parsed, ambiguous } = redisReport(cacheResolution);
 		cache = report;
 		if (!parsed) warnings.push("cache_redis_url_unparsed");
+		if (ambiguous) warnings.push("cache_redis_url_ambiguous_endpoint");
 	} else {
 		cache = { backend: "memory" };
 	}
