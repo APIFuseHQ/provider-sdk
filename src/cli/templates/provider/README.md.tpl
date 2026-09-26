@@ -137,8 +137,8 @@ Structured errors return an `error` object with `code`, `message`,
 ## Next steps
 
 1. Replace the sample `ping` operation with real upstream logic.
-2. Once the real operation declares `upstream.baseUrl` and uses `ctx.http` or
-   `ctx.stealth`, record a fixture with:
+2. Once the real operation calls the upstream through `ctx.http` or `ctx.stealth`
+   (absolute URLs, or relative ones under its `upstream.baseUrl`), record a fixture with:
    `bun run record -- --operation <operation> --params '<json-input>'`.
 3. Replace the starter `healthCheckUnsupported` with a real `healthCheck` for read-only upstream operations when safe.
 4. Extend tests and operation metadata until the provider is bounty-ready.

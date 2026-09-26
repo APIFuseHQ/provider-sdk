@@ -309,10 +309,14 @@ apifuse bounty-check [path]
 apifuse perf providers/korea-air-quality --operation realtime --params '{"stationName":"종로구"}'
 ```
 
-`apifuse record` is for real upstream-backed operations that declare
-`upstream.baseUrl` and call the upstream through `ctx.http` or `ctx.stealth`. The
-generated local-only `ping` operation intentionally has no upstream and should
-be replaced before recording fixtures.
+`apifuse record` is for real upstream-backed operations that call the upstream
+through `ctx.http` or `ctx.stealth`. Absolute request URLs need no declaration; a
+relative URL resolves the way `serve` resolves it — against the operation's
+`upstream.baseUrl`, else the provider's first declared one (`ctx.stealth` then
+falls back to `https://<allowedHosts[0]>`). A relative `ctx.http` URL with no base
+is refused with the `upstream.baseUrl` to declare. The generated local-only `ping`
+operation intentionally has no upstream and should be replaced before recording
+fixtures.
 
 ## Bounty submission readiness
 

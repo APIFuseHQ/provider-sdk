@@ -377,7 +377,7 @@ describe("recorder redaction seeding", () => {
 		// not equal the injected value — to raw.json in plaintext.
 		const { getCapturedSensitiveParams } = createCaptureContext(
 			provider,
-			"https://example.com",
+			{ http: "https://example.com", stealth: "https://example.com" },
 			true,
 			{
 				id: "local-connection",
@@ -396,7 +396,7 @@ describe("recorder redaction seeding", () => {
 	it("registers nothing when no connection is attached", () => {
 		const { getCapturedSensitiveParams } = createCaptureContext(
 			provider,
-			"https://example.com",
+			{ http: "https://example.com", stealth: "https://example.com" },
 			true,
 		);
 

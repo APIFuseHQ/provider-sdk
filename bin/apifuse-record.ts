@@ -36,6 +36,8 @@ import {
 	resolveLocalConnection,
 } from "../src/cli/local-connection.js";
 import { createCliResolverRuntime } from "../src/cli/resolver-runtime.js";
+import { isAbsoluteUrl } from "../src/runtime/http.js";
+import { getProviderBaseUrl, getProviderStealthBaseUrl } from "../src/runtime/provider.js";
 import { assertProcessEngineModeSupported } from "../src/runtime/engine-mode.js";
 import type { JsonValue } from "../src/contract-json.js";
 import {
@@ -93,6 +95,11 @@ const HELP_TEXT = `Usage: apifuse record [path] --operation <operation> --params
 
 Calls a real upstream-backed operation through ctx.http or ctx.stealth and writes __fixtures__/raw.json.
 
+Absolute request URLs need no declaration. A relative URL resolves the way serve resolves it: against
+the operation's upstream.baseUrl, else the provider's first declared one (ctx.stealth then falls back
+to https://<allowedHosts[0]>). A relative ctx.http URL with no base anywhere is refused and names
+the upstream.baseUrl to declare.
+
 Streaming responses are recorded as evidence (status, selected headers, full-body SHA-256 and byte
 count, plus a ${STREAM_PREVIEW_BYTES}-byte base64 preview). Test replay is evidence-only: ctx.http.stream exposes the
 preview as its body and the original body_sha256/body_bytes as response metadata.
@@ -137,7 +144,7 @@ export async function main() {
 
 		capture = createCaptureContext(
 			provider,
-			resolveOperationBaseUrl(provider, operationName),
+			resolveRecordBaseUrls(provider, operationName),
 			args.sanitize,
 			connection,
 		);
@@ -148,6 +155,7 @@ export async function main() {
 		try {
 			result = await executeOperation(provider, operationName, capture.ctx, parsedParams);
 		} catch (operationError) {
+			capture.throwIfRefused();
 			let partial: unknown;
 			try {
 				partial = await capture.getCapturedRaw();
@@ -172,6 +180,9 @@ export async function main() {
 			);
 			if (telemetryLine) console.log(telemetryLine);
 		}
+		// Checked on success too: an operation that caught the refusal and carried
+		// on would otherwise save a fixture missing the request it never made.
+		capture.throwIfRefused();
 		const captured = await capture.getCapturedRaw();
 
 		if (captured === undefined) {
@@ -534,23 +545,58 @@ async function parseParams(
 	return operation.input ? parseSchema(operation.input, parsed, "record.params") : parsed;
 }
 
-function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: string): string {
-	const baseUrl = provider.operations[operationName]?.upstream?.baseUrl;
-	if (!baseUrl) {
-		throw new Error(
-			`Operation "${operationName}" for provider "${provider.id}" must define upstream.baseUrl.`,
-		);
-	}
+/**
+ * The bases the recorder's `ctx.http` and `ctx.stealth` resolve relative
+ * request URLs against. An absent base means only absolute URLs resolve.
+ */
+export type RecordBaseUrls = {
+	readonly http?: string;
+	readonly stealth?: string;
+};
 
-	return baseUrl;
+/**
+ * `upstream.baseUrl` only resolves relative request URLs (and seeds the stealth
+ * cookie jar's default origin); the recorder uses it for nothing else, so an
+ * operation that requests absolute URLs records without one. The operation's
+ * own base wins; otherwise the recorder binds the bases `serve` binds, so a
+ * relative URL resolves in a recording exactly as it does in production.
+ */
+export function resolveRecordBaseUrls(
+	provider: ProviderRuntime,
+	operationName: string,
+): RecordBaseUrls {
+	const declared = provider.operations[operationName]?.upstream?.baseUrl;
+	const own = typeof declared === "string" && declared.length > 0 ? declared : undefined;
+	const http = own ?? getProviderBaseUrl(provider);
+	const stealth = own ?? getProviderStealthBaseUrl(provider);
+	return { ...(http ? { http } : {}), ...(stealth ? { stealth } : {}) };
+}
+
+/** A request the recorder cannot resolve without a declaration; fails the run even if the operation catches it. */
+class RecordRefusalError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "RecordRefusalError";
+	}
 }
 
 export function createCaptureContext(
 	provider: ProviderRuntime,
-	baseUrl: string,
+	baseUrls: RecordBaseUrls,
 	sanitize: boolean,
 	connection?: LocalConnection,
 ) {
+	let refusal: RecordRefusalError | undefined;
+	const refuse = (message: string): never => {
+		refusal ??= new RecordRefusalError(message);
+		throw refusal;
+	};
+	const assertResolvableHttpUrl = (url: string) => {
+		if (baseUrls.http || isAbsoluteUrl(url)) return;
+		refuse(
+			`ctx.http cannot resolve the relative URL "${requestPathForFixture(url)}": no operation of provider "${provider.id}" declares upstream.baseUrl. Declare upstream.baseUrl on the recorded operation, or request an absolute URL.`,
+		);
+	};
 	let nextCaptureOrder = 0;
 	let nextStreamOrdinal = 0;
 	let capturedRaw: JsonValue | undefined;
@@ -610,7 +656,8 @@ export function createCaptureContext(
 		rawCaptures.push({ order, value: json });
 	};
 
-	const http = captureHttpClient(createHttpClient(baseUrl), {
+	const http = captureHttpClient(createHttpClient(baseUrls.http), {
+		assertResolvableUrl: assertResolvableHttpUrl,
 		reserveOrder: reserveCaptureOrder,
 		reserveStreamOrdinal: () => {
 			nextStreamOrdinal += 1;
@@ -619,7 +666,7 @@ export function createCaptureContext(
 		onSensitiveParams: captureSensitiveParams,
 		onResponse: (order, response) => retainRawCapture(order, response.data),
 		onStreamResponse: (order, ordinal, requestUrl, method, response) => {
-			const resolvedRequestUrl = new URL(requestUrl, baseUrl).toString();
+			const resolvedRequestUrl = new URL(requestUrl, baseUrls.http).toString();
 			const request = {
 				ordinal,
 				method,
@@ -642,18 +689,25 @@ export function createCaptureContext(
 			capturedSse = {
 				order,
 				method,
-				path: requestPathForFixture(new URL(requestUrl, baseUrl).toString()),
+				path: requestPathForFixture(new URL(requestUrl, baseUrls.http).toString()),
 			};
 		},
 	});
-	const stealth = proxyStealthClient(
-		createStealthClient(baseUrl, {
-			...(provider.stealth ? { stealth: provider.stealth } : {}),
-		}),
-		captureSensitiveParams,
-		(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
-		reserveCaptureOrder,
-	);
+	// Without a base `serve` binds no stealth transport either, so every call is refused.
+	const refuseStealth = (): never =>
+		refuse(
+			`ctx.stealth has no base URL: provider "${provider.id}" declares neither upstream.baseUrl nor allowedHosts. Declare allowedHosts on the provider (serve binds ctx.stealth to https://<allowedHosts[0]>) or upstream.baseUrl on the recorded operation.`,
+		);
+	const stealth: StealthClient = baseUrls.stealth
+		? proxyStealthClient(
+				createStealthClient(baseUrls.stealth, {
+					...(provider.stealth ? { stealth: provider.stealth } : {}),
+				}),
+				captureSensitiveParams,
+				(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
+				reserveCaptureOrder,
+			)
+		: { fetch: async () => refuseStealth(), createSession: refuseStealth };
 
 	const providerEnvironment = createProviderEnvironment(
 		process.env,
@@ -723,6 +777,9 @@ export function createCaptureContext(
 	return {
 		ctx,
 		resolverTelemetry,
+		throwIfRefused: () => {
+			if (refusal) throw refusal;
+		},
 		getCapturedRaw: async () => {
 			if (streamCaptures.length === 0) {
 				if (capturedSse) throw unsupportedSseCaptureError(capturedSse);
@@ -843,6 +900,8 @@ function snapshotRequestOptions<T extends SensitiveRequestOptions>(options: T): 
 }
 
 type HttpCaptureCallbacks = {
+	/** Throws before the request when the recorder cannot resolve `url`. */
+	assertResolvableUrl(url: string): void;
 	reserveOrder(): number;
 	reserveStreamOrdinal(): number;
 	onSensitiveParams(url: string, options?: RequestOptions): void;
@@ -867,6 +926,7 @@ function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks):
 		return response;
 	};
 	const captureRequestOptions = (method: PropertyKey, args: unknown[]) => {
+		callbacks.assertResolvableUrl(String(args[0]));
 		const invocation = parseHttpRequestInvocation(method, args);
 		const options = invocation ? requestOptionsFromHttpInvocation(invocation) : undefined;
 		if (!invocation || !options) return;
