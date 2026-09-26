@@ -31,10 +31,23 @@ const wreqState = {
 	clients: [] as Array<Record<string, unknown> | undefined>,
 };
 
+// `mock.module` is process-global in `bun test`, so this stub can answer a later
+// file's real-wreq assertion (stealth.test.ts compares profile user agents with
+// it). Keep the user agent in wreq's real per-OS shape, as proxy.test.ts and
+// stealth-client.test.ts do.
 function emulationHeaders(profile: string, os = "macos") {
 	const version = /^chrome_(\d+)$/u.exec(profile)?.[1] ?? "149";
+	const osToken =
+		os === "windows"
+			? "Windows NT 10.0; Win64; x64"
+			: os === "linux"
+				? "X11; Linux x86_64"
+				: "Macintosh; Intel Mac OS X 10_15_7";
 	return new Map([
-		["user-agent", `Mozilla/5.0 Chrome/${version}.0.0.0 Safari/537.36`],
+		[
+			"user-agent",
+			`Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
+		],
 		["sec-ch-ua", `"Google Chrome";v="${version}"`],
 		["sec-ch-ua-mobile", "?0"],
 		["sec-ch-ua-platform", os === "linux" ? '"Linux"' : '"macOS"'],
