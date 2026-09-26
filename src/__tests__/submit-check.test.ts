@@ -4579,7 +4579,8 @@ const response = { updatedAt: "20260707222855" };
 		).toEqual([{ value: code, lineIndex: 2 }]);
 
 		// Shell: a word-initial `#` outside quotes starts a comment; `#` inside
-		// quotes, `${#var}`, and `$#` do not; backticks are code.
+		// quotes, `${#var}`, `$#`, after a closing quote, and after an escaped
+		// blank do not; backticks are code.
 		expect(
 			values(
 				[
@@ -4588,10 +4589,12 @@ const response = { updatedAt: "20260707222855" };
 					`LEN=\${#TOKEN} ARGS=$# NOTE="#${code}"`,
 					`NAME=\`${identifier}\``,
 					`echo 'it'"'"'s' '${identifier}'`,
+					`printf '%s' apiToken\\ # "${code}"`,
+					`echo "x"#"${code}"`,
 				].join("\n"),
 				"entrypoint.sh",
 			),
-		).toEqual([code, `#${code}`, identifier]);
+		).toEqual([code, `#${code}`, identifier, code, code]);
 	});
 
 	it("does not read a backticked SDK identifier in a comment as a secret (skiplagged#21)", async () => {

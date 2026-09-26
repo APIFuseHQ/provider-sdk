@@ -5756,22 +5756,24 @@ const SHELL_WORD_BOUNDARY = /[\s;&|()<>]/;
 
 // Quoted bodies on one shell line. Single quotes take no escapes; double
 // quotes and unquoted text honor backslash escapes. A `#` that begins a word
-// outside quotes ends the line's code (the rest is a comment); `${#var}` and
-// `$#` do not begin a word. Backticks are command substitution, so their text
-// is lexed as code. A quote left open on the line is read as a literal
-// character, as the line-based scan always has.
+// outside quotes ends the line's code (the rest is a comment). A word begins
+// at the line start or after an UNESCAPED boundary character, so `${#var}`,
+// `$#`, `"a"#b`, and `word\ #` (escaped blank) keep `#` inside the word.
+// Backticks are command substitution, so their text is lexed as code. A
+// quote left open on the line is read as a literal character, as the
+// line-based scan always has.
 function extractShellLineStrings(line: string): string[] {
 	const candidates: string[] = [];
 	let index = 0;
+	let atWordStart = true;
 	while (index < line.length) {
 		const char = line[index];
 		if (char === "\\") {
 			index += 2;
+			atWordStart = false;
 			continue;
 		}
-		if (char === "#" && (index === 0 || SHELL_WORD_BOUNDARY.test(line[index - 1] ?? ""))) {
-			break;
-		}
+		if (char === "#" && atWordStart) break;
 		if (char === '"' || char === "'") {
 			const contentStart = index + 1;
 			let cursor = contentStart;
@@ -5783,9 +5785,11 @@ function extractShellLineStrings(line: string): string[] {
 					candidates.push(line.slice(contentStart, cursor));
 				}
 				index = cursor + 1;
+				atWordStart = false;
 				continue;
 			}
 		}
+		atWordStart = SHELL_WORD_BOUNDARY.test(char ?? "");
 		index += 1;
 	}
 	return candidates;
