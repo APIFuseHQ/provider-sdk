@@ -1929,6 +1929,24 @@ function providerObservabilityDetails(
 	};
 }
 
+// The category a `ProviderError` (validation errors included) gets when its
+// author set none, ahead of the branch's own default: an operation-declared
+// rejection status (409/410/422) → upstream_rejected, then the registered
+// upstream code's category (UPSTREAM_SCHEMA_ERROR → upstream_schema_drift,
+// NOT_FOUND → upstream_http, ...). `undefined` leaves the branch default.
+function derivedErrorCategory(
+	error: unknown,
+	declaredStatus: unknown,
+): ProviderErrorCategory | undefined {
+	if (
+		isEmittableErrorStatus(declaredStatus) &&
+		categoryForStatus(declaredStatus) === "upstream_rejected"
+	) {
+		return "upstream_rejected";
+	}
+	return registeredUpstreamErrorCategory(providerErrorCode(error));
+}
+
 function classifiedErrorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
@@ -1943,12 +1961,10 @@ function classifiedErrorObservabilityDetails(
 		return {
 			category: providerCategory
 				? providerCategory
-				: isEmittableErrorStatus(declaredStatus) &&
-						categoryForStatus(declaredStatus) === "upstream_rejected"
-					? "upstream_rejected"
-					: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
+				: (derivedErrorCategory(error, declaredStatus) ??
+					(isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
 						? "provider_error"
-						: "input_validation",
+						: "input_validation")),
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: isProviderError(error)
 				? (providerErrorOption(error, "retryable") ?? effectiveDeclaration?.retryable ?? false)
@@ -1965,20 +1981,13 @@ function classifiedErrorObservabilityDetails(
 	}
 
 	if (isProviderError(error)) {
-		// Category precedence when the author set none: an operation-declared
-		// rejection status (409/410/422) → upstream_rejected; then the
-		// registered upstream code's category (UPSTREAM_SCHEMA_ERROR →
-		// upstream_schema_drift, NOT_FOUND → upstream_http, ...); then
-		// provider_error. Retryability does not follow the derived category:
-		// it stays instance ?? declared ?? false below.
-		const declaredStatus = effectiveDeclaration?.status;
-		const defaultCategory: ProviderErrorCategory =
-			isEmittableErrorStatus(declaredStatus) &&
-			categoryForStatus(declaredStatus) === "upstream_rejected"
-				? "upstream_rejected"
-				: (registeredUpstreamErrorCategory(providerErrorCode(error)) ?? "provider_error");
+		// Retryability does not follow the derived category: it stays
+		// instance ?? declared ?? false below.
 		return {
-			category: providerErrorOption(error, "category") ?? defaultCategory,
+			category:
+				providerErrorOption(error, "category") ??
+				derivedErrorCategory(error, effectiveDeclaration?.status) ??
+				"provider_error",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable:
 				providerErrorOption(error, "retryable") ?? effectiveDeclaration?.retryable ?? false,

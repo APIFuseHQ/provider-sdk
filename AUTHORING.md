@@ -681,9 +681,9 @@ The registered mappings are:
 | Other unregistered `ProviderError` code | 500 |
 
 A registered code that names an upstream outcome also carries a category. When
-a `ProviderError` (or subclass) with one of these codes sets no `category`, the
-server reports the code's category in `X-ApiFuse-Error-Observability`, and the
-public `source` follows from it:
+a `ProviderError` (or any subclass, `ValidationError` included) with one of
+these codes sets no `category`, the server reports the code's category in
+`X-ApiFuse-Error-Observability`, and the public `source` follows from it:
 
 | Error code | Category when unset | `source` |
 | --- | --- | --- |

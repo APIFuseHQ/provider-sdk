@@ -5,7 +5,7 @@ import {
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 	SDK_UPSTREAM_ERROR_CODE_REGISTRY,
 } from "../error-resolution.js";
-import { AuthError, ProviderError, type ProviderErrorOptions } from "../errors.js";
+import { AuthError, ProviderError, type ProviderErrorOptions, ValidationError } from "../errors.js";
 import {
 	categoryForStatus,
 	PROVIDER_ERROR_CATEGORIES,
@@ -230,6 +230,60 @@ describe("serving a registered upstream code thrown without a category", () => {
 			source: "upstream_failure",
 			category: "upstream_auth",
 		});
+	});
+
+	it("derives the category for a ValidationError carrying a registered upstream code", async () => {
+		// The registered status already applies to validation errors; the
+		// category follows the same code, not the input_validation default.
+		const served = await serveThrown(
+			() =>
+				new ValidationError("Upstream payload failed the response schema", {
+					code: "UPSTREAM_SCHEMA_ERROR",
+				}),
+		);
+
+		expect(served).toMatchObject({
+			status: 502,
+			source: "upstream_failure",
+			category: "upstream_schema_drift",
+			retryable: false,
+		});
+	});
+
+	it("keeps ValidationError defaults for unregistered codes and explicit categories", async () => {
+		const cases = [
+			{
+				createError: () => new ValidationError("bad input", { code: "BAD_DATE" }),
+				errorCodes: undefined,
+				expected: { status: 400, category: "input_validation", source: "client" },
+			},
+			{
+				createError: () => new ValidationError("bad upstream row", { code: "ROW_INVALID" }),
+				errorCodes: [{ code: "ROW_INVALID", status: 502, description: "Row invalid" }],
+				expected: { status: 502, category: "provider_error", source: "apifuse" },
+			},
+			{
+				createError: () =>
+					new ValidationError("bad input", {
+						code: "UPSTREAM_SCHEMA_ERROR",
+						category: "input_validation",
+					}),
+				errorCodes: undefined,
+				expected: { status: 502, category: "input_validation", source: "client" },
+			},
+		] as const;
+		for (const testCase of cases) {
+			const served = await serveThrown(
+				testCase.createError,
+				testCase.errorCodes ? { errorCodes: [...testCase.errorCodes] } : {},
+			);
+
+			expect({
+				status: served.status,
+				category: served.category,
+				source: served.source,
+			}).toEqual(testCase.expected);
+		}
 	});
 
 	it("keeps a declared retryability while deriving the category", async () => {
