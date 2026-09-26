@@ -1,3 +1,4 @@
+import type { ProviderErrorCategory } from "./observability.js";
 import type { ProviderErrorStatus } from "./types.js";
 
 // This set suppresses the unregistered-provider-error-code signal for codes
@@ -120,11 +121,89 @@ export const SDK_RUNTIME_OWNED_ERROR_CODES = new Set([
 	"not_found",
 ]);
 
+/** One registered upstream code: the status the SDK serves and who failed. */
+export type SdkUpstreamErrorCodeRegistration = {
+	readonly status: ProviderErrorStatus;
+	readonly category: ProviderErrorCategory;
+};
+
+// Registered codes that name an upstream outcome. A row states the status the
+// SDK serves and the observability category together, so an upstream code
+// cannot be registered without saying who failed. Serve reads the category
+// for a `ProviderError` that carries one of these codes and no explicit
+// `category`, and the public `source` follows from it (`sourceForCategory`).
+// Without a row the category defaults to `provider_error` → `source:
+// "apifuse"`, and the health monitor cannot tie a real upstream failure to the
+// upstream: it publishes `monitoring_unavailable` instead of `down`.
+//
+// The category is `categoryForStatus(status)` unless the code names a
+// narrower class than its status can: a schema change, a bot wall, an
+// upstream refusal of the platform-managed key (served 400, see below).
+// Every row is a code the fleet throws for something the upstream did or
+// said; caller-side and SDK-internal codes stay in the table below.
+export const SDK_UPSTREAM_ERROR_CODE_REGISTRY: ReadonlyMap<
+	string,
+	SdkUpstreamErrorCodeRegistration
+> = new Map<string, SdkUpstreamErrorCodeRegistration>([
+	// The SDK's own unknown-operation and unknown-route throws reuse the
+	// not-found spellings; they set an explicit category and stay APIFuse's.
+	["NOT_FOUND", { status: 404, category: "upstream_http" }],
+	["not_found", { status: 404, category: "upstream_http" }],
+	["NO_DATA", { status: 404, category: "upstream_http" }],
+	["RATE_LIMITED", { status: 429, category: "upstream_rate_limited" }],
+	["UPSTREAM_RATE_LIMIT", { status: 429, category: "upstream_rate_limited" }],
+	[
+		"LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR",
+		{ status: 429, category: "upstream_rate_limited" },
+	],
+	// Deterministic upstream business refusal (honest-provider-error-
+	// contract): the upstream evaluated the request and said no under its
+	// own rules — a conflict with upstream state, never a 5xx.
+	["UPSTREAM_REJECTED", { status: 409, category: "upstream_rejected" }],
+	["UPSTREAM_ERROR", { status: 502, category: "upstream_http" }],
+	// The upstream's bot wall or request protection refused the request. The
+	// status says only "upstream"; the code says which kind.
+	["BLOCKED", { status: 502, category: "anti_bot_blocked" }],
+	// Fleet-consensus provider codes. These are thrown by provider code, not
+	// by the SDK, so they are registered here (status mapping) and not in
+	// SDK_RUNTIME_OWNED_ERROR_CODES: an operation-declared status still wins,
+	// exactly as it does for UPSTREAM_ERROR and BLOCKED above. Registering
+	// them stops the fleet from re-declaring the same rows on every
+	// operation, and stops an undeclared throw from being served as 500.
+	//
+	// A platform-managed upstream service key the upstream refuses. With
+	// `auth.mode: "platform-managed"` the caller holds no credential, so 401
+	// ("re-authenticate") tells the caller to do something it cannot do, and
+	// 502 ("upstream is sick") promises a recovery that will never come. It is
+	// a deployment/config defect — the same class as MISSING_SECRET below,
+	// which is already an explicit 400 for that reason. The upstream is still
+	// the one refusing, so the category is `upstream_auth`; the gateway
+	// records it as `provider_error` for every non-`required` connection mode
+	// so the refusal stays provider-alertable.
+	["UPSTREAM_AUTH_ERROR", { status: 400, category: "upstream_auth" }],
+	// The upstream changed its response shape and the provider cannot
+	// normalize it. 502 because the fault is upstream of us, non-retryable
+	// because a retry returns the same broken payload.
+	["UPSTREAM_SCHEMA_ERROR", { status: 502, category: "upstream_schema_drift" }],
+]);
+
+/**
+ * The category a registered upstream code carries when its `ProviderError`
+ * sets none. `undefined` for every other code, which keeps its existing
+ * default.
+ */
+export function registeredUpstreamErrorCategory(
+	code: string | undefined,
+): ProviderErrorCategory | undefined {
+	return code === undefined ? undefined : SDK_UPSTREAM_ERROR_CODE_REGISTRY.get(code)?.category;
+}
+
 // Canonical SDK status mapping for recognized provider-thrown error codes.
 // serve.ts toStatusCode consults this map (after operation-declared overrides
 // for non-SDK-owned codes), and the authoring lint treats these codes as
 // SDK-registered. Add new codes here instead of duplicating literals in
-// either consumer.
+// either consumer — an upstream-attributed code goes in
+// SDK_UPSTREAM_ERROR_CODE_REGISTRY above, which feeds this map.
 export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, ProviderErrorStatus> =
 	new Map<string, ProviderErrorStatus>([
 		["AUTH_REQUIRED", 401],
@@ -132,16 +211,6 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		// Unprovisioned declared secret: a deployment/config defect, never an
 		// upstream failure — explicit 400.
 		["MISSING_SECRET", 400],
-		["NOT_FOUND", 404],
-		["not_found", 404],
-		["NO_DATA", 404],
-		["RATE_LIMITED", 429],
-		["UPSTREAM_RATE_LIMIT", 429],
-		["LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR", 429],
-		// Deterministic upstream business refusal (honest-provider-error-
-		// contract): the upstream evaluated the request and said no under its
-		// own rules — a conflict with upstream state, never a 5xx.
-		["UPSTREAM_REJECTED", 409],
 		// Only an unverifiable or foreign handle is the caller's: key and binding
 		// faults stay unmapped (500) because the engine host, not the caller, owns them.
 		["EGRESS_LEASE_INVALID", 409],
@@ -157,30 +226,11 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		["HANDLE_EXPIRED", 410],
 		["HANDLE_COMMITTED", 409],
 		["HANDLE_BUSY", 409],
-		["UPSTREAM_ERROR", 502],
-		["BLOCKED", 502],
-		// Fleet-consensus provider codes. These are thrown by provider code, not
-		// by the SDK, so they are registered here (status mapping) and not in
-		// SDK_RUNTIME_OWNED_ERROR_CODES: an operation-declared status still wins,
-		// exactly as it does for UPSTREAM_ERROR and BLOCKED above. Registering
-		// them stops the fleet from re-declaring the same three rows on every
-		// operation, and stops an undeclared throw from being served as 500.
-		//
-		// A platform-managed upstream service key the upstream refuses. With
-		// `auth.mode: "platform-managed"` the caller holds no credential, so 401
-		// ("re-authenticate") tells the caller to do something it cannot do, and
-		// 502 ("upstream is sick") promises a recovery that will never come. It is
-		// a deployment/config defect — the same class as MISSING_SECRET above,
-		// which is already an explicit 400 for that reason.
-		["UPSTREAM_AUTH_ERROR", 400],
-		// The upstream changed its response shape and the provider cannot
-		// normalize it. 502 because the fault is upstream of us, non-retryable
-		// because a retry returns the same broken payload.
-		["UPSTREAM_SCHEMA_ERROR", 502],
-		// Caller-side bad input rejected by the provider. The minority spellings
-		// (INVALID_INPUT / VALIDATION_ERROR / BAD_REQUEST) are deliberately not
-		// registered: they migrate to this spelling on the contract track, and
-		// registering them here would freeze the divergence.
+		// Caller-side bad input rejected by the provider (fleet consensus, like
+		// UPSTREAM_AUTH_ERROR and UPSTREAM_SCHEMA_ERROR above). The minority
+		// spellings (INVALID_INPUT / VALIDATION_ERROR / BAD_REQUEST) are
+		// deliberately not registered: they migrate to this spelling on the
+		// contract track, and registering them here would freeze the divergence.
 		["INVALID_REQUEST", 400],
 		["OCR_UNAVAILABLE", 503],
 		["UNSUPPORTED_OCR_BACKEND", 503],
@@ -194,6 +244,10 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		// retry can clear, and a retryable 5xx there would turn one bad rollout
 		// into gateway-driven load.
 		["PROVIDER_ENGINE_UNAVAILABLE", 503],
+		...Array.from(
+			SDK_UPSTREAM_ERROR_CODE_REGISTRY,
+			([code, registration]) => [code, registration.status] as const,
+		),
 	]);
 
 // Canonical retryability for the fleet-consensus codes registered above.

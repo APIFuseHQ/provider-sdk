@@ -39,6 +39,9 @@ export async function executeOperation<
 	if (!operation) {
 		throw new ProviderError(`Unknown operation: ${provider.id}/${operationId}`, {
 			code: "NOT_FOUND",
+			// No upstream was asked: keep the registered NOT_FOUND code from
+			// attributing this to one.
+			category: "provider_error",
 			fix: `Valid operations: ${Object.keys(provider.operations).join(", ")}`,
 		});
 	}

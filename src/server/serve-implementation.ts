@@ -29,6 +29,7 @@ import { SDK_VERSION } from "./sdk-version.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
+	registeredUpstreamErrorCategory,
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
@@ -1603,8 +1604,9 @@ function zodDetails(
 // (credential_unavailable) usually means a caller credential problem, an
 // internal stateful-routing deadline is APIFuse-owned despite its timeout
 // category, and the built-in upstream failure families keep their upstream
-// attribution even when the author left the category at the provider_error
-// default.
+// attribution even under an explicit non-upstream category. An unset category
+// needs no override: a registered upstream code already carries its category
+// (SDK_UPSTREAM_ERROR_CODE_REGISTRY), and the source follows from it.
 function publicErrorSource(error: unknown, category: ProviderErrorCategory): ProviderErrorSource {
 	if (error instanceof StatefulRoutingDeadlineError) return "apifuse";
 	if (isProviderError(error)) {
@@ -1963,19 +1965,20 @@ function classifiedErrorObservabilityDetails(
 	}
 
 	if (isProviderError(error)) {
-		// Deterministic upstream refusals default to the rejection category:
-		// the UPSTREAM_REJECTED family and any operation-declared rejection
-		// status (409/410/422) classify as upstream_rejected unless the
-		// author set an explicit category.
+		// Category precedence when the author set none: an operation-declared
+		// rejection status (409/410/422) → upstream_rejected; then the
+		// registered upstream code's category (UPSTREAM_SCHEMA_ERROR →
+		// upstream_schema_drift, NOT_FOUND → upstream_http, ...); then
+		// provider_error. Retryability does not follow the derived category:
+		// it stays instance ?? declared ?? false below.
 		const declaredStatus = effectiveDeclaration?.status;
-		const rejectionDefault =
-			providerErrorCode(error) === "UPSTREAM_REJECTED" ||
-			(isEmittableErrorStatus(declaredStatus) &&
-				categoryForStatus(declaredStatus) === "upstream_rejected")
-				? ("upstream_rejected" as const)
-				: ("provider_error" as const);
+		const defaultCategory: ProviderErrorCategory =
+			isEmittableErrorStatus(declaredStatus) &&
+			categoryForStatus(declaredStatus) === "upstream_rejected"
+				? "upstream_rejected"
+				: (registeredUpstreamErrorCategory(providerErrorCode(error)) ?? "provider_error");
 		return {
-			category: providerErrorOption(error, "category") ?? rejectionDefault,
+			category: providerErrorOption(error, "category") ?? defaultCategory,
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable:
 				providerErrorOption(error, "retryable") ?? effectiveDeclaration?.retryable ?? false,
@@ -3751,7 +3754,13 @@ function createServerAppWithCapabilityModules(
 	}
 
 	app.notFound((c) => {
-		const error = new ProviderError("Not found", { code: "not_found", retryable: false });
+		// An unknown route is not an upstream answer: the explicit category keeps
+		// the registered not_found code from attributing it to an upstream.
+		const error = new ProviderError("Not found", {
+			code: "not_found",
+			category: "provider_error",
+			retryable: false,
+		});
 		const observabilityDetails = errorObservabilityDetails(error);
 		return responseWithErrorObservability(
 			c.json(
