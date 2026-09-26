@@ -2114,8 +2114,13 @@ describe("provider HTTP server", () => {
 				message: "No upstream data",
 				requestId: "req_no_data",
 				retryable: false,
-				source: "apifuse",
+				source: "upstream_failure",
 			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "upstream_http",
+			taxonomyVersion: "2026-08-07",
+			retryable: false,
 		});
 	});
 
@@ -4038,7 +4043,7 @@ describe("operation-declared error resolution", () => {
 		const header = errorObservability(response);
 		expect(body.error.retryable).toBe(true);
 		expect(header).toEqual({
-			category: "provider_error",
+			category: "upstream_schema_drift",
 			taxonomyVersion: "2026-08-07",
 			retryable: true,
 		});

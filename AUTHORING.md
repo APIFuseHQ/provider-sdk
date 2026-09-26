@@ -680,6 +680,31 @@ The registered mappings are:
 | Unregistered input `ValidationError` code | 400 |
 | Other unregistered `ProviderError` code | 500 |
 
+A registered code that names an upstream outcome also carries a category. When
+a `ProviderError` (or any subclass, `ValidationError` included) with one of
+these codes sets no `category`, the server reports the code's category in
+`X-ApiFuse-Error-Observability`, and the public `source` follows from it:
+
+| Error code | Category when unset | `source` |
+| --- | --- | --- |
+| `NOT_FOUND`, `not_found`, `NO_DATA` | `upstream_http` | `upstream_failure` |
+| `RATE_LIMITED`, `UPSTREAM_RATE_LIMIT`, `LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR` | `upstream_rate_limited` | `upstream_rule` |
+| `UPSTREAM_REJECTED` | `upstream_rejected` | `upstream_rule` |
+| `UPSTREAM_ERROR` | `upstream_http` | `upstream_failure` |
+| `BLOCKED` | `anti_bot_blocked` | `upstream_failure` |
+| `UPSTREAM_AUTH_ERROR` | `upstream_auth` | `upstream_failure` |
+| `UPSTREAM_SCHEMA_ERROR` | `upstream_schema_drift` | `upstream_failure` |
+
+So `throw new ProviderError("…", { code: "UPSTREAM_SCHEMA_ERROR" })` is enough
+for the health monitor to grade a drifted upstream `down`; without the
+category it would be served as `source: "apifuse"` and graded unknown. An
+explicit `category` always wins, an operation-declared rejection status
+(409/410/422) still classifies as `upstream_rejected`, and retryability does
+not follow the category: it stays the instance option, then the declaration,
+then `false`. Every other code, including `AUTH_REQUIRED`, `INVALID_REQUEST`,
+and your own codes, is classified as before (`provider_error` unless you set a
+category).
+
 An unregistered non-validation `ProviderError` code returns HTTP 500 and emits
 the greppable `unregistered_provider_error_code` signal with the code in the
 structured failure log. A matching operation declaration, including one that
@@ -701,7 +726,9 @@ SDK-owned and keep their 502/504 mapping.
   refused a *platform-managed* service key. The caller holds no credential, so
   401 ("re-authenticate") asks for something the caller cannot do, and 502
   ("the upstream is sick") promises a recovery that will never arrive. It is a
-  deployment/config defect, exactly like `MISSING_SECRET`.
+  deployment/config defect, exactly like `MISSING_SECRET`. The status is about
+  what the caller can do; the attribution is still the upstream's, since the
+  upstream is what refused the key, so the category is `upstream_auth`.
 - `UPSTREAM_SCHEMA_ERROR` is non-retryable: a retry returns the same payload
   the provider already could not normalize.
 - `INVALID_REQUEST` is the spelling for caller-side bad input. `INVALID_INPUT`,
