@@ -578,7 +578,8 @@ function normalizeHttpMethod(method: string): Uppercase<HttpMethod> {
 	}
 }
 
-function isAbsoluteUrl(url: string): boolean {
+/** Whether `url` carries its own scheme, so it needs no `upstream.baseUrl` to resolve. */
+export function isAbsoluteUrl(url: string): boolean {
 	return /^[a-z][a-z\d+\-.]*:/i.test(url);
 }
 

@@ -1,0 +1,5 @@
+---
+"@apifuse/provider-sdk": patch
+---
+
+`apifuse record` no longer refuses an operation that does not declare `upstream.baseUrl`. The recorder used the base only to resolve relative request URLs (and to seed the stealth cookie jar's default origin), so an operation that calls absolute URLs through `ctx.http` or `ctx.stealth` now records as-is. A relative URL resolves the way `serve` resolves it: against the operation's own `upstream.baseUrl`, else the provider's first declared one, with `ctx.stealth` falling back to `https://<allowedHosts[0]>` (`serve` and the recorder now share that helper). The ambiguous case is still refused, at the request: a relative `ctx.http` URL with no base anywhere fails the run with a message naming the `upstream.baseUrl` to declare, and a `ctx.stealth` call on a provider that declares neither `upstream.baseUrl` nor `allowedHosts` names both. The refusal fails the recording even when the operation catches the error, so no fixture is written without the request. No public API changes.

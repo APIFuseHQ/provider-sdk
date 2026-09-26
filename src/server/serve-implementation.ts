@@ -106,7 +106,7 @@ import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
 import { bindOcrTelemetry, OcrTelemetryCollector } from "../runtime/ocr-telemetry.js";
-import { getProviderBaseUrl } from "../runtime/provider.js";
+import { getProviderBaseUrl, getProviderStealthBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
@@ -637,15 +637,6 @@ function bindResolverSignalWithoutRuntime(
 	};
 	inheritResolverTelemetryBinding(resolver, boundResolver);
 	return boundResolver;
-}
-
-function getProviderStealthBaseUrl(provider: ProviderDefinition): string | undefined {
-	const baseUrl = getProviderBaseUrl(provider);
-	if (baseUrl) {
-		return baseUrl;
-	}
-	const firstHost = provider.allowedHosts?.[0];
-	return firstHost ? `https://${firstHost}` : undefined;
 }
 
 function getProviderStealthProfile(provider: ProviderDefinition) {

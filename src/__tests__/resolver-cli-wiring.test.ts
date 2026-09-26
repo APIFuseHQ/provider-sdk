@@ -47,14 +47,16 @@ const HOSTED_RESOLVER = {
 
 type CliResolverHarness = { ctx: ProviderContext; resolverTelemetry: ResolverTelemetryCollector };
 
+const EXAMPLE_BASE_URLS = { http: "https://example.com", stealth: "https://example.com" };
+
 const harnesses = [
 	{
 		name: "apifuse record",
 		createContext(provider: ProviderDefinition): ProviderContext {
-			return createCaptureContext(provider, "https://example.com", true).ctx;
+			return createCaptureContext(provider, EXAMPLE_BASE_URLS, true).ctx;
 		},
 		createRuntime(provider: ProviderDefinition): CliResolverHarness {
-			return createCaptureContext(provider, "https://example.com", true);
+			return createCaptureContext(provider, EXAMPLE_BASE_URLS, true);
 		},
 		expectedSolveCalls: 2,
 		expectedSecondToken: "token-2",
@@ -403,7 +405,7 @@ describe("resolver CLI wiring", () => {
 			restoreAdapter = swapResolverAdapterFactoryForTests("capsolver", () => adapter);
 			const runtime = createCaptureContext(
 				createProvider({ resolver: HOSTED_RESOLVER, http: true }),
-				upstream.url.origin,
+				{ http: upstream.url.origin, stealth: upstream.url.origin },
 				true,
 			);
 			// The recorder learns the query secret from the request; the later solve must not echo it.

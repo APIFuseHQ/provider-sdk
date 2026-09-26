@@ -5,7 +5,12 @@ import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { formatCliError, prepareFixturePayload } from "../../bin/apifuse-record.js";
+import {
+	formatCliError,
+	prepareFixturePayload,
+	resolveRecordBaseUrls,
+} from "../../bin/apifuse-record.js";
+import { defineProvider, z } from "../index.js";
 import {
 	findStreamCaptureGroup,
 	findStreamEvidenceRecord,
@@ -1389,5 +1394,245 @@ export default { id: "record-invalid", version: "1.0.0", runtime: "standard", ht
 				upstream.close((error) => (error ? reject(error) : resolve()));
 			});
 		}
+	});
+});
+
+describe("record base URL resolution", () => {
+	const sdkEntry = JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href);
+
+	async function withUpstream<T>(
+		onRequest: (path: string) => unknown,
+		run: (origin: string) => Promise<T>,
+	): Promise<T> {
+		const upstream = createServer((request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify(onRequest(request.url ?? "/")));
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") throw new Error("Expected IP address");
+			return await run(`http://127.0.0.1:${address.port}`);
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	}
+
+	async function record(prefix: string, source: string, operation: string) {
+		const providerDir = makeTempDir(prefix);
+		writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+		writeFileSync(join(providerDir, "index.ts"), source);
+		const child = Bun.spawn({
+			cmd: [
+				"bun",
+				join(repoRoot, "bin", "apifuse.ts"),
+				"record",
+				providerDir,
+				"--operation",
+				operation,
+			],
+			cwd: repoRoot,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+		const fixturePath = join(providerDir, "__fixtures__", "raw.json");
+		return {
+			stderr,
+			exitCode,
+			fixture: existsSync(fixturePath) ? JSON.parse(readFileSync(fixturePath, "utf8")) : undefined,
+		};
+	}
+
+	it("records a ctx.http operation that requests absolute URLs and declares no upstream.baseUrl", async () => {
+		const requests: string[] = [];
+		const result = await withUpstream(
+			(path) => {
+				requests.push(path);
+				return { path };
+			},
+			(origin) =>
+				record(
+					"absolute-http-",
+					`import { z } from ${sdkEntry};
+export default {
+  id: "record-absolute-http", version: "1.0.0", runtime: "standard", http: true,
+  allowedHosts: ["127.0.0.1"],
+  operations: { lookup: { input: z.object({}), output: z.unknown(),
+    handler: async (ctx) => (await ctx.http.get("${origin}/absolute")).data,
+  } },
+};
+`,
+					"lookup",
+				),
+		);
+
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+		expect(requests).toEqual(["/absolute"]);
+		expect(result.fixture).toEqual({ path: "/absolute" });
+	});
+
+	it("records an absolute ctx.stealth request from a provider that declares only allowedHosts", async () => {
+		const result = await withUpstream(
+			(path) => ({ path }),
+			(origin) =>
+				record(
+					"absolute-stealth-",
+					`import { z } from ${sdkEntry};
+export default {
+  id: "record-absolute-stealth", version: "1.0.0", runtime: "standard",
+  stealth: { browser: "chrome", os: "macos" },
+  allowedHosts: ["127.0.0.1"],
+  operations: { lookup: { input: z.object({}), output: z.unknown(),
+    handler: async (ctx) => (await ctx.stealth.fetch("${origin}/stealth-absolute")).json(),
+  } },
+};
+`,
+					"lookup",
+				),
+		);
+
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+		expect(result.fixture).toEqual({ path: "/stealth-absolute" });
+	});
+
+	it("resolves a relative ctx.http URL against the base serve binds when the operation declares none", async () => {
+		const result = await withUpstream(
+			(path) => ({ path }),
+			(origin) =>
+				record(
+					"sibling-base-",
+					`import { z } from ${sdkEntry};
+export default {
+  id: "record-sibling-base", version: "1.0.0", runtime: "standard", http: true,
+  allowedHosts: ["127.0.0.1"],
+  operations: {
+    declared: { input: z.object({}), output: z.unknown(), upstream: { baseUrl: "${origin}" },
+      handler: async (ctx) => (await ctx.http.get("/declared")).data },
+    undeclared: { input: z.object({}), output: z.unknown(),
+      handler: async (ctx) => (await ctx.http.get("/undeclared")).data },
+  },
+};
+`,
+					"undeclared",
+				),
+		);
+
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+		expect(result.fixture).toEqual({ path: "/undeclared" });
+	});
+
+	it("refuses a relative ctx.http URL no declared base resolves, even when the operation catches the error", async () => {
+		const result = await record(
+			"relative-unresolvable-",
+			`import { z } from ${sdkEntry};
+export default {
+  id: "record-relative-unresolvable", version: "1.0.0", runtime: "standard", http: true,
+  allowedHosts: ["127.0.0.1"],
+  operations: { lookup: { input: z.object({}), output: z.unknown(),
+    handler: async (ctx) => {
+      try {
+        return (await ctx.http.get("/reviews?serviceKey=inline-query-secret")).data;
+      } catch {
+        return { swallowed: true };
+      }
+    },
+  } },
+};
+`,
+			"lookup",
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			'ctx.http cannot resolve the relative URL "/reviews": no operation of provider "record-relative-unresolvable" declares upstream.baseUrl. Declare upstream.baseUrl on the recorded operation, or request an absolute URL.',
+		);
+		expect(result.stderr).not.toContain("inline-query-secret");
+		expect(result.fixture).toBeUndefined();
+	});
+
+	it("refuses ctx.stealth when the provider declares neither upstream.baseUrl nor allowedHosts", async () => {
+		const result = await record(
+			"stealth-no-base-",
+			`import { z } from ${sdkEntry};
+export default {
+  id: "record-stealth-no-base", version: "1.0.0", runtime: "standard",
+  stealth: { browser: "chrome", os: "macos" },
+  operations: { lookup: { input: z.object({}), output: z.unknown(),
+    handler: async (ctx) => (await ctx.stealth.fetch("https://example.invalid/")).json(),
+  } },
+};
+`,
+			"lookup",
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			'ctx.stealth has no base URL: provider "record-stealth-no-base" declares neither upstream.baseUrl nor allowedHosts.',
+		);
+		expect(result.fixture).toBeUndefined();
+	});
+});
+
+describe("resolveRecordBaseUrls", () => {
+	const lookup = (baseUrl?: string) => ({
+		riskClass: "read" as const,
+		input: z.object({}),
+		output: z.object({}),
+		handler: async () => ({}),
+		healthCheckUnsupported: { reason: "record base URL unit test" },
+		...(baseUrl ? { upstream: { baseUrl } } : {}),
+	});
+	const provider = (options: {
+		firstBaseUrl?: string;
+		ownBaseUrl?: string;
+		allowedHosts?: string[];
+	}) =>
+		defineProvider({
+			id: "record-base-urls",
+			version: "1.0.0",
+			runtime: "standard",
+			...(options.allowedHosts ? { allowedHosts: options.allowedHosts } : {}),
+			meta: {
+				displayName: "Record base URLs",
+				descriptionKey: "record-base-urls.description",
+				category: "test",
+			},
+		})({
+			operations: { first: lookup(options.firstBaseUrl), recorded: lookup(options.ownBaseUrl) },
+		});
+
+	it("prefers the recorded operation's own upstream.baseUrl for both transports", () => {
+		expect(
+			resolveRecordBaseUrls(
+				provider({
+					firstBaseUrl: "https://first.example",
+					ownBaseUrl: "https://own.example",
+					allowedHosts: ["hosts.example"],
+				}),
+				"recorded",
+			),
+		).toEqual({ http: "https://own.example", stealth: "https://own.example" });
+	});
+
+	it("falls back to the provider-level bases serve binds, and to none when nothing is declared", () => {
+		expect(
+			resolveRecordBaseUrls(
+				provider({ firstBaseUrl: "https://first.example", allowedHosts: ["hosts.example"] }),
+				"recorded",
+			),
+		).toEqual({ http: "https://first.example", stealth: "https://first.example" });
+		expect(
+			resolveRecordBaseUrls(provider({ allowedHosts: ["hosts.example"] }), "recorded"),
+		).toEqual({ stealth: "https://hosts.example" });
+		expect(resolveRecordBaseUrls(provider({}), "recorded")).toEqual({});
 	});
 });
