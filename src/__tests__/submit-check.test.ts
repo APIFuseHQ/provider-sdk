@@ -4525,10 +4525,10 @@ const response = { updatedAt: "20260707222855" };
 
 	it("scans short string literals in linear time", () => {
 		const shortLiteralLine = '\t\t\tcloses_at: "21:00",';
-		const lines = Array.from({ length: 500 }, () => shortLiteralLine);
+		const source = `const hours = {\n${Array.from({ length: 500 }, () => shortLiteralLine).join("\n")}\n};\n`;
 		const startedAt = Date.now();
 
-		const candidates = lines.flatMap((line) => extractStringLiteralCandidates(line));
+		const candidates = extractStringLiteralCandidates(source, "index.ts");
 
 		expect(candidates).toHaveLength(0);
 		expect(Date.now() - startedAt).toBeLessThan(1_000);
@@ -4540,16 +4540,215 @@ const response = { updatedAt: "20260707222855" };
 		const backtick = "mP4sT7yB3cD6fG1hL5zX0aS";
 		const first = "A1b2C3d4E5f6G7h8I9j0K";
 		const second = "z9Y8x7W6v5U4t3S2r1Q0p";
+		const values = (source: string, file = "index.ts") =>
+			extractStringLiteralCandidates(source, file).map((candidate) => candidate.value);
 
 		expect(highEntropy.length).toBe(64);
-		expect(extractStringLiteralCandidates(`const key = "${highEntropy}";`)).toEqual([highEntropy]);
-		expect(extractStringLiteralCandidates(`const escaped = "${escaped}";`)).toEqual([escaped]);
-		expect(extractStringLiteralCandidates(`const template = \`${backtick}\`;`)).toEqual([backtick]);
-		expect(extractStringLiteralCandidates(`const pair = '${first}' + "${second}";`)).toEqual([
-			first,
-			second,
-		]);
-		expect(extractStringLiteralCandidates('const short = "1234567890123456789";')).toEqual([]);
+		expect(values(`const key = "${highEntropy}";`)).toEqual([highEntropy]);
+		expect(values(`const escaped = "${escaped}";`)).toEqual([escaped]);
+		expect(values(`const template = \`${backtick}\`;`)).toEqual([backtick]);
+		expect(values(`const pair = '${first}' + "${second}";`)).toEqual([first, second]);
+		expect(values('const short = "1234567890123456789";')).toEqual([]);
+	});
+
+	it("never extracts candidates from comments or shell command substitution", () => {
+		const identifier = "resolveHealthCheckInputDateTokens";
+		const code = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const values = (source: string, file: string) =>
+			extractStringLiteralCandidates(source, file).map((candidate) => candidate.value);
+
+		// JS/TS: full-line, trailing, and block comments are prose; code
+		// literals on the same lines (including `//` inside a string) remain.
+		expect(
+			values(
+				[
+					`// (\`${identifier}\`) and "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED"`,
+					`const url = "https://api.example.com/v1/${code}"; // \`${identifier}\``,
+					`const key = "${code}"; /* "${identifier}" */`,
+					"/**",
+					` * \`${identifier}\` spans`,
+					` * "${code}" lines`,
+					" */",
+					`const tpl = \`${code}\`; const re = /["'\`]/;`,
+				].join("\n"),
+				"src/client.tsx",
+			),
+		).toEqual([`https://api.example.com/v1/${code}`, code, code]);
+		expect(
+			extractStringLiteralCandidates(`\n\nconst key = "${code}"; // \`${identifier}\``, "a.mjs"),
+		).toEqual([{ value: code, lineIndex: 2 }]);
+
+		// Shell: a word-initial `#` outside quotes starts a comment; `#` inside
+		// quotes, `${#var}`, and `$#` do not; backticks are code.
+		expect(
+			values(
+				[
+					`# "${code}" and \`${identifier}\``,
+					`TOKEN="${code}" # "${identifier}"`,
+					`LEN=\${#TOKEN} ARGS=$# NOTE="#${code}"`,
+					`NAME=\`${identifier}\``,
+					`echo 'it'"'"'s' '${identifier}'`,
+				].join("\n"),
+				"entrypoint.sh",
+			),
+		).toEqual([code, `#${code}`, identifier]);
+	});
+
+	it("does not read a backticked SDK identifier in a comment as a secret (skiplagged#21)", async () => {
+		// apifuse-provider-skiplagged#21 was blocked at security 0/10 by this
+		// comment: `resolveHealthCheckInputDateTokens` (33 chars, 4.01
+		// bits/char) was extracted from comment text, and "Tokens" in its own
+		// name supplied the secret-ish context. Comments are prose, not
+		// values, so no comment form — full-line, trailing, or block — yields
+		// a candidate.
+		const dir = makeProviderDir(
+			"submit-entropy-comment-identifier-",
+			`${validProviderSource()}
+    // The already-resolved request, not the \`+45d\` token: the SDK renders a
+    // token left in \`fixtures.request\` on the KST calendar
+    // (\`resolveHealthCheckInputDateTokens\`), while the response above is built
+    // from the input schema's UTC rendering.
+export const HEALTH_WINDOW_DAYS = 45; // mirrors \`resolveHealthCheckInputDateTokens\`
+/**
+ * Renders like \`resolveHealthCheckInputDateTokens\`, so "resolveHealthCheckInputDateTokens"
+ * callers see the same calendar.
+ */
+export const DATE_TOKEN_PREFIX = "+";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence ?? []).toEqual([]);
+	});
+
+	it("does not read SCREAMING_SNAKE names quoted in comments as secrets", async () => {
+		// Before: "token" elsewhere in the comment was genuine outside context,
+		// so the quoted error code (36 chars, 4.04 bits/char) escalated to a
+		// blocker even though it is prose describing an upstream response.
+		const dir = makeProviderDir(
+			"submit-entropy-comment-screaming-snake-",
+			`${validProviderSource()}
+// When the session token expires the upstream answers "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED"
+// or \`AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED\`; see the retry notes in README.
+export const RETRY_LIMIT = 3; /* token refresh: 'AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED' */
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks a high-entropy literal in code that shares its line with a comment", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-code-with-comment-",
+			`${validProviderSource()}
+const apiKey = "${key}"; // rotated weekly, see \`resolveHealthCheckInputDateTokens\`
+void apiKey;
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toHaveLength(1);
+		expect(check?.evidence?.join("\n")).toContain("qJ8n...[REDACTED length=40]");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("still blocks a high-entropy template literal in code", async () => {
+		// A backtick in code opens a template literal — a string value, not a
+		// code reference — so it is scanned like any other quote form.
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-code-template-",
+			`${validProviderSource()}\nconst apiToken = \`${key}\`;\nvoid apiToken;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("does not treat // inside a string or a multi-line template as a comment", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-slashes-in-strings-",
+			`${validProviderSource()}
+const docsUrl = "https://api.example.com/v1"; const sessionToken = "${key}";
+const body = \`{
+  "note": "see https://example.com // not a comment",
+  "clientSecret": "${key}"
+}\`;
+void docsUrl;
+void sessionToken;
+void body;
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+		const evidence = check?.evidence?.join("\n") ?? "";
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toHaveLength(2);
+		expect(evidence).not.toContain(key);
+	});
+
+	it("scans shell sources with shell comment rules", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir("submit-entropy-shell-comments-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(
+			join(dir, "entrypoint.sh"),
+			`#!/bin/sh
+# Mirrors \`resolveHealthCheckInputDateTokens\` and "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" (token docs).
+exec bun run start # see "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j" in the token docs
+`,
+		);
+		const clean = await buildSubmitCheckReport(dir);
+		expect(clean.checks.find((item) => item.id === "secret-scan")?.status).toBe("pass");
+
+		writeFileSync(
+			join(dir, "entrypoint.sh"),
+			`#!/bin/sh
+API_TOKEN="${key}" # rotated weekly
+exec bun run start
+`,
+		);
+		const leaked = await buildSubmitCheckReport(dir);
+		const check = leaked.checks.find((item) => item.id === "secret-scan");
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence?.join("\n")).toContain("entrypoint.sh:2");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("keeps scanning every line of a JS source the TypeScript lexer cannot parse", async () => {
+		// When comments cannot be located reliably the scan falls back to the
+		// unmasked line walk: it may over-report, it never under-reports.
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir("submit-entropy-unparseable-js-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(
+			join(dir, "vendor.js"),
+			`export const apiKey = "${key}";\nexport const broken = (;\n`,
+		);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence?.join("\n")).toContain("vendor.js:1");
 	});
 
 	it("ignores high-entropy strings in fixtures", async () => {

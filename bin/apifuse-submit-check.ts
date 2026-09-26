@@ -4076,18 +4076,37 @@ type MaskCommentsAndStringsOptions = {
 	blankPropertyKeys?: boolean;
 };
 
+// Which literal bodies are blanked alongside comment bodies. "all" blanks
+// every string/template/regex body; "values" does the same but keeps quoted
+// property-key text (only its structural characters are blanked); "none"
+// leaves every literal and all code byte-identical, so only comments go.
+type LiteralMaskMode = "all" | "values" | "none";
+
 export function maskCommentsAndStrings(
 	source: string,
 	fileName = "provider.ts",
 	options: MaskCommentsAndStringsOptions = {},
 ): string {
-	const blankPropertyKeys = options.blankPropertyKeys === true;
-	const cacheKey = `${blankPropertyKeys ? "blank-keys" : "preserve-keys"}\0${source}`;
+	return maskSource(source, fileName, options.blankPropertyKeys === true ? "all" : "values");
+}
+
+// Blanks comment bodies only, from the same TypeScript-lexer comment ranges
+// maskCommentsAndStrings uses: a `//` inside a string, template, or regex is
+// not a comment, and a block comment spanning lines is blanked whole. Line
+// terminators survive, so line N of the result is line N of the source.
+// Throws like maskCommentsAndStrings when the source cannot be parsed.
+export function maskComments(source: string, fileName = "provider.ts"): string {
+	return maskSource(source, fileName, "none");
+}
+
+function maskSource(source: string, fileName: string, literals: LiteralMaskMode): string {
+	const { scriptKind } = maskScriptKind(fileName);
+	const cacheKey = `${literals}\0${scriptKind}\0${source}`;
 	const cached = maskCache.get(cacheKey);
 	if (cached !== undefined) {
 		return cached;
 	}
-	const masked = computeMaskedSource(source, fileName, blankPropertyKeys);
+	const masked = computeMaskedSource(source, fileName, literals);
 	if (maskCache.size >= MASK_CACHE_LIMIT) {
 		const oldest = maskCache.keys().next();
 		if (!oldest.done) {
@@ -4098,13 +4117,34 @@ export function maskCommentsAndStrings(
 	return masked;
 }
 
-function computeMaskedSource(source: string, fileName: string, blankPropertyKeys: boolean): string {
+// The script kind a source is lexed as, from its file name, and the synthetic
+// implementation file name transpileModule parses it under. Declaration files
+// trigger an internal TypeScript Debug Failure when passed to transpileModule,
+// so `.d.ts` (like every other non-JS/JSX/TSX name) parses as `provider.ts`.
+function maskScriptKind(fileName: string): {
+	scriptKind: TS.ScriptKind;
+	syntheticFileName: string;
+} {
+	if (fileName.endsWith(".tsx")) {
+		return { scriptKind: ts.ScriptKind.TSX, syntheticFileName: "provider.tsx" };
+	}
+	if (fileName.endsWith(".jsx")) {
+		return { scriptKind: ts.ScriptKind.JSX, syntheticFileName: "provider.jsx" };
+	}
+	if (/\.[cm]?js$/.test(fileName)) {
+		return { scriptKind: ts.ScriptKind.JS, syntheticFileName: "provider.js" };
+	}
+	return { scriptKind: ts.ScriptKind.TS, syntheticFileName: "provider.ts" };
+}
+
+function computeMaskedSource(source: string, fileName: string, literals: LiteralMaskMode): string {
+	const blankPropertyKeys = literals === "all";
+	const { scriptKind, syntheticFileName } = maskScriptKind(fileName);
 	const transpiled = ts.transpileModule(source, {
-		// Declaration files trigger an internal TypeScript Debug Failure when
-		// passed to transpileModule. Parsing is all we need here, so always use a
-		// synthetic implementation filename while retaining the real filename
-		// for source mapping and sanitized diagnostics below.
-		fileName: "provider.ts",
+		// Parsing is all we need here: parse under the synthetic implementation
+		// filename while retaining the real filename for source mapping and
+		// sanitized diagnostics below.
+		fileName: syntheticFileName,
 		reportDiagnostics: true,
 		compilerOptions: { target: ts.ScriptTarget.Latest },
 	});
@@ -4113,7 +4153,7 @@ function computeMaskedSource(source: string, fileName: string, blankPropertyKeys
 		source,
 		ts.ScriptTarget.Latest,
 		true,
-		ts.ScriptKind.TS,
+		scriptKind,
 	);
 	const parseDiagnostic = transpiled.diagnostics?.[0];
 	if (parseDiagnostic) {
@@ -4144,10 +4184,7 @@ function computeMaskedSource(source: string, fileName: string, blankPropertyKeys
 		}
 	};
 
-	const visit = (node: TS.Node): void => {
-		addCommentRanges(ts.getLeadingCommentRanges(source, node.getFullStart()));
-		addCommentRanges(ts.getTrailingCommentRanges(source, node.getEnd()));
-
+	const maskLiteralBody = (node: TS.Node): void => {
 		const start = node.getStart(sourceFile);
 		if (ts.isStringLiteral(node)) {
 			// Preserve quoted property keys ("response": ...) by default so range/key
@@ -4184,7 +4221,12 @@ function computeMaskedSource(source: string, fileName: string, blankPropertyKeys
 		} else if (node.kind === ts.SyntaxKind.TemplateTail) {
 			maskRange(start + 1, node.end - 1);
 		}
+	};
 
+	const visit = (node: TS.Node): void => {
+		addCommentRanges(ts.getLeadingCommentRanges(source, node.getFullStart()));
+		addCommentRanges(ts.getTrailingCommentRanges(source, node.getEnd()));
+		if (literals !== "none") maskLiteralBody(node);
 		for (const child of node.getChildren(sourceFile)) visit(child);
 	};
 
@@ -5599,18 +5641,18 @@ function findEntropySecretFindings(providerRoot: string, providerId: string): Se
 		if (isEntropySecretExcludedPath(relativePath)) continue;
 		const content = readFileSync(filePath, "utf8");
 		const lines = content.split(/\r?\n/);
-		for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-			const line = lines[lineIndex] ?? "";
-			for (const candidate of extractStringLiteralCandidates(line)) {
-				const finding = classifyEntropyCandidate({
-					value: candidate,
-					line,
-					file: relativePath,
-					lineNumber: lineIndex + 1,
-					providerId,
-				});
-				if (finding) findings.push(finding);
-			}
+		for (const candidate of extractStringLiteralCandidates(content, relativePath)) {
+			// Context is the whole source line, comment tail included: a
+			// comment that names the value is evidence about it, even though
+			// comment text itself is never a candidate.
+			const finding = classifyEntropyCandidate({
+				value: candidate.value,
+				line: lines[candidate.lineIndex] ?? "",
+				file: relativePath,
+				lineNumber: candidate.lineIndex + 1,
+				providerId,
+			});
+			if (finding) findings.push(finding);
 		}
 	}
 	return findings;
@@ -5626,7 +5668,62 @@ function isEntropySecretExcludedPath(relativePath: string): boolean {
 	);
 }
 
-export function extractStringLiteralCandidates(line: string): string[] {
+export type StringLiteralCandidate = {
+	value: string;
+	// 0-based index of the source line the literal sits on.
+	lineIndex: number;
+};
+
+// Every string-literal candidate (a quoted body of at least
+// ENTROPY_CANDIDATE_MIN_LENGTH characters) in one provider source file.
+// Candidates come from code only. Comments are prose, not values, so each
+// file's own comment syntax is removed before a quote is read:
+// - JS/TS sources: comment trivia is blanked with the TypeScript lexer
+//   (maskComments, the comment ranges the other source lints skip), so `//`
+//   inside a string or regex is not a comment and a `/* … */` block spanning
+//   lines is skipped whole. A backtick in code opens a template literal — a
+//   string value — so it stays a quote form.
+// - Shell sources (.sh/.bash, Dockerfile, entrypoint): `#` starts a comment
+//   when it begins a word outside quotes, and a backtick is command
+//   substitution (code), not a string delimiter.
+// Identifiers are therefore never candidates by construction: a bare name is
+// not a string literal, and a backticked name in a comment is comment text.
+// A JS/TS source the lexer cannot parse keeps the unmasked scan (every quote
+// pair is a candidate): when comments cannot be located the scan may
+// over-report, never under-report.
+export function extractStringLiteralCandidates(
+	content: string,
+	relativePath: string,
+): StringLiteralCandidate[] {
+	const shell = !isJavaScriptFamilySource(relativePath);
+	const codeLines = (shell ? content : maskCommentsForSecretScan(content, relativePath)).split(
+		/\r?\n/,
+	);
+	const candidates: StringLiteralCandidate[] = [];
+	for (let lineIndex = 0; lineIndex < codeLines.length; lineIndex += 1) {
+		const line = codeLines[lineIndex] ?? "";
+		const values = shell ? extractShellLineStrings(line) : extractQuotedLineStrings(line);
+		for (const value of values) candidates.push({ value, lineIndex });
+	}
+	return candidates;
+}
+
+function isJavaScriptFamilySource(relativePath: string): boolean {
+	return /\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(relativePath);
+}
+
+function maskCommentsForSecretScan(content: string, relativePath: string): string {
+	try {
+		return maskComments(content, relativePath);
+	} catch {
+		// Unparseable: scan the source unmasked rather than skip it.
+		return content;
+	}
+}
+
+// Quoted bodies on one comment-free JS/TS line (`"`, `'`, and template
+// backticks), with backslash escapes.
+function extractQuotedLineStrings(line: string): string[] {
 	const candidates: string[] = [];
 	for (let index = 0; index < line.length; index += 1) {
 		const quote = line[index];
@@ -5649,6 +5746,47 @@ export function extractStringLiteralCandidates(line: string): string[] {
 			}
 			cursor += 1;
 		}
+	}
+	return candidates;
+}
+
+// Characters after which a `#` begins a new shell word (blanks and the
+// metacharacters `;&|()<>`).
+const SHELL_WORD_BOUNDARY = /[\s;&|()<>]/;
+
+// Quoted bodies on one shell line. Single quotes take no escapes; double
+// quotes and unquoted text honor backslash escapes. A `#` that begins a word
+// outside quotes ends the line's code (the rest is a comment); `${#var}` and
+// `$#` do not begin a word. Backticks are command substitution, so their text
+// is lexed as code. A quote left open on the line is read as a literal
+// character, as the line-based scan always has.
+function extractShellLineStrings(line: string): string[] {
+	const candidates: string[] = [];
+	let index = 0;
+	while (index < line.length) {
+		const char = line[index];
+		if (char === "\\") {
+			index += 2;
+			continue;
+		}
+		if (char === "#" && (index === 0 || SHELL_WORD_BOUNDARY.test(line[index - 1] ?? ""))) {
+			break;
+		}
+		if (char === '"' || char === "'") {
+			const contentStart = index + 1;
+			let cursor = contentStart;
+			while (cursor < line.length && line[cursor] !== char) {
+				cursor += char === '"' && line[cursor] === "\\" ? 2 : 1;
+			}
+			if (cursor < line.length) {
+				if (cursor - contentStart >= ENTROPY_CANDIDATE_MIN_LENGTH) {
+					candidates.push(line.slice(contentStart, cursor));
+				}
+				index = cursor + 1;
+				continue;
+			}
+		}
+		index += 1;
 	}
 	return candidates;
 }
@@ -5757,7 +5895,7 @@ function literalContainerKey(literal: LineStringLiteral): string {
 // other literal is a VALUE: ternary arms (preceded by "?" or ":"), array
 // elements, call arguments, and assignment right-hand sides, even when a
 // ternary's ":" happens to follow them. Uses the same quote/escape walking as
-// extractStringLiteralCandidates.
+// extractQuotedLineStrings.
 function tokenizeLineStringLiterals(line: string): LineStringLiteral[] {
 	const literals: LineStringLiteral[] = [];
 	const bracketStack: Array<{ bracket: "[" | "(" | "{"; index: number }> = [];
