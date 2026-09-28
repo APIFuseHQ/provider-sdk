@@ -1,5 +1,5 @@
 ---
-"@apifuse/provider-sdk": minor
+"@apifuse/provider-sdk": major
 ---
 
 `ctx.stealth` gains a `form-post` request class for HTML form submissions.
@@ -10,3 +10,5 @@ A `<form method="post">` submission is a navigation in Chrome, and until now no 
 - Values: `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`, `Sec-Fetch-User: ?1` (dropped with `userActivation: false`, for a script `form.submit()`), `Upgrade-Insecure-Requests: 1`, the profile's document `Accept` and `Priority`, `Cache-Control: max-age=0` (a caller value wins), and `Content-Length` from the body.
 
 The request classes are now one descriptor table (fetch metadata, whether the class carries a body, whether it validates the cache), keyed by the public `requestClass` union, so a class without its row does not compile. A bare `POST` still infers `post`: the transport cannot tell a form submission from a script POST, so `form-post` is opt-in. The stealth telemetry `requestClass` gains `form_post`, and the owned-header lint message lists the new class.
+
+Release level: `major` under the CONTRIBUTING.md report rule, because the existing `requestClass` and `StealthTelemetryRequestClass` report lines change (each union gains a member). No existing value changes meaning. A consumer that switches exhaustively over the telemetry `requestClass` must handle `form_post`.
