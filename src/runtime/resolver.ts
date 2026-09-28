@@ -64,6 +64,7 @@ import {
 	DEFAULT_RESOLVER_TIMEOUT_MS,
 	kindRequiresClientProfile,
 } from "./resolver-config.js";
+import { resolverSpanAttributes } from "./resolver-span-attributes.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
 import type { BrowserTelemetrySink } from "./browser-telemetry.js";
@@ -595,7 +596,7 @@ function unavailableAttempt(
 
 function unavailableSpanAttributes(error: ResolverVendorUnavailableError): Record<string, unknown> {
 	const attempt = unavailableAttempt(error);
-	return {
+	return resolverSpanAttributes({
 		unavailability_reason: error.reason,
 		missing_fields: error.missingFields,
 		cause_name: attempt.cause?.name,
@@ -603,7 +604,7 @@ function unavailableSpanAttributes(error: ResolverVendorUnavailableError): Recor
 		upstream_host: attempt.upstreamHost,
 		transport_phase: attempt.phase,
 		transport_round: attempt.round,
-	};
+	});
 }
 
 type ResolverAttemptDiagnostics = {
@@ -994,8 +995,8 @@ async function invalidateResolverSolutionWithOutcome(
 		return await invalidate();
 	}
 	return await metadata.traceRecorder.runSpan("resolver.cache.invalidate", invalidate, {
-		attributes: { challenge_kind: challenge.kind },
-		onSuccess: (outcome) => ({ outcome }),
+		attributes: resolverSpanAttributes({ challenge_kind: challenge.kind }),
+		onSuccess: (outcome) => resolverSpanAttributes({ outcome }),
 	});
 }
 
@@ -1257,12 +1258,12 @@ function createResolverChainClient(options: {
 						};
 						solution = traceRecorder
 							? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
-									attributes: {
+									attributes: resolverSpanAttributes({
 										vendor: adapter.id,
 										challenge_kind: challenge.kind,
 										client_profile: options.clientProfile,
 										resolver_identity_source: identityResolution.userAgentSource,
-									},
+									}),
 									onError(error) {
 										return error instanceof ResolverVendorUnavailableError
 											? unavailableSpanAttributes(error)

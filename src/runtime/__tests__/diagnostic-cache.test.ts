@@ -7,9 +7,9 @@ import { join } from "node:path";
 it("keeps raw request text out of process-static caches after scope release", async () => {
 	const source = (
 		await readFile(new URL("../diagnostic-redactor.ts", import.meta.url), "utf8")
-	).replace(
-		'"./request-options.js"',
-		JSON.stringify(new URL("../request-options.ts", import.meta.url).href),
+	).replace(/"\.\/([\w-]+)\.js"/g, (_specifier, name: string) =>
+		// Point every sibling import of the copied module back at its source file.
+		JSON.stringify(new URL(`../${name}.ts`, import.meta.url).href),
 	);
 	const directory = await mkdtemp(join(tmpdir(), "p4-cache-"));
 	const path = join(directory, "probe.ts");

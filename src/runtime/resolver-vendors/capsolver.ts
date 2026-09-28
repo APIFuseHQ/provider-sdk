@@ -3,6 +3,7 @@ import type { ChallengeSolution, ProviderChallenge, ProviderChallengeKind } from
 import { redactSensitiveText } from "../request-options.js";
 import { DEFAULT_STEALTH_PROFILE } from "../stealth.js";
 import { recordPaidResolverCreate } from "../resolver-usage.js";
+import { resolverSpanAttributes } from "../resolver-span-attributes.js";
 import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
@@ -413,7 +414,7 @@ function spanErrorAttributes(
 	phase: CapsolverOperationPhase,
 ): Record<string, unknown> | undefined {
 	if (error instanceof ResolverVendorUnavailableError) {
-		return {
+		return resolverSpanAttributes({
 			unavailability_reason: error.reason,
 			transport_phase: error.phase,
 			...(error instanceof CapsolverUnavailableError
@@ -425,21 +426,21 @@ function spanErrorAttributes(
 						response_length: error.responseLength,
 					}
 				: {}),
-		};
+		});
 	}
 	if (error instanceof CapsolverVerdictError) {
-		return {
+		return resolverSpanAttributes({
 			verdict_reason: error.reason,
 			transport_phase: error.phase,
 			vendor_error_code: error.errorCode,
 			vendor_error_description: error.errorDescription,
-		};
+		});
 	}
 	if (error instanceof CapsolverSolveTimeoutError) {
-		return {
+		return resolverSpanAttributes({
 			unavailability_reason: "timeout",
 			transport_phase: phase,
-		};
+		});
 	}
 	return undefined;
 }
@@ -606,10 +607,10 @@ export function createCapsolverResolverVendorAdapter(
 				};
 				const taskId = traceRecorder
 					? await traceRecorder.runSpan("resolver.vendor.create_task", createTask, {
-							attributes: {
+							attributes: resolverSpanAttributes({
 								vendor: CAPSOLVER_VENDOR_ID,
 								challenge_kind: challenge.kind,
-							},
+							}),
 							onError: (error) => spanErrorAttributes(error, "create_task"),
 						})
 					: await createTask();
@@ -689,10 +690,10 @@ export function createCapsolverResolverVendorAdapter(
 				};
 				return traceRecorder
 					? await traceRecorder.runSpan("resolver.vendor.poll_result", pollResult, {
-							attributes: {
+							attributes: resolverSpanAttributes({
 								vendor: CAPSOLVER_VENDOR_ID,
 								challenge_kind: challenge.kind,
-							},
+							}),
 							onError: (error) => spanErrorAttributes(error, "poll_result"),
 						})
 					: await pollResult();

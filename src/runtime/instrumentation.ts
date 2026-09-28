@@ -26,6 +26,7 @@ import {
 	type TraceContext,
 } from "./trace.js";
 import { RESOLVER_INSTRUMENTATION_METADATA } from "./resolver-shared.js";
+import { resolverSpanAttributes } from "./resolver-span-attributes.js";
 
 export interface InstrumentationOptions extends CreateTraceContextOptions {}
 
@@ -707,7 +708,9 @@ function wrapNamespace<T extends object>(
 						"resolver.solve",
 						() => Reflect.apply(value, namespaceTarget, [args[0], args[1], recorder]),
 						{
-							attributes: challengeKind ? { challenge_kind: challengeKind } : undefined,
+							attributes: challengeKind
+								? resolverSpanAttributes({ challenge_kind: challengeKind })
+								: undefined,
 						},
 					);
 				};

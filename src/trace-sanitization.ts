@@ -52,7 +52,7 @@ export function sanitizeTraceAttributes(
 				const valueRedactor =
 					typeof value === "bigint" || isDiagnosticBigintAttribute(attributes, key)
 						? diagnosticStructuredRedactor(redact)
-						: diagnosticAttributeRedactor(key, redact);
+						: diagnosticAttributeRedactor(key, redact, value);
 				const sanitizedValue = keyChanged
 					? redactedKey === REDACTION_FAILED
 						? REDACTION_FAILED
