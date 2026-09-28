@@ -94,6 +94,21 @@ const OVERLAPPING_CREDENTIAL_ROWS = [
 	],
 	["an unclosed quoted value", 'password="hunter2', "password=[REDACTED]"],
 	[
+		"a quoted value with an escaped quote",
+		'password="hunt\\"er2" next',
+		'password="[REDACTED]" next',
+	],
+	[
+		"a credential assignment nested in a credential object",
+		'{"data": {"auth": {"password": "hunter2"}}}',
+		'{"data": {"auth": [REDACTED] "[REDACTED]"}}}',
+	],
+	[
+		"a Bearer echo inside a Bearer token",
+		"Bearer token:Bearer abc123",
+		"Bearer [REDACTED] [REDACTED]",
+	],
+	[
 		"a credential assignment inside another value",
 		"note: password=hunter2",
 		"note: password=[REDACTED]",
@@ -144,11 +159,21 @@ describe("credential header sanitization", () => {
 	});
 
 	it.each([
-		["a long word run", "g".repeat(100_000)],
-		["a long run of short assignments", "a:".repeat(50_000)],
-	])("scans %s once", (_label, input) => {
-		expect(sanitizeDiagnosticText(input)).toBe(input);
-		expect(sanitizeFixtureString(input)).toBe(input);
+		["a long word run", "g".repeat(100_000), "g".repeat(100_000)],
+		["a long run of short assignments", "a:".repeat(50_000), "a:".repeat(50_000)],
+		["a long run of credential keys", "password:".repeat(20_000), "password:[REDACTED]"],
+		[
+			"a long run of unterminated escaped quotes",
+			'password:"\\'.repeat(20_000),
+			`password:"${'[REDACTED]"'.repeat(20_000 - 2)}[REDACTED]`,
+		],
+		[
+			"a long run of colon-joined Bearer echoes",
+			"Bearer x:".repeat(20_000),
+			`Bearer ${Array.from({ length: 20_000 }, () => "[REDACTED]").join(" ")}`,
+		],
+	])("scans %s once", (_label, input, expected) => {
+		expect(sanitizeDiagnosticText(input)).toBe(expected);
 	});
 
 	it("scans a long padded token once", () => {

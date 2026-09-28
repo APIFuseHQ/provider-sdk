@@ -27,20 +27,23 @@ const CREDENTIALS_HEADER_ASSIGNMENT = new RegExp(
 	"gi",
 );
 /**
- * Keyless echoes of the token68 schemes whose token is always a credential. The token spans the
- * whole opaque-character run after the scheme, so no partial redaction leaves a remainder too short
- * for the opaque-token scan. Negotiate and NTLM match only their registered spelling so prose such
- * as "failed to negotiate TLS" is retained.
+ * Keyless echoes of the token68 schemes whose token is always a credential. Only the scheme and
+ * its whitespace are matched, so matches never overlap a later scheme; the token is the whole
+ * opaque run that follows, so no partial redaction leaves a remainder too short for the
+ * opaque-token scan. Negotiate and NTLM match only their registered spelling so prose such as
+ * "failed to negotiate TLS" is retained.
  */
-const TOKEN68_SCHEME_CREDENTIALS = [
-	/\bBearer\s+([A-Za-z0-9_+/=.:~-]+)/gi,
-	/\b(?:Negotiate|NTLM)\s+([A-Za-z0-9_+/=.:~-]+)/g,
-] as const;
+const TOKEN68_SCHEMES = [/\bBearer\s+/gi, /\b(?:Negotiate|NTLM)\s+/g] as const;
 /** A keyless `Basic` token is a credential only when it decodes to `user-id:password`. */
-const BASIC_SCHEME_CREDENTIAL = /\bBasic\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9_+/=.:~-])/gi;
-/** A key and its `:`/`=`, starting at a word boundary so a word run is scanned once. */
+const BASIC_SCHEME = /\bBasic\s+/gi;
+const OPAQUE_TOKEN_CHARACTER = /[A-Za-z0-9_+/=.:~-]/;
+const BASE64_CHARACTER = /[A-Za-z0-9+/]/;
+const ASSIGNMENT_VALUE_DELIMITER = /[\s,;&]/;
+/**
+ * A key and its `:`/`=`, starting at a word boundary so a word run is scanned once. Values are
+ * never consumed, so an assignment inside another value is still found.
+ */
 const ASSIGNMENT_KEY = /(["']?)(?<![\w-])([\w-]+)\1\s*[:=]\s*/gi;
-const ASSIGNMENT_VALUE = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+/y;
 
 /** Matches credential field names without treating benign prefixes such as `author` as `auth`. */
 export function isSensitiveFixtureKey(key: string): boolean {
@@ -252,43 +255,100 @@ function* credentialHeaderSpans(value: string): Iterable<CredentialSpan> {
 
 /** Tokens after keyless `Bearer`/`Negotiate`/`NTLM`, and `Basic` tokens that decode to `user-id:password`. */
 function* keylessCredentialSpans(value: string): Iterable<CredentialSpan> {
-	for (const pattern of TOKEN68_SCHEME_CREDENTIALS) {
-		for (const match of value.matchAll(pattern)) yield tokenSpan(match);
+	const opaqueEnds = runEnds(value, OPAQUE_TOKEN_CHARACTER);
+	for (const scheme of TOKEN68_SCHEMES) {
+		for (const match of value.matchAll(scheme)) {
+			const start = match.index + match[0].length;
+			if (opaqueEnds[start] > start) yield [start, opaqueEnds[start]];
+		}
 	}
-	for (const match of value.matchAll(BASIC_SCHEME_CREDENTIAL)) {
-		if (Buffer.from(match[1] as string, "base64").includes(0x3a)) yield tokenSpan(match);
+	const base64Ends = runEnds(value, BASE64_CHARACTER);
+	for (const match of value.matchAll(BASIC_SCHEME)) {
+		const start = match.index + match[0].length;
+		const payloadEnd = base64Ends[start];
+		let end = payloadEnd;
+		while (end < payloadEnd + 2 && value[end] === "=") end++;
+		// The base64 token must be the whole opaque run, not the prefix of a longer token.
+		if (payloadEnd === start || end !== opaqueEnds[start]) continue;
+		if (Buffer.from(value.slice(start, end), "base64").includes(0x3a)) yield [start, end];
 	}
-}
-
-function tokenSpan(match: RegExpExecArray): CredentialSpan {
-	const end = match.index + match[0].length;
-	return [end - (match[1] as string).length, end];
 }
 
 /**
- * Values of credential-named keys; quotes around a quoted value are kept. A non-credential key's
- * value is not skipped, so a credential assignment inside it (`note: password=x`) is still found;
- * a credential value is skipped whole, since all of it is redacted anyway.
+ * Values of credential-named keys; quotes around a quoted value are kept. Every key is visited,
+ * including keys inside another key's value (`auth: {"password": "x"}`), and each value's extent
+ * is read from precomputed tables, so the scan stays linear in the text length.
  */
 function* sensitiveAssignmentSpans(value: string): Iterable<CredentialSpan> {
-	const keys = new RegExp(ASSIGNMENT_KEY);
-	const values = new RegExp(ASSIGNMENT_VALUE);
-	for (let key = keys.exec(value); key; key = keys.exec(value)) {
+	let extents: AssignmentValueExtents | undefined;
+	for (const key of value.matchAll(ASSIGNMENT_KEY)) {
 		const name = key[2] as string;
 		if (!isSensitiveFixtureKey(name) && name.toLowerCase() !== "key") continue;
-		values.lastIndex = keys.lastIndex;
-		const assignmentValue = values.exec(value)?.[0];
-		if (assignmentValue === undefined) continue;
-		const quote = assignmentValue[0];
-		const quoted =
-			(quote === '"' || quote === "'") &&
-			assignmentValue.length > 1 &&
-			assignmentValue.endsWith(quote)
-				? 1
-				: 0;
-		yield [keys.lastIndex + quoted, keys.lastIndex + assignmentValue.length - quoted];
-		keys.lastIndex += assignmentValue.length;
+		extents ??= assignmentValueExtents(value);
+		const start = key.index + key[0].length;
+		const quote = value[start];
+		const closing =
+			quote === '"'
+				? extents.doubleQuoteClose[start + 1]
+				: quote === "'"
+					? extents.singleQuoteClose[start + 1]
+					: -1;
+		if (closing !== -1) {
+			yield [start + 1, closing];
+		} else if (extents.unquotedEnds[start] > start) {
+			yield [start, extents.unquotedEnds[start]];
+		}
 	}
+}
+
+type AssignmentValueExtents = {
+	/** End of the unquoted value (`[^\s,;&]+`) starting at each index. */
+	readonly unquotedEnds: Int32Array;
+	/** Index of the closing `"` when a `"(?:\\.|[^"\\])*"` body is read from each index, or -1. */
+	readonly doubleQuoteClose: Int32Array;
+	readonly singleQuoteClose: Int32Array;
+};
+
+function assignmentValueExtents(value: string): AssignmentValueExtents {
+	const unquotedEnds = new Int32Array(value.length + 1);
+	unquotedEnds[value.length] = value.length;
+	for (let index = value.length - 1; index >= 0; index--) {
+		unquotedEnds[index] = ASSIGNMENT_VALUE_DELIMITER.test(value[index] as string)
+			? index
+			: unquotedEnds[index + 1];
+	}
+	return {
+		unquotedEnds,
+		doubleQuoteClose: closingQuotes(value, '"'),
+		singleQuoteClose: closingQuotes(value, "'"),
+	};
+}
+
+/** Right-to-left: reading a quoted body from index i either closes at a quote or skips an escape pair. */
+function closingQuotes(value: string, quote: string): Int32Array {
+	const closing = new Int32Array(value.length + 2).fill(-1);
+	for (let index = value.length - 1; index >= 0; index--) {
+		const character = value[index];
+		closing[index] =
+			character === quote
+				? index
+				: character === "\\"
+					? /[^\n\r\u2028\u2029]/.test(value[index + 1] ?? "\n")
+						? (closing[index + 2] as number)
+						: -1
+					: (closing[index + 1] as number);
+	}
+	return closing;
+}
+
+/** For each index, the end of the run of `character` starting there, in one right-to-left pass. */
+function runEnds(value: string, character: RegExp): Int32Array {
+	const ends = new Int32Array(value.length + 1);
+	ends[value.length] = value.length;
+	for (let index = value.length - 1; index >= 0; index--) {
+		ends[index] = character.test(value[index] as string) ? (ends[index + 1] as number) : index;
+	}
+	return ends;
 }
 
 function isCredentialBearingUrl(value: string): boolean {
