@@ -7,6 +7,7 @@ import chromeGroundTruth from "../../chrome-ground-truth-capture.json";
 import chromeValueTransform from "../../chrome-value-transform.json";
 import h1CasingCapture from "../../h1-casing-capture.json";
 import {
+	HttpRedirectError,
 	ProviderError,
 	SDKError,
 	StealthCookieStoreVersionError,
@@ -7970,4 +7971,230 @@ describe("stealth telemetry managed proxy observations", () => {
 			expect(await run(true)).toEqual(await run(false));
 		});
 	}
+});
+
+describe("stealth redirect hop credentials and redirectPolicy", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	const credentials = { authorization: "Bearer caller-token", cookie: "sid=caller-session" };
+
+	function queueRedirect(from: string, to: string, status = 302) {
+		mockStealthState.queuedResponses.push({
+			status,
+			body: "",
+			headers: { location: to },
+			url: from,
+		});
+	}
+
+	function queueFinal(url: string) {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {}, url });
+	}
+
+	function callTo(url: string) {
+		return allWreqCalls().find((call) => call.url === url);
+	}
+
+	it("sends neither Authorization nor an explicit Cookie to a cross-site redirect target", async () => {
+		queueRedirect("https://www.example.com/login", "https://collector.example.net/steal");
+		queueFinal("https://collector.example.net/steal");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://www.example.com").fetch("/login", {
+			headers: { ...credentials, "x-trace": "kept" },
+		});
+
+		const first = callTo("https://www.example.com/login");
+		expect(requestHeader(first?.init, "authorization")).toBe("Bearer caller-token");
+		expect(requestHeader(first?.init, "cookie")).toBe("sid=caller-session");
+		const foreign = callTo("https://collector.example.net/steal");
+		expect(foreign).toBeDefined();
+		expect(requestHeader(foreign?.init, "authorization")).toBeUndefined();
+		expect(requestHeader(foreign?.init, "cookie")).toBeUndefined();
+		expect(requestHeader(foreign?.init, "x-trace")).toBe("kept");
+	});
+
+	it("keeps Authorization and an explicit Cookie on a same-origin hop", async () => {
+		queueRedirect("https://www.example.com/login", "/account");
+		queueFinal("https://www.example.com/account");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://www.example.com").fetch("/login", { headers: credentials });
+
+		const next = callTo("https://www.example.com/account");
+		expect(requestHeader(next?.init, "authorization")).toBe("Bearer caller-token");
+		expect(requestHeader(next?.init, "cookie")).toBe("sid=caller-session");
+	});
+
+	it("keeps an explicit Cookie but drops Authorization on a same-site subdomain hop", async () => {
+		queueRedirect("https://www.example.com/login", "https://auth.example.com/continue");
+		queueFinal("https://auth.example.com/continue");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://www.example.com").fetch("/login", { headers: credentials });
+
+		const next = callTo("https://auth.example.com/continue");
+		expect(requestHeader(next?.init, "authorization")).toBeUndefined();
+		expect(requestHeader(next?.init, "cookie")).toBe("sid=caller-session");
+	});
+
+	it("treats a downgrade to http on the same host as cross-site for the explicit Cookie", async () => {
+		queueRedirect("https://www.example.com/login", "http://www.example.com/plain");
+		queueFinal("http://www.example.com/plain");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://www.example.com").fetch("/login", { headers: credentials });
+
+		const next = callTo("http://www.example.com/plain");
+		expect(requestHeader(next?.init, "authorization")).toBeUndefined();
+		expect(requestHeader(next?.init, "cookie")).toBeUndefined();
+	});
+
+	it("does not restore a dropped credential when the chain returns to the first origin", async () => {
+		queueRedirect("https://www.example.com/login", "https://sso.example.net/bounce");
+		queueRedirect("https://sso.example.net/bounce", "https://www.example.com/back");
+		queueFinal("https://www.example.com/back");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://www.example.com").fetch("/login", { headers: credentials });
+
+		const back = callTo("https://www.example.com/back");
+		expect(requestHeader(back?.init, "authorization")).toBeUndefined();
+		expect(requestHeader(back?.init, "cookie")).toBeUndefined();
+	});
+
+	it("lets the session jar supply cookies once the explicit Cookie is dropped", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "https://sso.example.net/start" },
+			url: "https://www.example.com/login",
+		});
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "/next", "set-cookie": "sso=jar-value; Path=/" },
+			url: "https://sso.example.net/start",
+		});
+		queueFinal("https://sso.example.net/next");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://www.example.com").fetch("/login", { headers: credentials });
+
+		expect(requestHeader(callTo("https://sso.example.net/start")?.init, "cookie")).toBeUndefined();
+		expect(requestHeader(callTo("https://sso.example.net/next")?.init, "cookie")).toBe(
+			"sso=jar-value",
+		);
+	});
+
+	it("applies the same hop rules in session.redirects.run, including body headers", async () => {
+		queueRedirect("https://www.example.com/login", "https://collector.example.net/steal", 302);
+		queueFinal("https://collector.example.net/steal");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://www.example.com").createSession();
+		const result = await session.redirects.run({
+			url: "/login",
+			method: "POST",
+			body: "user=a",
+			headers: { ...credentials, "content-type": "application/x-www-form-urlencoded" },
+		});
+
+		expect(result.reason).toBe("completed");
+		const first = callTo("https://www.example.com/login");
+		expect(requestHeader(first?.init, "content-type")).toBe("application/x-www-form-urlencoded");
+		const foreign = callTo("https://collector.example.net/steal");
+		expect(foreign?.init?.method).toBe("GET");
+		expect(requestHeader(foreign?.init, "authorization")).toBeUndefined();
+		expect(requestHeader(foreign?.init, "cookie")).toBeUndefined();
+		expect(requestHeader(foreign?.init, "content-type")).toBeUndefined();
+	});
+
+	it("refuses a cross-origin hop under redirectPolicy before any request reaches the target", async () => {
+		queueRedirect("https://www.example.com/login", "https://collector.example.net/steal?t=1");
+		queueFinal("https://collector.example.net/steal?t=1");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		let thrown: unknown;
+		try {
+			await createStealthClient("https://www.example.com").fetch("/login", {
+				headers: credentials,
+				redirectPolicy: { mode: "same-origin", maxHops: 5 },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(HttpRedirectError);
+		expect(thrown).toMatchObject({
+			code: "http_redirect_stopped",
+			reason: "stopped",
+			target: "https://collector.example.net/steal?[REDACTED]",
+			status: 302,
+		});
+		expect(allWreqCalls().map((call) => call.url)).toEqual(["https://www.example.com/login"]);
+	});
+
+	it("follows same-origin hops under redirectPolicy and stops at maxHops", async () => {
+		queueRedirect("https://www.example.com/a", "/b");
+		queueFinal("https://www.example.com/b");
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://www.example.com");
+		const response = await client.fetch("/a", {
+			redirectPolicy: { mode: "same-origin", maxHops: 1 },
+		});
+		expect(response.status).toBe(200);
+		expect(response.redirected).toBe(true);
+
+		queueRedirect("https://www.example.com/c", "/d");
+		queueRedirect("https://www.example.com/d", "/e");
+		queueFinal("https://www.example.com/e");
+		await expect(
+			client.fetch("/c", { redirectPolicy: { mode: "same-origin", maxHops: 1 } }),
+		).rejects.toMatchObject({ code: "http_redirect_max_hops", reason: "max_hops" });
+		expect(allWreqCalls().map((call) => call.url)).toEqual([
+			"https://www.example.com/a",
+			"https://www.example.com/b",
+			"https://www.example.com/c",
+			"https://www.example.com/d",
+		]);
+	});
+
+	it("still caps a default redirect chain at the stealth redirect limit", async () => {
+		for (let hop = 0; hop <= 10; hop += 1) {
+			queueRedirect(`https://www.example.com/hop-${hop}`, `/hop-${hop + 1}`);
+		}
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await expect(createStealthClient("https://www.example.com").fetch("/hop-0")).rejects.toMatchObject({
+			code: "transport_network_error",
+			message: "Stealth request exceeded the 10-redirect limit",
+		});
+		expect(allWreqCalls()).toHaveLength(11);
+	});
+
+	it("rejects an invalid or inert redirectPolicy before sending", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://www.example.com");
+
+		await expect(
+			client.fetch("/a", { redirectPolicy: { mode: "same-origin", maxHops: 11 } }),
+		).rejects.toMatchObject({
+			code: "http_redirect_policy_invalid",
+			message: "Invalid ctx.stealth redirectPolicy: maxHops must be an integer from 0 to 10",
+		});
+		await expect(
+			client.fetch("/a", {
+				redirect: "manual",
+				redirectPolicy: { mode: "same-origin", maxHops: 1 },
+			}),
+		).rejects.toMatchObject({ code: "http_redirect_policy_invalid" });
+		expect(allWreqCalls()).toHaveLength(0);
+	});
 });
