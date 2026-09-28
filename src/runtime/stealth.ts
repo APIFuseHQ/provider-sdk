@@ -68,10 +68,15 @@ import {
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
+import { redirectHopHeaders } from "./redirect-hop-headers.js";
 import {
 	evaluateRedirectHop,
+	invalidRedirectPolicy,
 	isRedirectStatus,
 	nextRedirectMethod,
+	nextSameOriginRedirectHop,
+	normalizeRedirectPolicy,
+	type RedirectPolicyTransport,
 	resolveRedirectUrl,
 } from "./redirects.js";
 import {
@@ -139,12 +144,10 @@ function isBoundEgressTransportFailure(error: TransportError): boolean {
 	);
 }
 const MAX_STEALTH_REDIRECT_HOPS = 10;
-const REDIRECT_BODY_HEADERS = new Set([
-	"content-encoding",
-	"content-language",
-	"content-location",
-	"content-type",
-]);
+const STEALTH_REDIRECT_POLICY_TRANSPORT: RedirectPolicyTransport = {
+	label: "ctx.stealth",
+	maxHops: MAX_STEALTH_REDIRECT_HOPS,
+};
 
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
 	return typeof value === "object" && value !== null;
@@ -1172,10 +1175,30 @@ function locationHeader(headers: Record<string, string>): string | undefined {
 	return undefined;
 }
 
-function withoutRedirectBodyHeaders(headers: Record<string, string>): Record<string, string> {
-	return Object.fromEntries(
-		Object.entries(headers).filter(([name]) => !REDIRECT_BODY_HEADERS.has(name.toLowerCase())),
-	);
+/**
+ * Snapshot a caller's `redirectPolicy` before the first send. The policy acts
+ * on redirects the transport follows, so it requires the default
+ * `redirect: "follow"`.
+ */
+function snapshotStealthRedirectPolicy(options: StealthFetchOptions) {
+	let policy: ReturnType<typeof normalizeRedirectPolicy>;
+	try {
+		policy = normalizeRedirectPolicy(options.redirectPolicy, STEALTH_REDIRECT_POLICY_TRANSPORT);
+	} catch (error) {
+		if (error instanceof TransportError) throw error;
+		throw invalidRedirectPolicy(
+			STEALTH_REDIRECT_POLICY_TRANSPORT,
+			"could not be read safely",
+			error instanceof Error ? error : undefined,
+		);
+	}
+	if (policy && options.redirect !== undefined && options.redirect !== "follow") {
+		throw invalidRedirectPolicy(
+			STEALTH_REDIRECT_POLICY_TRANSPORT,
+			`it applies to followed redirects and cannot be combined with redirect: "${options.redirect}"`,
+		);
+	}
+	return policy;
 }
 
 function assertStealthRedirectUrl(url: string): void {
@@ -1337,6 +1360,10 @@ async function fetchStealthRedirectChain(
 	let followedHops = 0;
 	let response: StealthTransportResponse;
 	const deadline = options.timeout ? performance.now() + options.timeout : undefined;
+	// Snapshotted and validated by session.fetch before the first send.
+	const redirectPolicy = options.redirectPolicy;
+	const initialOrigin = new URL(requestUrl).origin;
+	const visitedRequests = new Set([`${method} ${requestUrl}`]);
 
 	let finishExchange: ReturnType<typeof startStealthExchange> | undefined;
 	let status: number | undefined;
@@ -1393,28 +1420,48 @@ async function fetchStealthRedirectChain(
 				});
 			}
 
-			const nextUrl = resolveRedirectUrl(
-				response.headers.get("location") ?? undefined,
-				response.url ?? currentUrl,
-			);
-			if (!nextUrl) break;
-			if (followedHops >= MAX_STEALTH_REDIRECT_HOPS) {
+			let nextUrl: string;
+			let nextMethod: StealthMethod;
+			if (redirectPolicy) {
 				discardStealthRedirectBody(response);
-				throw new TransportError(
-					`Stealth request exceeded the ${MAX_STEALTH_REDIRECT_HOPS}-redirect limit`,
-					{ code: "transport_network_error", status: 0 },
+				({ nextUrl, nextMethod } = nextSameOriginRedirectHop({
+					policy: redirectPolicy,
+					initialOrigin,
+					currentUrl,
+					responseUrl: response.url ?? currentUrl,
+					status: response.status,
+					method: currentMethod,
+					location: response.headers.get("location") ?? undefined,
+					followedHops,
+					visitedRequests,
+				}));
+			} else {
+				const location = resolveRedirectUrl(
+					response.headers.get("location") ?? undefined,
+					response.url ?? currentUrl,
 				);
+				if (!location) break;
+				if (followedHops >= MAX_STEALTH_REDIRECT_HOPS) {
+					discardStealthRedirectBody(response);
+					throw new TransportError(
+						`Stealth request exceeded the ${MAX_STEALTH_REDIRECT_HOPS}-redirect limit`,
+						{ code: "transport_network_error", status: 0 },
+					);
+				}
+				discardStealthRedirectBody(response);
+				nextUrl = location;
+				nextMethod = nextRedirectMethod(response.status, currentMethod);
 			}
 			assertStealthRedirectUrl(nextUrl);
-			discardStealthRedirectBody(response);
-			const nextMethod = nextRedirectMethod(response.status, currentMethod);
-			if (nextMethod !== currentMethod) {
-				currentBody = undefined;
-				currentHeaders = withoutRedirectBodyHeaders(currentHeaders);
-			}
+			currentHeaders = redirectHopHeaders(
+				{ from: currentUrl, to: nextUrl, methodChanged: nextMethod !== currentMethod },
+				currentHeaders,
+			);
+			if (nextMethod !== currentMethod) currentBody = undefined;
 			currentMethod = nextMethod;
 			currentUrl = nextUrl;
 			followedHops += 1;
+			visitedRequests.add(`${currentMethod} ${currentUrl}`);
 			emitStealthTelemetry(telemetry?.sink, (sink) => sink.recordRedirectHop());
 			finishExchange(status);
 			finishExchange = undefined;
@@ -1536,10 +1583,15 @@ function createSessionFetcher(
 		let entry = clients.get(cacheKey);
 		if (!entry) {
 			entry = {
+				// The header shape only partitions sessions; it is never handed to wreq as
+				// session `defaultHeaders`. wreq merges those into every request that lacks
+				// one of their names, so a header the SDK left off on purpose — a credential
+				// dropped on a cross-origin redirect hop, the body headers after POST -> GET,
+				// a cookie for another host — would come back with the first request's value.
+				// Every request already sends its complete ordered header list.
 				session: wreq.createSession({
 					browser,
 					os,
-					...(defaultHeaders ? { defaultHeaders } : {}),
 					...(proxyUrl ? { proxy: proxyUrl } : {}),
 					...(ignoreTlsErrors ? { insecure: true } : {}),
 					timeout: 30_000,
@@ -1740,6 +1792,10 @@ function createSessionFetcher(
 				try {
 					const method = normalizeMethod(options.method ?? "GET");
 					assertCallerHeadersSupported(options.headers ?? {});
+					// Replace the caller's object with the validated copy: the walker, a
+					// retry and an explicit replay all read this snapshot.
+					const redirectPolicy = snapshotStealthRedirectPolicy(options);
+					if (redirectPolicy) options.redirectPolicy = redirectPolicy;
 					const hasExplicitRetryPolicy = options.retry !== undefined;
 					const stealthRetryOptions =
 						normalizeProxyTransportRetryOptions(options.retry, {
@@ -2505,11 +2561,13 @@ function createSessionFetcher(
 					stopWhen,
 					params,
 					sensitiveParams,
+					headers: initialHeaders,
 					...fetchOptions
 				} = options;
 				const hops: StealthRedirectHop[] = [];
 				let method = normalizeMethod(options.method ?? "GET");
 				let body = options.body;
+				let headers = initialHeaders;
 				let response: StealthResponse | undefined;
 				const visitedRequests = new Set<string>();
 				const initialParams = params
@@ -2571,6 +2629,7 @@ function createSessionFetcher(
 					try {
 						response = await session.fetch(currentUrl, {
 							...fetchOptions,
+							...(headers ? { headers } : {}),
 							body,
 							method,
 							...(hopIndex === 0 && initialParams ? { params: initialParams } : {}),
@@ -2666,6 +2725,16 @@ function createSessionFetcher(
 							cookies: cookieJar.snapshot(),
 							cookieStore: cookieJar.serialize(),
 						};
+					}
+					if (headers) {
+						headers = redirectHopHeaders(
+							{
+								from: currentUrl,
+								to: decision.nextUrl,
+								methodChanged: decision.nextMethod !== method,
+							},
+							headers,
+						);
 					}
 					if (decision.nextMethod !== method) {
 						body = undefined;

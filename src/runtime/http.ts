@@ -4,7 +4,7 @@ import {
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 } from "../config/loader.js";
-import { HttpRedirectError, ProviderError, TransportError } from "../errors.js";
+import { ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
 	HttpAttemptContext,
@@ -36,7 +36,13 @@ import {
 	type HttpTelemetrySink,
 	type HttpAttemptTelemetryEvent,
 } from "./http-telemetry.js";
-import { evaluateRedirectHop, isRedirectStatus, resolveRedirectUrl } from "./redirects.js";
+import {
+	invalidRedirectPolicy,
+	isRedirectStatus,
+	nextSameOriginRedirectHop,
+	normalizeRedirectPolicy,
+	type RedirectPolicyTransport,
+} from "./redirects.js";
 import {
 	normalizeHttpRequestBody,
 	redactSensitiveError,
@@ -590,74 +596,24 @@ function resolveHttpUrl(baseUrl: string | undefined, url: string): string {
 type NativeFetchInit = RequestInit & { proxy?: string };
 
 const MAX_HTTP_REDIRECT_HOPS = 20;
-const HTTP_REDIRECT_POLICY_FIELDS = new Set(["mode", "maxHops"]);
+const HTTP_REDIRECT_POLICY_TRANSPORT: RedirectPolicyTransport = {
+	label: "ctx.http",
+	maxHops: MAX_HTTP_REDIRECT_HOPS,
+};
 const REDIRECT_BODY_HEADERS = new Set([
 	"content-encoding",
 	"content-language",
 	"content-location",
 	"content-type",
 ]);
-const MALFORMED_REDIRECT_TARGET = "[malformed redirect target]";
-
-function invalidHttpRedirectPolicy(message: string, cause?: Error): TransportError {
-	return new TransportError(`Invalid ctx.http redirectPolicy: ${message}`, {
-		code: "http_redirect_policy_invalid",
-		...(cause ? { cause } : {}),
-	});
-}
-
-/** Snapshot untrusted caller input synchronously, before proxy resolution or fetch. */
-function normalizeHttpRedirectPolicy(value: unknown): HttpRedirectPolicy | undefined {
-	if (value === undefined) return undefined;
-	if (value === null || typeof value !== "object" || Array.isArray(value)) {
-		throw invalidHttpRedirectPolicy("expected an object");
-	}
-
-	try {
-		const keys = Reflect.ownKeys(value);
-		for (const key of keys) {
-			if (typeof key !== "string" || !HTTP_REDIRECT_POLICY_FIELDS.has(key)) {
-				throw invalidHttpRedirectPolicy(`unknown field ${String(key)}`);
-			}
-		}
-		for (const field of HTTP_REDIRECT_POLICY_FIELDS) {
-			const descriptor = Object.getOwnPropertyDescriptor(value, field);
-			if (!descriptor || !("value" in descriptor)) {
-				throw invalidHttpRedirectPolicy(`${field} must be an own data property`);
-			}
-		}
-
-		const record = value as Record<string, unknown>;
-		if (record.mode !== "same-origin") {
-			throw invalidHttpRedirectPolicy('mode must be "same-origin"');
-		}
-		if (
-			typeof record.maxHops !== "number" ||
-			!Number.isInteger(record.maxHops) ||
-			record.maxHops < 0 ||
-			record.maxHops > MAX_HTTP_REDIRECT_HOPS
-		) {
-			throw invalidHttpRedirectPolicy(
-				`maxHops must be an integer from 0 to ${MAX_HTTP_REDIRECT_HOPS}`,
-			);
-		}
-
-		return { mode: "same-origin", maxHops: record.maxHops };
-	} catch (error) {
-		if (error instanceof TransportError) throw error;
-		throw invalidHttpRedirectPolicy(
-			"could not be inspected safely",
-			error instanceof Error ? error : undefined,
-		);
-	}
-}
 
 function snapshotHttpRedirectPolicy(options: RequestOptions): HttpRedirectPolicy | undefined {
 	try {
-		return normalizeHttpRedirectPolicy(options.redirectPolicy);
+		return normalizeRedirectPolicy(options.redirectPolicy, HTTP_REDIRECT_POLICY_TRANSPORT);
 	} catch (error) {
 		if (error instanceof TransportError) throw error;
-		throw invalidHttpRedirectPolicy(
+		throw invalidRedirectPolicy(
+			HTTP_REDIRECT_POLICY_TRANSPORT,
 			"could not be read safely",
 			error instanceof Error ? error : undefined,
 		);
@@ -668,21 +624,6 @@ function withoutRedirectBodyHeaders(headers: HeadersInit | undefined): Headers {
 	const nextHeaders = new Headers(headers);
 	for (const name of REDIRECT_BODY_HEADERS) nextHeaders.delete(name);
 	return nextHeaders;
-}
-
-function redirectDiagnosticTarget(value: string): string {
-	try {
-		const parsed = new URL(value);
-		// Origin omits URL userinfo. Keeping only origin + path makes diagnostics
-		// useful while structurally excluding every query value and fragment,
-		// including attacker-chosen keys the provider did not declare sensitive.
-		const redactedQuery = parsed.search ? "?[REDACTED]" : "";
-		return parsed.origin === "null"
-			? `${parsed.protocol}<opaque-target>`
-			: `${parsed.origin}${parsed.pathname}${redactedQuery}`;
-	} catch {
-		return MALFORMED_REDIRECT_TARGET;
-	}
 }
 
 function discardRedirectResponseBody(response: Response): void {
@@ -730,47 +671,17 @@ async function fetchWithHttpRedirectPolicy(
 
 		const location = response.headers.get("location");
 		discardRedirectResponseBody(response);
-		let nextUrlString: string | undefined;
-		try {
-			nextUrlString = resolveRedirectUrl(location || undefined, currentUrl);
-		} catch {
-			const target = MALFORMED_REDIRECT_TARGET;
-			throw new HttpRedirectError(`Redirect response has malformed Location target ${target}`, {
-				reason: "missing_location",
-				target,
-				status: response.status,
-			});
-		}
-
-		const decision = evaluateRedirectHop({
+		const decision = nextSameOriginRedirectHop({
+			policy,
+			initialOrigin,
+			currentUrl,
+			responseUrl: currentUrl,
 			status: response.status,
 			method,
-			nextUrl: nextUrlString,
-			shouldStop: nextUrlString ? new URL(nextUrlString).origin !== initialOrigin : false,
-			redirectCount: followedHops + 1,
-			maxHops: policy.maxHops,
+			location: location ?? undefined,
+			followedHops,
 			visitedRequests,
 		});
-		if (decision.kind === "stop") {
-			const target = decision.nextUrl ? redirectDiagnosticTarget(decision.nextUrl) : undefined;
-			const message = (() => {
-				switch (decision.reason) {
-					case "stopped":
-						return `Redirect policy refused cross-origin target ${target}`;
-					case "max_hops":
-						return `Redirect policy reached maxHops before target ${target}`;
-					case "loop":
-						return `Redirect loop refused target ${target}`;
-					case "missing_location":
-						return `Redirect response from ${redirectDiagnosticTarget(currentUrl)} is missing Location`;
-				}
-			})();
-			throw new HttpRedirectError(message, {
-				reason: decision.reason,
-				...(target ? { target } : {}),
-				status: response.status,
-			});
-		}
 		if (decision.nextMethod !== method) {
 			body = undefined;
 			headers = withoutRedirectBodyHeaders(headers);

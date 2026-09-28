@@ -1414,7 +1414,23 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	headers?: Record<string, string | string[]>;
 	method?: HttpMethod;
 	body?: string | Buffer;
+	/**
+	 * Defaults to `"follow"`. Every followed hop drops the request-body headers
+	 * when the method changes, `Authorization` and `Proxy-Authorization` when it
+	 * leaves the current origin, and an explicit `Cookie` when it leaves the
+	 * current site (scheme plus registrable domain); after that the session
+	 * cookie jar supplies cookies for the new site.
+	 */
 	redirect?: "follow" | "manual" | "error";
+	/**
+	 * Opt-in same-origin redirect enforcement, the ctx.http `redirectPolicy`
+	 * for the stealth transport. A redirect whose target leaves the initial
+	 * origin, exceeds `maxHops` (at most 10, the stealth redirect limit),
+	 * loops, or has no usable `Location` throws `HttpRedirectError` before any
+	 * request is sent to that target. Requires the default
+	 * `redirect: "follow"`.
+	 */
+	redirectPolicy?: HttpRedirectPolicy;
 	/**
 	 * Maximum decoded response-body bytes to buffer. When set, the stealth
 	 * transport aborts the response and throws `response_too_large` if the
@@ -1551,7 +1567,7 @@ export interface StealthRedirectHop {
 }
 
 export interface StealthRedirectRunOptions
-	extends Omit<StealthFetchOptions, "redirect"> {
+	extends Omit<StealthFetchOptions, "redirect" | "redirectPolicy"> {
 	url: string;
 	maxHops?: number;
 	stopWhen?: (hop: StealthRedirectHop) => boolean | Promise<boolean>;
