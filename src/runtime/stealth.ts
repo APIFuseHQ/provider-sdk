@@ -1583,10 +1583,15 @@ function createSessionFetcher(
 		let entry = clients.get(cacheKey);
 		if (!entry) {
 			entry = {
+				// The header shape only partitions sessions; it is never handed to wreq as
+				// session `defaultHeaders`. wreq merges those into every request that lacks
+				// one of their names, so a header the SDK left off on purpose — a credential
+				// dropped on a cross-origin redirect hop, the body headers after POST -> GET,
+				// a cookie for another host — would come back with the first request's value.
+				// Every request already sends its complete ordered header list.
 				session: wreq.createSession({
 					browser,
 					os,
-					...(defaultHeaders ? { defaultHeaders } : {}),
 					...(proxyUrl ? { proxy: proxyUrl } : {}),
 					...(ignoreTlsErrors ? { insecure: true } : {}),
 					timeout: 30_000,

@@ -2930,7 +2930,7 @@ describe("Chrome 149 header parity", () => {
 					stealth: { browser: "chrome", os },
 				}).fetch("/api", requestClass.options);
 
-				const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+				const defaults = mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][];
 				expect(defaults.map(([name]) => name)).toEqual(requestClass.expected.slice(4));
 				const wreqHeaders = mockEmulationHeaders("chrome_149", os);
 				expect(requestHeader({ headers: defaults }, "sec-ch-ua-platform")).toBe(
@@ -2956,7 +2956,7 @@ describe("Chrome 149 header parity", () => {
 			},
 		});
 
-		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		const defaults = mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][];
 		expect(defaults.map(([name]) => name)).toEqual(
 			realChromeOrder(chromeGroundTruth.fetch_post_json.order).slice(4),
 		);
@@ -2976,7 +2976,7 @@ describe("Chrome 149 header parity", () => {
 
 		const expected = realChromeOrder(chromeGroundTruth.document_navigation_cold.order).slice(4);
 		expect(expected.indexOf("accept-language")).toBe(expected.indexOf("accept-encoding") + 1);
-		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		const defaults = mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][];
 		expect(defaults.map(([name]) => name)).toEqual(expected);
 		expect(requestHeader({ headers: defaults }, "accept-language")).toBe("ja");
 		const overrideHeaders = mockStealthState.clients[0]?.calls[1]?.init?.headers as [
@@ -3201,7 +3201,7 @@ describe("Chrome 149 header parity", () => {
 		expect(requestHeader(h2Init, "sec-fetch-mode")).toBe("navigate");
 		expect(requestHeader(h2Init, "sec-fetch-dest")).toBe("document");
 		expect(requestHeader(h2Init, "upgrade-insecure-requests")).toBe("1");
-		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		const defaults = mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][];
 		expect(requestHeader({ headers: defaults }, "sec-fetch-user")).toBeUndefined();
 		const h1Names = (
 			mockStealthState.clients[1]?.calls[0]?.init?.headers as [string, string][]
