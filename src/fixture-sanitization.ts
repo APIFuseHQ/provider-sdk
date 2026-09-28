@@ -27,17 +27,20 @@ const CREDENTIALS_HEADER_ASSIGNMENT = new RegExp(
 	"gi",
 );
 /**
- * Keyless echoes of the token68 schemes whose token is always a credential. Negotiate and NTLM
- * match only their registered spelling so prose such as "failed to negotiate TLS" is retained.
+ * Keyless echoes of the token68 schemes whose token is always a credential. The token spans the
+ * whole opaque-character run after the scheme, so no partial redaction leaves a remainder too short
+ * for the opaque-token scan. Negotiate and NTLM match only their registered spelling so prose such
+ * as "failed to negotiate TLS" is retained.
  */
 const TOKEN68_SCHEME_CREDENTIALS = [
-	/\bBearer\s+([A-Za-z0-9._~+/=-]+)/gi,
-	/\b(?:Negotiate|NTLM)\s+([A-Za-z0-9._~+/=-]+)/g,
+	/\bBearer\s+([A-Za-z0-9_+/=.:~-]+)/gi,
+	/\b(?:Negotiate|NTLM)\s+([A-Za-z0-9_+/=.:~-]+)/g,
 ] as const;
 /** A keyless `Basic` token is a credential only when it decodes to `user-id:password`. */
-const BASIC_SCHEME_CREDENTIAL = /\bBasic\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9._~+/=-])/gi;
-const SENSITIVE_ASSIGNMENT =
-	/((["']?)([\w-]+)\2\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi;
+const BASIC_SCHEME_CREDENTIAL = /\bBasic\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9_+/=.:~-])/gi;
+/** A key and its `:`/`=`, starting at a word boundary so a word run is scanned once. */
+const ASSIGNMENT_KEY = /(["']?)(?<![\w-])([\w-]+)\1\s*[:=]\s*/gi;
+const ASSIGNMENT_VALUE = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+/y;
 
 /** Matches credential field names without treating benign prefixes such as `author` as `auth`. */
 export function isSensitiveFixtureKey(key: string): boolean {
@@ -262,12 +265,20 @@ function tokenSpan(match: RegExpExecArray): CredentialSpan {
 	return [end - (match[1] as string).length, end];
 }
 
-/** Values of credential-named keys; quotes around a quoted value are kept. */
+/**
+ * Values of credential-named keys; quotes around a quoted value are kept. A non-credential key's
+ * value is not skipped, so a credential assignment inside it (`note: password=x`) is still found;
+ * a credential value is skipped whole, since all of it is redacted anyway.
+ */
 function* sensitiveAssignmentSpans(value: string): Iterable<CredentialSpan> {
-	for (const match of value.matchAll(SENSITIVE_ASSIGNMENT)) {
-		const key = match[3] as string;
-		if (!isSensitiveFixtureKey(key) && key.toLowerCase() !== "key") continue;
-		const assignmentValue = match[4] as string;
+	const keys = new RegExp(ASSIGNMENT_KEY);
+	const values = new RegExp(ASSIGNMENT_VALUE);
+	for (let key = keys.exec(value); key; key = keys.exec(value)) {
+		const name = key[2] as string;
+		if (!isSensitiveFixtureKey(name) && name.toLowerCase() !== "key") continue;
+		values.lastIndex = keys.lastIndex;
+		const assignmentValue = values.exec(value)?.[0];
+		if (assignmentValue === undefined) continue;
 		const quote = assignmentValue[0];
 		const quoted =
 			(quote === '"' || quote === "'") &&
@@ -275,8 +286,8 @@ function* sensitiveAssignmentSpans(value: string): Iterable<CredentialSpan> {
 			assignmentValue.endsWith(quote)
 				? 1
 				: 0;
-		const start = match.index + (match[1] as string).length + quoted;
-		yield [start, start + assignmentValue.length - 2 * quoted];
+		yield [keys.lastIndex + quoted, keys.lastIndex + assignmentValue.length - quoted];
+		keys.lastIndex += assignmentValue.length;
 	}
 }
 

@@ -68,18 +68,14 @@ const KEYLESS_CREDENTIAL_ROWS = [
 // Each rule reads the same unmodified text and the output redacts the union of what they find,
 // so a scheme rule can never consume the key another rule needs to find a credential value.
 const OVERLAPPING_CREDENTIAL_ROWS = [
-	["a credential key after NTLM", "NTLM password: hunter2", "NTLM [REDACTED]: [REDACTED]"],
+	["a credential key after NTLM", "NTLM password: hunter2", "NTLM [REDACTED] [REDACTED]"],
 	[
 		"a credential key after Negotiate",
 		"Negotiate secret = hunter2",
 		"Negotiate [REDACTED] = [REDACTED]",
 	],
-	["a credential key after Bearer", "Bearer password: hunter2", "Bearer [REDACTED]: [REDACTED]"],
-	[
-		"a dotted credential key after NTLM",
-		"NTLM config.auth: hunter2",
-		"NTLM [REDACTED]: [REDACTED]",
-	],
+	["a credential key after Bearer", "Bearer password: hunter2", "Bearer [REDACTED] [REDACTED]"],
+	["a dotted credential key after NTLM", "NTLM config.auth: hunter2", "NTLM [REDACTED] [REDACTED]"],
 	["a credential key after Basic", "Basic token= hunter2", "Basic token= [REDACTED]"],
 	[
 		"a credential key inside an Authorization value",
@@ -97,6 +93,17 @@ const OVERLAPPING_CREDENTIAL_ROWS = [
 		"Authorization: [REDACTED]",
 	],
 	["an unclosed quoted value", 'password="hunter2', "password=[REDACTED]"],
+	[
+		"a credential assignment inside another value",
+		"note: password=hunter2",
+		"note: password=[REDACTED]",
+	],
+	[
+		"a credential assignment after a Bearer token",
+		"rejected Bearer abc123: password=hunter2",
+		"rejected Bearer [REDACTED] password=[REDACTED]",
+	],
+	["a user:password token after NTLM", "NTLM Administrator:synthetic-pass7", "NTLM [REDACTED]"],
 ] as const;
 
 // Prose and identifiers that share a word with a scheme or a credential key stay intact.
@@ -134,6 +141,14 @@ describe("credential header sanitization", () => {
 		// timeout; a single scan finishes in milliseconds.
 		const input = JSON.stringify({ authorization: "A".repeat(100_000) });
 		expect(sanitizeDiagnosticText(input)).toBe('{"authorization":"[REDACTED]"}');
+	});
+
+	it.each([
+		["a long word run", "g".repeat(100_000)],
+		["a long run of short assignments", "a:".repeat(50_000)],
+	])("scans %s once", (_label, input) => {
+		expect(sanitizeDiagnosticText(input)).toBe(input);
+		expect(sanitizeFixtureString(input)).toBe(input);
 	});
 
 	it("scans a long padded token once", () => {
