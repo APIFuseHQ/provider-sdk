@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+	isSensitiveFixtureKey,
 	requestPathForFixture,
 	sanitizeDiagnosticText,
 	sanitizeFixture,
+	sanitizeFixtureString,
 	sanitizeOrdinaryFixture,
 	sanitizeUrlForLogs,
 } from "../fixture-sanitization.js";
@@ -11,6 +13,209 @@ import {
 function diagnosticUrls(value: string): string[] {
 	return value.match(/https?:\/\/[^\s"'<>]+/gi) ?? [];
 }
+
+// Credential header forms an upstream error body can echo back (#202). Each row is the full
+// sanitized output so a partially redacted credential is a failing row, not a passing substring.
+const CREDENTIAL_HEADER_ROWS = [
+	["Basic header", "Authorization: Basic YWRtaW46YWRtaW4=", "Authorization: [REDACTED]"],
+	[
+		"Basic header whose token does not decode to user:password",
+		"Authorization: Basic c2VjcmV0LXRva2Vu",
+		"Authorization: [REDACTED]",
+	],
+	[
+		"Proxy-Authorization Basic header",
+		"Proxy-Authorization: Basic YWRtaW46YWRtaW4=",
+		"Proxy-Authorization: [REDACTED]",
+	],
+	[
+		"form-encoded proxy authorization",
+		"proxy_authorization=Basic dXNlcjpwYXNz",
+		"proxy_authorization=[REDACTED]",
+	],
+	[
+		"Negotiate header",
+		"Authorization: Negotiate YIIBhwYGKwYBBQUCoIIB",
+		"Authorization: [REDACTED]",
+	],
+	["NTLM header", "Authorization: NTLM TlRMTVNTUAABAAAAB4IIogAA", "Authorization: [REDACTED]"],
+	[
+		"Bearer header",
+		"Authorization: Bearer sk-live-abcdef1234567890abcdef",
+		"Authorization: [REDACTED]",
+	],
+	[
+		"JSON-quoted Basic header",
+		'{"authorization":"Basic YWRtaW46YWRtaW4="}',
+		'{"authorization":"[REDACTED]"}',
+	],
+	["x-api-key header", "x-api-key: abc123def456ghi789", "x-api-key: [REDACTED]"],
+	["JSON-quoted x-api-key", '{"x-api-key": "abc123def456ghi789"}', '{"x-api-key": "[REDACTED]"}'],
+	["x-access-key assignment", "x-access-key=abc123def456ghi789", "x-access-key=[REDACTED]"],
+	["x-client-token header", "x-client-token: abc123def456ghi789", "x-client-token: [REDACTED]"],
+] as const;
+
+// Keyless echoes: a scheme word followed by its token, with no header name in front.
+const KEYLESS_CREDENTIAL_ROWS = [
+	["Basic user:password", "echoed Basic YWRtaW46YWRtaW4= back", "echoed Basic [REDACTED] back"],
+	["Negotiate", "sent Negotiate YIIBhwYGKwYBBQUCoIIB", "sent Negotiate [REDACTED]"],
+	["NTLM", "sent NTLM TlRMTVNTUAABAAAAB4IIogAA", "sent NTLM [REDACTED]"],
+	["Bearer, unchanged", "rejected Bearer abcdef0123456789", "rejected Bearer [REDACTED]"],
+	["lowercase bearer", "rejected bearer abc123", "rejected bearer [REDACTED]"],
+	["Bearer under a credential key", "token=Bearer abc123", "token=[REDACTED] [REDACTED]"],
+] as const;
+
+// Each rule reads the same unmodified text and the output redacts the union of what they find,
+// so a scheme rule can never consume the key another rule needs to find a credential value.
+const OVERLAPPING_CREDENTIAL_ROWS = [
+	["a credential key after NTLM", "NTLM password: hunter2", "NTLM [REDACTED] [REDACTED]"],
+	[
+		"a credential key after Negotiate",
+		"Negotiate secret = hunter2",
+		"Negotiate [REDACTED] = [REDACTED]",
+	],
+	["a credential key after Bearer", "Bearer password: hunter2", "Bearer [REDACTED] [REDACTED]"],
+	["a dotted credential key after NTLM", "NTLM config.auth: hunter2", "NTLM [REDACTED] [REDACTED]"],
+	["a credential key after Basic", "Basic token= hunter2", "Basic token= [REDACTED]"],
+	[
+		"a credential key inside an Authorization value",
+		"Authorization: abc123 password = hunter2",
+		"Authorization: [REDACTED] = [REDACTED]",
+	],
+	[
+		"a Bearer token after prose in an Authorization value",
+		"Authorization: rejected Bearer abc123",
+		"Authorization: [REDACTED] [REDACTED]",
+	],
+	[
+		"a padded token that reads like a key",
+		"Authorization: Bearer supersecret=",
+		"Authorization: [REDACTED]",
+	],
+	["an unclosed quoted value", 'password="hunter2', "password=[REDACTED]"],
+	[
+		"a quoted value with an escaped quote",
+		'password="hunt\\"er2" next',
+		'password="[REDACTED]" next',
+	],
+	[
+		"a credential assignment nested in a credential object",
+		'{"data": {"auth": {"password": "hunter2"}}}',
+		'{"data": {"auth": [REDACTED] "[REDACTED]"}}}',
+	],
+	[
+		"a Bearer echo inside a Bearer token",
+		"Bearer token:Bearer abc123",
+		"Bearer [REDACTED] [REDACTED]",
+	],
+	[
+		"a credential assignment inside another value",
+		"note: password=hunter2",
+		"note: password=[REDACTED]",
+	],
+	[
+		"a credential assignment after a Bearer token",
+		"rejected Bearer abc123: password=hunter2",
+		"rejected Bearer [REDACTED] password=[REDACTED]",
+	],
+	["a user:password token after NTLM", "NTLM Administrator:synthetic-pass7", "NTLM [REDACTED]"],
+] as const;
+
+// Prose and identifiers that share a word with a scheme or a credential key stay intact.
+const RETAINED_TEXT_ROWS = [
+	["Basic prose", "Basic information is required"],
+	["Basic prose with a short word", "Basic auth failed"],
+	["negotiate as a verb", "failed to negotiate TLS version"],
+	["author", "author: Ada"],
+	["primary_key", "primary_key=42"],
+	["x-request-id", "x-request-id: 0123456789abcdef0123456789abcdef"],
+	["x-correlation-id", "x-correlation-id: 0123456789abcdef0123456789abcdef"],
+	["trace_id", "trace_id=0123456789abcdef0123456789abcdef"],
+] as const;
+
+describe("credential header sanitization", () => {
+	it.each(
+		CREDENTIAL_HEADER_ROWS,
+	)("redacts the whole credential of a %s", (_label, input, expected) => {
+		expect(sanitizeDiagnosticText(input)).toBe(expected);
+		expect(sanitizeFixtureString(input)).toBe(expected);
+	});
+
+	it.each(KEYLESS_CREDENTIAL_ROWS)("redacts a keyless %s token", (_label, input, expected) => {
+		expect(sanitizeDiagnosticText(input)).toBe(expected);
+	});
+
+	it.each(
+		OVERLAPPING_CREDENTIAL_ROWS,
+	)("redacts every credential in %s", (_label, input, expected) => {
+		expect(sanitizeDiagnosticText(input)).toBe(expected);
+	});
+
+	it("scans a long authorization value once instead of from every offset", () => {
+		// Quadratic backtracking here blocks the event loop long past the test runner's default
+		// timeout; a single scan finishes in milliseconds.
+		const input = JSON.stringify({ authorization: "A".repeat(100_000) });
+		expect(sanitizeDiagnosticText(input)).toBe('{"authorization":"[REDACTED]"}');
+	});
+
+	it.each([
+		["a long word run", "g".repeat(100_000), "g".repeat(100_000)],
+		["a long run of short assignments", "a:".repeat(50_000), "a:".repeat(50_000)],
+		["a long run of credential keys", "password:".repeat(20_000), "password:[REDACTED]"],
+		[
+			"a long run of unterminated escaped quotes",
+			'password:"\\'.repeat(20_000),
+			`password:"${'[REDACTED]"'.repeat(20_000 - 2)}[REDACTED]`,
+		],
+		[
+			"a long run of colon-joined Bearer echoes",
+			"Bearer x:".repeat(20_000),
+			`Bearer ${Array.from({ length: 20_000 }, () => "[REDACTED]").join(" ")}`,
+		],
+	])("scans %s once", (_label, input, expected) => {
+		expect(sanitizeDiagnosticText(input)).toBe(expected);
+	});
+
+	it("scans a long padded token once", () => {
+		const input = `Bearer ${"=".repeat(100_000)}A`;
+		expect(sanitizeDiagnosticText(input)).toBe("Bearer [REDACTED]");
+	});
+
+	it.each(RETAINED_TEXT_ROWS)("retains %s", (_label, input) => {
+		expect(sanitizeDiagnosticText(input)).toBe(input);
+	});
+
+	it.each([
+		["x-api-key", true],
+		["x-access-key", true],
+		["x-client-token", true],
+		["X-RapidAPI-Key", true],
+		["api-key", true],
+		["author", false],
+		["primary_key", false],
+		["x-request-id", false],
+		["x-correlation-id", false],
+		["trace_id", false],
+	] as const)("classifies %s as a credential key: %p", (key, sensitive) => {
+		expect(isSensitiveFixtureKey(key)).toBe(sensitive);
+	});
+
+	it("redacts vendor-prefixed key headers in JSON fixtures", () => {
+		expect(
+			sanitizeOrdinaryFixture({
+				"x-api-key": "abc123def456ghi789",
+				"x-access-key": "abc123def456ghi789",
+				"x-request-id": "req-1",
+				author: "Ada",
+			}),
+		).toEqual({
+			"x-api-key": "[REDACTED]",
+			"x-access-key": "[REDACTED]",
+			"x-request-id": "req-1",
+			author: "Ada",
+		});
+	});
+});
 
 describe("fixture sanitization", () => {
 	it("redacts credential keys beyond authorization and API tokens", () => {
@@ -135,13 +340,9 @@ describe("fixture sanitization", () => {
 		const secondUrl = "https://b.test/q?k=ccc333ddd444";
 		const firstSanitizedUrl = "https://a.test/p?[REDACTED]";
 		const secondSanitizedUrl = "https://b.test/q?[REDACTED]";
-		const diagnostic = sanitizeDiagnosticText(
-			`APIFUSEURL1X ${firstUrl} ${secondUrl} APIFUSEURL0X`,
-		);
+		const diagnostic = sanitizeDiagnosticText(`APIFUSEURL1X ${firstUrl} ${secondUrl} APIFUSEURL0X`);
 
-		expect(diagnostic).toBe(
-			`APIFUSEURL1X ${firstSanitizedUrl} ${secondSanitizedUrl} APIFUSEURL0X`,
-		);
+		expect(diagnostic).toBe(`APIFUSEURL1X ${firstSanitizedUrl} ${secondSanitizedUrl} APIFUSEURL0X`);
 		expect(diagnosticUrls(diagnostic)).toEqual([firstSanitizedUrl, secondSanitizedUrl]);
 	});
 
@@ -151,9 +352,7 @@ describe("fixture sanitization", () => {
 		const sanitizedUrl = "https://real.test/path?[REDACTED]";
 		const diagnostic = sanitizeDiagnosticText(`upstream said ${forgedSentinel} and ${url}`);
 
-		expect(diagnostic).toBe(
-			`upstream said \\u0000APIFUSE_URL0\\u0000 and ${sanitizedUrl}`,
-		);
+		expect(diagnostic).toBe(`upstream said \\u0000APIFUSE_URL0\\u0000 and ${sanitizedUrl}`);
 		expect(diagnosticUrls(diagnostic)).toEqual([sanitizedUrl]);
 	});
 
