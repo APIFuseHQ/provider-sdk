@@ -345,7 +345,12 @@ a Web `Response` or `{ status, headers, body }`; an unmatched call fails with
 the operation, transport, and method named in the error. Browser handlers expose
 method-level calls such as `goto`, `evaluate`, and `locator.click`, so provide a
 canned result for each method the handler uses. Native connections similarly
-identify `connectTcp`/`connectTls` and subsequent `write` calls. Direct global
+identify `connectTcp`/`connectTls` and subsequent `write` calls. The offline
+`ctx.stealth` rejects a stealth-owned request header (`User-Agent`,
+`Sec-Fetch-*`, `sec-ch-ua*`, ...) with `STEALTH_HEADER_OVERRIDE_UNSUPPORTED`
+before calling the stub, through the same check the production transport runs,
+so a header spread from a shared constants module or read from a variable fails
+the test instead of the first production request. Direct global
 `fetch` or socket usage is outside this ProviderContext seam and should not be
 used by provider handlers.
 

@@ -157,7 +157,9 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   explicitly defaults to `macos`. The transport owns `User-Agent`,
   `Accept-Encoding`, `sec-ch-ua*`, and every `Sec-Fetch-*` header and throws
   `STEALTH_HEADER_OVERRIDE_UNSUPPORTED` if you set one; declare
-  `stealth.requestClass: "navigation" | "xhr" | "post"` instead. Do not pin a
+  `stealth.requestClass: "navigation" | "xhr" | "post"` instead. The offline
+  `ctx.stealth` in `runStandardTests` runs the same check, so a provider test
+  fails wherever production would. Do not pin a
   browser version
   or tune JA3, HTTP/2 SETTINGS, or
   pseudo-header order in provider code. Chrome, Firefox, and Safari profiles

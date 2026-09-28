@@ -10,6 +10,7 @@ import { createTestHandleContext } from "../runtime/handle.js";
  */
 const STANDARD_TEST_CONNECTION_ID = "standard-test-connection";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { assertCallerHeadersSupported } from "../runtime/stealth-owned-headers.js";
 import { createUnsupportedOcrClient } from "../runtime/ocr.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
 import {
@@ -356,8 +357,19 @@ function createUpstreamContext(
 		options?: unknown,
 	): Promise<HttpResponse> =>
 		toHttpResponse(await dispatch({ transport: "http", method, url, body, options }));
-	const stealthCall = async (url: string, options?: { method?: string; body?: unknown }) =>
-		toStealthResponse(
+	// The production transport rejects owned headers (User-Agent, Sec-Fetch-*,
+	// sec-ch-ua*, ...) before any byte is sent; the fake applies the same
+	// function, so a provider test fails exactly where production would.
+	const stealthCall = async (
+		url: string,
+		options?: {
+			method?: string;
+			body?: unknown;
+			headers?: Readonly<Record<string, string | readonly string[] | undefined>>;
+		},
+	) => {
+		assertCallerHeadersSupported(options?.headers ?? {});
+		return toStealthResponse(
 			await dispatch({
 				transport: "stealth",
 				method: options?.method?.toUpperCase() ?? "GET",
@@ -367,6 +379,7 @@ function createUpstreamContext(
 			}),
 			url,
 		);
+	};
 
 	const createBrowserPage = (): BrowserPage => {
 		let currentUrl = "about:blank";

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { defineProvider } from "../define.js";
 import * as sdk from "../index.js";
 import { isStreamEvidenceReplayResponse } from "../stream-evidence.js";
+import { DOCUMENT_HEADERS } from "./fixtures/stealth-header-constants.js";
 import { createSnapshotContext } from "../testing/run.js";
 import {
 	describeTransform,
@@ -308,6 +309,62 @@ const handlerE2eProvider = defineProvider({
 		},
 	} });
 
+const stealthHeaderHarnessProvider = defineProvider({
+	id: "stealth-header-harness",
+	version: "1.0.0",
+	runtime: "standard",
+	stealth: { browser: "chrome", os: "macos" },
+	meta: {
+		displayName: "Stealth Header Harness",
+		descriptionKey: "meta.description",
+		category: "test",
+	},
+})({ operations: {
+		"imported-constants": {
+			riskClass: "read",
+			input: z.object({}),
+			output: z.object({ status: z.number() }),
+			handler: async (ctx) => {
+				const response = await ctx.stealth.fetch("https://stealth.example/page", {
+					headers: { ...DOCUMENT_HEADERS },
+				});
+				return { status: response.status };
+			},
+			fixtures: { request: {}, response: { status: 200 } },
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+		"user-agent-variable": {
+			riskClass: "read",
+			input: z.object({}),
+			output: z.object({ status: z.number() }),
+			handler: async (ctx) => {
+				const userAgent = sdk.getStealthProfile({ browser: "chrome", os: "macos" }).userAgent;
+				const session = ctx.stealth.createSession();
+				const { final } = await session.redirects.run({
+					url: "https://stealth.example/login",
+					headers: { "User-Agent": userAgent },
+				});
+				return { status: final.status };
+			},
+			fixtures: { request: {}, response: { status: 200 } },
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+		"caller-headers": {
+			riskClass: "read",
+			input: z.object({}),
+			output: z.object({ status: z.number() }),
+			handler: async (ctx) => {
+				const response = await ctx.stealth.fetch("https://stealth.example/page", {
+					headers: { accept: "text/html", referer: "https://stealth.example/" },
+					stealth: { requestClass: "navigation" },
+				});
+				return { status: response.status };
+			},
+			fixtures: { request: {}, response: { status: 200 } },
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+	} });
+
 const { operations: _handlerOperations, ...handlerE2eDeclaration } = handlerE2eProvider;
 const brokenHandlerProvider = defineProvider({
 	...handlerE2eDeclaration,
@@ -539,6 +596,56 @@ describe("runStandardTests handler E2E", () => {
 	it("surfaces per-operation warnings when upstreamStub is omitted", () => {
 		expect(standardTestsResult.warnings).toEqual([
 			'[provider-sdk] Operation "test-provider.search" has no handler E2E coverage in runStandardTests; configure upstreamStub to invoke the real handler.',
+		]);
+	});
+
+	it("rejects a stealth-owned header from an imported constants module like production", async () => {
+		const calls: string[] = [];
+		const stub = ({ url }: { url?: string }) => {
+			if (url) calls.push(url);
+			return { status: 200, body: "" };
+		};
+		await expect(
+			executeStandardTestHandler(stealthHeaderHarnessProvider, "imported-constants", stub),
+		).rejects.toMatchObject({
+			name: "SDKError",
+			code: "STEALTH_HEADER_OVERRIDE_UNSUPPORTED",
+			message: expect.stringContaining('"sec-fetch-dest"'),
+		});
+		expect(calls).toEqual([]);
+	});
+
+	it("rejects a User-Agent read from a variable through session.redirects.run", async () => {
+		const calls: string[] = [];
+		const stub = ({ url }: { url?: string }) => {
+			if (url) calls.push(url);
+			return { status: 200, body: "" };
+		};
+		await expect(
+			executeStandardTestHandler(stealthHeaderHarnessProvider, "user-agent-variable", stub),
+		).rejects.toMatchObject({
+			code: "STEALTH_HEADER_OVERRIDE_UNSUPPORTED",
+			message: expect.stringContaining('"user-agent"'),
+		});
+		expect(calls).toEqual([]);
+	});
+
+	it("passes caller headers the stealth transport does not own to the stub", async () => {
+		const seen: unknown[] = [];
+		const stub = ({ transport, options }: { transport: string; options?: unknown }) => {
+			seen.push({ transport, options });
+			return { status: 200, body: "" };
+		};
+		await expect(
+			executeStandardTestHandler(stealthHeaderHarnessProvider, "caller-headers", stub),
+		).resolves.toEqual({ status: 200 });
+		expect(seen).toEqual([
+			{
+				transport: "stealth",
+				options: expect.objectContaining({
+					headers: { accept: "text/html", referer: "https://stealth.example/" },
+				}),
+			},
 		]);
 	});
 
