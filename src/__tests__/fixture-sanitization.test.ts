@@ -61,22 +61,42 @@ const KEYLESS_CREDENTIAL_ROWS = [
 	["Negotiate", "sent Negotiate YIIBhwYGKwYBBQUCoIIB", "sent Negotiate [REDACTED]"],
 	["NTLM", "sent NTLM TlRMTVNTUAABAAAAB4IIogAA", "sent NTLM [REDACTED]"],
 	["Bearer, unchanged", "rejected Bearer abcdef0123456789", "rejected Bearer [REDACTED]"],
-	["lowercase bearer, unchanged", "rejected bearer abc123", "rejected Bearer [REDACTED]"],
+	["lowercase bearer", "rejected bearer abc123", "rejected bearer [REDACTED]"],
 	["Bearer under a credential key", "token=Bearer abc123", "token=[REDACTED] [REDACTED]"],
 ] as const;
 
-// A credential key right after a scheme word starts the next assignment; its value must still be
-// redacted rather than the key being consumed as the scheme's token.
-const FOLLOWING_ASSIGNMENT_ROWS = [
-	["NTLM", "NTLM password: hunter2", "NTLM password: [REDACTED]"],
-	["Negotiate", "Negotiate secret = hunter2", "Negotiate secret = [REDACTED]"],
-	["Bearer", "Bearer password: hunter2", "Bearer password: [REDACTED]"],
-	["Basic", "Basic token= hunter2", "Basic token= [REDACTED]"],
+// Each rule reads the same unmodified text and the output redacts the union of what they find,
+// so a scheme rule can never consume the key another rule needs to find a credential value.
+const OVERLAPPING_CREDENTIAL_ROWS = [
+	["a credential key after NTLM", "NTLM password: hunter2", "NTLM [REDACTED]: [REDACTED]"],
 	[
-		"an Authorization header",
-		"Authorization: abc123 password = hunter2",
-		"Authorization: [REDACTED] password = [REDACTED]",
+		"a credential key after Negotiate",
+		"Negotiate secret = hunter2",
+		"Negotiate [REDACTED] = [REDACTED]",
 	],
+	["a credential key after Bearer", "Bearer password: hunter2", "Bearer [REDACTED]: [REDACTED]"],
+	[
+		"a dotted credential key after NTLM",
+		"NTLM config.auth: hunter2",
+		"NTLM [REDACTED]: [REDACTED]",
+	],
+	["a credential key after Basic", "Basic token= hunter2", "Basic token= [REDACTED]"],
+	[
+		"a credential key inside an Authorization value",
+		"Authorization: abc123 password = hunter2",
+		"Authorization: [REDACTED] = [REDACTED]",
+	],
+	[
+		"a Bearer token after prose in an Authorization value",
+		"Authorization: rejected Bearer abc123",
+		"Authorization: [REDACTED] [REDACTED]",
+	],
+	[
+		"a padded token that reads like a key",
+		"Authorization: Bearer supersecret=",
+		"Authorization: [REDACTED]",
+	],
+	["an unclosed quoted value", 'password="hunter2', "password=[REDACTED]"],
 ] as const;
 
 // Prose and identifiers that share a word with a scheme or a credential key stay intact.
@@ -104,8 +124,8 @@ describe("credential header sanitization", () => {
 	});
 
 	it.each(
-		FOLLOWING_ASSIGNMENT_ROWS,
-	)("keeps a credential key after %s as an assignment", (_label, input, expected) => {
+		OVERLAPPING_CREDENTIAL_ROWS,
+	)("redacts every credential in %s", (_label, input, expected) => {
 		expect(sanitizeDiagnosticText(input)).toBe(expected);
 	});
 
@@ -114,6 +134,11 @@ describe("credential header sanitization", () => {
 		// timeout; a single scan finishes in milliseconds.
 		const input = JSON.stringify({ authorization: "A".repeat(100_000) });
 		expect(sanitizeDiagnosticText(input)).toBe('{"authorization":"[REDACTED]"}');
+	});
+
+	it("scans a long padded token once", () => {
+		const input = `Bearer ${"=".repeat(100_000)}A`;
+		expect(sanitizeDiagnosticText(input)).toBe("Bearer [REDACTED]");
 	});
 
 	it.each(RETAINED_TEXT_ROWS)("retains %s", (_label, input) => {
