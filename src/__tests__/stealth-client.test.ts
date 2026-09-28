@@ -8172,7 +8172,9 @@ describe("stealth redirect hop credentials and redirectPolicy", () => {
 		}
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		await expect(createStealthClient("https://www.example.com").fetch("/hop-0")).rejects.toMatchObject({
+		await expect(
+			createStealthClient("https://www.example.com").fetch("/hop-0"),
+		).rejects.toMatchObject({
 			code: "transport_network_error",
 			message: "Stealth request exceeded the 10-redirect limit",
 		});
