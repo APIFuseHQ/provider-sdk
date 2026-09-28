@@ -65,6 +65,20 @@ const KEYLESS_CREDENTIAL_ROWS = [
 	["Bearer under a credential key", "token=Bearer abc123", "token=[REDACTED] [REDACTED]"],
 ] as const;
 
+// A credential key right after a scheme word starts the next assignment; its value must still be
+// redacted rather than the key being consumed as the scheme's token.
+const FOLLOWING_ASSIGNMENT_ROWS = [
+	["NTLM", "NTLM password: hunter2", "NTLM password: [REDACTED]"],
+	["Negotiate", "Negotiate secret = hunter2", "Negotiate secret = [REDACTED]"],
+	["Bearer", "Bearer password: hunter2", "Bearer password: [REDACTED]"],
+	["Basic", "Basic token= hunter2", "Basic token= [REDACTED]"],
+	[
+		"an Authorization header",
+		"Authorization: abc123 password = hunter2",
+		"Authorization: [REDACTED] password = [REDACTED]",
+	],
+] as const;
+
 // Prose and identifiers that share a word with a scheme or a credential key stay intact.
 const RETAINED_TEXT_ROWS = [
 	["Basic prose", "Basic information is required"],
@@ -87,6 +101,19 @@ describe("credential header sanitization", () => {
 
 	it.each(KEYLESS_CREDENTIAL_ROWS)("redacts a keyless %s token", (_label, input, expected) => {
 		expect(sanitizeDiagnosticText(input)).toBe(expected);
+	});
+
+	it.each(
+		FOLLOWING_ASSIGNMENT_ROWS,
+	)("keeps a credential key after %s as an assignment", (_label, input, expected) => {
+		expect(sanitizeDiagnosticText(input)).toBe(expected);
+	});
+
+	it("scans a long authorization value once instead of from every offset", () => {
+		// Quadratic backtracking here blocks the event loop long past the test runner's default
+		// timeout; a single scan finishes in milliseconds.
+		const input = JSON.stringify({ authorization: "A".repeat(100_000) });
+		expect(sanitizeDiagnosticText(input)).toBe('{"authorization":"[REDACTED]"}');
 	});
 
 	it.each(RETAINED_TEXT_ROWS)("retains %s", (_label, input) => {

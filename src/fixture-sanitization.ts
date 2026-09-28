@@ -17,22 +17,34 @@ const PEM_PRIVATE_KEY =
 	/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
 /** RFC 9110 §11.4 `token68`, the single credential token of Bearer, Basic, Negotiate and NTLM. */
 const TOKEN68 = "[A-Za-z0-9._~+/-]+=*";
+/** Captures a following `:`/`=` so a credential key after a scheme word stays an assignment key. */
+const FOLLOWING_OPERATOR = String.raw`(?=(\s*[:=])?)`;
 /**
  * A credential header's value is the whole RFC 9110 `credentials` production
  * (`auth-scheme SP token68`), so the scheme and its token are one value, not two words.
+ * The key starts at a word boundary so a long word run is scanned once, not from every offset.
  */
 const CREDENTIALS_HEADER_ASSIGNMENT = new RegExp(
-	String.raw`((["']?)[\w-]*authorization\2\s*[:=]\s*)[A-Za-z][\w.+-]*[ \t]+${TOKEN68}(?![^\s,;&])`,
+	String.raw`(?<![\w-])((["']?)[\w-]*authorization\2\s*[:=]\s*)[A-Za-z][\w.+-]*[ \t]+(${TOKEN68})(?![^\s,;&])${FOLLOWING_OPERATOR}`,
 	"gi",
 );
 /**
  * Keyless echoes of the token68 schemes whose token is always a credential. Negotiate and NTLM
  * match only their registered spelling so prose such as "failed to negotiate TLS" is retained.
  */
-const BEARER_SCHEME_CREDENTIAL = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
-const GSSAPI_SCHEME_CREDENTIAL = /\b(Negotiate|NTLM)\s+[A-Za-z0-9._~+/=-]+/g;
+const BEARER_SCHEME_CREDENTIAL = new RegExp(
+	String.raw`\b(Bearer)\s+([A-Za-z0-9._~+/=-]+)${FOLLOWING_OPERATOR}`,
+	"gi",
+);
+const GSSAPI_SCHEME_CREDENTIAL = new RegExp(
+	String.raw`\b(Negotiate|NTLM)\s+([A-Za-z0-9._~+/=-]+)${FOLLOWING_OPERATOR}`,
+	"g",
+);
 /** A keyless `Basic` token is a credential only when it decodes to `user-id:password`. */
-const BASIC_SCHEME_CREDENTIAL = /\b(Basic)\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9._~+/=-])/gi;
+const BASIC_SCHEME_CREDENTIAL = new RegExp(
+	String.raw`\b(Basic)\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9._~+/=-])${FOLLOWING_OPERATOR}`,
+	"gi",
+);
 
 /** Matches credential field names without treating benign prefixes such as `author` as `auth`. */
 export function isSensitiveFixtureKey(key: string): boolean {
@@ -204,15 +216,42 @@ export function sanitizeDiagnosticText(value: string): string {
 /** Redacts `Bearer`/`Negotiate`/`NTLM` tokens and `Basic` tokens that decode to `user-id:password`. */
 function redactKeylessCredentials(value: string): string {
 	return value
-		.replace(BEARER_SCHEME_CREDENTIAL, `Bearer ${REDACTED_FIXTURE_VALUE}`)
-		.replace(GSSAPI_SCHEME_CREDENTIAL, `$1 ${REDACTED_FIXTURE_VALUE}`)
-		.replace(BASIC_SCHEME_CREDENTIAL, (match, scheme: string, token: string) =>
-			Buffer.from(token, "base64").includes(0x3a) ? `${scheme} ${REDACTED_FIXTURE_VALUE}` : match,
+		.replace(
+			BEARER_SCHEME_CREDENTIAL,
+			keylessTokenRedactor(() => true, "Bearer"),
+		)
+		.replace(
+			GSSAPI_SCHEME_CREDENTIAL,
+			keylessTokenRedactor(() => true),
+		)
+		.replace(
+			BASIC_SCHEME_CREDENTIAL,
+			keylessTokenRedactor((token) => Buffer.from(token, "base64").includes(0x3a)),
 		);
 }
 
+function keylessTokenRedactor(isCredential: (token: string) => boolean, spelling?: string) {
+	return (match: string, scheme: string, token: string, operator: string | undefined): string =>
+		isAssignmentKey(token, operator) || !isCredential(token)
+			? match
+			: `${spelling ?? scheme} ${REDACTED_FIXTURE_VALUE}`;
+}
+
 function redactCredentialHeaders(value: string): string {
-	return value.replace(CREDENTIALS_HEADER_ASSIGNMENT, `$1${REDACTED_FIXTURE_VALUE}`);
+	return value.replace(
+		CREDENTIALS_HEADER_ASSIGNMENT,
+		(match, prefix: string, _quote: string, token: string, operator: string | undefined) =>
+			isAssignmentKey(token, operator) ? match : `${prefix}${REDACTED_FIXTURE_VALUE}`,
+	);
+}
+
+/** `password:` or `api_key=` after a scheme word starts the next assignment; it is not a token. */
+function isAssignmentKey(token: string, operator: string | undefined): boolean {
+	const key = token.replace(/=+$/, "");
+	return (
+		(operator !== undefined || key !== token) &&
+		(isSensitiveFixtureKey(key) || key.toLowerCase() === "key")
+	);
 }
 
 function redactSensitiveAssignments(value: string): string {
