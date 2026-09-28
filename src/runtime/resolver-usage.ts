@@ -4,6 +4,7 @@ import type {
 	ResolverVendorUnavailableError,
 } from "./resolver-vendors/types.js";
 import type { TraceRecorder } from "./trace.js";
+import { resolverSpanAttributes } from "./resolver-span-attributes.js";
 
 export const RESOLVER_PAID_USAGE_SPAN = "resolver.usage";
 
@@ -22,9 +23,11 @@ export type ResolverPaidUsageEndpoint =
  * but has no published price, so it is recorded with 0 units and `billing: "unconfirmed"`
  * rather than invented as a paid unit; the span still proves the call was made.
  */
+export type ResolverPaidUsageBilling = "metered" | "unconfirmed";
+
 const ENDPOINT_BILLING: Record<
 	ResolverPaidUsageEndpoint,
-	{ readonly billable_units: 0 | 1; readonly billing: "metered" | "unconfirmed" }
+	{ readonly billable_units: 0 | 1; readonly billing: ResolverPaidUsageBilling }
 > = {
 	"capsolver:create_task": { billable_units: 1, billing: "metered" },
 	"twocaptcha:create_task": { billable_units: 1, billing: "metered" },
@@ -78,7 +81,7 @@ export async function recordPaidResolverCreate<T>(options: {
 		}
 		return options.create();
 	}
-	const baseAttributes = {
+	const baseAttributes = resolverSpanAttributes({
 		vendor: options.vendor,
 		challenge_kind: options.kind,
 		endpoint: options.endpoint,
@@ -87,10 +90,10 @@ export async function recordPaidResolverCreate<T>(options: {
 		...(options.usage ? { vendor_index: options.usage.vendorIndex } : {}),
 		...(options.round === undefined ? {} : { round: options.round }),
 		resolver_identity_scope: options.usage?.resolverIdentityScope,
-	};
+	});
 	return options.traceRecorder.runSpan(RESOLVER_PAID_USAGE_SPAN, options.create, {
 		attributes: baseAttributes,
-		onSuccess: () => ({ outcome: "success" }),
-		onError: (error) => ({ outcome: errorOutcome(error, options.signal) }),
+		onSuccess: () => resolverSpanAttributes({ outcome: "success" }),
+		onError: (error) => resolverSpanAttributes({ outcome: errorOutcome(error, options.signal) }),
 	});
 }

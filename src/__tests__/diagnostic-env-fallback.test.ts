@@ -337,7 +337,7 @@ const registry = createDiagnosticRedactor([], compileProcessDiagnosticSensitiveV
 for (const value of ['12345678', '9007199254740993', 'privatekeygrove']) readDiagnosticEnv('P4_CAP', { P4_CAP: value });
 for (let i = 3; i < 1024; i++) readDiagnosticEnv('P4_CAP', { P4_CAP: 'entrygrove-' + i });
 readDiagnosticEnv('P4_CAP', { P4_CAP: 'overflowgrove' });
-const attributes = { duration_ms: 1234, status: 200, retryable: true, outcome: 'success', code: 'upstream_error', errorClass: 'upstream', phase: 'cleanup', cacheStatus: 'hit', identitySource: 'declared', taxonomy: 'v1', taxonomyVersion: 'v1', message: 'ordinary message', longNumber: 987654321, shortBigint: 1234n, longBigint: 987654321n, matchedNumber: 12345678, matchedBigint: 9007199254740993n, privatekeygrove: 'private value' };
+const attributes = { duration_ms: 1234, status: 200, retryable: true, outcome: 'success', vendor: 'capsolver', challenge_kind: 'recaptcha_v2', endpoint: 'capsolver:create_task', billing: 'metered', unavailability_reason: 'timeout', transport_phase: 'cleanup', code: 'upstream_error', errorClass: 'upstream', phase: 'cleanup', cacheStatus: 'hit', identitySource: 'declared', taxonomy: 'v1', taxonomyVersion: 'v1', message: 'ordinary message', longNumber: 987654321, shortBigint: 1234n, longBigint: 987654321n, matchedNumber: 12345678, matchedBigint: 9007199254740993n, privatekeygrove: 'private value' };
 const observed = [], exports = [];
 swapOTLPTransportForTests(Object.assign(async (_url, init) => { exports.push(JSON.parse(init.body)); return new Response(); }, { preconnect: fetch.preconnect }));
 const trace = createTraceContext({ redact: registry.redact, onSpan: span => observed.push(span), exportOptions: { endpoint: 'http://collector.test' }, resourceAttributes: { code: 'upstream_error', message: 'resource text' }, sanitizeSpanForExport: span => sanitizeSpanForOutput(span, undefined, registry.redact) });
@@ -356,14 +356,22 @@ console.log(JSON.stringify({ recorded: span.attributes, notified: observed[0].at
 				duration_ms: 1234,
 				status: 200,
 				retryable: true,
+				// Literals a resolver span producer declares as closed enums keep their values.
 				outcome: "success",
-				code: "upstream_error",
-				errorClass: "upstream",
-				phase: "cleanup",
-				cacheStatus: "hit",
-				identitySource: "declared",
-				taxonomy: "v1",
-				taxonomyVersion: "v1",
+				vendor: "capsolver",
+				challenge_kind: "recaptcha_v2",
+				endpoint: "capsolver:create_task",
+				billing: "metered",
+				unavailability_reason: "timeout",
+				transport_phase: "cleanup",
+				// No span producer declares these keys, so their values are free text.
+				code: "[REDACTION_FAILED]",
+				errorClass: "[REDACTION_FAILED]",
+				phase: "[REDACTION_FAILED]",
+				cacheStatus: "[REDACTION_FAILED]",
+				identitySource: "[REDACTION_FAILED]",
+				taxonomy: "[REDACTION_FAILED]",
+				taxonomyVersion: "[REDACTION_FAILED]",
 				message: "[REDACTION_FAILED]",
 				longNumber: 987654321,
 				shortBigint: "1234",
@@ -388,7 +396,7 @@ console.log(JSON.stringify({ recorded: span.attributes, notified: observed[0].at
 					]),
 				),
 				resource: [
-					{ key: "code", value: { stringValue: "upstream_error" } },
+					{ key: "code", value: { stringValue: "[REDACTION_FAILED]" } },
 					{ key: "message", value: { stringValue: "[REDACTION_FAILED]" } },
 				],
 				warnings: 1,

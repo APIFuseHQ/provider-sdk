@@ -8,6 +8,7 @@ import type {
 } from "../../types.js";
 import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import type { TraceRecorder } from "../trace.js";
+import { resolverSpanAttributes } from "../resolver-span-attributes.js";
 import type { BrowserTelemetrySink } from "../browser-telemetry.js";
 import { resolverChallengeIssuingIdentity } from "./bindings.js";
 import { assertResolverHostAllowed, normalizedResolverHostname } from "./hosts.js";
@@ -218,15 +219,15 @@ async function runBoundedCleanup(
 
 	await traceRecorder
 		.runSpan("resolver.vendor.cleanup", boundedCleanup, {
-			attributes: {
+			attributes: resolverSpanAttributes({
 				vendor: BROWSER_VENDOR_ID,
 				challenge_kind: challengeKind,
 				operation,
-			},
+			}),
 			onError(error) {
-				return {
+				return resolverSpanAttributes({
 					error_message: error instanceof Error ? error.message : String(error),
-				};
+				});
 			},
 		})
 		.catch(() => undefined);

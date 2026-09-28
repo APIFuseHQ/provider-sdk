@@ -127,6 +127,7 @@ import {
 	tenantOpaqueKeys,
 } from "../runtime/request-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
+import { resolverSpanAttributes } from "../runtime/resolver-span-attributes.js";
 import {
 	bindResolverTelemetry,
 	createUnsupportedResolverClient,
@@ -702,7 +703,7 @@ function createStealthChallengeDetection(
 							const solve = () => resolver.solve(challenge, solveSignal, recorder ?? undefined);
 							return recorder
 								? recorder.runSpan("resolver.solve", solve, {
-										attributes: { challenge_kind: challenge.kind },
+										attributes: resolverSpanAttributes({ challenge_kind: challenge.kind }),
 									})
 								: solve();
 						},

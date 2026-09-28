@@ -6,6 +6,7 @@ import {
 	REDACTED_QUERY_VALUE,
 	type SensitiveValueVariant,
 } from "./request-options.js";
+import { RESOLVER_CLOSED_ENUM_SPAN_ATTRIBUTES } from "./resolver-span-attributes.js";
 
 export type DiagnosticRedactor = (text: string) => string;
 export const REDACTION_FAILED = "[REDACTION_FAILED]";
@@ -577,11 +578,19 @@ export function redactDiagnosticAttributeKey(key: string, redact?: DiagnosticRed
 export function redactCriticalDiagnosticText(text: string, redact?: DiagnosticRedactor): string {
 	return redactDiagnosticText(text, redact ? (criticalRedactors.get(redact) ?? redact) : undefined);
 }
+/**
+ * The redactor for one attribute value. A value its producer declares as a closed-enum literal for
+ * this key is a contract, like a typed number: exhaustion suppression skips it, while registered
+ * credentials still match. Any other value under the same key stays free text.
+ */
 export function diagnosticAttributeRedactor(
 	key: string,
 	redact?: DiagnosticRedactor,
+	value?: unknown,
 ): DiagnosticRedactor | undefined {
-	if (CLOSED_ENUM_ATTRIBUTE_KEYS.has(key)) return diagnosticStructuredRedactor(redact);
+	if (typeof value === "string" && CLOSED_ENUM_ATTRIBUTE_VALUES.get(key)?.has(value)) {
+		return diagnosticStructuredRedactor(redact);
+	}
 	return CRITICAL_ATTRIBUTE_KEYS.has(key) && redact
 		? (criticalRedactors.get(redact) ?? redact)
 		: redact;
@@ -600,18 +609,15 @@ const CRITICAL_ATTRIBUTE_KEYS = new Set([
 	"http.status_code",
 ]);
 
-// SDK-owned closed enums are contracts, like typed numbers and booleans. This
-// exempts only exhaustion suppression; registered credentials still match.
-const CLOSED_ENUM_ATTRIBUTE_KEYS = new Set([
-	"outcome",
-	"code",
-	"errorClass",
-	"phase",
-	"cacheStatus",
-	"identitySource",
-	"taxonomy",
-	"taxonomyVersion",
-]);
+// SDK-owned closed enums are contracts, like typed numbers and booleans. The table is the
+// producers' own declaration of which span attributes are closed enums and of every literal each
+// one can carry; it exempts only exhaustion suppression, and registered credentials still match.
+const CLOSED_ENUM_ATTRIBUTE_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+	Object.entries(RESOLVER_CLOSED_ENUM_SPAN_ATTRIBUTES).map(([key, values]) => [
+		key,
+		new Set<string>(values),
+	]),
+);
 
 // Bigints normalize to strings for OTLP. Carry their type policy through internal
 // detached copies without treating arbitrary numeric-looking free text as typed.

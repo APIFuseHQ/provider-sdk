@@ -191,7 +191,11 @@ function normalizeAttributes(
 				? redactedKey === REDACTION_FAILED
 					? REDACTION_FAILED
 					: REDACTED_QUERY_VALUE
-				: normalizeAttributeValue(value, diagnosticAttributeRedactor(key, redact), retainBigints);
+				: normalizeAttributeValue(
+						value,
+						diagnosticAttributeRedactor(key, redact, value),
+						retainBigints,
+					);
 			return [normalizedKey, normalizedValue] as const;
 		})
 		.filter(
@@ -226,7 +230,7 @@ function prepareResourceAttributesForExport(
 					? redactedKey === REDACTION_FAILED
 						? REDACTION_FAILED
 						: REDACTED_QUERY_VALUE
-					: sanitizeSpanNameForOutput(value, diagnosticAttributeRedactor(key, redact)),
+					: sanitizeSpanNameForOutput(value, diagnosticAttributeRedactor(key, redact, value)),
 			];
 		}),
 	);

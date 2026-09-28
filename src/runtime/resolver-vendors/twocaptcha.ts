@@ -1,6 +1,7 @@
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
 import type { TraceRecorder } from "../trace.js";
 import { recordPaidResolverCreate } from "../resolver-usage.js";
+import { resolverSpanAttributes } from "../resolver-span-attributes.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	type ResolverIdentity,
@@ -300,19 +301,19 @@ function spanErrorAttributes(
 	phase: TwoCaptchaOperationPhase,
 ): Record<string, unknown> | undefined {
 	if (error instanceof ResolverVendorUnavailableError) {
-		return {
+		return resolverSpanAttributes({
 			unavailability_reason: error.reason,
 			transport_phase: error.phase,
-		};
+		});
 	}
 	// The solve budget raises TwoCaptchaSolveTimeoutError inside the spanned closure and
 	// the outer catch converts it only after the span has been finalized, so the span has
 	// to recognize it here or slow solves lose exactly the attribution these spans add.
 	if (error instanceof TwoCaptchaSolveTimeoutError) {
-		return {
+		return resolverSpanAttributes({
 			unavailability_reason: "timeout",
 			transport_phase: phase,
-		};
+		});
 	}
 	return undefined;
 }
@@ -468,10 +469,10 @@ export function createTwoCaptchaResolverVendorAdapter(
 				};
 				const taskId = traceRecorder
 					? await traceRecorder.runSpan("resolver.vendor.create_task", createTask, {
-							attributes: {
+							attributes: resolverSpanAttributes({
 								vendor: TWOCAPTCHA_VENDOR_ID,
 								challenge_kind: challenge.kind,
-							},
+							}),
 							onError: (error) => spanErrorAttributes(error, "create_task"),
 						})
 					: await createTask();
@@ -517,10 +518,10 @@ export function createTwoCaptchaResolverVendorAdapter(
 				};
 				return traceRecorder
 					? await traceRecorder.runSpan("resolver.vendor.poll_result", pollResult, {
-							attributes: {
+							attributes: resolverSpanAttributes({
 								vendor: TWOCAPTCHA_VENDOR_ID,
 								challenge_kind: challenge.kind,
-							},
+							}),
 							onError: (error) => spanErrorAttributes(error, "poll_result"),
 						})
 					: await pollResult();
