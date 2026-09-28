@@ -1118,6 +1118,47 @@ function isStealthContextAccess(node: import("typescript").Node): boolean {
 	return false;
 }
 
+function isTupleTypeNode(type: import("typescript").TypeNode | undefined): boolean {
+	if (!type) return false;
+	const ts = getTypeScript();
+	if (ts.isTypeOperatorNode(type)) return isTupleTypeNode(type.type);
+	return ts.isTupleTypeNode(type);
+}
+
+/**
+ * True where a two-element array is consumed as a `[name, value]` header entry:
+ * inside an entries list (`new Headers([[name, value]])`,
+ * `Object.fromEntries([...])`), passed to a call such as `tuples.push(...)`, or
+ * declared with a tuple type. A two-name list is bound, iterated, or handed to
+ * a constructor instead — `const STRIP = ["sec-fetch-dest", "referer"]`,
+ * `for (const name of [...])`, `new Set([...])` — and is not an entry. The
+ * position decides because a Sec-Fetch-* value ("document", "navigate") is
+ * token-shaped exactly like a header name.
+ */
+function isHeaderEntryPosition(node: import("typescript").ArrayLiteralExpression): boolean {
+	const ts = getTypeScript();
+	let child: import("typescript").Node = node;
+	let parent = node.parent;
+	while (
+		parent &&
+		(ts.isParenthesizedExpression(parent) ||
+			ts.isAsExpression(parent) ||
+			ts.isSatisfiesExpression(parent) ||
+			ts.isTypeAssertionExpression(parent))
+	) {
+		if (!ts.isParenthesizedExpression(parent) && isTupleTypeNode(parent.type)) return true;
+		child = parent;
+		parent = parent.parent;
+	}
+	if (!parent) return false;
+	if (ts.isArrayLiteralExpression(parent)) return true;
+	if (ts.isCallExpression(parent)) return parent.arguments.some((argument) => argument === child);
+	if (ts.isVariableDeclaration(parent)) {
+		return parent.initializer === child && isTupleTypeNode(parent.type);
+	}
+	return false;
+}
+
 function isStaticUndefined(node: import("typescript").Node | undefined): boolean {
 	if (!node) return false;
 	const ts = getTypeScript();
@@ -1138,9 +1179,14 @@ function calleeName(node: import("typescript").CallExpression): string | undefin
  * runtime rejection: host, connection, and accept-encoding are left alone
  * because ctx.http callers set them legitimately in the same files, and
  * user-agent only reaches a finding through the "user-agent" kind, which
- * matches a versioned literal value rather than the name — a user-agent read
- * from a variable is rejected by the runtime and stays silent here. Widening
- * the set needs a per-file transport scope and a suppression path first.
+ * matches a versioned literal value rather than the name.
+ *
+ * This rule is the early, same-file signal only. The complete check is the
+ * offline test harness: `runStandardTests` runs every `ctx.stealth` request
+ * through the runtime's own `assertCallerHeadersSupported`, so a header spread
+ * from another module, or a user-agent read from a variable or
+ * `getStealthProfile(...)`, fails the provider's tests exactly as it would fail
+ * in production.
  */
 function isReportedOwnedHeaderName(value: string | undefined): boolean {
 	if (value === undefined) return false;
@@ -1247,17 +1293,16 @@ function collectBrowserVersionLiteralFindings(
 		}
 
 		if (ts.isArrayLiteralExpression(node) && node.elements[0]) {
-			// Only a `[name, value]` tuple is a header. A name list such as
-			// `new Set(["sec-ch-ua-mobile", "sec-ch-ua-platform"])` is not: it is
-			// the argument of a constructor, or its second element is itself an
-			// owned name.
+			// Only a `[name, value]` tuple is a header: a two-element array in an
+			// entry position (isHeaderEntryPosition) whose second element is not
+			// itself an owned name.
 			const second = node.elements[1];
 			inspectHeaderEntry(
 				node.elements[0],
 				staticStringText(node.elements[0]),
 				second,
 				node.elements.length === 2 &&
-					!ts.isNewExpression(node.parent) &&
+					isHeaderEntryPosition(node) &&
 					!isStealthOwnedHeaderName(staticStringText(second) ?? "")
 					? "entry"
 					: false,

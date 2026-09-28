@@ -38,7 +38,7 @@ import type {
 } from "../types.js";
 import { chrome149HeaderOrder } from "./chrome149-header-order.js";
 import { registerDiagnosticValue } from "./diagnostic-env.js";
-import { isStealthOwnedHeaderName } from "./stealth-owned-headers.js";
+import { assertCallerHeadersSupported } from "./stealth-owned-headers.js";
 import {
 	ENGINE_CEREMONY_EGRESS_LEASE,
 	type CeremonyEgressBinding,
@@ -547,33 +547,11 @@ function chromeHeaderOrder(
 	return order;
 }
 
-function normalizedCallerHeaderEntries(
-	headers: Record<string, string | string[] | undefined>,
-): HeaderTuple[] {
-	const entries = normalizedHeaderEntries(headers);
-	assertCallerHeadersSupported(entries);
-	return entries;
-}
-
 function normalizedCallerHeaderEntriesFromRecord(headers: Record<string, string>): HeaderTuple[] {
 	// The record has been through normalizeHeaders (lowercase, merged names); the
 	// lowercase here only guards later insertions such as the cookie jar's header.
-	const entries: HeaderTuple[] = Object.entries(headers).map(([name, value]) => [
-		name.toLowerCase(),
-		value,
-	]);
-	assertCallerHeadersSupported(entries);
-	return entries;
-}
-
-function assertCallerHeadersSupported(entries: readonly HeaderTuple[]): void {
-	for (const [name] of entries) {
-		if (isStealthOwnedHeaderName(name)) {
-			throw new SDKError(`Stealth transport owns the "${name}" header; remove it from headers.`, {
-				code: "STEALTH_HEADER_OVERRIDE_UNSUPPORTED",
-			});
-		}
-	}
+	assertCallerHeadersSupported(headers);
+	return Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]);
 }
 
 function chromeRequestClass(
@@ -1761,7 +1739,7 @@ function createSessionFetcher(
 			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
 				try {
 					const method = normalizeMethod(options.method ?? "GET");
-					normalizedCallerHeaderEntries(options.headers ?? {});
+					assertCallerHeadersSupported(options.headers ?? {});
 					const hasExplicitRetryPolicy = options.retry !== undefined;
 					const stealthRetryOptions =
 						normalizeProxyTransportRetryOptions(options.retry, {

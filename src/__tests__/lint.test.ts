@@ -1365,6 +1365,43 @@ export function forward(name: string, headers: Record<string, string | undefined
 		expect(diagnostics).toEqual([]);
 	});
 
+	it("ignores a bound or iterated two-name list whose second name is not owned", () => {
+		const diagnostics = lintSourceFile(`
+const STRIP = ["sec-fetch-dest", "referer"];
+const STRIP_CONST = ["Sec-Fetch-Site", "cookie"] as const;
+export function strip(headers: Record<string, string>, ctx: { stealth: unknown }) {
+  for (const name of [...STRIP, ...STRIP_CONST]) delete headers[name];
+  for (const name of ["sec-fetch-user", "origin"]) delete headers[name];
+  return ["sec-ch-ua-mobile", "accept"].includes("x") ? headers : ctx.stealth;
+}
+`);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("still reports a [name, value] tuple in an entries list, a call, or a tuple type", () => {
+		const diagnostics = lintSourceFile(`
+export function build(tuples: Array<[string, string]>, ctx: { stealth: unknown }) {
+  const listed = Object.fromEntries([["sec-fetch-dest", "document"]]);
+  const wrapped = new Headers([["Sec-Fetch-Mode", "navigate"]]);
+  tuples.push(["sec-fetch-site", "same-origin"]);
+  const typed: readonly [string, string] = ["sec-fetch-user", "?1"];
+  const asserted = ["sec-ch-ua-mobile", "?0"] as [string, string];
+  return [listed, wrapped, typed, asserted, ctx.stealth];
+}
+`);
+
+		expect(
+			diagnostics.map((diagnostic) => diagnostic.message.match(/"([^"]+)" header/)?.[1]),
+		).toEqual([
+			"sec-fetch-dest",
+			"Sec-Fetch-Mode",
+			"sec-fetch-site",
+			"sec-fetch-user",
+			"sec-ch-ua-mobile",
+		]);
+	});
+
 	it("reports an undefined value in the Headers shapes the runtime does not drop", () => {
 		const diagnostics = lintSourceFile(`
 export function clear(headers: Headers, tuples: Array<[string, string | undefined]>, ctx: { stealth: unknown }) {
