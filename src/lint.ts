@@ -1344,7 +1344,7 @@ function browserVersionLiteralMessage(finding: BrowserVersionLiteralFinding): st
 		case "sec-ch-ua":
 			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from stealth: { browser: "chrome", os: "macos" }. ctx.stealth also owns User-Agent, so omit that header there as well; for ctx.http only, derive it from getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.';
 		case "owned-header":
-			return `ctx.stealth owns the "${finding.literal}" header and rejects a caller value with STEALTH_HEADER_OVERRIDE_UNSUPPORTED (HTTP 500 at request time). Remove it; declare stealth: { requestClass: "navigation" | "xhr" | "post" } to drive Sec-Fetch-* and select the profile with stealth: { browser: "chrome", os: "macos" } for client hints.`;
+			return `ctx.stealth owns the "${finding.literal}" header and rejects a caller value with STEALTH_HEADER_OVERRIDE_UNSUPPORTED (HTTP 500 at request time). Remove it; declare stealth: { requestClass: "navigation" | "form-post" | "xhr" | "post" } to drive Sec-Fetch-* and select the profile with stealth: { browser: "chrome", os: "macos" } for client hints.`;
 	}
 }
 

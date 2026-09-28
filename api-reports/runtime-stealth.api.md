@@ -465,7 +465,7 @@ interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "h
     redirectPolicy?: HttpRedirectPolicy;
     signal?: never;
     stealth?: StealthProfileSelection & {
-        requestClass?: "navigation" | "xhr" | "post";
+        requestClass?: "navigation" | "form-post" | "xhr" | "post";
         userActivation?: boolean;
         insecureSkipVerify?: boolean;
     };
@@ -603,7 +603,7 @@ export type StealthTelemetryDiagnostics = {
 export type StealthTelemetryErrorCode = "transport_network_error" | "transport_timeout" | "transport_cancelled" | "upstream_http_error" | "response_too_large" | "proxy_connect_failed" | "PROXY_POOL_STALE" | "PROXY_EDGE_AUTH_REJECTED" | "PROXY_AUTH_IP_DENIED" | "PROXY_EDGE_TLS_REJECTED" | "PROXY_REQUIRED" | "other";
 
 // @public (undocumented)
-export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "xhr" | "post";
+export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "form_post" | "xhr" | "post";
 
 // @public (undocumented)
 export type StealthTelemetrySbsdEvent = {
@@ -674,9 +674,9 @@ type StealthTransportResponse = {
 // dist/runtime/stealth.d.ts:51:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:925:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:930:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1317:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1367:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1367:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1325:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1375:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1375:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

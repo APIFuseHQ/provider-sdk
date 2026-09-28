@@ -1,5 +1,5 @@
 ---
-"@apifuse/provider-sdk": minor
+"@apifuse/provider-sdk": major
 ---
 
 The stealth redirect walkers no longer carry caller credentials to another origin or site, and `ctx.stealth.fetch` accepts the ctx.http same-origin `redirectPolicy`.
@@ -9,3 +9,5 @@ The stealth redirect walkers no longer carry caller credentials to another origi
 - New opt-in `redirectPolicy: { mode: "same-origin", maxHops }` on `StealthFetchOptions`, validated and enforced by the same code as the ctx.http option: a redirect that leaves the initial origin, exceeds `maxHops` (0 to 10, the stealth redirect limit), loops, or has no usable `Location` throws `HttpRedirectError` (`http_redirect_stopped` / `_max_hops` / `_loop` / `_missing_location`) before any request goes to that target. It requires the default `redirect: "follow"`; combining it with `"manual"` or `"error"` throws `http_redirect_policy_invalid`. `StealthRedirectRunOptions` does not take it, since `redirects.run` already has `maxHops` and `stopWhen`.
 
 Not in this change: enforcing `allowedHosts` on redirect hops. No SDK transport enforces `allowedHosts` today, and ADR-0011 D5 (#252) puts the egress allowlist in the engine.
+
+Release level: `major` under the CONTRIBUTING.md report rule, because the existing `StealthRedirectRunOptions` report line changes (it now also omits `redirectPolicy`). #358 landed this changeset as `minor`, and #359 corrects the level.

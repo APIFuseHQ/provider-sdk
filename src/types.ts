@@ -1456,13 +1456,21 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 		 * replacement for hand-set `Sec-Fetch-*` headers, which the transport
 		 * rejects; it drives `Sec-Fetch-Mode`/`Dest`/`User`, `Accept`, `Priority`,
 		 * and `Upgrade-Insecure-Requests`.
+		 *
+		 * `form-post` is an HTML `<form method="post">` submission: a navigation
+		 * (`navigate`/`document`, the document `Accept`, `Upgrade-Insecure-Requests`)
+		 * that carries a body, in the header order Chrome uses for it, with
+		 * `Cache-Control: max-age=0` and the caller's `Content-Type`, `Origin` and
+		 * `Referer` in place. It is never inferred, since a form submission and a
+		 * script `fetch()` POST look the same to the transport.
 		 */
-		requestClass?: "navigation" | "xhr" | "post";
+		requestClass?: "navigation" | "form-post" | "xhr" | "post";
 		/**
-		 * Whether a `navigation` request carries a user gesture and therefore
-		 * `Sec-Fetch-User: ?1` (default `true`). Set `false` for script-driven
-		 * navigations such as `location.replace`, which Chrome sends without it.
-		 * Ignored for the `xhr` and `post` request classes.
+		 * Whether a `navigation` or `form-post` request carries a user gesture and
+		 * therefore `Sec-Fetch-User: ?1` (default `true`). Set `false` for
+		 * script-driven navigations such as `location.replace` or
+		 * `form.submit()`, which Chrome sends without it. Ignored for the `xhr` and
+		 * `post` request classes.
 		 */
 		userActivation?: boolean;
 		/**

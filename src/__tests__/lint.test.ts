@@ -1320,7 +1320,7 @@ export function apply(headers: Headers, tuples: Array<[string, string]>) {
 			);
 			expect(diagnostic?.message).toContain("STEALTH_HEADER_OVERRIDE_UNSUPPORTED");
 			expect(diagnostic?.message).toContain(
-				'stealth: { requestClass: "navigation" | "xhr" | "post" }',
+				'stealth: { requestClass: "navigation" | "form-post" | "xhr" | "post" }',
 			);
 		}
 	});

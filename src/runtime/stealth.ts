@@ -402,6 +402,8 @@ function normalizedHeaderEntries(
 // installs Accept-Language via DevTools next to User-Agent; real Chrome only
 // receives it from //net (URLRequestHttpJob::AddExtraHeaders), after
 // Accept-Encoding and before Cookie, as al-placement-capture.json B/C show.
+// chrome-form-post-capture.json was taken without that option and needs no
+// adjustment.
 const CHROME_HEADER_ORDERS = {
 	navigation: [
 		"sec-ch-ua",
@@ -438,7 +440,28 @@ const CHROME_HEADER_ORDERS = {
 		"cookie",
 		"priority",
 	],
-} as const;
+	"form-post": [
+		"content-length",
+		"cache-control",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"upgrade-insecure-requests",
+		"content-type",
+		"user-agent",
+		"origin",
+		"accept",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-user",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"accept-language",
+		"cookie",
+		"priority",
+	],
+} as const satisfies Record<Exclude<ChromeRequestClass, "xhr">, readonly string[]>;
 
 const CHROME_H1_HEADER_ORDERS = {
 	navigation: [
@@ -495,7 +518,29 @@ const CHROME_H1_HEADER_ORDERS = {
 		"accept-language",
 		"cookie",
 	],
-} as const;
+	"form-post": [
+		"host",
+		"connection",
+		"content-length",
+		"cache-control",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"upgrade-insecure-requests",
+		"content-type",
+		"user-agent",
+		"origin",
+		"accept",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-user",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"accept-language",
+		"cookie",
+	],
+} as const satisfies Record<ChromeRequestClass, readonly string[]>;
 
 const CHROME_H1_HEADER_NAMES: Record<string, string> = {
 	host: "Host",
@@ -519,7 +564,30 @@ const CHROME_H1_HEADER_NAMES: Record<string, string> = {
 	range: "Range",
 };
 
-type ChromeRequestClass = keyof typeof CHROME_HEADER_ORDERS | "xhr";
+type ChromeRequestClass = NonNullable<NonNullable<StealthFetchOptions["stealth"]>["requestClass"]>;
+
+/**
+ * What each request class sends besides its header order, one row per public
+ * `stealth.requestClass`:
+ *
+ * - `fetchMetadata: "navigate"` is a document navigation: `Sec-Fetch-Mode:
+ *   navigate`, `Sec-Fetch-Dest: document`, `Sec-Fetch-User: ?1` unless
+ *   `userActivation` is false, `Upgrade-Insecure-Requests: 1`, and the
+ *   profile's `Accept` and `Priority`. `"cors"` is a script fetch: `cors` /
+ *   `empty`, `Accept: *\/*`, `Priority: u=1, i`.
+ * - `bodyful` sends `Content-Length`.
+ * - `validateCache` sends `Cache-Control: max-age=0`, which Chrome adds to a
+ *   form submission (chrome-form-post-capture.json).
+ */
+const CHROME_REQUEST_CLASSES = {
+	navigation: { fetchMetadata: "navigate", bodyful: false, validateCache: false },
+	"form-post": { fetchMetadata: "navigate", bodyful: true, validateCache: true },
+	xhr: { fetchMetadata: "cors", bodyful: false, validateCache: false },
+	post: { fetchMetadata: "cors", bodyful: true, validateCache: false },
+} as const satisfies Record<
+	ChromeRequestClass,
+	{ fetchMetadata: "navigate" | "cors"; bodyful: boolean; validateCache: boolean }
+>;
 
 function chromeHeaderOrder(
 	requestClass: ChromeRequestClass,
@@ -602,9 +670,10 @@ function buildChromeHeaderTuples(options: {
 		),
 	);
 	const requestClass = chromeRequestClass(options.method, options.requestClass);
+	const shape = CHROME_REQUEST_CLASSES[requestClass];
 	const referer = caller.get("referer");
 	const fetchSite = secFetchSite(options.requestUrl, referer);
-	const isNavigation = requestClass === "navigation";
+	const isNavigation = shape.fetchMetadata === "navigate";
 	const values = new Map<string, string>([
 		["sec-ch-ua", requiredEmulationHeader(emulation, "sec-ch-ua")],
 		["sec-ch-ua-mobile", requiredEmulationHeader(emulation, "sec-ch-ua-mobile")],
@@ -630,12 +699,16 @@ function buildChromeHeaderTuples(options: {
 		values.set("upgrade-insecure-requests", "1");
 		if (options.userActivation !== false) values.set("sec-fetch-user", "?1");
 	}
+	if (shape.validateCache) values.set("cache-control", "max-age=0");
 	for (const [name, value] of callerEntries) values.set(name, value);
 	for (const name of ["content-type", "origin", "referer"] as const) {
 		const value = caller.get(name);
 		if (value !== undefined) values.set(name, value);
 	}
-	if (requestClass === "post") {
+	// A bodyful class keeps its class across a 301/302/303 that rewrites the method
+	// to GET (a form submission's redirect stays a validated navigation), but the
+	// rewritten request has no body and Chrome sends no Content-Length for it.
+	if (shape.bodyful && options.method !== "GET" && options.method !== "HEAD") {
 		values.set(
 			"content-length",
 			caller.get("content-length") ?? String(Buffer.byteLength(options.body ?? "")),
@@ -1319,7 +1392,9 @@ function startStealthExchange(
 				requestClass:
 					requestClass === "navigation" && options.stealth?.userActivation === false
 						? "script_navigation"
-						: requestClass,
+						: requestClass === "form-post"
+							? "form_post"
+							: requestClass,
 				...(status === undefined ? {} : { status }),
 				...(errorCode ? { errorCode } : {}),
 				...(error === undefined

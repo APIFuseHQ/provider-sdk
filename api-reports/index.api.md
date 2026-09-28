@@ -7915,7 +7915,7 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
     redirectPolicy?: HttpRedirectPolicy;
     signal?: never;
     stealth?: StealthProfileSelection & {
-        requestClass?: "navigation" | "xhr" | "post";
+        requestClass?: "navigation" | "form-post" | "xhr" | "post";
         userActivation?: boolean;
         insecureSkipVerify?: boolean;
     };
@@ -8138,7 +8138,7 @@ export type StealthTelemetryLogPayload = {
 };
 
 // @public (undocumented)
-export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "xhr" | "post";
+export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "form_post" | "xhr" | "post";
 
 // @public (undocumented)
 export type StealthTelemetrySbsdEvent = {
@@ -8703,11 +8703,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:272:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:682:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1727:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1815:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1823:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1824:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2011:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1735:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1823:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1831:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1832:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2019:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
