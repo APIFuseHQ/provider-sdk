@@ -5,6 +5,7 @@ import chromeAcceptOverride from "../../chrome-accept-override.json";
 import chromeExtendedCapture from "../../chrome-extended-capture.json";
 import chromeGroundTruth from "../../chrome-ground-truth-capture.json";
 import chromeValueTransform from "../../chrome-value-transform.json";
+import chromeFormPostCapture from "../../chrome-form-post-capture.json";
 import h1CasingCapture from "../../h1-casing-capture.json";
 import {
 	HttpRedirectError,
@@ -3140,6 +3141,139 @@ describe("Chrome 149 header parity", () => {
 			mockStealthState.clients[1]?.calls[0]?.init?.headers as [string, string][]
 		).map(([name]) => name);
 		expect(h1Names).toEqual(realChromeOrder(h1CasingCapture.chrome_xhr.names));
+	});
+
+	describe("form-post request class", () => {
+		const formHeaders = {
+			"Content-Type": "application/x-www-form-urlencoded",
+			Origin: "https://example.com",
+			Referer: "https://example.com/signin",
+			Cookie: "probe_sid=abc123",
+		};
+
+		async function formPost(url: string, stealth: StealthFetchOptions["stealth"] = {}) {
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient(url).fetch("/signin", {
+				method: "POST",
+				body: "q=probe",
+				headers: formHeaders,
+				stealth: { requestClass: "form-post", ...stealth },
+			});
+			return mockStealthState.clients.at(-1)?.calls.at(-1)?.init;
+		}
+
+		it("sends real Chrome's form submission order over HTTP/2", async () => {
+			const init = await formPost("https://example.com");
+			const names = (init?.headers as [string, string][]).map(([name]) => name);
+			expect(names).toEqual(chromeFormPostCapture.form_post_h2.order.slice(4));
+		});
+
+		it("sends real Chrome's form submission order and casing over HTTP/1.1", async () => {
+			const init = await formPost("http://example.com");
+			const names = (init?.headers as [string, string][]).map(([name]) => name);
+			expect(names).toEqual(chromeFormPostCapture.form_post_h1.names);
+		});
+
+		it("carries navigation metadata, the document Accept and a body length", async () => {
+			const init = await formPost("https://example.com");
+			const captured = chromeFormPostCapture.form_post_h2.values;
+			for (const name of [
+				"sec-fetch-mode",
+				"sec-fetch-dest",
+				"sec-fetch-user",
+				"upgrade-insecure-requests",
+				"cache-control",
+				"priority",
+				"content-type",
+			] as const) {
+				expect(requestHeader(init, name)).toBe(captured[name]);
+			}
+			// The document Accept of the selected profile (the capture's is Chrome's own).
+			expect(requestHeader(init, "accept")).toBe(
+				mockEmulationHeaders("chrome_149", "macos").get("accept"),
+			);
+			expect(requestHeader(init, "sec-fetch-site")).toBe("same-origin");
+			expect(requestHeader(init, "content-length")).toBe("7");
+			expect(requestHeader(init, "origin")).toBe("https://example.com");
+			expect(requestHeader(init, "cookie")).toBe("probe_sid=abc123");
+		});
+
+		it("drops Sec-Fetch-User for a script-driven submission", async () => {
+			const init = await formPost("https://example.com", { userActivation: false });
+			const names = (init?.headers as [string, string][]).map(([name]) => name);
+			expect(names).toEqual(
+				chromeFormPostCapture.form_post_h2.order
+					.slice(4)
+					.filter((name) => name !== "sec-fetch-user"),
+			);
+		});
+
+		it("keeps a bare POST on the fetch-style post class", async () => {
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/signin", {
+				method: "POST",
+				body: "q=probe",
+				headers: formHeaders,
+			});
+			const init = mockStealthState.clients[0]?.calls[0]?.init;
+			expect(requestHeader(init, "sec-fetch-mode")).toBe("cors");
+			expect(requestHeader(init, "sec-fetch-dest")).toBe("empty");
+			expect(requestHeader(init, "cache-control")).toBeUndefined();
+			expect(requestHeader(init, "upgrade-insecure-requests")).toBeUndefined();
+		});
+	});
+
+	it("derives Sec-Fetch metadata, Accept and Upgrade-Insecure-Requests from the request class", async () => {
+		const expectations = {
+			navigation: {
+				mode: "navigate",
+				dest: "document",
+				user: "?1",
+				upgrade: "1",
+				documentAccept: true,
+			},
+			"form-post": {
+				mode: "navigate",
+				dest: "document",
+				user: "?1",
+				upgrade: "1",
+				documentAccept: true,
+			},
+			xhr: {
+				mode: "cors",
+				dest: "empty",
+				user: undefined,
+				upgrade: undefined,
+				documentAccept: false,
+			},
+			post: {
+				mode: "cors",
+				dest: "empty",
+				user: undefined,
+				upgrade: undefined,
+				documentAccept: false,
+			},
+		} as const;
+		const documentAccept = mockEmulationHeaders("chrome_149", "macos").get("accept");
+		for (const [requestClass, expected] of Object.entries(expectations)) {
+			mockStealthState.clients.length = 0;
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			const bodyful = requestClass === "post" || requestClass === "form-post";
+			await createStealthClient("https://example.com").fetch("/page", {
+				...(bodyful ? { method: "POST" as const, body: "a=1" } : {}),
+				stealth: { requestClass: requestClass as keyof typeof expectations },
+			});
+			const init = mockStealthState.clients[0]?.calls[0]?.init;
+			expect(requestHeader(init, "sec-fetch-mode")).toBe(expected.mode);
+			expect(requestHeader(init, "sec-fetch-dest")).toBe(expected.dest);
+			expect(requestHeader(init, "sec-fetch-user")).toBe(expected.user);
+			expect(requestHeader(init, "upgrade-insecure-requests")).toBe(expected.upgrade);
+			expect(requestHeader(init, "accept")).toBe(expected.documentAccept ? documentAccept : "*/*");
+			expect(requestHeader(init, "content-length")).toBe(bodyful ? "3" : undefined);
+		}
 	});
 
 	it("allows a refererless XHR without navigation-only headers", async () => {

@@ -22,7 +22,12 @@ export type StealthTelemetryErrorCode =
 	| "PROXY_REQUIRED"
 	| "other";
 
-export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "xhr" | "post";
+export type StealthTelemetryRequestClass =
+	| "navigation"
+	| "script_navigation"
+	| "form_post"
+	| "xhr"
+	| "post";
 
 export type StealthTelemetryAttemptKind = "request" | "resolver" | "proxy_diagnostic";
 

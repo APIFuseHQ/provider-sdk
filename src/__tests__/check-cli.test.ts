@@ -847,7 +847,7 @@ export const headers = {
 		}
 		expect(ownedHeaderDetails.join("\n")).not.toContain("Upgrade-Insecure-Requests");
 		expect(ownedHeaderDetails.join("\n")).toContain(
-			'stealth: { requestClass: "navigation" | "xhr" | "post" }',
+			'stealth: { requestClass: "navigation" | "form-post" | "xhr" | "post" }',
 		);
 	});
 

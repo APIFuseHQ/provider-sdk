@@ -2,6 +2,7 @@ import net from "node:net";
 import alPlacementCapture from "../al-placement-capture.json";
 import chromeAcceptOverride from "../chrome-accept-override.json";
 import chromeExtendedCapture from "../chrome-extended-capture.json";
+import chromeFormPostCapture from "../chrome-form-post-capture.json";
 import chromeGroundTruth from "../chrome-ground-truth-capture.json";
 import chromeValueTransform from "../chrome-value-transform.json";
 import h1CasingCapture from "../h1-casing-capture.json";
@@ -111,6 +112,35 @@ const probes: Array<{
 		options: {
 			method: "POST",
 			body: "a=1",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Origin: "https://tls.peet.ws",
+				Referer: "https://tls.peet.ws/api/all",
+				Cookie: "probe_sid=abc123",
+			},
+		},
+	},
+	{
+		// Taken without Playwright's locale option, so no Accept-Language move.
+		name: "form-post",
+		expected: chromeFormPostCapture.form_post_h2.order,
+		expectedValues: Object.fromEntries(
+			(
+				[
+					"cache-control",
+					"upgrade-insecure-requests",
+					"sec-fetch-site",
+					"sec-fetch-mode",
+					"sec-fetch-user",
+					"sec-fetch-dest",
+					"priority",
+				] as const
+			).map((name) => [name, chromeFormPostCapture.form_post_h2.values[name]]),
+		),
+		options: {
+			method: "POST",
+			body: "q=probe",
+			stealth: { requestClass: "form-post" },
 			headers: {
 				"Content-Type": "application/x-www-form-urlencoded",
 				Origin: "https://tls.peet.ws",
