@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 import type { JsonValue } from "./contract-json.js";
 
 export const REDACTED_FIXTURE_VALUE = "[REDACTED]";
@@ -13,6 +15,24 @@ const DIAGNOSTIC_URL_SENTINEL_RUN = new RegExp(
 );
 const PEM_PRIVATE_KEY =
 	/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
+/** RFC 9110 §11.4 `token68`, the single credential token of Bearer, Basic, Negotiate and NTLM. */
+const TOKEN68 = "[A-Za-z0-9._~+/-]+=*";
+/**
+ * A credential header's value is the whole RFC 9110 `credentials` production
+ * (`auth-scheme SP token68`), so the scheme and its token are one value, not two words.
+ */
+const CREDENTIALS_HEADER_ASSIGNMENT = new RegExp(
+	String.raw`((["']?)[\w-]*authorization\2\s*[:=]\s*)[A-Za-z][\w.+-]*[ \t]+${TOKEN68}(?![^\s,;&])`,
+	"gi",
+);
+/**
+ * Keyless echoes of the token68 schemes whose token is always a credential. Negotiate and NTLM
+ * match only their registered spelling so prose such as "failed to negotiate TLS" is retained.
+ */
+const BEARER_SCHEME_CREDENTIAL = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+const GSSAPI_SCHEME_CREDENTIAL = /\b(Negotiate|NTLM)\s+[A-Za-z0-9._~+/=-]+/g;
+/** A keyless `Basic` token is a credential only when it decodes to `user-id:password`. */
+const BASIC_SCHEME_CREDENTIAL = /\b(Basic)\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9._~+/=-])/gi;
 
 /** Matches credential field names without treating benign prefixes such as `author` as `auth`. */
 export function isSensitiveFixtureKey(key: string): boolean {
@@ -23,7 +43,8 @@ export function isSensitiveFixtureKey(key: string): boolean {
 			/^(?:authorization|authentication|auth|bearer|cookie|credential|password|passwd|privatekey|secret|session|sessionid|token)$/.test(
 				candidate,
 			) ||
-			/^(?:api|client|service|access|consumer)(?:key|secret|token)$/.test(candidate) ||
+			// Unanchored at the start so vendor-prefixed headers (`x-api-key`) match too.
+			/(?:api|client|service|access|consumer)(?:key|secret|token)$/.test(candidate) ||
 			/(?:authorization|credential|password|passwd|privatekey|secret|sessionid|token)$/.test(
 				candidate,
 			),
@@ -71,7 +92,7 @@ export function sanitizeFixtureString(value: string): string {
 			retainedUrls.push(isCredentialBearingUrl(url) ? sanitizeUrlForLogs(url) : url) - 1;
 		return `APIFUSEURL${index}X`;
 	});
-	sanitized = redactSensitiveAssignments(sanitized);
+	sanitized = redactSensitiveAssignments(redactCredentialHeaders(sanitized));
 	sanitized = sanitized.replace(OPAQUE_TOKEN_RUN, (candidate) =>
 		isSensitiveFixtureValue(candidate) ? REDACTED_FIXTURE_VALUE : candidate,
 	);
@@ -162,9 +183,11 @@ export function sanitizeDiagnosticText(value: string): string {
 			const index = retainedUrls.push(sanitizeUrlForLogs(url)) - 1;
 			return `${DIAGNOSTIC_URL_SENTINEL_DELIMITER}APIFUSE_URL${index}${DIAGNOSTIC_URL_SENTINEL_DELIMITER}`;
 		})
-		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_FIXTURE_VALUE}`)
 		.replace(EMAIL_ADDRESS_RUN, REDACTED_FIXTURE_VALUE);
-	sanitized = redactSensitiveAssignments(sanitized);
+	// Header credentials first, so a scheme echoed after its header key stays part of one value.
+	sanitized = redactSensitiveAssignments(
+		redactKeylessCredentials(redactCredentialHeaders(sanitized)),
+	);
 	sanitized = sanitized.replace(OPAQUE_TOKEN_RUN, (candidate, offset: number, source: string) => {
 		if (/^(?:request|trace|correlation)[-_]?id[:=]/i.test(candidate)) return candidate;
 		const prefix = source.slice(Math.max(0, offset - 32), offset);
@@ -176,6 +199,20 @@ export function sanitizeDiagnosticText(value: string): string {
 		(_match, index: string) => retainedUrls[Number(index)] ?? REDACTED_FIXTURE_VALUE,
 	);
 	return encodeDiagnosticControls(sanitized);
+}
+
+/** Redacts `Bearer`/`Negotiate`/`NTLM` tokens and `Basic` tokens that decode to `user-id:password`. */
+function redactKeylessCredentials(value: string): string {
+	return value
+		.replace(BEARER_SCHEME_CREDENTIAL, `Bearer ${REDACTED_FIXTURE_VALUE}`)
+		.replace(GSSAPI_SCHEME_CREDENTIAL, `$1 ${REDACTED_FIXTURE_VALUE}`)
+		.replace(BASIC_SCHEME_CREDENTIAL, (match, scheme: string, token: string) =>
+			Buffer.from(token, "base64").includes(0x3a) ? `${scheme} ${REDACTED_FIXTURE_VALUE}` : match,
+		);
+}
+
+function redactCredentialHeaders(value: string): string {
+	return value.replace(CREDENTIALS_HEADER_ASSIGNMENT, `$1${REDACTED_FIXTURE_VALUE}`);
 }
 
 function redactSensitiveAssignments(value: string): string {
