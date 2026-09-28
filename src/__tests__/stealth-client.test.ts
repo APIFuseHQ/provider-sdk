@@ -3209,6 +3209,34 @@ describe("Chrome 149 header parity", () => {
 			);
 		});
 
+		it("sends the GET after a redirected submission without a body length", async () => {
+			mockStealthState.queuedResponses.push(
+				{
+					status: 303,
+					body: "",
+					headers: { location: "/done" },
+					url: "https://example.com/signin",
+				},
+				{ status: 200, body: "ok", headers: {}, url: "https://example.com/done" },
+			);
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/signin", {
+				method: "POST",
+				body: "q=probe",
+				headers: formHeaders,
+				stealth: { requestClass: "form-post" },
+			});
+			const [submit, done] = mockStealthState.clients[0]?.calls ?? [];
+			expect(requestHeader(submit?.init, "content-length")).toBe("7");
+			expect(done?.init?.method).toBe("GET");
+			expect(requestHeader(done?.init, "content-length")).toBeUndefined();
+			expect(requestHeader(done?.init, "content-type")).toBeUndefined();
+			// Chrome keeps validating the cache and navigating on the redirected GET.
+			expect(requestHeader(done?.init, "cache-control")).toBe("max-age=0");
+			expect(requestHeader(done?.init, "sec-fetch-mode")).toBe("navigate");
+			expect(requestHeader(done?.init, "sec-fetch-dest")).toBe("document");
+		});
+
 		it("keeps a bare POST on the fetch-style post class", async () => {
 			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
 			const { createStealthClient } = await import("../runtime/stealth.js");

@@ -705,7 +705,10 @@ function buildChromeHeaderTuples(options: {
 		const value = caller.get(name);
 		if (value !== undefined) values.set(name, value);
 	}
-	if (shape.bodyful) {
+	// A bodyful class keeps its class across a 301/302/303 that rewrites the method
+	// to GET (a form submission's redirect stays a validated navigation), but the
+	// rewritten request has no body and Chrome sends no Content-Length for it.
+	if (shape.bodyful && options.method !== "GET" && options.method !== "HEAD") {
 		values.set(
 			"content-length",
 			caller.get("content-length") ?? String(Buffer.byteLength(options.body ?? "")),
