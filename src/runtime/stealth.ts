@@ -148,6 +148,14 @@ const STEALTH_REDIRECT_POLICY_TRANSPORT: RedirectPolicyTransport = {
 	label: "ctx.stealth",
 	maxHops: MAX_STEALTH_REDIRECT_HOPS,
 };
+/**
+ * Marks the options `session.redirects.run` passes to `session.fetch` for a hop
+ * after the first, so the Chrome header builder uses the redirected order. A
+ * module-private symbol: it never appears on the public options type, and the
+ * options snapshot and the challenge replay copy (object spreads) keep it.
+ */
+const REDIRECTED_HOP = Symbol("stealth.redirectedHop");
+type StealthHopFetchOptions = StealthFetchOptions & { [REDIRECTED_HOP]?: true };
 
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
 	return typeof value === "object" && value !== null;
@@ -402,8 +410,9 @@ function normalizedHeaderEntries(
 // installs Accept-Language via DevTools next to User-Agent; real Chrome only
 // receives it from //net (URLRequestHttpJob::AddExtraHeaders), after
 // Accept-Encoding and before Cookie, as al-placement-capture.json B/C show.
-// chrome-form-post-capture.json was taken without that option and needs no
-// adjustment.
+// chrome-form-post-capture.json and chrome-redirect-hop-capture.json were taken
+// without that option and need no adjustment; the latter places a navigation's
+// Referer after Sec-Fetch-Dest.
 const CHROME_HEADER_ORDERS = {
 	navigation: [
 		"sec-ch-ua",
@@ -416,6 +425,7 @@ const CHROME_HEADER_ORDERS = {
 		"sec-fetch-mode",
 		"sec-fetch-user",
 		"sec-fetch-dest",
+		"referer",
 		"accept-encoding",
 		"accept-language",
 		"cookie",
@@ -477,6 +487,7 @@ const CHROME_H1_HEADER_ORDERS = {
 		"sec-fetch-mode",
 		"sec-fetch-user",
 		"sec-fetch-dest",
+		"referer",
 		"accept-encoding",
 		"accept-language",
 		"cookie",
@@ -589,11 +600,30 @@ const CHROME_REQUEST_CLASSES = {
 	{ fetchMetadata: "navigate" | "cors"; bodyful: boolean; validateCache: boolean }
 >;
 
+const CHROME_CLIENT_HINT_HEADERS = ["sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"];
+
+/**
+ * The order of a navigation that a redirect produced. Real Chrome 149 sends the
+ * client hints of a redirected navigation or form submission right after
+ * Sec-Fetch-Dest instead of first, on HTTP/2 and HTTP/1.1, whether the redirect
+ * kept the method (307) or rewrote it to GET (302/303). A redirected page
+ * fetch() keeps its first request's order (chrome-redirect-hop-capture.json).
+ */
+function redirectedNavigationOrder(order: readonly string[]): string[] {
+	const moved = order.filter((name) => !CHROME_CLIENT_HINT_HEADERS.includes(name));
+	moved.splice(moved.indexOf("sec-fetch-dest") + 1, 0, ...CHROME_CLIENT_HINT_HEADERS);
+	return moved;
+}
+
 function chromeHeaderOrder(
 	requestClass: ChromeRequestClass,
 	isHttp1: boolean,
 	caller: ReadonlyMap<string, string>,
+	redirected: boolean,
 ): readonly string[] {
+	if (redirected && CHROME_REQUEST_CLASSES[requestClass].fetchMetadata === "navigate") {
+		return redirectedNavigationOrder(chromeHeaderOrder(requestClass, isHttp1, caller, false));
+	}
 	if (isHttp1) return CHROME_H1_HEADER_ORDERS[requestClass];
 	if (requestClass !== "xhr") return CHROME_HEADER_ORDERS[requestClass];
 	// Cookie and Referer are forbidden Fetch headers, so they never enter the page
@@ -660,6 +690,8 @@ function buildChromeHeaderTuples(options: {
 	acceptLanguage?: string;
 	requestClass?: ChromeRequestClass;
 	userActivation?: boolean;
+	/** The request follows a redirect (any hop after the first). */
+	redirected?: boolean;
 }): HeaderTuple[] {
 	const callerEntries = normalizedCallerHeaderEntriesFromRecord(options.headers);
 	const caller = new Map(callerEntries);
@@ -720,7 +752,7 @@ function buildChromeHeaderTuples(options: {
 		values.set("host", new URL(options.requestUrl).host);
 		values.set("connection", "keep-alive");
 	}
-	const order = chromeHeaderOrder(requestClass, isHttp1, caller);
+	const order = chromeHeaderOrder(requestClass, isHttp1, caller, options.redirected === true);
 	const tuples: HeaderTuple[] = [];
 	const placed = new Set<string>();
 	for (const name of order) {
@@ -1425,6 +1457,7 @@ async function fetchStealthRedirectChain(
 		method: StealthMethod,
 		body: string | Buffer | undefined,
 		headers: Record<string, string>,
+		redirected: boolean,
 	) => HeaderTuple[],
 	telemetry?: StealthExchangeTelemetry,
 ): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
@@ -1439,6 +1472,8 @@ async function fetchStealthRedirectChain(
 	const redirectPolicy = options.redirectPolicy;
 	const initialOrigin = new URL(requestUrl).origin;
 	const visitedRequests = new Set([`${method} ${requestUrl}`]);
+	// A session.redirects.run hop arrives here as its own one-request chain.
+	const startsRedirected = (options as StealthHopFetchOptions)[REDIRECTED_HOP] === true;
 
 	let finishExchange: ReturnType<typeof startStealthExchange> | undefined;
 	let status: number | undefined;
@@ -1453,7 +1488,13 @@ async function fetchStealthRedirectChain(
 			}
 			const requestInit: StealthRequestInit = {
 				headers: buildHeaders
-					? buildHeaders(currentUrl, currentMethod, currentBody, headers)
+					? buildHeaders(
+							currentUrl,
+							currentMethod,
+							currentBody,
+							headers,
+							startsRedirected || followedHops > 0,
+						)
 					: headers,
 				method: currentMethod,
 				redirect: "manual",
@@ -2084,6 +2125,7 @@ function createSessionFetcher(
 									currentMethod: StealthMethod,
 									currentBody: string | Buffer | undefined,
 									currentHeaders: Record<string, string>,
+									redirected: boolean,
 								) =>
 									buildChromeHeaderTuples({
 										emulationHeaders: chromeEmulationHeaders,
@@ -2094,6 +2136,7 @@ function createSessionFetcher(
 										acceptLanguage: clientOptions.stealth?.acceptLanguage,
 										requestClass: options.stealth?.requestClass,
 										userActivation: options.stealth?.userActivation,
+										redirected,
 									})
 							: undefined;
 						const initialHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
@@ -2101,11 +2144,15 @@ function createSessionFetcher(
 							const cookieHeader = cookieJar.toHeader(requestUrl);
 							if (cookieHeader) initialHeaders.cookie = cookieHeader;
 						}
+						// The session partition key (getClientEntry) takes the first-request order even
+						// for a session.redirects.run hop, so the hop stays on the wreq session, and
+						// its connections, that the same request outside a redirect uses.
 						const defaultHeaders = buildOrderedHeaders?.(
 							requestUrl,
 							method,
 							requestBody,
 							initialHeaders,
+							false,
 						);
 						const fetchOnBoundSession = (
 							fetchUrl: string,
@@ -2701,19 +2748,21 @@ function createSessionFetcher(
 					// the first visited key is the caller's resolved URL, not its expanded query.
 					const visitedUrl = hopIndex === 0 && !initialSensitiveParams ? currentUrl : outboundUrl;
 					visitedRequests.add(`${method} ${visitedUrl}`);
+					const hopOptions: StealthHopFetchOptions = {
+						...fetchOptions,
+						...(headers ? { headers } : {}),
+						body,
+						method,
+						...(hopIndex === 0 && initialParams ? { params: initialParams } : {}),
+						...(hopIndex === 0 && initialSensitiveParams
+							? { sensitiveParams: initialSensitiveParams }
+							: {}),
+						redirect: "manual",
+						throwOnHttpError: false,
+						...(hopIndex > 0 ? { [REDIRECTED_HOP]: true as const } : {}),
+					};
 					try {
-						response = await session.fetch(currentUrl, {
-							...fetchOptions,
-							...(headers ? { headers } : {}),
-							body,
-							method,
-							...(hopIndex === 0 && initialParams ? { params: initialParams } : {}),
-							...(hopIndex === 0 && initialSensitiveParams
-								? { sensitiveParams: initialSensitiveParams }
-								: {}),
-							redirect: "manual",
-							throwOnHttpError: false,
-						});
+						response = await session.fetch(currentUrl, hopOptions);
 					} catch (error) {
 						throw redactSensitiveError(
 							error,
