@@ -24,6 +24,15 @@ export function assertIsError(value: unknown): asserts value is Error {
 	}
 }
 
+/**
+ * Text an error exposes to logs and serializers. URL parse errors carry the raw URL in the
+ * message on Bun < 1.4 but in enumerable `input`/`base` fields on Bun >= 1.4 and Node, so
+ * redaction assertions must look at both surfaces.
+ */
+export function errorDiagnosticText(error: unknown): string {
+	return `${String(error)}\n${JSON.stringify(error)}`;
+}
+
 export function emptyArray<T>(): T[] {
 	return [];
 }

@@ -1133,7 +1133,7 @@ describe("createBrowserClient", () => {
 		cdpState.pageEnabled = 0;
 		cdpState.screenshotCalls.length = 0;
 		cdpState.webdriverPatches = 0;
-		process.env.APIFUSE__CDP_POOL__URL = undefined;
+		delete process.env.APIFUSE__CDP_POOL__URL;
 		globalThis.WebSocket = originalWebSocket;
 		registerBrowserMocks();
 	});
