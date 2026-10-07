@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
 	buildReleasePrBody,
 	nextBetaVersion,
@@ -12,6 +13,26 @@ const RELEASE_WORKFLOW = workflow("release.yml");
 const RELEASE_AUTOMATION_WORKFLOW = workflow("release-pr-automation.yml");
 const RELEASE_GUARD_WORKFLOW = workflow("release-guard.yml");
 const GUARDED_SHA = "0123456789abcdef0123456789abcdef01234567";
+const NPM_TARBALL_WAIT_STEP = "- name: Wait for the published tarball on npm";
+// The failing case spends a real 4s budget (one attempt, one sleep); the timeout
+// leaves headroom over bun's 5s default on a loaded runner.
+const NPM_WAIT_TEST_TIMEOUT_MS = 30_000;
+
+const FAKE_NPM = `#!/usr/bin/env bash
+# Stand-in for \`npm view <package>@<version> dist.tarball\`.
+if [ "$1" = view ] && [ "$3" = dist.tarball ]; then
+	version="\${2##*@}"
+	printf 'https://registry.npmjs.org/@apifuse/provider-sdk/-/provider-sdk-%s.tgz\\n' "\${version}"
+	exit 0
+fi
+echo "unexpected npm call: $*" >&2
+exit 2
+`;
+
+const FAKE_CURL = `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "\${FAKE_CURL_LOG}"
+printf '%s' "\${FAKE_TARBALL_HTTP}"
+`;
 
 describe("release workflows", () => {
 	it("does not publish npm from a normal feature branch merge alone", () => {
@@ -91,7 +112,109 @@ describe("release workflows", () => {
 			expect(runBlocks(source).some((block) => block.includes("${{"))).toBe(false);
 		}
 	});
+
+	it("dispatches provider_sdk_released only after the npm tarball wait", () => {
+		const publish = RELEASE_WORKFLOW.indexOf("- name: Publish to npm");
+		const wait = RELEASE_WORKFLOW.indexOf(NPM_TARBALL_WAIT_STEP);
+		const notify = RELEASE_WORKFLOW.indexOf(
+			"- name: Notify monorepo (provider_sdk_released dispatch)",
+		);
+		expect(publish).toBeGreaterThan(-1);
+		expect(wait).toBeGreaterThan(publish);
+		expect(notify).toBeGreaterThan(wait);
+	});
 });
+
+// Executes the extracted wait step against a stand-in `npm`/`curl` on PATH.
+// No network: `node` (package.json read) and coreutils are the only real tools.
+describe("release npm tarball wait step (executed)", () => {
+	it(
+		"passes once the published tarball answers HTTP 200",
+		() => {
+			const run = runNpmTarballWait({ budgetSeconds: 60, tarballHttp: "200" });
+			expect(run.exitCode, run.stderr).toBe(0);
+			expect(run.stdout).toContain("@apifuse/provider-sdk@2.2.0-beta.69 tarball answers HTTP 200");
+			expect(run.curlCalls).toContain(
+				"https://registry.npmjs.org/@apifuse/provider-sdk/-/provider-sdk-2.2.0-beta.69.tgz",
+			);
+		},
+		NPM_WAIT_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps waiting while the tarball is not served and fails with a warning at the budget",
+		() => {
+			const run = runNpmTarballWait({ budgetSeconds: 4, tarballHttp: "404" });
+			expect(run.exitCode).toBe(1);
+			expect(run.stdout).toContain(
+				"::warning::@apifuse/provider-sdk@2.2.0-beta.69 tarball did not answer HTTP 200 within 4s",
+			);
+			expect(run.stdout).toContain("answered HTTP 404");
+		},
+		NPM_WAIT_TEST_TIMEOUT_MS,
+	);
+});
+
+function npmTarballWaitScript(): string {
+	const start = RELEASE_WORKFLOW.indexOf(NPM_TARBALL_WAIT_STEP);
+	if (start < 0) throw new Error("npm tarball wait step not found in release.yml");
+	const lines = RELEASE_WORKFLOW.slice(start).split("\n");
+	const runIndex = lines.findIndex((line) => /^\s*run: \|$/.test(line));
+	const runLine = lines[runIndex];
+	if (runIndex < 0 || runLine === undefined)
+		throw new Error("npm tarball wait step has no run block");
+	const indent = runLine.search(/\S/);
+	const body: string[] = [];
+	for (const line of lines.slice(runIndex + 1)) {
+		if (line.trim() && line.search(/\S/) <= indent) break;
+		body.push(line.slice(indent + 2));
+	}
+	return body.join("\n");
+}
+
+function runNpmTarballWait(input: {
+	readonly budgetSeconds: number;
+	readonly tarballHttp: string;
+}): {
+	readonly curlCalls: string;
+	readonly exitCode: number;
+	readonly stderr: string;
+	readonly stdout: string;
+} {
+	const root = mkdtempSync(join(tmpdir(), "provider-sdk-release-npm-wait-"));
+	try {
+		const bin = join(root, "bin");
+		mkdirSync(bin);
+		writeFileSync(join(bin, "npm"), FAKE_NPM);
+		writeFileSync(join(bin, "curl"), FAKE_CURL);
+		chmodSync(join(bin, "npm"), 0o755);
+		chmodSync(join(bin, "curl"), 0o755);
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ name: "@apifuse/provider-sdk", version: "2.2.0-beta.69" }),
+		);
+		const curlLog = join(root, "curl-calls");
+		writeFileSync(curlLog, "");
+		const result = Bun.spawnSync(["bash", "-c", npmTarballWaitScript()], {
+			cwd: root,
+			env: {
+				...process.env,
+				FAKE_CURL_LOG: curlLog,
+				FAKE_TARBALL_HTTP: input.tarballHttp,
+				NPM_VISIBILITY_TIMEOUT_SECONDS: String(input.budgetSeconds),
+				PATH: [bin, dirname(process.execPath), process.env.PATH ?? ""].join(":"),
+			},
+		});
+		return {
+			curlCalls: readFileSync(curlLog, "utf8"),
+			exitCode: result.exitCode,
+			stderr: result.stderr.toString(),
+			stdout: result.stdout.toString(),
+		};
+	} finally {
+		rmSync(root, { force: true, recursive: true });
+	}
+}
 
 function workflow(name: string): string {
 	return readFileSync(join(WORKFLOW_DIR, name), "utf8");
