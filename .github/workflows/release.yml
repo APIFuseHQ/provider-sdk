@@ -82,17 +82,79 @@ jobs:
           else
             gh release create "$TAG" --title "$TAG" --generate-notes
           fi
+      # `npm publish` returns before the registry serves the new version to
+      # every reader: beta.68 published at 04:45:37Z and the monorepo's
+      # auto-bump first saw it at 04:49:22Z (apifuse run 36379069044, six
+      # E404 attempts). The dispatch below starts consumers that install the
+      # tarball, so it goes out once the tarball itself answers HEAD 200.
+      # Publish already happened, so a miss must not fail the release: the
+      # step is continue-on-error and the dispatch still goes out with a
+      # warning, leaving the monorepo's own bounded npm wait as the judge.
+      - name: Wait for the published tarball on npm
+        id: npm_tarball
+        continue-on-error: true
+        env:
+          NPM_VISIBILITY_TIMEOUT_SECONDS: "600"
+        run: |
+          set -euo pipefail
+          PACKAGE="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          started_at="${SECONDS}"
+          attempt=0
+          delay_seconds=5
+          last_error="no npm request was attempted"
+          error_file="$(mktemp)"
+          trap 'rm -f "${error_file}"' EXIT
+          while true; do
+            elapsed_seconds=$((SECONDS - started_at))
+            remaining_seconds=$((NPM_VISIBILITY_TIMEOUT_SECONDS - elapsed_seconds))
+            if (( remaining_seconds <= 0 )); then
+              break
+            fi
+            attempt=$((attempt + 1))
+            : > "${error_file}"
+            npm_status=0
+            tarball_url="$(timeout "${remaining_seconds}s" npm view "${PACKAGE}@${VERSION}" dist.tarball 2>"${error_file}")" || npm_status=$?
+            if (( npm_status == 0 )) && [[ "${tarball_url}" == https://* ]]; then
+              curl_seconds=$(( remaining_seconds < 20 ? remaining_seconds : 20 ))
+              tarball_http="$(curl -sS -o /dev/null -I --max-time "${curl_seconds}" -w '%{http_code}' "${tarball_url}" 2>"${error_file}")" || tarball_http="000"
+              if [ "${tarball_http}" = "200" ]; then
+                echo "${PACKAGE}@${VERSION} tarball answers HTTP 200 after ${elapsed_seconds}s (attempt ${attempt}): ${tarball_url}"
+                exit 0
+              fi
+              last_error="tarball ${tarball_url} answered HTTP ${tarball_http} $(tr '\n' ' ' < "${error_file}")"
+            elif (( npm_status == 0 )); then
+              last_error="npm view returned no tarball URL (${tarball_url:-<empty>})"
+            else
+              last_error="$(tr '\n' ' ' < "${error_file}")"
+            fi
+            elapsed_seconds=$((SECONDS - started_at))
+            remaining_seconds=$((NPM_VISIBILITY_TIMEOUT_SECONDS - elapsed_seconds))
+            if (( remaining_seconds <= 0 )); then
+              break
+            fi
+            sleep_seconds=$(( delay_seconds < remaining_seconds ? delay_seconds : remaining_seconds ))
+            echo "attempt ${attempt} at ${elapsed_seconds}s: ${last_error}; retrying in ${sleep_seconds}s"
+            sleep "${sleep_seconds}"
+            delay_seconds=$(( delay_seconds * 2 > 60 ? 60 : delay_seconds * 2 ))
+          done
+          echo "::warning::${PACKAGE}@${VERSION} tarball did not answer HTTP 200 within ${NPM_VISIBILITY_TIMEOUT_SECONDS}s. Last error: ${last_error}"
+          exit 1
       - name: Notify monorepo (provider_sdk_released dispatch)
         # Publish already happened: a dispatch failure must not fail the
         # release. The monorepo falls back to a manual bump PR in that case.
         continue-on-error: true
         env:
+          NPM_TARBALL_OUTCOME: ${{ steps.npm_tarball.outcome }}
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
           DOPPLER_PROJECT: apifuse
           DOPPLER_CONFIG: prd
           RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          if [ "${NPM_TARBALL_OUTCOME}" != "success" ]; then
+            echo "::warning::Dispatching provider_sdk_released without a confirmed npm tarball (wait step ${NPM_TARBALL_OUTCOME}); the monorepo auto-bump's own npm wait decides."
+          fi
           if [ -z "${DOPPLER_TOKEN}" ]; then
             echo "::warning::DOPPLER_TOKEN secret missing; skipping provider_sdk_released dispatch to the monorepo. Open the bump PR manually."
             exit 1
