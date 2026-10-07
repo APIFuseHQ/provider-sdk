@@ -7,6 +7,7 @@ const headers = {
 	"Proxy-Authorization": "Basic proxy",
 	Cookie: "sid=1",
 	"Content-Type": "application/x-www-form-urlencoded",
+	Origin: "https://www.example.com",
 	Referer: "https://www.example.com/",
 };
 
@@ -21,7 +22,7 @@ describe("redirectHopHeaders", () => {
 		);
 	});
 
-	it("drops the request-body headers only when the method changes", () => {
+	it("drops the request-body headers and Origin only when the method changes", () => {
 		expect(hop("https://www.example.com/a", "https://www.example.com/b", true)).toEqual([
 			"Authorization",
 			"Proxy-Authorization",
@@ -37,7 +38,12 @@ describe("redirectHopHeaders", () => {
 			"https://www.example.com:8443/b",
 			"https://example.com/b",
 		]) {
-			expect(hop("https://www.example.com/a", to)).toEqual(["Cookie", "Content-Type", "Referer"]);
+			expect(hop("https://www.example.com/a", to)).toEqual([
+				"Cookie",
+				"Content-Type",
+				"Origin",
+				"Referer",
+			]);
 		}
 		// Other site: registrable domain or scheme differs.
 		for (const to of [
@@ -45,7 +51,7 @@ describe("redirectHopHeaders", () => {
 			"http://www.example.com/b",
 			"https://example.com.evil.test/b",
 		]) {
-			expect(hop("https://www.example.com/a", to)).toEqual(["Content-Type", "Referer"]);
+			expect(hop("https://www.example.com/a", to)).toEqual(["Content-Type", "Origin", "Referer"]);
 		}
 	});
 
@@ -59,10 +65,12 @@ describe("redirectHopHeaders", () => {
 		expect(hop("http://127.0.0.1:4000/a", "http://127.0.0.1:5000/b")).toEqual([
 			"Cookie",
 			"Content-Type",
+			"Origin",
 			"Referer",
 		]);
 		expect(hop("http://127.0.0.1:4000/a", "http://127.0.0.2:4000/b")).toEqual([
 			"Content-Type",
+			"Origin",
 			"Referer",
 		]);
 	});

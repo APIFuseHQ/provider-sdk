@@ -6,6 +6,7 @@ import chromeExtendedCapture from "../../chrome-extended-capture.json";
 import chromeGroundTruth from "../../chrome-ground-truth-capture.json";
 import chromeValueTransform from "../../chrome-value-transform.json";
 import chromeFormPostCapture from "../../chrome-form-post-capture.json";
+import chromeRedirectHopCapture from "../../chrome-redirect-hop-capture.json";
 import h1CasingCapture from "../../h1-casing-capture.json";
 import {
 	HttpRedirectError,
@@ -3396,6 +3397,147 @@ describe("Chrome 149 header parity", () => {
 			expect(requestHeader(call.init, "sec-fetch-mode")).toBe("navigate");
 			expect(requestHeader(call.init, "sec-fetch-user")).toBeUndefined();
 		}
+	});
+
+	describe("redirected hops (chrome-redirect-hop-capture.json)", () => {
+		type CaptureName = Exclude<keyof typeof chromeRedirectHopCapture, "provenance">;
+		const capturedOrders = (name: CaptureName): string[][] =>
+			chromeRedirectHopCapture[name].hops.map((hop) => hop.order);
+		// The capture's h2 orders start with the four pseudo-headers.
+		const headerNames = (order: string[], transport: "h2" | "h1") =>
+			transport === "h2" ? order.slice(4) : order;
+		const sentNames = (call: MockWreqCall | undefined) =>
+			(call?.init?.headers as [string, string][]).map(([name]) => name);
+		const formHeaders = (origin: string) => ({
+			"Content-Type": "application/x-www-form-urlencoded",
+			Origin: origin,
+			Referer: `${origin}/page`,
+			Cookie: "probe_sid=abc123",
+		});
+		const transports = [
+			{ transport: "h2", origin: "https://example.com" },
+			{ transport: "h1", origin: "http://example.com" },
+		] as const;
+
+		function queueRedirect(origin: string, status: number, from: string) {
+			mockStealthState.queuedResponses.push(
+				{ status, body: "", headers: { location: "/done" }, url: `${origin}${from}` },
+				{ status: 200, body: "done", headers: {}, url: `${origin}/done` },
+			);
+		}
+
+		for (const { transport, origin } of transports) {
+			it(`sends a clicked navigation and its redirected hop in real Chrome's ${transport} order`, async () => {
+				queueRedirect(origin, 302, "/start");
+				const { createStealthClient } = await import("../runtime/stealth.js");
+				await createStealthClient(origin).fetch("/start", {
+					headers: { Referer: `${origin}/page`, Cookie: "probe_sid=abc123" },
+				});
+				const [first, hop] = mockStealthState.clients[0]?.calls ?? [];
+				const [capturedFirst, capturedHop] = capturedOrders(`navigation_302_${transport}`);
+				expect(sentNames(first)).toEqual(headerNames(capturedFirst!, transport));
+				expect(sentNames(hop)).toEqual(headerNames(capturedHop!, transport));
+			});
+
+			for (const status of [302, 303, 307] as const) {
+				it(`sends a form submission redirected with ${status} in real Chrome's ${transport} order`, async () => {
+					queueRedirect(origin, status, "/submit");
+					const { createStealthClient } = await import("../runtime/stealth.js");
+					await createStealthClient(origin).fetch("/submit", {
+						method: "POST",
+						body: "q=probe",
+						headers: formHeaders(origin),
+						stealth: { requestClass: "form-post" },
+					});
+					const [submit, hop] = mockStealthState.clients[0]?.calls ?? [];
+					const [capturedSubmit, capturedHop] = capturedOrders(`form_post_${status}_${transport}`);
+					expect(sentNames(submit)).toEqual(headerNames(capturedSubmit!, transport));
+					expect(sentNames(hop)).toEqual(headerNames(capturedHop!, transport));
+					// A 307 keeps the method, the body and Origin; 302/303 rewrite to a GET without them.
+					expect(requestHeader(hop?.init, "origin")).toBe(status === 307 ? origin : undefined);
+					expect(requestHeader(hop?.init, "content-length")).toBe(status === 307 ? "7" : undefined);
+				});
+			}
+		}
+
+		it("keeps a redirected page fetch in its first request's order, as Chrome does", async () => {
+			for (const name of [
+				"fetch_get_302_h2",
+				"fetch_post_json_302_h2",
+				"fetch_post_json_303_h2",
+				"fetch_post_json_307_h2",
+			] as const) {
+				const [first, hop] = capturedOrders(name);
+				const kept = (order: string[]) =>
+					order.filter((header) => !["content-length", "content-type", "origin"].includes(header));
+				expect(kept(hop!)).toEqual(kept(first!));
+			}
+			queueRedirect("https://example.com", 302, "/api/start");
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/api/start", {
+				stealth: { requestClass: "xhr" },
+				headers: { Referer: "https://example.com/page", Cookie: "probe_sid=abc123" },
+			});
+			const [first, hop] = mockStealthState.clients[0]?.calls ?? [];
+			expect(sentNames(hop)).toEqual(sentNames(first));
+			expect(sentNames(first)).toEqual(capturedOrders("fetch_get_302_h2")[0]!.slice(4));
+		});
+
+		it("drops Origin from a fetch-style POST rewritten to GET", async () => {
+			queueRedirect("https://example.com", 303, "/api/submit");
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/api/submit", {
+				method: "POST",
+				body: '{"probe":true}',
+				headers: {
+					"Content-Type": "application/json",
+					Origin: "https://example.com",
+					Referer: "https://example.com/page",
+				},
+			});
+			const [submit, hop] = mockStealthState.clients[0]?.calls ?? [];
+			expect(requestHeader(submit?.init, "origin")).toBe("https://example.com");
+			expect(hop?.init?.method).toBe("GET");
+			expect(requestHeader(hop?.init, "origin")).toBeUndefined();
+		});
+
+		it("uses the redirected order on every redirects.run hop after the first", async () => {
+			queueRedirect("https://example.com", 303, "/submit");
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com")
+				.createSession()
+				.redirects.run({
+					url: "/submit",
+					method: "POST",
+					body: "q=probe",
+					headers: formHeaders("https://example.com"),
+					stealth: { requestClass: "form-post" },
+				});
+			const [submit, hop] = allWreqCalls();
+			const [capturedSubmit, capturedHop] = capturedOrders("form_post_303_h2");
+			expect(sentNames(submit)).toEqual(capturedSubmit!.slice(4));
+			expect(sentNames(hop)).toEqual(capturedHop!.slice(4));
+			expect(requestHeader(hop?.init, "origin")).toBeUndefined();
+		});
+
+		it("keeps a redirects.run navigation chain on one wreq session", async () => {
+			queueRedirect("https://example.com", 302, "/start");
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com")
+				.createSession()
+				.redirects.run({
+					url: "/start",
+					headers: { Referer: "https://example.com/page" },
+				});
+			// The redirected order does not enter the session partition key, so the hop
+			// reuses the session (and its connections) of the first request.
+			expect(mockStealthState.clients).toHaveLength(1);
+			const [first, hop] = mockStealthState.clients[0]?.calls ?? [];
+			const [capturedFirst, capturedHop] = capturedOrders("navigation_302_h2");
+			const withoutCookie = (order: string[]) => order.filter((name) => name !== "cookie");
+			expect(sentNames(first)).toEqual(withoutCookie(capturedFirst!.slice(4)));
+			expect(sentNames(hop)).toEqual(withoutCookie(capturedHop!.slice(4)));
+		});
 	});
 
 	const overridePositionCases = [

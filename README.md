@@ -151,7 +151,9 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   `maxBodyBytes`, `redirect`, `redirectPolicy`, `throwOnHttpError`, and
   `stealth.insecureSkipVerify`. A followed redirect drops `Authorization` when
   it leaves the origin and an explicit `Cookie` when it leaves the site (the
-  session cookie jar takes over there); set
+  session cookie jar takes over there), drops `Origin` and the body headers
+  when a 301/302/303 turns the POST into a GET, and sends a redirected
+  navigation or form submission in Chrome's redirected-hop header order; set
   `redirectPolicy: { mode: "same-origin", maxHops }` to refuse a cross-origin
   hop with `HttpRedirectError` before any request reaches it. For login
   flows that must inspect intermediate `Location`/`Set-Cookie` headers, create
