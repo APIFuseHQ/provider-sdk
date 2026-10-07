@@ -40,6 +40,7 @@ import {
 	createProviderDefinitionDouble,
 	defineTestProvider,
 	emptyArray,
+	errorDiagnosticText,
 } from "./test-utils.js";
 
 type MockSessionCookie = {
@@ -2435,10 +2436,10 @@ describe("createStealthClient", () => {
 		}
 
 		expect(thrown).toBeInstanceOf(Error);
-		expect(String(thrown)).not.toContain(secret);
+		expect(errorDiagnosticText(thrown)).not.toContain(secret);
 		assertIsError(thrown);
 		expect(thrown.stack).not.toContain(secret);
-		expect(String(thrown)).toContain("[REDACTED]");
+		expect(errorDiagnosticText(thrown)).toContain("[REDACTED]");
 	});
 
 	it("redirects.run redacts malformed initial URLs before resolution", async () => {
@@ -2461,7 +2462,7 @@ describe("createStealthClient", () => {
 		assertIsError(thrown);
 		expect(thrown.stack).not.toContain(secret);
 		expect(serialized).not.toContain(secret);
-		expect(String(thrown)).toContain("[REDACTED]");
+		expect(errorDiagnosticText(thrown)).toContain("[REDACTED]");
 	});
 
 	it("redacts raw hop URLs from ProviderError classification fields in stopWhen", async () => {

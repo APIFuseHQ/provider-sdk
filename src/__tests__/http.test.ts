@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { assertIsError, emptyArray } from "./test-utils.js";
+import { assertIsError, emptyArray, errorDiagnosticText } from "./test-utils.js";
 import { HttpRedirectError, TransportError } from "../errors.js";
 import {
 	HttpRetryAfterPolicy,
@@ -1251,8 +1251,8 @@ describe("createHttpClient", () => {
 			thrown = error;
 		}
 
-		expect(String(thrown)).not.toContain("serviceKey=api");
-		expect(String(thrown)).toContain("serviceKey=[REDACTED]");
+		expect(errorDiagnosticText(thrown)).not.toContain("serviceKey=api");
+		expect(errorDiagnosticText(thrown)).toContain("serviceKey=[REDACTED]");
 		expect(mockNativeFetchState.calls).toHaveLength(0);
 	});
 
