@@ -55,6 +55,7 @@ export {
 	HealthStepSchema,
 	ExtractStepSchema,
 	FindFirstSchema,
+	GUARD_REASON_CODES,
 	GuardStepSchema,
 	JournalPolicySchema,
 	JsonTemplateSchema,
