@@ -123,6 +123,12 @@ export type RuntimeDiagnosticsFdKind =
 
 export interface RuntimeDiagnosticsProcfs {
 	readonly clockTicksPerSecond: number;
+	/**
+	 * Elapsed time between the two /proc/self scans. Slightly longer than
+	 * `window.observedMs` because it encloses the scans themselves; thread
+	 * `window.cores` is computed over this interval.
+	 */
+	readonly observedMs: number;
 	readonly threads: {
 		readonly total: number;
 		readonly byName: Readonly<Record<string, number>>;
@@ -200,15 +206,23 @@ export async function collectRuntimeDiagnostics(
 	const procfsRoot = input.procfsRoot ?? DEFAULT_PROCFS_SELF_ROOT;
 	const requestedMs = normalizeRuntimeDiagnosticsWindowMs(input.windowMs);
 
+	// Two nested brackets. The procfs scans are synchronous work on the main
+	// thread, so the process-level CPU bracket starts after the first scan and
+	// closes before the second one: the scans' own CPU never lands inside it.
+	// The thread bracket encloses the scans and divides their tick deltas by
+	// its own elapsed time, so the scan cost is attributed over the interval it
+	// actually spans instead of inflating a short window.
+	const threadsStartedAt = clock.now();
+	const threadsStart = sampleThreads(procfsRoot);
 	const cpuStart = process.cpuUsage();
 	const eventLoopStart = sampleEventLoopUtilization();
-	const threadsStart = sampleThreads(procfsRoot);
 	const startedAt = clock.now();
 	await clock.sleep(requestedMs);
 	const observedMs = Math.max(0, clock.now() - startedAt);
 	const cpuWindow = process.cpuUsage(cpuStart);
 	const eventLoopEnd = sampleEventLoopUtilization();
 	const threadsEnd = sampleThreads(procfsRoot);
+	const threadsObservedMs = Math.max(0, clock.now() - threadsStartedAt);
 	const fileDescriptors = sampleFileDescriptors(procfsRoot);
 
 	const cpuLifetime = process.cpuUsage();
@@ -263,7 +277,8 @@ export async function collectRuntimeDiagnostics(
 				? null
 				: {
 						clockTicksPerSecond: PROCFS_CLOCK_TICKS_PER_SECOND,
-						threads: summarizeThreads(threadsStart, threadsEnd, observedMs),
+						observedMs: threadsObservedMs,
+						threads: summarizeThreads(threadsStart, threadsEnd, threadsObservedMs),
 						fileDescriptors,
 					},
 	};

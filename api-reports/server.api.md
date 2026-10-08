@@ -4652,6 +4652,7 @@ export interface RuntimeDiagnosticsProcfs {
         readonly total: number;
         readonly byKind: Readonly<Record<RuntimeDiagnosticsFdKind, number>>;
     };
+    readonly observedMs: number;
     // (undocumented)
     readonly threads: {
         readonly total: number;

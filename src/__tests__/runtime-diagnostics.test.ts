@@ -141,7 +141,7 @@ describe("collectRuntimeDiagnostics", () => {
 			"/dev/null",
 			"anon_inode:[io_uring]",
 		]);
-		const clock = scriptedClock([0, 1000], () => {
+		const clock = scriptedClock([0, 0, 1000, 1000], () => {
 			// The main thread burns 40 ticks user + 10 ticks system (0.5 cores over
 			// one second) and switches context 30 times; the network thread
 			// moves 2 ticks; the helper stays idle.
@@ -178,6 +178,7 @@ describe("collectRuntimeDiagnostics", () => {
 		const procfs = report.procfs;
 		if (!procfs) throw new Error("expected procfs");
 		expect(procfs.clockTicksPerSecond).toBe(PROCFS_CLOCK_TICKS_PER_SECOND);
+		expect(procfs.observedMs).toBe(1000);
 		expect(procfs.threads.total).toBe(3);
 		expect(procfs.threads.byName).toEqual({ bun: 1, "HTTP Client": 1, HeapHelper: 1 });
 		expect(procfs.threads.items.map((thread) => thread.tid)).toEqual([1, 2, 3]);
@@ -217,7 +218,7 @@ describe("collectRuntimeDiagnostics", () => {
 		const root = createProcfsFixture();
 		writeThread(root, { tid: 1, name: "bun", userTicks: 1, systemTicks: 1 });
 		writeThread(root, { tid: 2, name: "JITWorker", userTicks: 9, systemTicks: 9 });
-		const clock = scriptedClock([0, 500], () => {
+		const clock = scriptedClock([0, 0, 500, 500], () => {
 			rmSync(join(root, "task", "2"), { recursive: true, force: true });
 			writeThread(root, { tid: 3, name: "HTTP Client", userTicks: 7, systemTicks: 0 });
 		});
@@ -255,7 +256,7 @@ describe("collectRuntimeDiagnostics", () => {
 		mkdirSync(join(root, "task", "not-a-tid"));
 		mkdirSync(join(root, "task", "7"));
 		writeFileSync(join(root, "task", "7", "stat"), "garbage without parentheses\n");
-		const clock = scriptedClock([0, 250]);
+		const clock = scriptedClock([0, 0, 250, 250]);
 
 		const report = await collectRuntimeDiagnostics({
 			provider,
@@ -269,7 +270,7 @@ describe("collectRuntimeDiagnostics", () => {
 
 	it("reports procfs as null when /proc/self is unreadable and still samples process CPU", async () => {
 		const root = createProcfsFixture();
-		const clock = scriptedClock([0, 250]);
+		const clock = scriptedClock([0, 0, 250, 250]);
 
 		const report = await collectRuntimeDiagnostics({
 			provider,
@@ -296,10 +297,30 @@ describe("collectRuntimeDiagnostics", () => {
 		);
 	});
 
+	it("brackets the procfs scans outside the process CPU window", async () => {
+		const root = createProcfsFixture();
+		writeThread(root, { tid: 1, name: "bun", userTicks: 0, systemTicks: 0 });
+		// Thread bracket 0 -> 1200 (encloses both scans), CPU bracket 100 -> 1100.
+		const clock = scriptedClock([0, 100, 1100, 1200], () => {
+			writeThread(root, { tid: 1, name: "bun", userTicks: 60, systemTicks: 0 });
+		});
+
+		const report = await collectRuntimeDiagnostics({
+			provider,
+			windowMs: 1000,
+			procfsRoot: root,
+			clock,
+		});
+
+		expect(report.window.observedMs).toBe(1000);
+		expect(report.procfs?.observedMs).toBe(1200);
+		expect(report.procfs?.threads.items[0]?.window?.cores).toBe(0.5);
+	});
+
 	it("never divides by a zero-length window", async () => {
 		const root = createProcfsFixture();
 		writeThread(root, { tid: 1, name: "bun", userTicks: 1, systemTicks: 1 });
-		const clock = scriptedClock([10, 10]);
+		const clock = scriptedClock([10, 10, 10, 10]);
 
 		const report = await collectRuntimeDiagnostics({
 			provider,
