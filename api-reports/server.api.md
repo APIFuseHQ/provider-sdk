@@ -651,6 +651,22 @@ export type ClosedEnum<T extends string> = T & {
 // @public
 export function closedEnum<T extends string>(value: T): ClosedEnum<T>;
 
+// @public (undocumented)
+export function collectRuntimeDiagnostics(input: CollectRuntimeDiagnosticsInput): Promise<RuntimeDiagnosticsReport>;
+
+// @public (undocumented)
+export interface CollectRuntimeDiagnosticsInput {
+    // (undocumented)
+    readonly clock?: RuntimeDiagnosticsClock;
+    readonly procfsRoot?: string;
+    // (undocumented)
+    readonly provider: {
+        readonly id: string;
+        readonly version: string;
+    };
+    readonly windowMs?: number;
+}
+
 // Warning: (ae-forgotten-export) The symbol "ProviderDefinition" needs to be exported by the entry point index.d.ts
 //
 // @public
@@ -824,6 +840,12 @@ interface DeclarativeStealthResponse {
     // (undocumented)
     url?: string;
 }
+
+// @public (undocumented)
+export const DEFAULT_PROCFS_SELF_ROOT = "/proc/self";
+
+// @public (undocumented)
+export const DEFAULT_RUNTIME_DIAGNOSTICS_WINDOW_MS = 250;
 
 // @public (undocumented)
 export const DEFAULT_SELF_TEST_PORT = 3001;
@@ -1821,6 +1843,12 @@ type ManualTriggerPolicy = {
 };
 
 // @public (undocumented)
+export const MAX_RUNTIME_DIAGNOSTICS_WINDOW_MS = 5000;
+
+// @public (undocumented)
+export const MIN_RUNTIME_DIAGNOSTICS_WINDOW_MS = 50;
+
+// @public (undocumented)
 export type NativeAttemptSample = NativeConnectTelemetryEvent & {
     n: number;
 };
@@ -2193,6 +2221,9 @@ export type NativeVendorSkipTelemetryEvent = {
 
 // @public (undocumented)
 type NonEmpty<T> = readonly [T, ...T[]];
+
+// @public (undocumented)
+export function normalizeRuntimeDiagnosticsWindowMs(value: number | undefined): number;
 
 // @public (undocumented)
 interface OcrCaptchaCandidate {
@@ -3023,6 +3054,9 @@ const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
 
 // @public
 type ProbeInterval = ms.StringValue;
+
+// @public
+export const PROCFS_CLOCK_TICKS_PER_SECOND = 100;
 
 // @public (undocumented)
 const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
@@ -4474,6 +4508,9 @@ export interface ResolverTelemetrySink {
     recordVendorAttempt(event: ResolverVendorAttemptTelemetryEvent): void;
 }
 
+// @public
+export function resolveRuntimeDiagnosticsWindowMs(raw: string | undefined | null): number;
+
 // @public (undocumented)
 export type ResolverVendorAttemptTelemetryEvent = {
     readonly vendor: ProviderResolverVendor;
@@ -4523,6 +4560,180 @@ type RetryPolicy = {
     };
     attemptTimeoutMs?: number;
 };
+
+// @public
+export const RUNTIME_DIAGNOSTICS_ROUTE = "/__apifuse/diagnostics/runtime";
+
+// @public (undocumented)
+export const RUNTIME_DIAGNOSTICS_SCHEMA_VERSION: 1;
+
+// @public
+export const RUNTIME_DIAGNOSTICS_WINDOW_QUERY = "windowMs";
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsActiveResources {
+    // (undocumented)
+    readonly byType: Readonly<Record<string, number>>;
+    readonly reported: boolean;
+    // (undocumented)
+    readonly total: number;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsClock {
+    // (undocumented)
+    now(): number;
+    // (undocumented)
+    sleep(ms: number): Promise<void>;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsCpu {
+    readonly lifetime: RuntimeDiagnosticsCpuTotals & {
+        readonly averageCores: number;
+    };
+    readonly window: RuntimeDiagnosticsCpuTotals & {
+        readonly userCores: number;
+        readonly systemCores: number;
+        readonly totalCores: number;
+    };
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsCpuTotals {
+    // (undocumented)
+    readonly systemMicros: number;
+    // (undocumented)
+    readonly userMicros: number;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsEventLoop {
+    // (undocumented)
+    readonly lifetime: RuntimeDiagnosticsEventLoopUtilization;
+    readonly reported: boolean;
+    // (undocumented)
+    readonly window: RuntimeDiagnosticsEventLoopUtilization;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsEventLoopUtilization {
+    // (undocumented)
+    readonly active: number;
+    // (undocumented)
+    readonly idle: number;
+    // (undocumented)
+    readonly utilization: number;
+}
+
+// @public (undocumented)
+export type RuntimeDiagnosticsFdKind = "socket" | "eventpoll" | "timerfd" | "eventfd" | "pipe" | "file" | "other";
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsMemory {
+    // (undocumented)
+    readonly arrayBuffers: number;
+    // (undocumented)
+    readonly external: number;
+    // (undocumented)
+    readonly heapTotal: number;
+    // (undocumented)
+    readonly heapUsed: number;
+    // (undocumented)
+    readonly rss: number;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsProcfs {
+    // (undocumented)
+    readonly clockTicksPerSecond: number;
+    // (undocumented)
+    readonly fileDescriptors: {
+        readonly total: number;
+        readonly byKind: Readonly<Record<RuntimeDiagnosticsFdKind, number>>;
+    };
+    readonly observedMs: number;
+    // (undocumented)
+    readonly threads: {
+        readonly total: number;
+        readonly byName: Readonly<Record<string, number>>;
+        readonly items: readonly RuntimeDiagnosticsThread[];
+    };
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsReport {
+    // (undocumented)
+    readonly activeResources: RuntimeDiagnosticsActiveResources;
+    // (undocumented)
+    readonly cpu: RuntimeDiagnosticsCpu;
+    // (undocumented)
+    readonly eventLoop: RuntimeDiagnosticsEventLoop;
+    // (undocumented)
+    readonly memory: RuntimeDiagnosticsMemory;
+    readonly procfs: RuntimeDiagnosticsProcfs | null;
+    // (undocumented)
+    readonly provider: {
+        readonly id: string;
+        readonly version: string;
+    };
+    // (undocumented)
+    readonly runtime: {
+        readonly bunVersion: string | null;
+        readonly nodeCompatVersion: string;
+        readonly platform: string;
+        readonly arch: string;
+        readonly pid: number;
+    };
+    // (undocumented)
+    readonly sampledAt: string;
+    // (undocumented)
+    readonly schemaVersion: typeof RUNTIME_DIAGNOSTICS_SCHEMA_VERSION;
+    // (undocumented)
+    readonly sdkVersion: string;
+    // (undocumented)
+    readonly uptimeSeconds: number;
+    // (undocumented)
+    readonly window: {
+        readonly requestedMs: number;
+        readonly observedMs: number;
+    };
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsThread {
+    // (undocumented)
+    readonly lifetime: RuntimeDiagnosticsThreadCpuTicks;
+    readonly name: string;
+    readonly state: string;
+    // (undocumented)
+    readonly tid: number;
+    readonly waitChannel: string | null;
+    readonly window: RuntimeDiagnosticsThreadWindow | null;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsThreadContextSwitches {
+    // (undocumented)
+    readonly nonvoluntary: number;
+    // (undocumented)
+    readonly voluntary: number;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsThreadCpuTicks {
+    // (undocumented)
+    readonly systemTicks: number;
+    // (undocumented)
+    readonly userTicks: number;
+}
+
+// @public (undocumented)
+export interface RuntimeDiagnosticsThreadWindow extends RuntimeDiagnosticsThreadCpuTicks {
+    // (undocumented)
+    readonly contextSwitches: RuntimeDiagnosticsThreadContextSwitches;
+    readonly cores: number;
+}
 
 // @public
 type SchemaLike = ZodType | StandardSchemaV1;

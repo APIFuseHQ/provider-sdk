@@ -222,6 +222,12 @@ import {
 	type ProviderStateBackendLogEvent,
 	providerStateBackendLogEvent,
 } from "./state-backend-report.js";
+import {
+	collectRuntimeDiagnostics,
+	resolveRuntimeDiagnosticsWindowMs,
+	RUNTIME_DIAGNOSTICS_ROUTE,
+	RUNTIME_DIAGNOSTICS_WINDOW_QUERY,
+} from "./runtime-diagnostics.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
 import {
 	collectStaticDiagnosticSensitiveValues,
@@ -3820,6 +3826,22 @@ function createServerAppWithCapabilityModules(
 			engineAttached ? 200 : 503,
 		),
 	);
+
+	// Internal runtime diagnostics: process CPU over a short window, memory,
+	// the Node event-loop/active-resource APIs and, on Linux, per-thread CPU and
+	// file-descriptor counts from /proc/self. Tells an idle pod that still burns
+	// CPU apart from a busy one without exec. Read-only and secret-free, behind
+	// the same boundary as /health and /readyz: the provider NetworkPolicy only
+	// admits the gateway on this port and the gateway dials canonical operation
+	// paths only, so operators reach it through `kubectl port-forward`.
+	app.get(RUNTIME_DIAGNOSTICS_ROUTE, async (c) => {
+		const report = await collectRuntimeDiagnostics({
+			provider: { id: provider.id, version: provider.version },
+			windowMs: resolveRuntimeDiagnosticsWindowMs(c.req.query(RUNTIME_DIAGNOSTICS_WINDOW_QUERY)),
+		});
+		c.header("Cache-Control", "no-store");
+		return c.json(report);
+	});
 
 	app.post(STATEFUL_INTERNAL_OPERATIONS_ROUTE, async (c) => {
 		let rawBodyText = "";
