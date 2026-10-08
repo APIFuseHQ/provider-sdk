@@ -167,6 +167,23 @@ only for a provider already pinned to an SDK release that serves the route.
 Earlier pins answer `404`, and a failing readiness/startup probe is not
 self-healing, so manifests move to `/readyz` after the pin wave, never before.
 
+`GET /__apifuse/diagnostics/runtime` is the internal runtime diagnostics route on
+the same listener. It answers one JSON report (`schemaVersion: 1`) sampled over a
+short window (`?windowMs=`, default 250, clamped to 50..5000): `cpu.window`
+(`process.cpuUsage()` delta as cores, user/system split), `cpu.lifetime`,
+`memory`, `eventLoop` (`performance.eventLoopUtilization`), `activeResources`
+(`process.getActiveResourcesInfo()` counts by type) and, on Linux, `procfs`
+with per-thread CPU ticks, context switches, wait channel and file-descriptor
+counts by kind from `/proc/self`. Bun 1.2 and 1.3 stub the two Node APIs, so
+their `reported` flag is `false` there; `cpu.window` and `procfs.threads`
+(sorted hottest first, named `bun`, `HTTP Client`, `HeapHelper`, ...) are the
+signals that tell an idle process that still burns CPU apart from a busy one.
+The route is read-only and carries no secrets. It is internal by the same
+boundary as `/health` and `/readyz`: the generated provider NetworkPolicy admits
+only the gateway on this port and the gateway dials canonical operation paths
+only, so operators reach it with `kubectl port-forward` and the tenant-facing
+API never does.
+
 ### Deployment intent
 
 Deployment intent (runtime profile, resources, HPA, Redis, extra TCP ports) has

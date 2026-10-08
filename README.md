@@ -40,6 +40,8 @@ Do not use internal monorepo placement for bounty workspaces. Accepted provider 
 - Dev default: `3900`
 - Start/Docker/container contract: `3000`
 - `GET /health`
+- `GET /readyz`
+- `GET /__apifuse/diagnostics/runtime` (internal runtime diagnostics, see `AUTHORING.md`)
 - `POST /v1/{operation}`
 - `POST /auth/start`
 - `POST /auth/continue`
