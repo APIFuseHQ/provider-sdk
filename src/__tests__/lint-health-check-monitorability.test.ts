@@ -8,6 +8,7 @@ import { describeKey } from "../schema.js";
 const OPERATION_KEY = "listItems";
 const UNMONITORED = "health-check-assertions-not-monitored";
 const UNGUARDED_STALE = "health-check-stale-serve-unguarded";
+const STALE_REASON = "health-check-stale-serve-reason";
 const STALE_CLIENT =
 	"await ctx.cache.getOrSet(key, load, { ttlMs: 60_000, staleIfErrorMs: 300_000 });";
 
@@ -224,6 +225,63 @@ describe("health-check monitorability lint", () => {
 		expect(diagnostics[0]?.message).toContain("upstream/client.ts");
 		expect(diagnostics[0]?.message).toContain('reasonCode "served_stale_cache"');
 		expect(diagnostics[0]?.message).toContain("expected_absence");
+	});
+
+	it("warns when a freshness guard still attributes expected_absence, without losing coverage", () => {
+		// The guidance before served_stale_cache existed (provider-sdk#331) had no
+		// other code to offer; korea-air-quality ships exactly this shape. The
+		// platform now publishes expected_absence as a non-incident status, so
+		// the guard would turn an outage into "nothing to return".
+		if (FRESHNESS_GUARD.kind !== "guard") throw new Error("fixture is not a guard");
+		const legacyFreshnessGuard: HealthStep = {
+			...FRESHNESS_GUARD,
+			onFail: {
+				attribute: [
+					{
+						operationId: OPERATION_KEY,
+						status: "degraded",
+						reasonCode: "expected_absence",
+						reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
+					},
+				],
+				stop: "scenario",
+			},
+		};
+		const diagnostics = lint(
+			{
+				interval: "1h",
+				cases: [
+					{ name: "dense", input: {}, scenario: scenario([READ_STEP, legacyFreshnessGuard]) },
+				],
+			},
+			{ providerSourceFiles: { "upstream/client.ts": STALE_CLIENT } },
+		);
+
+		const reason = rules(diagnostics, STALE_REASON);
+		expect(reason).toHaveLength(1);
+		expect(reason[0]?.level).toBe("warn");
+		expect(reason[0]?.field).toBe(`operations.${OPERATION_KEY}.healthCheck.cases`);
+		expect(reason[0]?.message).toContain('"dense"');
+		expect(reason[0]?.message).toContain('reasonCode "served_stale_cache"');
+		// Still freshness coverage: the unguarded rule stays silent.
+		expect(rules(diagnostics, UNGUARDED_STALE)).toEqual([]);
+		// A guard on something other than freshness attributing expected_absence
+		// (an emptiness guard) is not this rule's business.
+		expect(
+			rules(
+				lint({
+					interval: "1h",
+					cases: [
+						{
+							name: "dense",
+							input: {},
+							scenario: scenario([READ_STEP, rowsGuard(OPERATION_KEY, "emptyBoard")]),
+						},
+					],
+				}),
+				STALE_REASON,
+			),
+		).toEqual([]);
 	});
 
 	it("clears once the case guards served_stale_cache", () => {

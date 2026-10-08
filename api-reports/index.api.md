@@ -2036,7 +2036,7 @@ export function getProviderLocaleSegments(catalog: ProviderLocaleCatalog, segmen
 export function getStealthProfile(selection?: StealthProfileSelection): StealthProfile;
 
 // @public
-export const GUARD_REASON_CODES: readonly ["expected_absence", "served_stale_cache"];
+export const GUARD_REASON_CODES: [GuardReasonCode, ...GuardReasonCode[]];
 
 // @public (undocumented)
 export type GuardAttribution = {

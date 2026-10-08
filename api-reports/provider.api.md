@@ -1415,6 +1415,9 @@ export interface FlowContext {
 // @public (undocumented)
 export function getProviderLocalePath(catalog: ProviderLocaleCatalog, key: ProviderLocaleKey | string): ProviderLocaleValue | undefined;
 
+// @public
+export const GUARD_REASON_CODES: [GuardReasonCode, ...GuardReasonCode[]];
+
 // @public (undocumented)
 export type GuardAttribution = {
     operationId: string;

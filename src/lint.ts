@@ -3306,6 +3306,35 @@ function resultBindingChecksFreshness(
 	return false;
 }
 
+/**
+ * Whether a freshness guard for this operation still attributes
+ * `expected_absence` — the only code the attribution schema admitted before
+ * `served_stale_cache` existed, so earlier guidance recommended it. It IS
+ * freshness coverage (the guard runs and stops the scenario), which is why
+ * `scenarioChecksFreshness` accepts it; but the platform publishes
+ * `expected_absence` as a non-incident status, so the stale serve it catches
+ * would read as "nothing to return" instead of `degraded`.
+ */
+function freshnessGuardAttributesExpectedAbsence(scenario: unknown, operationId: string): boolean {
+	if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) return false;
+	const bindings = operationStepBindings(scenario.steps, operationId);
+	if (bindings.size === 0) return false;
+	return scenario.steps.some(
+		(step) =>
+			isLintRecord(step) &&
+			step.kind === "guard" &&
+			rejectsStaleServe(step.condition, bindings) &&
+			isLintRecord(step.onFail) &&
+			Array.isArray(step.onFail.attribute) &&
+			step.onFail.attribute.some(
+				(entry) =>
+					isLintRecord(entry) &&
+					entry.operationId === operationId &&
+					entry.reasonCode === "expected_absence",
+			),
+	);
+}
+
 /** How many uncovered probes the stale-serve message names before eliding. */
 const STALE_SERVE_MESSAGE_PROBE_LIMIT = 8;
 
@@ -3345,6 +3374,7 @@ function lintHealthCheckMonitorability(provider: {
 	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		const cases = readHealthCheckCases(operation.healthCheck);
 		const unmonitored: string[] = [];
+		const absenceAttributed: string[] = [];
 		for (const [caseIndex, healthCase] of cases.entries()) {
 			const caseLabel =
 				typeof healthCase.name === "string" && healthCase.name.length > 0
@@ -3358,6 +3388,17 @@ function lintHealthCheckMonitorability(provider: {
 				uncovered.push(`${operationKey} ${caseLabel}`);
 				uncoveredByOperation.set(operationKey, uncovered);
 			}
+			if (freshnessGuardAttributesExpectedAbsence(healthCase.scenario, operationKey)) {
+				absenceAttributed.push(caseLabel);
+			}
+		}
+		if (absenceAttributed.length > 0) {
+			diagnostics.push({
+				rule: "health-check-stale-serve-reason",
+				level: "warn",
+				field: `operations.${operationKey}.healthCheck.cases`,
+				message: `${providerLabel} operation "${operationKey}" health-check ${absenceAttributed.length === 1 ? "case" : "cases"} ${absenceAttributed.join(", ")} guard ${SERVED_STALE_CACHE_OPERAND} but attribute reasonCode "expected_absence". The platform publishes expected_absence as a non-incident status (neither ok nor degraded, excluded from uptime and incidents), so an upstream outage this guard catches would read as "nothing to return" instead of degraded. Attribute reasonCode "served_stale_cache" instead; the reasonKey and its copy can stay.`,
+			});
 		}
 		if (unmonitored.length > 0) {
 			diagnostics.push({

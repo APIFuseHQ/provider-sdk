@@ -102,11 +102,7 @@ export type CredentialReference = z.infer<typeof credentialReferenceSchema>;
 export type EstablishedConnectionReference = CredentialReference & { field: "connection" };
 export type AttemptReference = z.infer<typeof attemptReferenceSchema>;
 export type CandidateReference = z.infer<typeof candidateReferenceSchema>;
-export type Reference =
-	| StepReference
-	| CredentialReference
-	| AttemptReference
-	| CandidateReference;
+export type Reference = StepReference | CredentialReference | AttemptReference | CandidateReference;
 const referenceSchema = z.discriminatedUnion("namespace", [
 	stepReferenceSchema,
 	credentialReferenceSchema,
@@ -217,15 +213,31 @@ export const SafeRegexSchema = z
 	.strict()
 	.superRefine((value, ctx) => {
 		if (/\\[1-9kg]/.test(value.pattern))
-			ctx.addIssue({ code: "custom", path: ["pattern"], message: "backreferences are not supported by RE2" });
+			ctx.addIssue({
+				code: "custom",
+				path: ["pattern"],
+				message: "backreferences are not supported by RE2",
+			});
 		if (/\(\?/.test(value.pattern))
-			ctx.addIssue({ code: "custom", path: ["pattern"], message: "extended groups are not supported by RE2" });
+			ctx.addIssue({
+				code: "custom",
+				path: ["pattern"],
+				message: "extended groups are not supported by RE2",
+			});
 		if (containsNestedRegexQuantifier(value.pattern))
-			ctx.addIssue({ code: "custom", path: ["pattern"], message: "nested regex quantifiers are not permitted" });
+			ctx.addIssue({
+				code: "custom",
+				path: ["pattern"],
+				message: "nested regex quantifiers are not permitted",
+			});
 		try {
 			new RegExp(value.pattern, value.flags);
 		} catch {
-			ctx.addIssue({ code: "custom", path: ["pattern"], message: "pattern must be valid regular-expression syntax" });
+			ctx.addIssue({
+				code: "custom",
+				path: ["pattern"],
+				message: "pattern must be valid regular-expression syntax",
+			});
 		}
 	});
 
@@ -549,11 +561,22 @@ const stepBaseSchema = z
  *   incidents.
  */
 export type GuardReasonCode = "expected_absence" | "served_stale_cache";
-/** The closed vocabulary above as a tuple, for schema and lint consumers. */
-export const GUARD_REASON_CODES = [
-	"expected_absence",
-	"served_stale_cache",
-] as const satisfies readonly GuardReasonCode[];
+/**
+ * Every member of the union, pinned in both directions: a code missing here
+ * fails `satisfies Record<GuardReasonCode, true>`, a code added here without
+ * the union fails the excess-property check. The union itself stays a
+ * literal so the type-only entry points (contract, server, testing) do not
+ * have to re-export the runtime tuple.
+ */
+const GUARD_REASON_CODE_SET = {
+	expected_absence: true,
+	served_stale_cache: true,
+} as const satisfies Record<GuardReasonCode, true>;
+/** The closed vocabulary as a non-empty tuple, for schema and lint consumers. */
+export const GUARD_REASON_CODES = Object.keys(GUARD_REASON_CODE_SET) as [
+	GuardReasonCode,
+	...GuardReasonCode[],
+];
 export type GuardAttribution = {
 	operationId: string;
 	status: "degraded";
