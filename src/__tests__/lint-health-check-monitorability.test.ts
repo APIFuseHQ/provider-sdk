@@ -110,7 +110,7 @@ function freshnessGuard(operationId: string, binding = `${operationId}-response`
 				{
 					operationId,
 					status: "degraded",
-					reasonCode: "expected_absence",
+					reasonCode: "served_stale_cache",
 					reasonKey: `health.operations.${operationId}.probe.servedStaleCache`,
 				},
 			],
@@ -151,7 +151,7 @@ function conditionGuard(condition: AssertionExpression): HealthStep {
 				{
 					operationId: OPERATION_KEY,
 					status: "degraded",
-					reasonCode: "expected_absence",
+					reasonCode: "served_stale_cache",
 					reasonKey: `health.operations.${OPERATION_KEY}.probe.servedStaleCache`,
 				},
 			],
@@ -222,6 +222,7 @@ describe("health-check monitorability lint", () => {
 		expect(diagnostics[0]?.level).toBe("warn");
 		expect(diagnostics[0]?.field).toBe("healthCheck");
 		expect(diagnostics[0]?.message).toContain("upstream/client.ts");
+		expect(diagnostics[0]?.message).toContain('reasonCode "served_stale_cache"');
 		expect(diagnostics[0]?.message).toContain("expected_absence");
 	});
 

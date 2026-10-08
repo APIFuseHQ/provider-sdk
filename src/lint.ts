@@ -3413,7 +3413,7 @@ function lintHealthCheckMonitorability(provider: {
 		rule: "health-check-stale-serve-unguarded",
 		level: "warn",
 		field: "healthCheck",
-		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...sources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "expected_absence", placed before any row or emptiness guard.${caveat}`,
+		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...sources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "served_stale_cache" (a stale serve is an upstream fault; "expected_absence" is the non-incident status for an absence the provider declares in advance), placed before any row or emptiness guard.${caveat}`,
 	});
 	return diagnostics;
 }

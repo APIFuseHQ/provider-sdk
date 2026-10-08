@@ -33,8 +33,9 @@ describe("health-checks-and-fail-closed prompt asset", () => {
 		expect(skill).toContain("staleIfErrorMs");
 		expect(skill).toContain("served_stale_cache");
 		expect(skill).toContain('operator: "not_equals"');
-		expect(skill).toContain('reasonCode: "expected_absence"');
+		expect(skill).toContain('reasonCode: "served_stale_cache"');
 		expect(skill).toContain('status: "degraded"');
+		expect(skill).toContain("`expected_absence` is published as a non-incident status");
 	});
 
 	it("orders the freshness guard before any row or emptiness guard", () => {

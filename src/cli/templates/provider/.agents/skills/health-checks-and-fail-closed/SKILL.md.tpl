@@ -116,7 +116,7 @@ Add ONE guard step per stale-if-error probe:
       {
         operationId: "list-items",
         status: "degraded",
-        reasonCode: "expected_absence",
+        reasonCode: "served_stale_cache",
         reasonKey: "health.operations.list-items.dense-district.servedStaleCache",
       },
     ],
@@ -128,9 +128,12 @@ Add ONE guard step per stale-if-error probe:
 - `degraded`, not `down`: the cache policy is behaving as promised and callers
   are still served; it is the upstream that is unavailable, and that has to be
   visible instead of green.
-- `expected_absence` is the only `reasonCode` the guard attribution schema
-  admits today, and it reads correctly here — the FRESH read is what was
-  absent. The tenant-facing wording lives in the localized `reasonKey`.
+- `served_stale_cache`, not `expected_absence`: the platform publishes a
+  stale serve as `degraded` (an upstream fault that opens incidents), while
+  `expected_absence` is published as a non-incident status — neither ok nor
+  degraded, excluded from uptime — for an absence the provider declares in
+  advance (no alert today, a closed shelf, a feed outside its hours). The
+  tenant-facing wording lives in the localized `reasonKey`.
 - Place the freshness guard BEFORE any row or emptiness guard. A stale serve
   that happens to be empty would otherwise be attributed to the emptiness
   reason, which is a confident answer to the wrong question.

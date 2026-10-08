@@ -1423,8 +1423,8 @@ export type GuardAttribution = {
     reasonKey: string;
 };
 
-// @public (undocumented)
-export type GuardReasonCode = "expected_absence";
+// @public
+export type GuardReasonCode = "expected_absence" | "served_stale_cache";
 
 // @public (undocumented)
 export type GuardResult = {
@@ -1453,27 +1453,27 @@ export const GuardStepSchema: z.ZodObject<{
         attribute: z.ZodPipe<z.ZodArray<z.ZodType<{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }, unknown, z.core.$ZodTypeInternals<{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }, unknown>>>, z.ZodTransform<[{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }, ...{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }[]], {
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }[]>>;
         stop: z.ZodLiteral<"scenario">;
@@ -2038,27 +2038,27 @@ export const HealthStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         attribute: z.ZodPipe<z.ZodArray<z.ZodType<{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }, unknown, z.core.$ZodTypeInternals<{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }, unknown>>>, z.ZodTransform<[{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }, ...{
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }[]], {
             operationId: string;
             status: "degraded";
-            reasonCode: "expected_absence";
+            reasonCode: "expected_absence" | "served_stale_cache";
             reasonKey: string;
         }[]>>;
         stop: z.ZodLiteral<"scenario">;

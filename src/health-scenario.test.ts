@@ -594,7 +594,7 @@ describe("declarative health scenarios", () => {
 							{
 								operationId: "ping",
 								status: "degraded",
-								reasonCode: "expected_absence",
+								reasonCode: "served_stale_cache",
 								reasonKey: "health.ping.servedStaleCache",
 							},
 						],

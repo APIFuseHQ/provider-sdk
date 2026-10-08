@@ -532,7 +532,28 @@ const stepBaseSchema = z
 		timeoutMs: finiteInt(1, 600_000).optional(),
 	})
 	.strict();
-export type GuardReasonCode = "expected_absence";
+/**
+ * Why a guard stopped the scenario. The platform decides what each reason
+ * publishes; the attribution's `status` is only the scenario rollup.
+ *
+ * - `expected_absence`: the upstream answered exactly as this provider says it
+ *   does when there is nothing to return — no weather alert today, an empty
+ *   shelf, a transit feed outside its operating hours. Published as the
+ *   non-incident status `expected_absence`: neither ok nor degraded, excluded
+ *   from uptime, never an incident. Use it only for an absence the provider
+ *   can declare in advance. Data that must be there (a product that must have
+ *   options) is a failing assertion, not an expected absence.
+ * - `served_stale_cache`: the operation step was answered from the
+ *   stale-if-error window (`served_stale_cache` on the step result) instead
+ *   of a live read. A measured upstream verdict: published `degraded`, opens
+ *   incidents.
+ */
+export type GuardReasonCode = "expected_absence" | "served_stale_cache";
+/** The closed vocabulary above as a tuple, for schema and lint consumers. */
+export const GUARD_REASON_CODES = [
+	"expected_absence",
+	"served_stale_cache",
+] as const satisfies readonly GuardReasonCode[];
 export type GuardAttribution = {
 	operationId: string;
 	status: "degraded";
@@ -562,7 +583,10 @@ export type OperationResult = {
 	 * fails the step rather than projecting as fresh.
 	 *
 	 * Providers that serve stale-if-error should guard on it, so an outage the
-	 * cache is absorbing stops reading as green:
+	 * cache is absorbing stops reading as green. Attribute it
+	 * `served_stale_cache`, not `expected_absence`: a stale serve is an upstream
+	 * fault the platform publishes as `degraded`, while an expected absence is
+	 * published as a non-incident status.
 	 *
 	 * ```ts
 	 * {
@@ -576,7 +600,7 @@ export type OperationResult = {
 	 *     expected: true,
 	 *   },
 	 *   onFail: {
-	 *     attribute: [{ operationId, status: "degraded", reasonCode: "expected_absence", reasonKey }],
+	 *     attribute: [{ operationId, status: "degraded", reasonCode: "served_stale_cache", reasonKey }],
 	 *     stop: "scenario",
 	 *   },
 	 * }
@@ -601,7 +625,7 @@ const attributionSchema = z
 	.object({
 		operationId: z.string().min(1),
 		status: z.literal("degraded"),
-		reasonCode: z.literal("expected_absence"),
+		reasonCode: z.enum(GUARD_REASON_CODES),
 		reasonKey: z.string().min(1),
 	})
 	.strict();
