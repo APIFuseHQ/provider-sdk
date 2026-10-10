@@ -134,7 +134,7 @@
 		"@changesets/cli": "^3.0.1",
 		"@microsoft/api-extractor": "^7.58.13",
 		"@types/bun": "latest",
-		"@types/node": "^25.9.3",
+		"@types/node": "^26.0.0",
 		"ajv": "^8.17",
 		"typescript": "6.0.3"
 	},
