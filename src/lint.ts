@@ -23,6 +23,12 @@ import {
 	isProviderLocaleKey,
 	type ProviderLocaleCatalog,
 } from "./i18n/keys.js";
+import {
+	PROVIDER_ERROR_CATEGORIES,
+	type ProviderErrorCategory,
+	type ProviderErrorSource,
+	sourceForCategory,
+} from "./observability.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
 import {
 	isStealthOwnedHeaderName,
@@ -1609,9 +1615,11 @@ type ThrownErrorConstructionSite = {
 	readonly code?: string;
 	readonly messageKey?: string;
 	readonly fixKey?: string;
+	/** Literal `category` option, when the site sets one. */
+	readonly category?: string;
 };
 
-const THROWN_ERROR_LOCALE_OPTION_NAMES = ["code", "messageKey", "fixKey"] as const;
+const THROWN_ERROR_SCANNED_OPTION_NAMES = ["code", "messageKey", "fixKey", "category"] as const;
 
 function collectThrownErrorConstructionSites(source: string): ThrownErrorConstructionSite[] {
 	const sites: ThrownErrorConstructionSite[] = [];
@@ -1624,12 +1632,13 @@ function collectThrownErrorConstructionSites(source: string): ThrownErrorConstru
 		const argsStart = match.index + match[0].length;
 		const args = extractBalancedCallArguments(source, argsStart);
 		if (args !== undefined) {
-			const values = collectLiteralErrorOptionValues(args, THROWN_ERROR_LOCALE_OPTION_NAMES);
+			const values = collectLiteralErrorOptionValues(args, THROWN_ERROR_SCANNED_OPTION_NAMES);
 			sites.push({
 				errorClass: match[1] ?? "",
 				...(values.code === undefined ? {} : { code: values.code }),
 				...(values.messageKey === undefined ? {} : { messageKey: values.messageKey }),
 				...(values.fixKey === undefined ? {} : { fixKey: values.fixKey }),
+				...(values.category === undefined ? {} : { category: values.category }),
 			});
 		}
 		THROWN_ERROR_CONSTRUCTION_PATTERN.lastIndex = argsStart;
@@ -3483,6 +3492,12 @@ const EXPECTED_ERROR_FORBIDDEN_CODES: ReadonlySet<string> = new Set([
 /** Statuses the `expectedErrors` schema excludes; a code that serves one is not an absence. */
 const EXPECTED_ERROR_FORBIDDEN_STATUSES: ReadonlySet<number> = new Set([401, 403, 429]);
 
+const PROVIDER_ERROR_CATEGORY_SET: ReadonlySet<string> = new Set(PROVIDER_ERROR_CATEGORIES);
+
+function isProviderErrorCategory(value: string): value is ProviderErrorCategory {
+	return PROVIDER_ERROR_CATEGORY_SET.has(value);
+}
+
 type ExpectedErrorEntry = { status: number; code: string };
 
 /** The `expectedErrors` entries of one operation step, read structurally. */
@@ -3496,28 +3511,102 @@ function readExpectedErrors(step: Record<string, unknown>): ExpectedErrorEntry[]
 }
 
 /**
- * `expectedErrors` entries the runtime can never produce as an absence, and
- * entries that would turn a credential or rate-limit refusal into one.
+ * The declaration the runtime reads for a code: `buildOperationErrorCodeLookup`
+ * builds a `Map` from the list, so a duplicate code resolves to its LAST entry.
+ */
+function lastErrorCodeDeclaration<T extends { code: string }>(
+	errorCodes: readonly T[] | undefined,
+	code: string,
+): T | undefined {
+	if (errorCodes === undefined) return undefined;
+	for (let index = errorCodes.length - 1; index >= 0; index -= 1) {
+		const entry = errorCodes[index];
+		if (entry?.code === code) return entry;
+	}
+	return undefined;
+}
+
+/**
+ * The category the serve layer derives for a code when the throw site sets
+ * none (`derivedErrorCategory`): a declared rejection status first, then the
+ * registered upstream code's category. `undefined` leaves the class default.
+ */
+function derivedExpectedErrorCategory(
+	code: string,
+	declaredStatus: number | undefined,
+): ProviderErrorCategory | undefined {
+	if (declaredStatus === 409 || declaredStatus === 410 || declaredStatus === 422)
+		return "upstream_rejected";
+	return SDK_UPSTREAM_ERROR_CODE_REGISTRY.get(code)?.category;
+}
+
+/**
+ * Every `source` the serve layer can put on the envelope of a thrown code, as
+ * far as the linter can see: `publicErrorSource` pins MISSING_SECRET,
+ * UPSTREAM_ERROR and BLOCKED, and otherwise follows the category — the throw
+ * site's literal `category` when it sets one, else the derived category, else
+ * the class default (`provider_error` for ProviderError, `input_validation`
+ * for ValidationError).
+ *
+ * A site whose `code` is not a literal (a helper that receives the code) may be
+ * the one that throws this code, so it counts; a site with another literal
+ * code does not. With no candidate site at all the derived resolution is the
+ * answer, which for a provider code that nothing registers is `apifuse`.
+ */
+function expectedErrorEnvelopeSources(
+	code: string,
+	declaredStatus: number | undefined,
+	sites: readonly ThrownErrorConstructionSite[],
+): ReadonlySet<ProviderErrorSource> {
+	if (code === "MISSING_SECRET") return new Set(["apifuse"]);
+	if (code === "UPSTREAM_ERROR" || code === "BLOCKED") return new Set(["upstream_failure"]);
+	const derived = derivedExpectedErrorCategory(code, declaredStatus);
+	const candidates = sites.filter((site) => site.code === code || site.code === undefined);
+	if (candidates.length === 0) return new Set([sourceForCategory(derived ?? "provider_error")]);
+	return new Set(
+		candidates.map((site) => {
+			const literal =
+				site.category !== undefined && isProviderErrorCategory(site.category)
+					? site.category
+					: undefined;
+			const fallback =
+				site.errorClass === "ValidationError" ? "input_validation" : "provider_error";
+			return sourceForCategory(literal ?? derived ?? fallback);
+		}),
+	);
+}
+
+/**
+ * `expectedErrors` entries the runtime can never produce as a matching
+ * envelope, and entries that would turn a credential or rate-limit refusal
+ * into an absence.
  *
  * `expectedErrors` on an operation step tells the platform monitor that one
  * specific non-2xx answer — this `status` and `code`, served by the
- * provider's own error envelope — is the provider's declared "nothing to
- * return". The monitor matches it exactly, so an entry naming a code the
- * operation never serves, or a status the runtime never serves for that
- * code, is silently dead: the quiet day stays recorded as `down`, which is
- * the defect the clause exists to fix. The served status is the one
- * `toStatusCode` resolves — the operation's `errorCodes` declaration for a
- * provider code, the SDK's canonical mapping for a registered one, and HTTP
- * 500 for anything else.
+ * provider's own upstream envelope (`source: "upstream_failure"`) — is the
+ * provider's declared "nothing to return". The monitor matches all three, so
+ * an entry naming a code the operation never serves, a status the runtime
+ * never serves for that code, or a code whose envelope the serve layer
+ * attributes elsewhere (`upstream_rule` for a declared rejection status or a
+ * registered refusal, `apifuse` for a provider code thrown without an
+ * upstream `category`) is silently dead: the quiet day stays recorded as
+ * `down`, which is the defect the clause exists to fix. The served status and
+ * source are the ones `toStatusCode` / `publicErrorSource` resolve, read the
+ * way the runtime reads them (a duplicate `errorCodes` entry resolves to its
+ * last declaration).
  *
  * Error level: the clause is new, nothing in the fleet depends on a looser
  * reading, and a dead or dangerous entry has no partial value.
  */
 function lintHealthCheckExpectedErrors(provider: {
 	id?: string;
+	authFlowSource?: string;
+	providerSourceFiles?: Record<string, string>;
 	operations?: Record<
 		string,
 		{
+			handler?: unknown;
+			source?: string;
 			healthCheck?: unknown;
 			errorCodes?: ReadonlyArray<{ code: string; status?: number }>;
 		}
@@ -3526,6 +3615,13 @@ function lintHealthCheckExpectedErrors(provider: {
 	const diagnostics: LintDiagnostic[] = [];
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
 	const operations = provider.operations ?? {};
+	let scannedSites: ThrownErrorConstructionSite[] | undefined;
+	const throwSites = (): ThrownErrorConstructionSite[] => {
+		scannedSites ??= collectThrowSiteLintSources(provider).flatMap(({ source }) =>
+			collectThrownErrorConstructionSites(source),
+		);
+		return scannedSites;
+	};
 	for (const [operationKey, operation] of Object.entries(operations)) {
 		const cases = readHealthCheckCases(operation.healthCheck);
 		for (const [caseIndex, healthCase] of cases.entries()) {
@@ -3540,13 +3636,12 @@ function lintHealthCheckExpectedErrors(provider: {
 				for (const [entryIndex, entry] of entries.entries()) {
 					const field = `operations.${operationKey}.healthCheck.cases[${caseIndex}].scenario.steps[${stepIndex}].expectedErrors[${entryIndex}]`;
 					const label = `${providerLabel} operation "${operationKey}" health-check case [${caseIndex}] step "${typeof step.id === "string" ? step.id : stepIndex}" declares expectedErrors ${entry.status} "${entry.code}" for operation "${stepOperationId}"`;
-					const declared = owning?.errorCodes?.find((candidate) => candidate.code === entry.code);
+					const declared = lastErrorCodeDeclaration(owning?.errorCodes, entry.code);
 					const canonicalStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(entry.code);
 					// Mirrors toStatusCode: an SDK-owned code ignores the declaration,
 					// any other declared status wins over the canonical mapping.
-					const servedStatus = SDK_RUNTIME_OWNED_ERROR_CODES.has(entry.code)
-						? canonicalStatus
-						: (declared?.status ?? canonicalStatus);
+					const sdkOwned = SDK_RUNTIME_OWNED_ERROR_CODES.has(entry.code);
+					const servedStatus = sdkOwned ? canonicalStatus : (declared?.status ?? canonicalStatus);
 					if (
 						EXPECTED_ERROR_FORBIDDEN_CODES.has(entry.code) ||
 						(servedStatus !== undefined && EXPECTED_ERROR_FORBIDDEN_STATUSES.has(servedStatus))
@@ -3561,7 +3656,7 @@ function lintHealthCheckExpectedErrors(provider: {
 					}
 					if (declared === undefined && canonicalStatus === undefined) {
 						diagnostics.push({
-							rule: "health-check-expected-error-undeclared",
+							rule: "health-check-expected-error-unmatchable",
 							level: "error",
 							field,
 							message: `${label}, which neither declares that code in its errorCodes nor is it SDK-registered; the runtime serves HTTP 500 for it, so this entry can never match and the absence it describes is recorded as down. Declare the code in the owning operation's errorCodes with status ${entry.status}, or name the registered code the handler actually throws.`,
@@ -3570,7 +3665,7 @@ function lintHealthCheckExpectedErrors(provider: {
 					}
 					if (servedStatus === undefined) {
 						diagnostics.push({
-							rule: "health-check-expected-error-undeclared",
+							rule: "health-check-expected-error-unmatchable",
 							level: "error",
 							field,
 							message: `${label}, but the errorCodes declaration for "${entry.code}" carries no status and the SDK has no canonical one, so the runtime serves HTTP 500 for it and this entry can never match. Add status ${entry.status} to that errorCodes entry.`,
@@ -3579,12 +3674,32 @@ function lintHealthCheckExpectedErrors(provider: {
 					}
 					if (servedStatus !== entry.status) {
 						diagnostics.push({
-							rule: "health-check-expected-error-undeclared",
+							rule: "health-check-expected-error-unmatchable",
 							level: "error",
 							field,
-							message: `${label}, but the runtime serves status ${servedStatus} for that code (${declared?.status !== undefined && !SDK_RUNTIME_OWNED_ERROR_CODES.has(entry.code) ? "declared in errorCodes" : "the SDK's canonical status"}); the monitor matches status and code together, so this entry can never match. Use status ${servedStatus}.`,
+							message: `${label}, but the runtime serves status ${servedStatus} for that code (${declared?.status !== undefined && !sdkOwned ? "declared in errorCodes" : "the SDK's canonical status"}); the monitor matches status and code together, so this entry can never match. Use status ${servedStatus}.`,
 						});
+						continue;
 					}
+					const sources = expectedErrorEnvelopeSources(
+						entry.code,
+						sdkOwned ? undefined : declared?.status,
+						throwSites(),
+					);
+					if (sources.has("upstream_failure")) continue;
+					const registered = SDK_UPSTREAM_ERROR_CODE_REGISTRY.get(entry.code);
+					const hint =
+						registered !== undefined
+							? `A code registered as ${registered.category} is an upstream refusal, not an absence; throw the registered code the upstream answer means (NO_DATA for an empty result).`
+							: servedStatus === 409 || servedStatus === 410 || servedStatus === 422
+								? `A declared status of ${servedStatus} classes the code as an upstream refusal (upstream_rejected → upstream_rule); an absence is a 404-class answer.`
+								: `A provider code thrown without a category is classed provider_error (source "apifuse"). Set category: "upstream_http" on the new ProviderError(...) that throws it — the linter reads literal construction sites, so a helper that builds the error must set the category there.`;
+					diagnostics.push({
+						rule: "health-check-expected-error-unmatchable",
+						level: "error",
+						field,
+						message: `${label}, but the runtime serves that code with source ${[...sources].map((source) => `"${source}"`).join(" or ")}; the monitor honours expectedErrors only for the provider's own upstream envelope (source "upstream_failure"), so this entry can never match. ${hint}`,
+					});
 				}
 			}
 		}

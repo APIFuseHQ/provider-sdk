@@ -31,7 +31,7 @@ The monitor matches the provider's own error envelope (`source: "upstream_failur
 
 - `attribute` reuses the guard attribution narrowed to `reasonCode: "expected_absence"` (`ExpectedAbsenceAttribution`); `served_stale_cache` is a 2xx concern and is rejected here.
 - `status` is a 4xx other than 401, 403 and 429: the retry classes and credential refusals are never an absence. Two entries for the same status and code on one step are rejected.
-- Two new `apifuse check` errors: `health-check-expected-error-undeclared` (the code is neither declared in the step's operation `errorCodes` nor SDK-registered, or the runtime serves a different status for it, so the entry can never match) and `health-check-expected-error-not-an-absence` (a credential or rate-limit code, or a code served as 401/403/429).
+- Two new `apifuse check` errors: `health-check-expected-error-unmatchable` (the entry can never match: the code is neither declared in the step's operation `errorCodes` nor SDK-registered, the runtime serves a different status for it, or the serve layer attributes its envelope elsewhere — `upstream_rule` for a registered refusal or a declared 409/410/422, `apifuse` for a provider code thrown without an upstream `category`; a duplicate `errorCodes` entry resolves to its last declaration, as at runtime) and `health-check-expected-error-not-an-absence` (a credential or rate-limit code, or a code served as 401/403/429).
 - `ExpectedErrorSchema`, `ExpectedError` and `ExpectedAbsenceAttribution` are exported; the health-checks skill asset documents the clause.
 
 Additive: no existing scenario validates differently. The clause is honoured once the platform health-monitor that reads it is deployed; until then a declared entry is accepted and ignored.

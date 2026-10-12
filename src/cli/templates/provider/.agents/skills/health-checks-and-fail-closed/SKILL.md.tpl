@@ -180,10 +180,12 @@ attribution, and never retries it:
 - Only `expected_absence` is admitted here. A stale-cache serve is a 2xx; a
   non-2xx is either the declared absence or a real failure.
 - `code` must be a code the operation serves — declared in its `errorCodes`
-  or SDK-registered — with the same status (`apifuse check` fails otherwise:
-  a mismatched entry never matches and the quiet day stays `down`). Auth and
-  rate-limit codes, 401/403/429 and every 5xx are never an absence and are
-  rejected.
+  or SDK-registered — with the same status, and served as the upstream's own
+  envelope: a registered upstream code such as `NO_DATA`, or a provider code
+  thrown with `category: "upstream_http"` (`apifuse check` fails otherwise: a
+  mismatched entry never matches and the quiet day stays `down`). Auth and
+  rate-limit codes, 401/403/429, 409/410/422 and every 5xx are never an
+  absence and are rejected.
 - The upstream must answer that code for nothing else. If the same status and
   code also mean a real fault, split the codes in the handler first.
 - Keep the row guard (`array_length_gte` on the 2xx body) as well: an

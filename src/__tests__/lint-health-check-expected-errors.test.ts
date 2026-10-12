@@ -6,25 +6,51 @@ import { type LintDiagnostic, lintProvider } from "../lint.js";
 import { describeKey } from "../schema.js";
 
 const OPERATION_KEY = "weatherAlerts";
-const UNDECLARED = "health-check-expected-error-undeclared";
+const UNMATCHABLE = "health-check-expected-error-unmatchable";
 const NOT_AN_ABSENCE = "health-check-expected-error-not-an-absence";
+
+/** A handler that throws the provider code from the upstream's own answer. */
+const UPSTREAM_THROW = (code: string) =>
+	`throw new ProviderError("nothing today", { code: "${code}", status: 404, category: "upstream_http" });`;
+/** The same code thrown with no category: classed provider_error, source apifuse. */
+const BARE_THROW = (code: string) =>
+	`throw new ProviderError("nothing today", { code: "${code}", status: 404 });`;
 
 type ErrorCodeDeclaration = { code: string; status?: number; retryable?: boolean };
 
-function operation(healthCheck?: unknown, errorCodes?: readonly ErrorCodeDeclaration[]) {
+function operation(
+	healthCheck?: unknown,
+	errorCodes?: readonly ErrorCodeDeclaration[],
+	source?: string,
+) {
 	return {
 		descriptionKey: `operations.${OPERATION_KEY}.description`,
 		input: describeKey(z.object({}), `operations.${OPERATION_KEY}.input.description`),
 		output: describeKey(z.object({}), `operations.${OPERATION_KEY}.output.description`),
 		fixtures: { request: {}, response: {} },
 		...(errorCodes === undefined ? {} : { errorCodes }),
+		...(source === undefined ? {} : { source }),
 		...(healthCheck === undefined ? {} : { healthCheck }),
+	};
+}
+
+function probeScenario(steps: [HealthStep, ...HealthStep[]]): HealthScenario {
+	return {
+		scenarioVersion: 2,
+		id: `${OPERATION_KEY}.probe`,
+		display: { titleKey: `health.operations.${OPERATION_KEY}.probe.title` },
+		schedule: { kind: "interval", intervalMs: 3_600_000, jitterMs: 0 },
+		timeoutMs: 15_000,
+		coversOperations: [OPERATION_KEY],
+		credentialRefs: [],
+		steps,
 	};
 }
 
 function lint(
 	expectedErrors: readonly [ExpectedError, ...ExpectedError[]],
 	errorCodes?: readonly ErrorCodeDeclaration[],
+	source?: string,
 ): LintDiagnostic[] {
 	const read: HealthStep = {
 		id: "read",
@@ -34,24 +60,18 @@ function lint(
 		inputTemplate: {},
 		expectedErrors,
 	};
-	const scenario: HealthScenario = {
-		scenarioVersion: 2,
-		id: `${OPERATION_KEY}.probe`,
-		display: { titleKey: `health.operations.${OPERATION_KEY}.probe.title` },
-		schedule: { kind: "interval", intervalMs: 3_600_000, jitterMs: 0 },
-		timeoutMs: 15_000,
-		coversOperations: [OPERATION_KEY],
-		credentialRefs: [],
-		steps: [read],
-	};
 	return lintProvider({
 		id: "demo",
 		allowedHosts: ["example.com"],
 		reviewed: "2026-10-12",
 		operations: {
-			[OPERATION_KEY]: operation({ cases: [{ name: "national", scenario }] }, errorCodes),
+			[OPERATION_KEY]: operation(
+				{ cases: [{ name: "national", scenario: probeScenario([read]) }] },
+				errorCodes,
+				source,
+			),
 		},
-	}).filter((diagnostic) => diagnostic.rule === UNDECLARED || diagnostic.rule === NOT_AN_ABSENCE);
+	}).filter((diagnostic) => diagnostic.rule === UNMATCHABLE || diagnostic.rule === NOT_AN_ABSENCE);
 }
 
 function expected(status: number, code: string): ExpectedError {
@@ -69,25 +89,49 @@ function expected(status: number, code: string): ExpectedError {
 	};
 }
 
+const FIELD = `operations.${OPERATION_KEY}.healthCheck.cases[0].scenario.steps[0].expectedErrors`;
+
 describe("health-check expectedErrors lint", () => {
-	it("accepts an SDK-registered code at its canonical status", () => {
-		// NO_DATA is registered as 404 upstream_http; the fleet does not re-declare it.
+	it("accepts an SDK-registered upstream code at its canonical status", () => {
+		// NO_DATA is registered 404 / upstream_http, so the envelope is the
+		// upstream's (source upstream_failure) however the handler throws it —
+		// including through a table-driven helper with no literal code.
 		expect(lint([expected(404, "NO_DATA")])).toEqual([]);
+		expect(
+			lint(
+				[expected(404, "NO_DATA")],
+				undefined,
+				"throw new ProviderError(entry.message, { code: entry.code, retryable: false });",
+			),
+		).toEqual([]);
 	});
 
-	it("accepts a provider code declared in errorCodes at the declared status", () => {
-		expect(lint([expected(404, "NO_FORECAST")], [{ code: "NO_FORECAST", status: 404 }])).toEqual(
-			[],
-		);
+	it("accepts a provider code declared in errorCodes and thrown as an upstream answer", () => {
+		expect(
+			lint(
+				[expected(404, "NO_FORECAST")],
+				[{ code: "NO_FORECAST", status: 404 }],
+				UPSTREAM_THROW("NO_FORECAST"),
+			),
+		).toEqual([]);
+		// A helper that receives the code but pins the category still names the
+		// upstream as the source; the linter cannot exclude it, so it counts.
+		expect(
+			lint(
+				[expected(404, "NO_FORECAST")],
+				[{ code: "NO_FORECAST", status: 404 }],
+				'throw new ProviderError(message, { code, status: 404, category: "upstream_http" });',
+			),
+		).toEqual([]);
 	});
 
 	it("rejects a code the operation neither declares nor the SDK registers", () => {
 		const diagnostics = lint([expected(404, "NO_FORECAST")]);
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]).toMatchObject({
-			rule: UNDECLARED,
+			rule: UNMATCHABLE,
 			level: "error",
-			field: `operations.${OPERATION_KEY}.healthCheck.cases[0].scenario.steps[0].expectedErrors[0]`,
+			field: `${FIELD}[0]`,
 		});
 		expect(diagnostics[0]?.message).toContain('"NO_FORECAST"');
 		expect(diagnostics[0]?.message).toContain("HTTP 500");
@@ -96,9 +140,13 @@ describe("health-check expectedErrors lint", () => {
 	it("rejects a status the runtime never serves for the code", () => {
 		// Declared 404, declared as expected at 410: the monitor matches both
 		// fields, so the entry is dead.
-		const declared = lint([expected(410, "NO_FORECAST")], [{ code: "NO_FORECAST", status: 404 }]);
+		const declared = lint(
+			[expected(410, "NO_FORECAST")],
+			[{ code: "NO_FORECAST", status: 404 }],
+			UPSTREAM_THROW("NO_FORECAST"),
+		);
 		expect(declared).toHaveLength(1);
-		expect(declared[0]).toMatchObject({ rule: UNDECLARED, level: "error" });
+		expect(declared[0]).toMatchObject({ rule: UNMATCHABLE, level: "error" });
 		expect(declared[0]?.message).toContain("serves status 404");
 		// Registered NO_DATA is 404 whatever the operation says it expects.
 		const registered = lint([expected(410, "NO_DATA")]);
@@ -108,6 +156,75 @@ describe("health-check expectedErrors lint", () => {
 		const unstated = lint([expected(404, "NO_FORECAST")], [{ code: "NO_FORECAST" }]);
 		expect(unstated).toHaveLength(1);
 		expect(unstated[0]?.message).toContain("carries no status");
+	});
+
+	it("resolves a duplicate errorCodes declaration the way the runtime does", () => {
+		// buildOperationErrorCodeLookup builds a Map, so the LAST declaration of
+		// a code is the one served.
+		const lastWins = lint(
+			[expected(404, "NO_FORECAST")],
+			[
+				{ code: "NO_FORECAST", status: 410 },
+				{ code: "NO_FORECAST", status: 404 },
+			],
+			UPSTREAM_THROW("NO_FORECAST"),
+		);
+		expect(lastWins).toEqual([]);
+		const firstIsStale = lint(
+			[expected(404, "NO_FORECAST")],
+			[
+				{ code: "NO_FORECAST", status: 404 },
+				{ code: "NO_FORECAST", status: 410 },
+			],
+			UPSTREAM_THROW("NO_FORECAST"),
+		);
+		expect(firstIsStale).toHaveLength(1);
+		expect(firstIsStale[0]?.message).toContain("serves status 410");
+	});
+
+	it("rejects a code whose envelope the serve layer attributes elsewhere", () => {
+		// Registered as an upstream refusal: served with source upstream_rule.
+		const rejected = lint([expected(409, "UPSTREAM_REJECTED")]);
+		expect(rejected).toHaveLength(1);
+		expect(rejected[0]).toMatchObject({ rule: UNMATCHABLE, level: "error" });
+		expect(rejected[0]?.message).toContain('source "upstream_rule"');
+		expect(rejected[0]?.message).toContain("registered as upstream_rejected");
+		// Status-mapped but not an upstream code: classed provider_error, source apifuse.
+		const invalid = lint([expected(400, "INVALID_REQUEST")]);
+		expect(invalid).toHaveLength(1);
+		expect(invalid[0]?.message).toContain('source "apifuse"');
+		// A declared rejection status classes a provider code as a refusal.
+		const rejectionStatus = lint(
+			[expected(410, "GONE_TODAY")],
+			[{ code: "GONE_TODAY", status: 410 }],
+			'throw new ProviderError("gone", { code: "GONE_TODAY", status: 410 });',
+		);
+		expect(rejectionStatus).toHaveLength(1);
+		expect(rejectionStatus[0]?.message).toContain("upstream_rejected");
+	});
+
+	it("rejects a provider code thrown without an upstream category", () => {
+		// No category at the throw site: provider_error, source apifuse — the
+		// monitor never sees the upstream's envelope.
+		for (const source of [undefined, BARE_THROW("NO_FORECAST")]) {
+			const diagnostics = lint(
+				[expected(404, "NO_FORECAST")],
+				[{ code: "NO_FORECAST", status: 404 }],
+				source,
+			);
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0]).toMatchObject({ rule: UNMATCHABLE, level: "error" });
+			expect(diagnostics[0]?.message).toContain('source "apifuse"');
+			expect(diagnostics[0]?.message).toContain('category: "upstream_http"');
+		}
+		// A site that throws ANOTHER literal code says nothing about this one.
+		const unrelated = lint(
+			[expected(404, "NO_FORECAST")],
+			[{ code: "NO_FORECAST", status: 404 }],
+			UPSTREAM_THROW("NO_STATION"),
+		);
+		expect(unrelated).toHaveLength(1);
+		expect(unrelated[0]?.message).toContain('source "apifuse"');
 	});
 
 	it("rejects credential and rate-limit codes whatever status they serve", () => {
@@ -126,6 +243,7 @@ describe("health-check expectedErrors lint", () => {
 		const forbiddenStatus = lint(
 			[expected(404, "MEMBERS_ONLY")],
 			[{ code: "MEMBERS_ONLY", status: 403 }],
+			UPSTREAM_THROW("MEMBERS_ONLY"),
 		);
 		expect(forbiddenStatus).toHaveLength(1);
 		expect(forbiddenStatus[0]).toMatchObject({ rule: NOT_AN_ABSENCE });
@@ -135,16 +253,11 @@ describe("health-check expectedErrors lint", () => {
 		const diagnostics = lint(
 			[expected(404, "NO_DATA"), expected(404, "NO_FORECAST"), expected(404, "RATE_LIMITED")],
 			[{ code: "NO_FORECAST", status: 410 }],
+			UPSTREAM_THROW("NO_FORECAST"),
 		);
 		expect(diagnostics.map((diagnostic) => [diagnostic.rule, diagnostic.field])).toEqual([
-			[
-				UNDECLARED,
-				`operations.${OPERATION_KEY}.healthCheck.cases[0].scenario.steps[0].expectedErrors[1]`,
-			],
-			[
-				NOT_AN_ABSENCE,
-				`operations.${OPERATION_KEY}.healthCheck.cases[0].scenario.steps[0].expectedErrors[2]`,
-			],
+			[UNMATCHABLE, `${FIELD}[1]`],
+			[NOT_AN_ABSENCE, `${FIELD}[2]`],
 		]);
 	});
 
@@ -172,33 +285,26 @@ describe("health-check expectedErrors lint", () => {
 				},
 			],
 		};
-		const scenario: HealthScenario = {
-			scenarioVersion: 2,
-			id: `${OPERATION_KEY}.probe`,
-			display: { titleKey: `health.operations.${OPERATION_KEY}.probe.title` },
-			schedule: { kind: "interval", intervalMs: 3_600_000, jitterMs: 0 },
-			timeoutMs: 15_000,
-			coversOperations: [OPERATION_KEY],
-			credentialRefs: [],
-			steps: [
-				read,
-				{
-					id: "read",
-					result: "response",
-					kind: "operation",
-					operationId: OPERATION_KEY,
-					inputTemplate: {},
-				},
-			],
-		};
+		const scenario = probeScenario([
+			read,
+			{
+				id: "read",
+				result: "response",
+				kind: "operation",
+				operationId: OPERATION_KEY,
+				inputTemplate: {},
+			},
+		]);
 		const diagnostics = lintProvider({
 			id: "demo",
 			allowedHosts: ["example.com"],
 			reviewed: "2026-10-12",
 			operations: {
-				[OPERATION_KEY]: operation({ cases: [{ name: "national", scenario }] }, [
-					{ code: "NO_HELPER_DATA", status: 404 },
-				]),
+				[OPERATION_KEY]: operation(
+					{ cases: [{ name: "national", scenario }] },
+					[{ code: "NO_HELPER_DATA", status: 404 }],
+					UPSTREAM_THROW("NO_HELPER_DATA"),
+				),
 				helper: {
 					descriptionKey: "operations.helper.description",
 					input: describeKey(z.object({}), "operations.helper.input.description"),
@@ -206,7 +312,7 @@ describe("health-check expectedErrors lint", () => {
 					fixtures: { request: {}, response: {} },
 				},
 			},
-		}).filter((diagnostic) => diagnostic.rule === UNDECLARED);
+		}).filter((diagnostic) => diagnostic.rule === UNMATCHABLE);
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]?.message).toContain('for operation "helper"');
 	});
