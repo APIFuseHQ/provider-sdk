@@ -1260,6 +1260,21 @@ export function every(interval: string, options?: {
     randomize?: HealthScheduleRandomization;
 }): HealthJourneySchedule;
 
+// @public
+export type ExpectedAbsenceAttribution = Omit<GuardAttribution, "reasonCode"> & {
+    reasonCode: "expected_absence";
+};
+
+// @public
+export type ExpectedError = {
+    status: number;
+    code: string;
+    attribute: NonEmpty<ExpectedAbsenceAttribution>;
+};
+
+// @public (undocumented)
+export const ExpectedErrorSchema: z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>;
+
 // @public (undocumented)
 export type ExtractResult<T extends JsonValue = JsonValue> = {
     kind: "extract_result";
@@ -1993,6 +2008,7 @@ export const HealthStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     retry: z.ZodOptional<z.ZodType<RetryPolicy, unknown, z.core.$ZodTypeInternals<RetryPolicy, unknown>>>;
     candidate: z.ZodOptional<z.ZodUnion<readonly [z.ZodType<CandidatePolicy, unknown, z.core.$ZodTypeInternals<CandidatePolicy, unknown>>, z.ZodType<CandidateBlock, unknown, z.core.$ZodTypeInternals<CandidateBlock, unknown>>]>>;
     journal: z.ZodOptional<z.ZodType<JournalPolicy, unknown, z.core.$ZodTypeInternals<JournalPolicy, unknown>>>;
+    expectedErrors: z.ZodOptional<z.ZodPipe<z.ZodArray<z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>>, z.ZodTransform<[ExpectedError, ...ExpectedError[]], ExpectedError[]>>>;
 }, z.core.$strict>, z.ZodObject<{
     id: z.ZodString;
     result: z.ZodString;
@@ -3099,6 +3115,7 @@ export type OperationStep = StepBase & {
     retry?: RetryPolicy;
     candidate?: CandidatePolicy | CandidateBlock;
     journal?: JournalPolicy;
+    expectedErrors?: NonEmpty<ExpectedError>;
 };
 
 // @public (undocumented)
@@ -3117,6 +3134,7 @@ export const OperationStepSchema: z.ZodObject<{
     retry: z.ZodOptional<z.ZodType<RetryPolicy, unknown, z.core.$ZodTypeInternals<RetryPolicy, unknown>>>;
     candidate: z.ZodOptional<z.ZodUnion<readonly [z.ZodType<CandidatePolicy, unknown, z.core.$ZodTypeInternals<CandidatePolicy, unknown>>, z.ZodType<CandidateBlock, unknown, z.core.$ZodTypeInternals<CandidateBlock, unknown>>]>>;
     journal: z.ZodOptional<z.ZodType<JournalPolicy, unknown, z.core.$ZodTypeInternals<JournalPolicy, unknown>>>;
+    expectedErrors: z.ZodOptional<z.ZodPipe<z.ZodArray<z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>>, z.ZodTransform<[ExpectedError, ...ExpectedError[]], ExpectedError[]>>>;
 }, z.core.$strict>;
 
 // Warning: (ae-forgotten-export) The symbol "OperationJsonTransport" needs to be exported by the entry point provider.d.ts

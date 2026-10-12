@@ -583,6 +583,41 @@ export type GuardAttribution = {
 	reasonCode: GuardReasonCode;
 	reasonKey: string;
 };
+/**
+ * A guard attribution that can only declare an absence. `expectedErrors`
+ * reuses the guard vocabulary but admits `expected_absence` alone: a non-2xx
+ * answer the provider names in advance is "nothing to return", never a
+ * measured upstream verdict, so `served_stale_cache` has no meaning here.
+ */
+export type ExpectedAbsenceAttribution = Omit<GuardAttribution, "reasonCode"> & {
+	reasonCode: "expected_absence";
+};
+/**
+ * A non-2xx answer an operation step declares as an expected absence: the
+ * upstream's "no data" that the provider serves as an error envelope (HTTP
+ * 404 `NO_DATA` on a day with no weather alert) rather than as an empty 2xx
+ * body a `guard` could read.
+ *
+ * The platform monitor ends an attempt before any guard runs when an
+ * operation step answers non-2xx, so a guard cannot see this case. A matching
+ * entry — the provider's own error envelope (`source: "upstream_failure"`)
+ * with exactly this `status` and `code` — completes the attempt with
+ * `attribute` as the guard attribution instead of recording a transport
+ * failure, and is never retried. Anything else (another code, another status,
+ * an envelope the SDK did not tie to the upstream) stays the failure it is.
+ *
+ * `status` is a 4xx that is neither a retry class (429) nor a credential
+ * refusal (401, 403): those are never an absence, and the retry policy and
+ * the connection gates are what answer them. `code` must be a code this
+ * operation serves — declared in its `errorCodes` or registered by the SDK —
+ * with the same status; the authoring lint checks that, so a typo cannot
+ * leave a quiet day recorded as `down`.
+ */
+export type ExpectedError = {
+	status: number;
+	code: string;
+	attribute: NonEmpty<ExpectedAbsenceAttribution>;
+};
 export type OperationResult = {
 	kind: "operation_result";
 	status_code: number;
@@ -652,6 +687,26 @@ const attributionSchema = z
 		reasonKey: z.string().min(1),
 	})
 	.strict();
+const expectedAbsenceAttributionSchema = attributionSchema
+	.extend({ reasonCode: z.literal("expected_absence") })
+	.strict();
+/**
+ * Statuses an expected error never names: the retry class 429 and the
+ * credential refusals 401/403. Not a tunable — the clause has no meaning for
+ * them, so the schema does not admit them.
+ */
+const EXPECTED_ERROR_EXCLUDED_STATUSES: ReadonlySet<number> = new Set([401, 403, 429]);
+const expectedErrorSchema: z.ZodType<ExpectedError> = z
+	.object({
+		status: finiteInt(400, 499).refine(
+			(status) => !EXPECTED_ERROR_EXCLUDED_STATUSES.has(status),
+			"expected error status must be a 4xx other than 401, 403 and 429",
+		),
+		code: z.string().min(1),
+		attribute: nonEmptyArray(expectedAbsenceAttributionSchema),
+	})
+	.strict();
+export const ExpectedErrorSchema = expectedErrorSchema;
 
 export type FindFirst = {
 	kind: "find_first";
@@ -677,6 +732,8 @@ export type OperationStep = StepBase & {
 	retry?: RetryPolicy;
 	candidate?: CandidatePolicy | CandidateBlock;
 	journal?: JournalPolicy;
+	/** Non-2xx answers this step declares as an expected absence; see {@link ExpectedError}. */
+	expectedErrors?: NonEmpty<ExpectedError>;
 };
 export type ExtractStep = StepBase & {
 	kind: "extract";
@@ -706,6 +763,7 @@ const operationStepSchema = stepBaseSchema
 		retry: retryPolicySchema.optional(),
 		candidate: z.union([candidatePolicySchema, candidateBlockSchema]).optional(),
 		journal: journalPolicySchema.optional(),
+		expectedErrors: nonEmptyArray(expectedErrorSchema).optional(),
 	})
 	.strict();
 const extractStepSchema = stepBaseSchema
@@ -858,6 +916,22 @@ export const HealthScenarioSchema: z.ZodType<HealthScenario> = z
 					path: ["steps", index, "retry", "attemptTimeoutMs"],
 					message: "timeout retry requires attemptTimeoutMs",
 				});
+			if (step.kind === "operation" && step.expectedErrors) {
+				// The monitor takes the first entry whose status and code match, so
+				// two entries for one answer would make the attribution depend on
+				// declaration order.
+				const seen = new Set<string>();
+				for (const [errorIndex, expected] of step.expectedErrors.entries()) {
+					const key = `${expected.status} ${expected.code}`;
+					if (seen.has(key))
+						ctx.addIssue({
+							code: "custom",
+							path: ["steps", index, "expectedErrors", errorIndex],
+							message: `duplicate expected error ${key}`,
+						});
+					seen.add(key);
+				}
+			}
 
 			const expression =
 				step.kind === "assert"

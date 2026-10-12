@@ -4,6 +4,7 @@ import {
 	SDK_CANONICAL_ERROR_CODE_RETRYABILITY,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
+	SDK_UPSTREAM_ERROR_CODE_REGISTRY,
 } from "./error-resolution.js";
 import {
 	APIFUSE_HANDLE_META_KEY,
@@ -3459,6 +3460,138 @@ function lintHealthCheckMonitorability(provider: {
 	return diagnostics;
 }
 
+/**
+ * Codes an `expectedErrors` entry may never name, whatever status they serve:
+ * the upstream refusing the platform-managed key, the caller needing to
+ * re-authenticate, an unprovisioned secret, and every rate-limit code. Each
+ * one is a measured fault the platform publishes as such; declaring it an
+ * absence would publish an outage as a non-incident.
+ */
+const EXPECTED_ERROR_FORBIDDEN_CODES: ReadonlySet<string> = new Set([
+	"AUTH_REQUIRED",
+	"reauth_required",
+	"MISSING_SECRET",
+	...Array.from(SDK_UPSTREAM_ERROR_CODE_REGISTRY)
+		.filter(
+			([, registration]) =>
+				registration.category === "upstream_auth" ||
+				registration.category === "upstream_rate_limited",
+		)
+		.map(([code]) => code),
+]);
+
+/** Statuses the `expectedErrors` schema excludes; a code that serves one is not an absence. */
+const EXPECTED_ERROR_FORBIDDEN_STATUSES: ReadonlySet<number> = new Set([401, 403, 429]);
+
+type ExpectedErrorEntry = { status: number; code: string };
+
+/** The `expectedErrors` entries of one operation step, read structurally. */
+function readExpectedErrors(step: Record<string, unknown>): ExpectedErrorEntry[] {
+	if (step.kind !== "operation" || !Array.isArray(step.expectedErrors)) return [];
+	return step.expectedErrors.flatMap((entry) =>
+		isLintRecord(entry) && typeof entry.status === "number" && typeof entry.code === "string"
+			? [{ status: entry.status, code: entry.code }]
+			: [],
+	);
+}
+
+/**
+ * `expectedErrors` entries the runtime can never produce as an absence, and
+ * entries that would turn a credential or rate-limit refusal into one.
+ *
+ * `expectedErrors` on an operation step tells the platform monitor that one
+ * specific non-2xx answer — this `status` and `code`, served by the
+ * provider's own error envelope — is the provider's declared "nothing to
+ * return". The monitor matches it exactly, so an entry naming a code the
+ * operation never serves, or a status the runtime never serves for that
+ * code, is silently dead: the quiet day stays recorded as `down`, which is
+ * the defect the clause exists to fix. The served status is the one
+ * `toStatusCode` resolves — the operation's `errorCodes` declaration for a
+ * provider code, the SDK's canonical mapping for a registered one, and HTTP
+ * 500 for anything else.
+ *
+ * Error level: the clause is new, nothing in the fleet depends on a looser
+ * reading, and a dead or dangerous entry has no partial value.
+ */
+function lintHealthCheckExpectedErrors(provider: {
+	id?: string;
+	operations?: Record<
+		string,
+		{
+			healthCheck?: unknown;
+			errorCodes?: ReadonlyArray<{ code: string; status?: number }>;
+		}
+	>;
+}): LintDiagnostic[] {
+	const diagnostics: LintDiagnostic[] = [];
+	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
+	const operations = provider.operations ?? {};
+	for (const [operationKey, operation] of Object.entries(operations)) {
+		const cases = readHealthCheckCases(operation.healthCheck);
+		for (const [caseIndex, healthCase] of cases.entries()) {
+			const scenario = healthCase.scenario;
+			if (!isLintRecord(scenario) || !Array.isArray(scenario.steps)) continue;
+			for (const [stepIndex, step] of scenario.steps.entries()) {
+				if (!isLintRecord(step)) continue;
+				const entries = readExpectedErrors(step);
+				if (entries.length === 0) continue;
+				const stepOperationId = typeof step.operationId === "string" ? step.operationId : "";
+				const owning = operations[stepOperationId];
+				for (const [entryIndex, entry] of entries.entries()) {
+					const field = `operations.${operationKey}.healthCheck.cases[${caseIndex}].scenario.steps[${stepIndex}].expectedErrors[${entryIndex}]`;
+					const label = `${providerLabel} operation "${operationKey}" health-check case [${caseIndex}] step "${typeof step.id === "string" ? step.id : stepIndex}" declares expectedErrors ${entry.status} "${entry.code}" for operation "${stepOperationId}"`;
+					const declared = owning?.errorCodes?.find((candidate) => candidate.code === entry.code);
+					const canonicalStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(entry.code);
+					// Mirrors toStatusCode: an SDK-owned code ignores the declaration,
+					// any other declared status wins over the canonical mapping.
+					const servedStatus = SDK_RUNTIME_OWNED_ERROR_CODES.has(entry.code)
+						? canonicalStatus
+						: (declared?.status ?? canonicalStatus);
+					if (
+						EXPECTED_ERROR_FORBIDDEN_CODES.has(entry.code) ||
+						(servedStatus !== undefined && EXPECTED_ERROR_FORBIDDEN_STATUSES.has(servedStatus))
+					) {
+						diagnostics.push({
+							rule: "health-check-expected-error-not-an-absence",
+							level: "error",
+							field,
+							message: `${label}, but that code is a credential or rate-limit refusal${servedStatus === undefined ? "" : ` (served ${servedStatus})`}: a measured fault the platform publishes as degraded or down, never an absence. Remove the entry; declare only the code the handler throws when the upstream has nothing to return.`,
+						});
+						continue;
+					}
+					if (declared === undefined && canonicalStatus === undefined) {
+						diagnostics.push({
+							rule: "health-check-expected-error-undeclared",
+							level: "error",
+							field,
+							message: `${label}, which neither declares that code in its errorCodes nor is it SDK-registered; the runtime serves HTTP 500 for it, so this entry can never match and the absence it describes is recorded as down. Declare the code in the owning operation's errorCodes with status ${entry.status}, or name the registered code the handler actually throws.`,
+						});
+						continue;
+					}
+					if (servedStatus === undefined) {
+						diagnostics.push({
+							rule: "health-check-expected-error-undeclared",
+							level: "error",
+							field,
+							message: `${label}, but the errorCodes declaration for "${entry.code}" carries no status and the SDK has no canonical one, so the runtime serves HTTP 500 for it and this entry can never match. Add status ${entry.status} to that errorCodes entry.`,
+						});
+						continue;
+					}
+					if (servedStatus !== entry.status) {
+						diagnostics.push({
+							rule: "health-check-expected-error-undeclared",
+							level: "error",
+							field,
+							message: `${label}, but the runtime serves status ${servedStatus} for that code (${declared?.status !== undefined && !SDK_RUNTIME_OWNED_ERROR_CODES.has(entry.code) ? "declared in errorCodes" : "the SDK's canonical status"}); the monitor matches status and code together, so this entry can never match. Use status ${servedStatus}.`,
+						});
+					}
+				}
+			}
+		}
+	}
+	return diagnostics;
+}
+
 export function lintOperation(op: {
 	descriptionKey?: string;
 	whenToUseKeys?: readonly string[];
@@ -3655,6 +3788,7 @@ export function lintProviderWithInformation(
 		...lintProviderMetaNarrowing(provider),
 		...lintHandleDeclarations(provider),
 		...lintHealthCheckMonitorability(provider),
+		...lintHealthCheckExpectedErrors(provider),
 	];
 	// Runtime boundary rules (process.env, node:fs/net/child_process, raw
 	// fetch) also yield information entries for `@apifuse-allow` acknowledgements.

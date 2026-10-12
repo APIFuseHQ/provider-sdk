@@ -38,6 +38,26 @@ describe("health-checks-and-fail-closed prompt asset", () => {
 		expect(skill).toContain("`expected_absence` is published as a non-incident status");
 	});
 
+	it("teaches expectedErrors as the declaration for an absence served as an error", () => {
+		const skill = healthCheckSkill();
+		const section = skill.slice(
+			skill.indexOf("## Declared absence served as an error"),
+			skill.indexOf("## Fail-closed: envelope level"),
+		);
+
+		// The guard cannot see a non-2xx; the declaration lives on the step.
+		expect(section).toContain("before any guard runs");
+		expect(section).toContain("expectedErrors: [");
+		expect(section).toContain("status: 404");
+		expect(section).toContain('code: "NO_DATA"');
+		expect(section).toContain('reasonCode: "expected_absence"');
+		expect(section).toContain("never retries");
+		// The lint contract the author has to satisfy, and what is never an absence.
+		expect(section).toContain("`errorCodes`");
+		expect(section).toContain("401/403/429");
+		expect(section).toContain("Keep the row guard");
+	});
+
 	it("orders the freshness guard before any row or emptiness guard", () => {
 		expect(healthCheckSkill()).toContain(
 			"Place the freshness guard BEFORE any row or emptiness guard",
