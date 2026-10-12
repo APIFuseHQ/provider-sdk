@@ -1,26 +1,33 @@
+import { RELATIVE_DATE_OFFSET_DAYS } from "../health-scenario.js";
+
 /**
  * Relative date-token resolution for health-check case inputs and fixture
  * requests. The calendar defaults to KST; callers that need UTC must opt in
  * explicitly so UTC and KST do not silently disagree from 15:00–23:59 UTC.
  *
- * Supported token: `+<days>d` or `+<days>d:YYYYMMDD` (1..365 days ahead).
+ * Supported token: `+<days>d` / `-<days>d`, optionally `:YYYYMMDD`. The sign is
+ * mandatory and the signed offset shares the `relativeDate.offsetDays` bounds
+ * (-365..365; `+0d` is today), so a self-test can use the backward window its
+ * scenario declares. Any other string stays a literal.
  */
-const RELATIVE_DATE_TOKEN = /^\+(\d{1,3})d(?::(YYYYMMDD))?$/i;
+const RELATIVE_DATE_TOKEN = /^([+-]\d{1,3})d(?::(YYYYMMDD))?$/i;
 
 export type InputDateTokenCalendar = "KST" | "UTC";
 
-function dateFromDaysAhead(
-	daysAhead: number,
+function dateWithOffset(
+	offsetDays: number,
 	now = new Date(),
 	format: "YYYY-MM-DD" | "YYYYMMDD" = "YYYY-MM-DD",
 	calendar: InputDateTokenCalendar = "KST",
 ): string {
 	const calendarNow = new Date(now.getTime() + (calendar === "KST" ? 9 * 60 * 60 * 1000 : 0));
+	// Day arithmetic on the calendar date: Date.UTC normalizes month and year
+	// rollover in both directions.
 	const date = new Date(
 		Date.UTC(
 			calendarNow.getUTCFullYear(),
 			calendarNow.getUTCMonth(),
-			calendarNow.getUTCDate() + daysAhead,
+			calendarNow.getUTCDate() + offsetDays,
 		),
 	);
 	const isoDate = date.toISOString().slice(0, 10);
@@ -35,12 +42,16 @@ export function resolveHealthCheckInputDateTokens(
 	if (typeof value === "string") {
 		const relative = value.match(RELATIVE_DATE_TOKEN);
 		if (!relative) return value;
-		const daysAhead = Number(relative[1]);
-		if (!Number.isInteger(daysAhead) || daysAhead < 1 || daysAhead > 365) {
+		const offsetDays = Number(relative[1]);
+		if (
+			!Number.isInteger(offsetDays) ||
+			offsetDays < RELATIVE_DATE_OFFSET_DAYS.min ||
+			offsetDays > RELATIVE_DATE_OFFSET_DAYS.max
+		) {
 			return value;
 		}
 		const format = relative[2]?.toUpperCase() === "YYYYMMDD" ? "YYYYMMDD" : "YYYY-MM-DD";
-		return dateFromDaysAhead(daysAhead, now, format, calendar);
+		return dateWithOffset(offsetDays, now, format, calendar);
 	}
 	if (Array.isArray(value)) {
 		const resolved = value.map((entry) => resolveHealthCheckInputDateTokens(entry, now, calendar));

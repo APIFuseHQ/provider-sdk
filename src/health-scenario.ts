@@ -111,12 +111,22 @@ const referenceSchema = z.discriminatedUnion("namespace", [
 ]);
 export const ReferenceSchema = referenceSchema;
 
+/**
+ * Inclusive calendar-day bounds of `relativeDate.offsetDays`. A negative offset
+ * reaches back from the anchor's Asia/Seoul date (a "last N days" window), `0`
+ * is the anchor date itself, a positive offset reaches forward. Every node of
+ * one operation is evaluated from the same anchor instant, so a window written
+ * as two nodes is well-formed (start <= end) exactly when the start offset is
+ * <= the end offset. The self-test date token shares these bounds.
+ */
+export const RELATIVE_DATE_OFFSET_DAYS = { min: -365, max: 365 } as const;
+
 const relativeDateNodeSchema = z
 	.object({
 		relativeDate: z
 			.object({
 				anchor: z.literal("operation_started_at"),
-				offsetDays: finiteInt(1, 365),
+				offsetDays: finiteInt(RELATIVE_DATE_OFFSET_DAYS.min, RELATIVE_DATE_OFFSET_DAYS.max),
 				timeZone: z.literal("Asia/Seoul"),
 				format: z.enum(["YYYY-MM-DD", "YYYYMMDD"]),
 			})
