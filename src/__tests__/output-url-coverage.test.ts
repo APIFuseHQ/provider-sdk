@@ -92,6 +92,25 @@ describe("output URL coverage report", () => {
 		expect(warning?.fix).toContain('upgradeHttp: ["tong.example.com"]');
 	});
 
+	it("gives the upgrade advice for an http:// value without a picture extension beside a picture", () => {
+		const [warning] = reportOutputUrlCoverage({
+			search: {
+				output: z.object({ items: z.array(z.object({ cover: z.string(), url: itemPage() })) }),
+				fixtures: {
+					response: {
+						items: [
+							{ cover: "https://cdn.example.com/b.jpg", url: null },
+							{ cover: "http://cdn.example.com/image?id=1", url: null },
+						],
+					},
+				},
+			},
+		});
+		expect(warning?.message).toContain("http://cdn.example.com/…");
+		expect(warning?.fix).toContain('upgradeHttp: ["cdn.example.com"]');
+		expect(image().safeParse("http://cdn.example.com/image?id=1").success).toBe(false);
+	});
+
 	it("warns about a declared format: uri string without a fixture value", () => {
 		const warnings = reportOutputUrlCoverage({
 			detail: {

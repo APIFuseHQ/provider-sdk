@@ -231,11 +231,12 @@ function unclassifiedWarning(
 	values: readonly string[],
 ): OutputUrlCoverageWarning {
 	const absolute = values.filter((value) => isAbsoluteHttpUrl(value));
-	// A picture value decides the suggestion and an http:// picture how to get
-	// there, so the line cites that one.
-	const pictures = absolute.filter((value) => looksLikeImageFile(value));
-	const insecure = pictures.find((value) => /^http:/i.test(value));
-	const example = insecure ?? pictures[0] ?? absolute[0];
+	// A picture value makes image() the suggestion. image() refuses every
+	// http:// value, picture file or not, so any one decides how to get there
+	// and is the one the line cites.
+	const picture = absolute.find((value) => looksLikeImageFile(value));
+	const insecure = absolute.find((value) => /^http:/i.test(value));
+	const example = picture === undefined ? absolute[0] : (insecure ?? picture);
 	const evidence =
 		example === undefined
 			? 'it is declared format: "uri" (z.string().url())'
@@ -244,7 +245,7 @@ function unclassifiedWarning(
 	if (example === undefined)
 		fix =
 			"declare it with image() for a picture, itemPage() for the item's own page or link() for any other URL.";
-	else if (!looksLikeImageFile(example))
+	else if (picture === undefined)
 		fix = "declare it with itemPage() if it is the item's own page, otherwise link().";
 	else if (insecure === undefined)
 		fix =
