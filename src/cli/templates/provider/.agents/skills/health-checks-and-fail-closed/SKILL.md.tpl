@@ -141,6 +141,57 @@ Add ONE guard step per stale-if-error probe:
   by the serve layer, so `return result.value` discarding `result.meta` does
   not suppress the signal.
 
+## Declared absence served as an error: `expectedErrors`
+Some upstreams answer "nothing to return" with an error, not an empty body: no
+weather alert issued today is HTTP 404 `NO_DATA`, not `items: []`. A guard
+cannot see that — the monitor ends the attempt the moment an operation step
+answers non-2xx, before any guard runs — so without a declaration every quiet
+day is recorded `down`.
+
+Declare the answer on the operation step itself. The monitor matches the
+provider's own error envelope (`source: "upstream_failure"`) on `status` and
+`code` together, completes the attempt with `attribute` as the guard
+attribution, and never retries it:
+
+```ts
+{
+  id: "read-weather-alerts",
+  result: "response",
+  kind: "operation",
+  operationId: "weather-alerts",
+  inputTemplate: {},
+  expectedErrors: [
+    {
+      status: 404,
+      code: "NO_DATA",
+      attribute: [
+        {
+          operationId: "weather-alerts",
+          status: "degraded",
+          reasonCode: "expected_absence",
+          reasonKey: "health.operations.weather-alerts.national.calm",
+        },
+      ],
+    },
+  ],
+}
+```
+
+- Only `expected_absence` is admitted here. A stale-cache serve is a 2xx; a
+  non-2xx is either the declared absence or a real failure.
+- `code` must be a code the operation serves — declared in its `errorCodes`
+  or SDK-registered — with the same status, and served as the upstream's own
+  envelope: a registered upstream code such as `NO_DATA`, or a provider code
+  thrown with `category: "upstream_http"` (`apifuse check` fails otherwise: a
+  mismatched entry never matches and the quiet day stays `down`). Auth and
+  rate-limit codes, 401/403/429, 409/410/422 and every 5xx are never an
+  absence and are rejected.
+- The upstream must answer that code for nothing else. If the same status and
+  code also mean a real fault, split the codes in the handler first.
+- Keep the row guard (`array_length_gte` on the 2xx body) as well: an
+  `expectedErrors` entry answers the error envelope, the guard answers the
+  empty success body.
+
 ## Fail-closed: envelope level
 - Upstream error headers/codes → structured `ProviderError` with a stable
   `code` (`UPSTREAM_AUTH_ERROR`, `UPSTREAM_ERROR`, `NO_DATA`, ...).
