@@ -192,6 +192,39 @@ attribution, and never retries it:
   `expectedErrors` entry answers the error envelope, the guard answers the
   empty success body.
 
+## Announced upstream maintenance: `maintenanceWindows`
+When the upstream publishes a maintenance notice (the service is unavailable
+between two times), declare that window on `healthProbe` with the notice's
+URL. Failing samples inside the window are published as an expected absence,
+not an outage, and incidents whose failing samples all fall inside it are
+retracted, also when the window is declared after it happened (up to 90 days
+back).
+
+```ts
+healthProbe: {
+  maintenanceWindows: [
+    {
+      // Notice: JST 2026-10-14 02:00-08:00
+      startsAt: "2026-10-13T17:00:00Z",
+      endsAt: "2026-10-13T23:00:00Z",
+      sourceUrl: "https://buyee.jp/information/public/info_3077",
+      declaredAt: "2026-10-14T09:00:00Z",
+    },
+  ],
+},
+```
+
+- UTC only: convert the notice's local time (JST 02:00 is 17:00Z the day
+  before). An offset or a time without `Z` is rejected.
+- Declare only what the upstream announced, with the announcement's URL. The
+  platform retracts incidents on the strength of it.
+- `operations: ["search", ...]` narrows the window to the operations the
+  notice covers; omit it when the whole upstream is unavailable.
+- Probes keep running through the window. A failure that outlasts `endsAt` is
+  an outage from `endsAt` on, so copy the announced times; do not pad them.
+- `startsAt` may be at most 90 days before `declaredAt`; older samples are
+  gone. There is no recurring form: declare each announced window.
+
 ## Fail-closed: envelope level
 - Upstream error headers/codes → structured `ProviderError` with a stable
   `code` (`UPSTREAM_AUTH_ERROR`, `UPSTREAM_ERROR`, `NO_DATA`, ...).
@@ -229,6 +262,7 @@ details/logs only.
 - [ ] Every list op probe fails on 0 rows for a dense query
 - [ ] One semantic field asserted on a real row
 - [ ] Every `staleIfErrorMs` read has a `served_stale_cache` guard, placed first
+- [ ] Each announced upstream maintenance is a `maintenanceWindows` entry (UTC, notice URL)
 - [ ] Swallowed-error test exists (non-ok mock → handler rejects)
 - [ ] Non-empty upstream → zero normalized rows throws
 - [ ] No upstream free text in customer-facing error messages

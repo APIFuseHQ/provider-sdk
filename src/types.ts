@@ -1,6 +1,7 @@
 import type ms from "ms";
 import type { HandleContext, HandleKind } from "./handle.js";
-import type { HealthScenario } from "./health-scenario.js";
+import type { HealthScenario, NonEmpty } from "./health-scenario.js";
+import type { UpstreamMaintenanceWindow } from "./upstream-maintenance.js";
 import type { SerializedCookieJar } from "tough-cookie";
 
 import type { infer as ZodInfer, ZodType } from "zod";
@@ -887,9 +888,10 @@ export interface HealthCheckUnsupported {
 
 /**
  * Provider-level monitoring metadata for credential-bearing health checks.
- * Describes ONLY env-secret keys the runtime needs and the service account
- * to use; SHALL NOT carry probe schedules, sample inputs, or assertion
- * logic (those remain on `OperationDefinition.healthCheck`).
+ * Describes ONLY env-secret keys the runtime needs, the service account
+ * to use, and the upstream's announced maintenance windows; SHALL NOT carry
+ * probe schedules, sample inputs, or assertion logic (those remain on
+ * `OperationDefinition.healthCheck`).
  */
 export interface ProviderHealthMonitorConfig {
 	/**
@@ -927,6 +929,16 @@ export interface ProviderHealthMonitorConfig {
 	 * Defaults to the runtime's `APIFUSE__HEALTH_MONITOR__SERVICE_ACCOUNT_ID` env var.
 	 */
 	serviceAccount?: string;
+	/**
+	 * Maintenance windows the upstream announced, at absolute UTC instants with
+	 * the announcement's URL. Failing health samples inside a window are an
+	 * expected absence, not an outage, and incidents whose failing samples all
+	 * fall inside one are retracted, also for windows declared after the fact
+	 * (up to 90 days back). Probes keep running through the window. Validated
+	 * by `UpstreamMaintenanceWindowsSchema`; `operations` must name operations
+	 * of this provider.
+	 */
+	maintenanceWindows?: NonEmpty<UpstreamMaintenanceWindow>;
 }
 
 /**

@@ -38,6 +38,24 @@ describe("health-checks-and-fail-closed prompt asset", () => {
 		expect(skill).toContain("`expected_absence` is published as a non-incident status");
 	});
 
+	it("teaches maintenanceWindows as the declaration for an announced upstream maintenance", () => {
+		const skill = healthCheckSkill();
+		const section = skill.slice(
+			skill.indexOf("## Announced upstream maintenance"),
+			skill.indexOf("## Fail-closed: envelope level"),
+		);
+
+		expect(section).toContain("healthProbe: {");
+		expect(section).toContain("maintenanceWindows: [");
+		expect(section).toContain('startsAt: "2026-10-13T17:00:00Z"');
+		expect(section).toContain("sourceUrl:");
+		expect(section).toContain("declaredAt:");
+		expect(section).toContain("UTC only");
+		expect(section).toContain("an outage from `endsAt` on");
+		expect(section).toContain("90 days");
+		expect(skill).toContain("Each announced upstream maintenance is a `maintenanceWindows` entry");
+	});
+
 	it("teaches expectedErrors as the declaration for an absence served as an error", () => {
 		const skill = healthCheckSkill();
 		const section = skill.slice(

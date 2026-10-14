@@ -169,6 +169,12 @@ export {
 	ValueTypeSchema,
 } from "./health-scenario.js";
 export {
+	UPSTREAM_MAINTENANCE_LOOKBACK_DAYS,
+	UpstreamMaintenanceWindowSchema,
+	UpstreamMaintenanceWindowsSchema,
+} from "./upstream-maintenance.js";
+export type { UpstreamMaintenanceWindow } from "./upstream-maintenance.js";
+export {
 	getProviderLocalePath,
 	type ProviderErrorMessageParams,
 	providerLocaleKey,

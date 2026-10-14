@@ -5387,6 +5387,7 @@ export interface ProviderHealthMonitorConfig {
     credentialInputs?: Record<string, string>;
     defaultDegradedThresholdMs?: number;
     defaultProbeTimeoutMs?: number;
+    maintenanceWindows?: NonEmpty<UpstreamMaintenanceWindow>;
     // Warning: (ae-forgotten-export) The symbol "HealthMonitorProbeOverride" needs to be exported by the entry point index.d.ts
     probeOverrides?: Record<string, HealthMonitorProbeOverride>;
     requiredSecrets?: string[];
@@ -8600,6 +8601,24 @@ export function unwrapEnvelope(data: unknown, path?: string): unknown;
 // @public
 export function unwrapGovEnvelope(raw: unknown): unknown;
 
+// @public
+export const UPSTREAM_MAINTENANCE_LOOKBACK_DAYS = 90;
+
+// @public
+export type UpstreamMaintenanceWindow = {
+    startsAt: string;
+    endsAt: string;
+    sourceUrl: string;
+    declaredAt: string;
+    operations?: NonEmpty<string>;
+};
+
+// @public (undocumented)
+export const UpstreamMaintenanceWindowSchema: z.ZodType<UpstreamMaintenanceWindow>;
+
+// @public (undocumented)
+export const UpstreamMaintenanceWindowsSchema: z.ZodType<NonEmpty<UpstreamMaintenanceWindow>>;
+
 // @public (undocumented)
 const VALID_OPERATION_ERROR_STATUSES: readonly [400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504];
 
@@ -8723,12 +8742,12 @@ export { z }
 // dist/server/serve-implementation.d.ts:199:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:272:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:682:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1735:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1823:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1831:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1832:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2019:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1747:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1835:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1843:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1844:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2031:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
