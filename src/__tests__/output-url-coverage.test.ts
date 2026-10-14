@@ -229,4 +229,17 @@ describe("output URL coverage report", () => {
 	it("skips an output schema that is not zod", () => {
 		expect(reportOutputUrlCoverage({ x: { output: { parse: () => ({}) } } })).toEqual([]);
 	});
+
+	it("does not warn about a format: uri branch another branch declares with a helper", () => {
+		const warnings = reportOutputUrlCoverage({
+			detail: {
+				output: z.intersection(
+					z.object({ url: z.string().url() }),
+					z.object({ url: itemPage(), image_url: image() }),
+				),
+				fixtures: { response: { url: "https://shop.example.com/p/1", image_url: null } },
+			},
+		});
+		expect(warnings).toEqual([]);
+	});
 });

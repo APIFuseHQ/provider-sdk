@@ -293,6 +293,8 @@ export function reportOutputUrlCoverage(
 		}
 		for (const leaf of unannotated) {
 			if (leaf.format !== "uri" || warned.has(leaf.path)) continue;
+			// Another branch (an intersection, a union) declares it with a helper.
+			if (annotated.some((candidate) => outputPathMatches(candidate.path, leaf.path))) continue;
 			warned.add(leaf.path);
 			warnings.push(unclassifiedWarning(operationId, leaf.path, undefined));
 		}

@@ -4,7 +4,11 @@ import { relative, resolve, sep } from "node:path";
 import type TS from "typescript";
 
 import { appendPropertyPath, image, itemPage, link } from "../output-url.js";
-import { collectFixtureStrings, isAbsoluteHttpUrl } from "../output-url-coverage.js";
+import {
+	collectFixtureStrings,
+	isAbsoluteHttpUrl,
+	outputPathMatches,
+} from "../output-url-coverage.js";
 import { getTypeScript } from "../typescript-module.js";
 
 /**
@@ -111,7 +115,8 @@ const WALK_BUDGET = 100_000;
 // Single-string chain: kept, dropped (implied by the helper), or refused.
 const SINGLE_KEEP = new Set(["optional", "describe", "describeKey", "meta"]);
 const SINGLE_DROP = new Set(["url", "nullable", "min", "nonempty", "trim"]);
-const ELEMENT_DROP = new Set(["url", "nullable", "min", "nonempty", "trim"]);
+// imageList() items are never null, so an item's own .nullable() is not implied.
+const ELEMENT_DROP = new Set(["url", "min", "nonempty", "trim"]);
 const ARRAY_KEEP = new Set([
 	"optional",
 	"nullable",
@@ -981,7 +986,10 @@ class Analysis {
 						kind: "string",
 						list: true,
 						declaredUrl: element.declaredUrl,
-						elementMethods: element.methods,
+						// A describeKey(...) wrapper on the item is item metadata imageList() cannot carry.
+						elementMethods: element.wrap
+							? [...element.methods, { name: "describeKey", text: "" }]
+							: element.methods,
 						methods: calls,
 					};
 				}
@@ -1178,13 +1186,18 @@ class Analysis {
 			}
 		}
 		const fn = this.functionOf(callee);
-		if (fn && !ts.isArrowFunction(this.unwrap(callee))) {
+		if (fn) {
+			// A project function: its return value is the output. Its arguments
+			// reach the output only through the parameters the returns read
+			// (`compactRecord(record)` returning a copy of `record`), never as such:
+			// `mapItem({ image_url: raw })` passes an input the mapper may resolve.
 			const inner = this.bind(fn, args, env, target);
 			for (const returned of this.returnsOf(fn)) next(returned, path, inner, flat, projection);
+			return;
 		}
-		// Value-shaping helpers (compactRecord({...}), cache wrappers): their
-		// literal arguments and callbacks become the value. An awaited call is
-		// I/O; its literal arguments are a request, not the output.
+		// A library call in value position (Object.fromEntries(Object.entries(x)),
+		// a cache wrapper): its arguments and callbacks become the value. An
+		// awaited call is I/O; its arguments are a request, not the output.
 		for (const argument of args) {
 			const value = this.unwrap(argument);
 			if (
@@ -1192,7 +1205,8 @@ class Analysis {
 				(ts.isObjectLiteralExpression(value) ||
 					ts.isArrayLiteralExpression(value) ||
 					ts.isConditionalExpression(value) ||
-					ts.isCallExpression(value))
+					ts.isCallExpression(value) ||
+					ts.isIdentifier(value))
 			)
 				next(value, path, env, flat, projection);
 			else if (
@@ -1309,14 +1323,18 @@ class Analysis {
 				property: name,
 				paths,
 			};
-			const values = reaches.flatMap((reach) =>
-				(
-					reach.operation.fixtureStrings.get(parsed.list ? `${reach.path}[]` : reach.path) ?? []
-				).map((value) => ({ value, where: `${reach.operation.name}:${reach.path}` })),
-			);
-			const present = values.filter(({ value }) => value.trim().length > 0);
-			const absolute = present.filter(({ value }) => isAbsoluteHttpUrl(value));
-			const nonUrl = present.filter(({ value }) => !isAbsoluteHttpUrl(value));
+			const values = reaches.flatMap((reach) => {
+				const schemaPath = parsed.list ? `${reach.path}[]` : reach.path;
+				return [...reach.operation.fixtureStrings]
+					.filter(([valuePath]) => outputPathMatches(schemaPath, valuePath))
+					.flatMap(([, found]) =>
+						found.map((value) => ({ value, where: `${reach.operation.name}:${reach.path}` })),
+					);
+			});
+			// A blank string is not absent to the helpers: they refuse it, so a
+			// fixture holding one would stop validating.
+			const absolute = values.filter(({ value }) => isAbsoluteHttpUrl(value));
+			const nonUrl = values.filter(({ value }) => !isAbsoluteHttpUrl(value));
 			const evidence = absolute.length > 0 || parsed.declaredUrl;
 			const helper = FLEET_FIELD_HELPERS.get(name);
 
@@ -1479,13 +1497,24 @@ class Analysis {
 		if (targets.size > 0) {
 			const isTarget = (found: ReadonlySet<FieldNode> | undefined) =>
 				found && [...found].some((field) => targets.has(field)) ? found : undefined;
+			// Exact path, or a record path (`by_id.*.url`) the concrete key matches.
+			const fieldsAt = (table: ReadonlyMap<string, Set<FieldNode>>, path: string) => {
+				const exact = table.get(path);
+				if (exact) return exact;
+				const matched = [...table].filter(
+					([pattern]) => pattern.includes("*") && outputPathMatches(pattern, path),
+				);
+				return matched.length > 0
+					? new Set(matched.flatMap(([, fields]) => [...fields]))
+					: undefined;
+			};
 			for (const operation of this.operations) {
 				const table = this.operationTables.get(operation);
 				const handler = this.property(operation.node, "handler");
 				const fn = handler ? this.functionOf(handler) : this.methodHandler(operation.node);
 				if (!table || !fn) continue;
 				const walk: ValueWalk = {
-					lookup: (path) => isTarget(table.get(path)),
+					lookup: (path) => isTarget(fieldsAt(table, path)),
 					onSite,
 					seen: new Set(),
 				};
@@ -1501,7 +1530,7 @@ class Analysis {
 				});
 				if (![...table.values()].some((found) => isTarget(found))) return;
 				this.walkValue(argument, "", this.emptyEnv, {
-					lookup: (path) => isTarget(table.get(path)),
+					lookup: (path) => isTarget(fieldsAt(table, path)),
 					onSite,
 					seen: new Set(),
 				});

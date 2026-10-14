@@ -139,7 +139,13 @@ export const searchOperation = {
 };
 `;
 
-function writeFixtureRepository(): string {
+function writeFixtureRepository(
+	files: Readonly<Record<string, string>> = {
+		"schemas.ts": SCHEMAS,
+		"mapper.ts": MAPPER,
+		"index.ts": INDEX,
+	},
+): string {
 	const dir = mkdtempSync(join(tmpdir(), "apifuse-migrate-url-kinds-"));
 	tempDirs.push(dir);
 	mkdirSync(join(dir, "node_modules", "@apifuse"), { recursive: true });
@@ -159,9 +165,7 @@ function writeFixtureRepository(): string {
 			include: ["**/*.ts"],
 		}),
 	);
-	writeFileSync(join(dir, "schemas.ts"), SCHEMAS);
-	writeFileSync(join(dir, "mapper.ts"), MAPPER);
-	writeFileSync(join(dir, "index.ts"), INDEX);
+	for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, file), text);
 	return dir;
 }
 
@@ -413,5 +417,72 @@ export const op = {
 			}),
 		);
 		expect(result.rewrites.map((item) => item.property)).not.toContain("image_url");
+	});
+
+	it("leaves mapper inputs, blank or null-item fixtures, item metadata alone and reads record paths", () => {
+		const dir = writeFixtureRepository({
+			"schemas.ts": `import { describeKey, z } from "@apifuse/provider-sdk/provider";
+
+export const OutputSchema = z.object({
+  item: z.object({ image_url: z.string() }),
+  blank: z.object({ image_url: z.string() }),
+  nullable_items: z.object({ image_urls: z.array(z.string().nullable()) }),
+  described_items: z.object({ image_urls: z.array(describeKey(z.string().url(), "fields.image")) }),
+  by_id: z.record(z.string(), z.object({ url: z.string() })),
+});
+`,
+			"mapper.ts": `export function resolveImage(input: { image_url: string }) {
+  return { image_url: new URL(input.image_url, "https://cdn.example.com").href };
+}
+
+export function mapOutput(path: string) {
+  return {
+    item: resolveImage({ image_url: path }),
+    blank: { image_url: path },
+    nullable_items: { image_urls: [path] },
+    described_items: { image_urls: [path] },
+    by_id: { first: { url: path } },
+  };
+}
+`,
+			"index.ts": `import { OutputSchema } from "./schemas";
+import { mapOutput } from "./mapper";
+
+export const op = {
+  output: OutputSchema,
+  handler: async (_ctx: unknown, input: { path: string }) => mapOutput(input.path),
+  fixtures: {
+    request: { path: "/a.jpg" },
+    response: {
+      item: { image_url: "https://cdn.example.com/a.jpg" },
+      blank: { image_url: "" },
+      nullable_items: { image_urls: ["https://cdn.example.com/a.jpg", null] },
+      described_items: { image_urls: ["https://cdn.example.com/a.jpg"] },
+      by_id: { first: { url: "https://shop.example.com/p/1" } },
+    },
+  },
+};
+`,
+		});
+		const result = migrateUrlKindsRepository(dir, { typecheck: false });
+		const mapper = readFileSync(join(dir, "mapper.ts"), "utf8");
+
+		expect(result.rewrites.map((item) => `${item.paths.join("|")} -> ${item.after}`)).toEqual([
+			"item.image_url -> image()",
+			"by_id.*.url -> itemPage()",
+		]);
+		// the mapper's own return is wrapped, the input it resolves is not
+		expect(mapper).toContain(
+			'return { image_url: toImageUrl(new URL(input.image_url, "https://cdn.example.com").href, { field: "item.image_url" }) };',
+		);
+		expect(mapper).toContain("item: resolveImage({ image_url: path }),");
+		expect(mapper).toContain(
+			'by_id: { first: { url: toItemPageUrl(path, { field: "by_id.*.url" }) } },',
+		);
+		expect(result.skipped.map((item) => `${item.paths.join("|")} ${item.reason}`)).toEqual([
+			"blank.image_url non_url_fixture_value",
+			"nullable_items.image_urls unsupported_chain",
+			"described_items.image_urls unsupported_chain",
+		]);
 	});
 });
