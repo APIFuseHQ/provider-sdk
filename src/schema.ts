@@ -398,7 +398,11 @@ function pathMatches(
 	});
 }
 
-function isReservedSensitiveKey(key: string): boolean {
+/**
+ * Reserved secret-like keys (`RESERVED_SENSITIVE_KEYS`) are redacted at any depth whether or not a
+ * schema declares them; shared with the health-monitor capture evidence walker (ADR-0013).
+ */
+export function isReservedSensitiveKey(key: string): boolean {
 	const normalized = key.toLowerCase().replace(/[-_\s]/g, "");
 	return RESERVED_SENSITIVE_KEYS.has(normalized) || RESERVED_SENSITIVE_KEYS.has(key.toLowerCase());
 }
