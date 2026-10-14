@@ -4,6 +4,7 @@ import {
 	defineHealthJourney,
 	defineHealthScenario,
 	every,
+	type ExpectedError,
 	type HealthJourneyDefinition,
 	type HealthCheckCase,
 	type HealthScenario,
@@ -303,6 +304,32 @@ describe("declarative health scenarios", () => {
 			accept: { kind: "predicate", operator: "is_true", actual: true },
 		};
 		expect(() => defineHealthScenario(candidate)).toThrow();
+	});
+
+	it("admits relative-date offsets from -365 to 365 days", () => {
+		const node = (offsetDays: number) => ({
+			relativeDate: {
+				anchor: "operation_started_at" as const,
+				offsetDays,
+				timeZone: "Asia/Seoul" as const,
+				format: "YYYY-MM-DD" as const,
+			},
+		});
+		const withStartOffset = (offsetDays: number) => {
+			const scenario = validScenario();
+			const step = scenario.steps[0];
+			if (step?.kind !== "operation") throw new Error("expected operation step");
+			step.inputTemplate = { start_date: node(offsetDays), end_date: node(0) };
+			return scenario;
+		};
+		for (const offsetDays of [-365, -182, -1, 0, 1, 365]) {
+			expect(defineHealthScenario(withStartOffset(offsetDays))).toEqual(
+				withStartOffset(offsetDays),
+			);
+		}
+		for (const offsetDays of [-366, 366, -0.5, 1.5]) {
+			expect(() => defineHealthScenario(withStartOffset(offsetDays))).toThrow();
+		}
 	});
 
 	it("rejects selector depth, property byte length, and index bounds", () => {
@@ -605,6 +632,98 @@ describe("declarative health scenarios", () => {
 		};
 		const parsed = defineHealthScenario(scenario);
 		expect(JSON.parse(JSON.stringify(parsed))).toEqual(parsed);
+	});
+
+	it("authors a declared non-2xx absence on the operation step", () => {
+		// An upstream that answers "nothing to return" with an error envelope
+		// (404 NO_DATA on a quiet day) never reaches a guard: the monitor ends the
+		// attempt on a non-2xx before any guard runs. The declaration therefore
+		// lives on the operation step and reuses the guard attribution, narrowed
+		// to the one reason an error envelope can mean.
+		const base = validScenario();
+		const [operation, ...rest] = base.steps;
+		if (operation.kind !== "operation") throw new Error("expected operation step");
+		const expectedError: ExpectedError = {
+			status: 404,
+			code: "NO_DATA",
+			attribute: [
+				{
+					operationId: "ping",
+					status: "degraded",
+					reasonCode: "expected_absence",
+					reasonKey: "health.ping.calm",
+				},
+			],
+		};
+		const scenario: HealthScenario = {
+			...base,
+			steps: [{ ...operation, expectedErrors: [expectedError] }, ...rest],
+		};
+		const parsed = defineHealthScenario(scenario);
+		expect(JSON.parse(JSON.stringify(parsed))).toEqual(parsed);
+		const parsedOperation = parsed.steps[0];
+		expect(
+			parsedOperation.kind === "operation" ? parsedOperation.expectedErrors : undefined,
+		).toEqual([expectedError]);
+	});
+
+	it("rejects expected errors that are not an absence", () => {
+		const withExpectedErrors = (expectedErrors: unknown) => {
+			const base = validScenario();
+			const [operation, ...rest] = base.steps;
+			return { ...base, steps: [{ ...operation, expectedErrors }, ...rest] };
+		};
+		const attribute = (reasonCode: string) => [
+			{ operationId: "ping", status: "degraded", reasonCode, reasonKey: "health.ping.calm" },
+		];
+		// Only `expected_absence`: a stale-cache serve is a 2xx and has no error
+		// envelope to declare.
+		expect(() =>
+			defineHealthScenario(
+				withExpectedErrors([
+					{ status: 404, code: "NO_DATA", attribute: attribute("served_stale_cache") },
+				]),
+			),
+		).toThrow();
+		// The retry classes and credential refusals are never an absence.
+		for (const status of [401, 403, 429, 500, 502, 503, 200, 399]) {
+			expect(() =>
+				defineHealthScenario(
+					withExpectedErrors([
+						{ status, code: "NO_DATA", attribute: attribute("expected_absence") },
+					]),
+				),
+			).toThrow();
+		}
+		// Empty list, empty attribution, unknown fields, duplicate answers.
+		expect(() => defineHealthScenario(withExpectedErrors([]))).toThrow();
+		expect(() =>
+			defineHealthScenario(withExpectedErrors([{ status: 404, code: "NO_DATA", attribute: [] }])),
+		).toThrow();
+		expect(() =>
+			defineHealthScenario(
+				withExpectedErrors([
+					{ status: 404, code: "NO_DATA", attribute: attribute("expected_absence"), retry: true },
+				]),
+			),
+		).toThrow();
+		expect(() =>
+			defineHealthScenario(
+				withExpectedErrors([
+					{ status: 404, code: "NO_DATA", attribute: attribute("expected_absence") },
+					{ status: 404, code: "NO_DATA", attribute: attribute("expected_absence") },
+				]),
+			),
+		).toThrow(/duplicate expected error 404 NO_DATA/);
+		// Two different answers on one step are fine.
+		expect(() =>
+			defineHealthScenario(
+				withExpectedErrors([
+					{ status: 404, code: "NO_DATA", attribute: attribute("expected_absence") },
+					{ status: 404, code: "NO_ROUTE", attribute: attribute("expected_absence") },
+				]),
+			),
+		).not.toThrow();
 	});
 
 	it("round-trips v2 additions through JSON unchanged", () => {

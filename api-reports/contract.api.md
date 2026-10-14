@@ -614,6 +614,20 @@ interface EnvContext {
     get(key: string): string | undefined;
 }
 
+// Warning: (ae-forgotten-export) The symbol "GuardAttribution" needs to be exported by the entry point contract.d.ts
+//
+// @public
+type ExpectedAbsenceAttribution = Omit<GuardAttribution, "reasonCode"> & {
+    reasonCode: "expected_absence";
+};
+
+// @public
+type ExpectedError = {
+    status: number;
+    code: string;
+    attribute: NonEmpty<ExpectedAbsenceAttribution>;
+};
+
 // Warning: (ae-forgotten-export) The symbol "ProviderDefinition" needs to be exported by the entry point contract.d.ts
 //
 // @public (undocumented)
@@ -1885,6 +1899,7 @@ type OperationStep = StepBase & {
     retry?: RetryPolicy;
     candidate?: CandidatePolicy | CandidateBlock;
     journal?: JournalPolicy;
+    expectedErrors?: NonEmpty<ExpectedError>;
 };
 
 // Warning: (ae-forgotten-export) The symbol "OperationJsonTransport" needs to be exported by the entry point contract.d.ts
@@ -3943,26 +3958,27 @@ interface VerificationCodeExtractionResult {
 
 // Warnings were encountered during analysis:
 //
-// dist/health-scenario.d.ts:1491:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1500:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1530:5 - (ae-forgotten-export) The symbol "StepReference" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1541:5 - (ae-forgotten-export) The symbol "Reference" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1574:5 - (ae-forgotten-export) The symbol "GuardReasonCode" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1646:5 - (ae-forgotten-export) The symbol "ScopedAssertionExpression" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1653:5 - (ae-forgotten-export) The symbol "JsonTemplate" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1654:5 - (ae-forgotten-export) The symbol "CredentialReference" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1655:5 - (ae-forgotten-export) The symbol "RetryPolicy" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1656:5 - (ae-forgotten-export) The symbol "CandidatePolicy" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1656:5 - (ae-forgotten-export) The symbol "CandidateBlock" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1657:5 - (ae-forgotten-export) The symbol "JournalPolicy" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1662:5 - (ae-forgotten-export) The symbol "BoundedJsonPath" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1662:5 - (ae-forgotten-export) The symbol "FindFirst" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1663:5 - (ae-forgotten-export) The symbol "ValueType" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1669:5 - (ae-forgotten-export) The symbol "AssertionExpression" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1675:9 - (ae-forgotten-export) The symbol "GuardAttribution" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1894:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1896:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point contract.d.ts
-// dist/health-scenario.d.ts:1897:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1503:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1512:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1542:5 - (ae-forgotten-export) The symbol "StepReference" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1553:5 - (ae-forgotten-export) The symbol "Reference" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1586:5 - (ae-forgotten-export) The symbol "GuardReasonCode" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1622:5 - (ae-forgotten-export) The symbol "ExpectedAbsenceAttribution" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1694:5 - (ae-forgotten-export) The symbol "ScopedAssertionExpression" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1701:5 - (ae-forgotten-export) The symbol "JsonTemplate" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1702:5 - (ae-forgotten-export) The symbol "CredentialReference" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1703:5 - (ae-forgotten-export) The symbol "RetryPolicy" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1704:5 - (ae-forgotten-export) The symbol "CandidatePolicy" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1704:5 - (ae-forgotten-export) The symbol "CandidateBlock" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1705:5 - (ae-forgotten-export) The symbol "JournalPolicy" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1707:5 - (ae-forgotten-export) The symbol "ExpectedError" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1712:5 - (ae-forgotten-export) The symbol "BoundedJsonPath" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1712:5 - (ae-forgotten-export) The symbol "FindFirst" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1713:5 - (ae-forgotten-export) The symbol "ValueType" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1719:5 - (ae-forgotten-export) The symbol "AssertionExpression" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1946:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1948:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point contract.d.ts
+// dist/health-scenario.d.ts:1949:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:128:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:356:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:358:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point contract.d.ts
