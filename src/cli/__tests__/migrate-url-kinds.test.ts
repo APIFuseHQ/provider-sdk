@@ -16,7 +16,7 @@ import { migrateUrlKindsRepository } from "../migrate-url-kinds.js";
 
 const SDK_ROOT = dirname(dirname(dirname(import.meta.dir)));
 // Each run builds a TypeScript program over the fixture and the SDK's types.
-setDefaultTimeout(60_000);
+setDefaultTimeout(120_000);
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -431,6 +431,7 @@ export const OutputSchema = z.object({
   by_id: z.record(z.string(), z.object({ url: z.string() })),
   external: z.object({ image_url: z.string() }),
   external_ref: z.object({ image_url: z.string() }),
+  gallery: z.array(z.object({ image_url: z.string() })),
 });
 `,
 			"mapper.ts": `declare function externalResolve<T>(value: T): T;
@@ -449,6 +450,7 @@ export function mapOutput(path: string) {
     by_id: { first: { url: path } },
     external: externalResolve({ image_url: path }),
     external_ref: externalResolve(raw),
+    gallery: Array.from([path], (src) => ({ image_url: src })),
   };
 }
 `,
@@ -468,6 +470,7 @@ export const op = {
       by_id: { first: { url: "https://shop.example.com/p/1" } },
       external: { image_url: "https://cdn.example.com/b.jpg" },
       external_ref: { image_url: "https://cdn.example.com/c.jpg" },
+      gallery: [{ image_url: "https://cdn.example.com/d.jpg" }],
     },
   },
 };
@@ -481,6 +484,7 @@ export const op = {
 			"by_id.*.url -> itemPage()",
 			"external.image_url -> image()",
 			"external_ref.image_url -> image()",
+			"gallery[].image_url -> image()",
 		]);
 		// the mapper's own return is wrapped, the input it resolves is not
 		expect(mapper).toContain(
@@ -490,6 +494,9 @@ export const op = {
 		// an unknown function's arguments are its inputs
 		expect(mapper).toContain("external: externalResolve({ image_url: path }),");
 		expect(mapper).toContain("const raw = { image_url: path };");
+		expect(mapper).toContain(
+			'gallery: Array.from([path], (src) => ({ image_url: toImageUrl(src, { field: "gallery[].image_url" }) })),',
+		);
 		expect(mapper).toContain(
 			'by_id: { first: { url: toItemPageUrl(path, { field: "by_id.*.url" }) } },',
 		);

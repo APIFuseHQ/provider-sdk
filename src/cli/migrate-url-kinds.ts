@@ -1194,8 +1194,21 @@ class Analysis {
 		// properties (Object.fromEntries(Object.entries(x)), Object.assign,
 		// structuredClone) pass it through. An unknown function may resolve or
 		// drop the value, so its arguments are inputs, not the output.
-		if (!awaited && this.isPassThroughCall(callee))
-			for (const argument of args) next(argument, path, env, flat, projection);
+		if (awaited || !this.isPassThroughCall(callee)) return;
+		const builtin = ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
+		if (builtin === "of") {
+			// Array.of(a, b): each argument is one element.
+			if (projection.length === 0) for (const argument of args) next(argument, elementPath);
+			return;
+		}
+		if (builtin === "from" && args[1]) {
+			// Array.from(source, mapper): the elements are the mapper's returns.
+			const mapper = this.functionOf(args[1]);
+			if (mapper && projection.length === 0)
+				for (const returned of this.returnsOf(mapper)) next(returned, elementPath, env);
+			return;
+		}
+		for (const argument of args) next(argument, path, env, flat, projection);
 	}
 
 	private isPassThroughCall(callee: TS.Expression): boolean {
