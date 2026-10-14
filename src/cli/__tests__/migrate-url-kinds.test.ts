@@ -429,19 +429,26 @@ export const OutputSchema = z.object({
   nullable_items: z.object({ image_urls: z.array(z.string().nullable()) }),
   described_items: z.object({ image_urls: z.array(describeKey(z.string().url(), "fields.image")) }),
   by_id: z.record(z.string(), z.object({ url: z.string() })),
+  external: z.object({ image_url: z.string() }),
+  external_ref: z.object({ image_url: z.string() }),
 });
 `,
-			"mapper.ts": `export function resolveImage(input: { image_url: string }) {
+			"mapper.ts": `declare function externalResolve<T>(value: T): T;
+
+export function resolveImage(input: { image_url: string }) {
   return { image_url: new URL(input.image_url, "https://cdn.example.com").href };
 }
 
 export function mapOutput(path: string) {
+  const raw = { image_url: path };
   return {
     item: resolveImage({ image_url: path }),
     blank: { image_url: path },
     nullable_items: { image_urls: [path] },
     described_items: { image_urls: [path] },
     by_id: { first: { url: path } },
+    external: externalResolve({ image_url: path }),
+    external_ref: externalResolve(raw),
   };
 }
 `,
@@ -459,6 +466,8 @@ export const op = {
       nullable_items: { image_urls: ["https://cdn.example.com/a.jpg", null] },
       described_items: { image_urls: ["https://cdn.example.com/a.jpg"] },
       by_id: { first: { url: "https://shop.example.com/p/1" } },
+      external: { image_url: "https://cdn.example.com/b.jpg" },
+      external_ref: { image_url: "https://cdn.example.com/c.jpg" },
     },
   },
 };
@@ -470,12 +479,17 @@ export const op = {
 		expect(result.rewrites.map((item) => `${item.paths.join("|")} -> ${item.after}`)).toEqual([
 			"item.image_url -> image()",
 			"by_id.*.url -> itemPage()",
+			"external.image_url -> image()",
+			"external_ref.image_url -> image()",
 		]);
 		// the mapper's own return is wrapped, the input it resolves is not
 		expect(mapper).toContain(
 			'return { image_url: toImageUrl(new URL(input.image_url, "https://cdn.example.com").href, { field: "item.image_url" }) };',
 		);
 		expect(mapper).toContain("item: resolveImage({ image_url: path }),");
+		// an unknown function's arguments are its inputs
+		expect(mapper).toContain("external: externalResolve({ image_url: path }),");
+		expect(mapper).toContain("const raw = { image_url: path };");
 		expect(mapper).toContain(
 			'by_id: { first: { url: toItemPageUrl(path, { field: "by_id.*.url" }) } },',
 		);

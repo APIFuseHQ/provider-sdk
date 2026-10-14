@@ -93,19 +93,14 @@ const PASS_THROUGH_ARRAY_METHODS = new Set([
 	"with",
 	"toSpliced",
 ]);
-const CALLBACK_ARRAY_METHODS = new Set([
-	"reduce",
-	"reduceRight",
-	"forEach",
-	"some",
-	"every",
-	"find",
-	"findIndex",
-	"findLast",
-	"findLastIndex",
-	"filter",
-	"sort",
-	"toSorted",
+// Built-ins whose result carries their arguments' properties unchanged.
+const PASS_THROUGH_CALLS = new Set([
+	"Object.fromEntries",
+	"Object.entries",
+	"Object.assign",
+	"Object.freeze",
+	"Array.from",
+	"Array.of",
 ]);
 const SKIP_DIRECTORIES = ["node_modules", ".git", "dist", ".worktree", ".worktrees"];
 const TODO_MARKER = "TODO(url-kind)";
@@ -1195,26 +1190,22 @@ class Analysis {
 			for (const returned of this.returnsOf(fn)) next(returned, path, inner, flat, projection);
 			return;
 		}
-		// A library call in value position (Object.fromEntries(Object.entries(x)),
-		// a cache wrapper): its arguments and callbacks become the value. An
-		// awaited call is I/O; its arguments are a request, not the output.
-		for (const argument of args) {
-			const value = this.unwrap(argument);
-			if (
-				!awaited &&
-				(ts.isObjectLiteralExpression(value) ||
-					ts.isArrayLiteralExpression(value) ||
-					ts.isConditionalExpression(value) ||
-					ts.isCallExpression(value) ||
-					ts.isIdentifier(value))
-			)
-				next(value, path, env, flat, projection);
-			else if (
-				(ts.isArrowFunction(value) || ts.isFunctionExpression(value)) &&
-				(method === undefined || !CALLBACK_ARRAY_METHODS.has(method))
-			)
-				for (const returned of this.returnsOf(value)) next(returned, path, env, flat, projection);
-		}
+		// Any other call: only built-ins known to return their argument's
+		// properties (Object.fromEntries(Object.entries(x)), Object.assign,
+		// structuredClone) pass it through. An unknown function may resolve or
+		// drop the value, so its arguments are inputs, not the output.
+		if (!awaited && this.isPassThroughCall(callee))
+			for (const argument of args) next(argument, path, env, flat, projection);
+	}
+
+	private isPassThroughCall(callee: TS.Expression): boolean {
+		const ts = this.ts;
+		if (ts.isIdentifier(callee)) return callee.text === "structuredClone";
+		return (
+			ts.isPropertyAccessExpression(callee) &&
+			ts.isIdentifier(callee.expression) &&
+			PASS_THROUGH_CALLS.has(`${callee.expression.text}.${callee.name.text}`)
+		);
 	}
 
 	private readonly pushes = new Map<TS.Symbol, TS.Expression[]>();
@@ -1499,10 +1490,10 @@ class Analysis {
 				found && [...found].some((field) => targets.has(field)) ? found : undefined;
 			// Exact path, or a record path (`by_id.*.url`) the concrete key matches.
 			const fieldsAt = (table: ReadonlyMap<string, Set<FieldNode>>, path: string) => {
-				const exact = table.get(path);
-				if (exact) return exact;
+				// Exact and record-wildcard declarations of the same location together.
 				const matched = [...table].filter(
-					([pattern]) => pattern.includes("*") && outputPathMatches(pattern, path),
+					([pattern]) =>
+						pattern === path || (pattern.includes("*") && outputPathMatches(pattern, path)),
 				);
 				return matched.length > 0
 					? new Set(matched.flatMap(([, fields]) => [...fields]))
