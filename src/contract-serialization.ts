@@ -60,8 +60,16 @@ function digest(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
-function isZodSchema(schema: SchemaLike): schema is ZodType {
+function isZodSchema(schema: unknown): schema is ZodType {
 	return schema instanceof z.ZodType;
+}
+
+/**
+ * The JSON Schema of a zod schema as contract extraction emits it, or
+ * `undefined` for any other schema. Throws when the conversion fails.
+ */
+export function zodSchemaToJson(schema: unknown): JsonValue | undefined {
+	return isZodSchema(schema) ? zodJsonSchema(schema) : undefined;
 }
 
 function zodJsonSchema(schema: ZodType): JsonValue {

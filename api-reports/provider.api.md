@@ -2275,7 +2275,7 @@ interface HttpStreamResponse {
 }
 
 // @public
-export function image(options?: ImageFieldOptions): z.ZodType<ImageUrl, string>;
+export function image(options?: ImageFieldOptions): z.ZodNullable<z.ZodType<ImageUrl, string>>;
 
 // @public
 export interface ImageFieldOptions {
@@ -2347,10 +2347,10 @@ export function isSessionExpiredError(value: unknown): value is SessionExpiredEr
 export function isTransportError(value: unknown): value is TransportError;
 
 // @public
-export function itemPage(): z.ZodType<ItemPageUrl, string>;
+export function itemPage(): z.ZodNullable<z.ZodType<ItemPageUrl, string>>;
 
 // @public
-export function itemPageFrom(template: string, values: Readonly<Record<string, string | number | null | undefined>>, options?: Pick<OutputUrlOptions, "field">): ItemPageUrl | undefined;
+export function itemPageFrom(template: string, values: Readonly<Record<string, string | number | null | undefined>>, options?: Pick<OutputUrlOptions, "field">): ItemPageUrl | null;
 
 // @public
 export type ItemPageUrl = `http${string}://${string}` & {
@@ -2390,7 +2390,7 @@ export type JsonValue = JsonPrimitive | readonly JsonValue[] | {
 };
 
 // @public
-export function link(): z.ZodType<LinkUrl, string>;
+export function link(): z.ZodNullable<z.ZodType<LinkUrl, string>>;
 
 // @public
 export type LinkUrl = `http${string}://${string}` & {
@@ -3205,14 +3205,6 @@ const OUTPUT_URL_KIND: unique symbol;
 
 // @public
 export const OUTPUT_URL_KINDS: readonly ["image", "item_page", "link"];
-
-// @public
-export interface OutputUrlDrop {
-    field?: string;
-    kind: OutputUrlKind;
-    reason: OutputUrlDropReason;
-    value?: string;
-}
 
 // @public
 export type OutputUrlDropReason = (typeof OUTPUT_URL_DROP_REASONS)[number];
@@ -5960,16 +5952,16 @@ interface SttWarning {
 }
 
 // @public
-export function toImageUrl(raw: unknown, options?: ImageUrlOptions): ImageUrl | undefined;
+export function toImageUrl(raw: unknown, options?: ImageUrlOptions): ImageUrl | null;
 
 // @public
 export function toImageUrls(raws: readonly unknown[] | null | undefined, options?: ImageUrlOptions): ImageUrl[];
 
 // @public
-export function toItemPageUrl(raw: unknown, options?: OutputUrlOptions): ItemPageUrl | undefined;
+export function toItemPageUrl(raw: unknown, options?: OutputUrlOptions): ItemPageUrl | null;
 
 // @public
-export function toLinkUrl(raw: unknown, options?: OutputUrlOptions): LinkUrl | undefined;
+export function toLinkUrl(raw: unknown, options?: OutputUrlOptions): LinkUrl | null;
 
 // @public (undocumented)
 interface TraceContext {

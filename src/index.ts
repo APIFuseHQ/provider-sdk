@@ -388,7 +388,6 @@ export {
 	noMedia,
 	OUTPUT_URL_DROP_REASONS,
 	OUTPUT_URL_KINDS,
-	type OutputUrlDrop,
 	type OutputUrlDropReason,
 	type OutputUrlKind,
 	type OutputUrlOptions,
@@ -447,7 +446,6 @@ export type {
 	HealthCheckCaseResult,
 	HealthCheckSuite,
 	HealthCheckUnsupported,
-	NoMediaDeclaration,
 	HealthJourneyDefinition,
 	HealthJourneyEventContext,
 	HealthJourneyGatewayContext,
@@ -494,6 +492,7 @@ export type {
 	NativeTcpPortRange,
 	NativeTcpTlsMode,
 	NativeTlsConnectOptions,
+	NoMediaDeclaration,
 	OcrCaptchaCandidate,
 	OcrCaptchaOptions,
 	OcrCaptchaResult,
@@ -685,3 +684,7 @@ export {
 	type StateTelemetrySink,
 	type StateTelemetryViolation,
 } from "./runtime/state-telemetry.js";
+export type {
+	OutputUrlDropGroup,
+	OutputUrlEventsLogPayload,
+} from "./runtime/output-url-telemetry.js";

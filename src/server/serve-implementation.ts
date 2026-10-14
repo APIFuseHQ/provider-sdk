@@ -95,8 +95,6 @@ import {
 } from "../runtime/egress-lease.js";
 import { createEnvContext } from "../runtime/env.js";
 import { executeOperation } from "../runtime/executor.js";
-import { observeOutputUrlDrops } from "../runtime/output-url-observer.js";
-import { OutputUrlTelemetryCollector } from "../runtime/output-url-telemetry.js";
 import { createHttpClient } from "../runtime/http.js";
 import { NativeTelemetryCollector } from "../runtime/native-telemetry.js";
 import {
@@ -109,6 +107,8 @@ import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
 import { bindOcrTelemetry, OcrTelemetryCollector } from "../runtime/ocr-telemetry.js";
+import { observeOutputUrlDrops } from "../runtime/output-url-observer.js";
+import { OutputUrlTelemetryCollector } from "../runtime/output-url-telemetry.js";
 import { getProviderBaseUrl, getProviderStealthBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,

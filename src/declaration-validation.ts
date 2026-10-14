@@ -1,4 +1,4 @@
-import { describeSchema } from "./contract-serialization.js";
+import { zodSchemaToJson } from "./contract-serialization.js";
 import { ProviderError } from "./errors.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
 import { APIFUSE_URL_KIND_META_KEY, inspectOutputUrlKinds } from "./output-url.js";
@@ -61,11 +61,11 @@ export function validateFailClosedDeclaration(provider: ProviderDefinition): voi
 	const violations: DeclarationViolation[] = [];
 	validateHealthDeclaration(provider, violations);
 	validatePinnedWireFieldPaths(provider, violations);
-	validateSchemaDeclaration(provider, violations);
+	const outputSchemas = validateSchemaDeclaration(provider, violations);
 	validateProxyDeclaration(provider, violations);
 	validateResolverClientProfileDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
-	validateOutputUrlKindDeclaration(provider, violations);
+	validateOutputUrlKindDeclaration(provider, outputSchemas, violations);
 	if (violations.length > 0) throw declarationInvalidError(violations);
 }
 
@@ -168,9 +168,9 @@ function collectOperationDeclarationViolations(
 	provider: OperationDeclarationRulesInput,
 	violations: DeclarationViolation[],
 ): void {
-	validateSchemaDeclaration(provider, violations);
+	const outputSchemas = validateSchemaDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
-	validateOutputUrlKindDeclaration(provider, violations);
+	validateOutputUrlKindDeclaration(provider, outputSchemas, violations);
 }
 
 function validateHealthDeclaration(
@@ -226,14 +226,21 @@ function healthJourneyPath(journey: HealthJourneyDefinition, index: number): str
 		: `healthJourneys[${index}]`;
 }
 
+/**
+ * Checks that every operation schema converts to JSON Schema and returns the
+ * converted output schemas by operation id (absent when conversion failed or
+ * the schema is not zod), so later rules read them without converting again.
+ */
 function validateSchemaDeclaration(
 	provider: OperationDeclarationRulesInput,
 	violations: DeclarationViolation[],
-): void {
+): Map<string, unknown> {
+	const outputSchemas = new Map<string, unknown>();
 	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
+		const outputPath = `operations.${operationId}.output`;
 		const schemaEntries: Array<[string, unknown]> = [
 			[`operations.${operationId}.input`, operation.input],
-			[`operations.${operationId}.output`, operation.output],
+			[outputPath, operation.output],
 		];
 		// SSE event schemas reach contract extraction the same way input/output do,
 		// so a transform-bearing event schema would abort extraction at runtime while
@@ -249,7 +256,8 @@ function validateSchemaDeclaration(
 		}
 		for (const [path, schema] of schemaEntries) {
 			try {
-				describeSchema(schema as Parameters<typeof describeSchema>[0]);
+				const jsonSchema = zodSchemaToJson(schema);
+				if (path === outputPath) outputSchemas.set(operationId, jsonSchema);
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				violations.push({
@@ -261,6 +269,7 @@ function validateSchemaDeclaration(
 			}
 		}
 	}
+	return outputSchemas;
 }
 
 /**
@@ -271,22 +280,13 @@ function validateSchemaDeclaration(
  */
 function validateOutputUrlKindDeclaration(
 	provider: OperationDeclarationRulesInput,
+	outputSchemas: ReadonlyMap<string, unknown>,
 	violations: DeclarationViolation[],
 ): void {
 	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
-		let jsonSchema: unknown;
-		try {
-			const described = describeSchema(operation.output as Parameters<typeof describeSchema>[0]);
-			jsonSchema =
-				described && typeof described === "object" && !Array.isArray(described)
-					? Reflect.get(described, "jsonSchema")
-					: undefined;
-		} catch {
-			// operation-schema-serializable reports the conversion failure.
-			continue;
-		}
+		// operation-schema-serializable reports a failed conversion.
 		const path = `operations.${operationId}.output`;
-		const { entries, conflicts } = inspectOutputUrlKinds(jsonSchema);
+		const { entries, conflicts } = inspectOutputUrlKinds(outputSchemas.get(operationId));
 		for (const conflict of conflicts) {
 			const helper = conflict.kind === "item_page" ? "itemPage()" : "image()";
 			violations.push({

@@ -243,3 +243,13 @@ export {
 	type NativeTelemetryVendorSkipReason,
 	type NativeVendorSkipTelemetryEvent,
 } from "../runtime/native-telemetry.js";
+export {
+	OUTPUT_URL_DROP_REASONS,
+	OUTPUT_URL_KINDS,
+	type OutputUrlDropReason,
+	type OutputUrlKind,
+} from "../output-url.js";
+export type {
+	OutputUrlDropGroup,
+	OutputUrlEventsLogPayload,
+} from "../runtime/output-url-telemetry.js";

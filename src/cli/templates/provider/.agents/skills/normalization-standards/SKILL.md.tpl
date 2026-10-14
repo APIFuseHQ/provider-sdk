@@ -49,10 +49,14 @@ Public output is the product. Apply these to every schema + mapper pair.
   `UPSTREAM_SCHEMA_ERROR`; do not emit partial rows.
 
 ## Images and item links
-- Declare pictures and pages, never plain strings: `image()` (main picture),
-  `image({ thumbnail: true })`, `imageList()`, `itemPage()` (the item's own
-  page), `link()` (any other URL). Fill them with `toImageUrl()`,
-  `toImageUrls()`, `toItemPageUrl()` / `itemPageFrom()`, `toLinkUrl()`.
+- Declare new pictures and pages with the helpers, never plain strings:
+  `image()` (main picture), `image({ thumbnail: true })`, `imageList()`,
+  `itemPage()` (the item's own page), `link()` (any other URL). Fill them with
+  `toImageUrl()`, `toImageUrls()`, `toItemPageUrl()` / `itemPageFrom()`,
+  `toLinkUrl()`. They admit `null` (missing or left out) without `.nullable()`.
+- Moving an existing plain field onto a helper rotates the operation's
+  compatibility hash; do it in the `add-output-url-kinds` migration order, not
+  as a drive-by edit.
 - If the upstream gives a picture or a page for the item, publish it. Read the
   exact upstream key from the recorded fixture (`pdImgUrl` is not `imgUrl`).
 - Images are `https://` only. Add a host to `upgradeHttp` only after

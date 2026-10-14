@@ -3009,7 +3009,7 @@ export interface HttpTelemetrySink {
 export type IanaTimeZone = string;
 
 // @public
-export function image(options?: ImageFieldOptions): z.ZodType<ImageUrl, string>;
+export function image(options?: ImageFieldOptions): z.ZodNullable<z.ZodType<ImageUrl, string>>;
 
 // @public
 export interface ImageFieldOptions {
@@ -3131,10 +3131,10 @@ export function isTransportError(value: unknown): value is TransportError;
 export function isValidationError(value: unknown): value is ValidationError;
 
 // @public
-export function itemPage(): z.ZodType<ItemPageUrl, string>;
+export function itemPage(): z.ZodNullable<z.ZodType<ItemPageUrl, string>>;
 
 // @public
-export function itemPageFrom(template: string, values: Readonly<Record<string, string | number | null | undefined>>, options?: Pick<OutputUrlOptions, "field">): ItemPageUrl | undefined;
+export function itemPageFrom(template: string, values: Readonly<Record<string, string | number | null | undefined>>, options?: Pick<OutputUrlOptions, "field">): ItemPageUrl | null;
 
 // @public
 export type ItemPageUrl = `http${string}://${string}` & {
@@ -3174,7 +3174,7 @@ export type JsonValue = JsonPrimitive | readonly JsonValue[] | {
 };
 
 // @public
-export function link(): z.ZodType<LinkUrl, string>;
+export function link(): z.ZodNullable<z.ZodType<LinkUrl, string>>;
 
 // @public
 export type LinkUrl = `http${string}://${string}` & {
@@ -4364,15 +4364,22 @@ const OUTPUT_URL_KIND: unique symbol;
 export const OUTPUT_URL_KINDS: readonly ["image", "item_page", "link"];
 
 // @public
-export interface OutputUrlDrop {
-    field?: string;
+export type OutputUrlDropGroup = {
     kind: OutputUrlKind;
     reason: OutputUrlDropReason;
-    value?: string;
-}
+    field?: string;
+    count: number;
+    example?: string;
+};
 
 // @public
 export type OutputUrlDropReason = (typeof OUTPUT_URL_DROP_REASONS)[number];
+
+// @public
+export type OutputUrlEventsLogPayload = {
+    telemetryFailed?: true;
+    outputUrlDropped: OutputUrlDropGroup[];
+};
 
 // @public
 export type OutputUrlKind = (typeof OUTPUT_URL_KINDS)[number];
@@ -8554,7 +8561,7 @@ export function today(timezone: string): string;
 export function toFloat(v: unknown, decimals?: number): number;
 
 // @public
-export function toImageUrl(raw: unknown, options?: ImageUrlOptions): ImageUrl | undefined;
+export function toImageUrl(raw: unknown, options?: ImageUrlOptions): ImageUrl | null;
 
 // @public
 export function toImageUrls(raws: readonly unknown[] | null | undefined, options?: ImageUrlOptions): ImageUrl[];
@@ -8566,10 +8573,10 @@ export function toInt(v: unknown): number;
 export function toISODate(v: unknown, timezone: string): string;
 
 // @public
-export function toItemPageUrl(raw: unknown, options?: OutputUrlOptions): ItemPageUrl | undefined;
+export function toItemPageUrl(raw: unknown, options?: OutputUrlOptions): ItemPageUrl | null;
 
 // @public
-export function toLinkUrl(raw: unknown, options?: OutputUrlOptions): LinkUrl | undefined;
+export function toLinkUrl(raw: unknown, options?: OutputUrlOptions): LinkUrl | null;
 
 // @public
 export function toNumber(v: unknown): number;

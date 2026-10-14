@@ -293,7 +293,11 @@ healthCheck: {
 ### Images and item links
 
 Declare item pictures and item pages with the URL field helpers instead of
-plain strings, and fill them with the matching constructor in the mapper:
+plain strings, and fill them with the matching constructor in the mapper.
+New providers and new fields use them now; existing fields move in the
+migration order of the openspec change `add-output-url-kinds`, because
+adopting a helper rotates the operation's compatibility hash (and widens a
+non-nullable field to admit `null`):
 
 ```ts
 import {
@@ -309,11 +313,11 @@ import {
 
 const Product = z.object({
   name: z.string(),
-  image_url: image().optional(),                  // the item's main picture
-  thumbnail_url: image({ thumbnail: true }).optional(),
-  image_urls: imageList(),                        // more pictures, upstream order
-  url: itemPage().optional(),                     // the item's own page
-  source_url: link().optional(),                  // any other URL
+  image_url: image(),                    // the item's main picture, or null
+  thumbnail_url: image({ thumbnail: true }),
+  image_urls: imageList(),               // more pictures, upstream order
+  url: itemPage(),                       // the item's own page, or null
+  source_url: link().optional(),         // any other URL; key may be absent
 })
 
 const product = {
@@ -328,16 +332,25 @@ const product = {
   `x-apifuse-url-kind: "image" | "item_page" | "link"` (thumbnails also
   `x-apifuse-image-role: "thumbnail"`), so clients find the picture and the
   page without guessing from field names. Field names stay as they are.
-- Constructors keep absolute `https://` URLs on public hosts byte for byte.
-  Images must be `https://`: `http://` images are dropped unless the host is
-  listed in `upgradeHttp` (only for hosts that serve the same path over
-  `https://`). Item pages and links accept `http://` and `https://`. Relative
-  values resolve against `base`; without it they are dropped. IP literals,
-  `localhost`, internal or single-label hosts, and URLs carrying a user name or
-  password are dropped.
-- A dropped value is left out of the output and reported once in the request
-  log (`events.outputUrlDropped`, grouped by kind, reason and the `field` label
-  you pass). The operation never fails over a dropped URL.
+- A missing or left-out value is `null` (the fleet's "upstream did not
+  provide it"): constructors return `null`, and `image()`, `itemPage()` and
+  `link()` admit it without `.nullable()`. `imageList()` is empty instead.
+- Constructors publish the URL's serialization (`new URL(value).href`), so the
+  published host is the host that was checked; an already serialized URL,
+  such as a signed URL, is kept byte for byte and percent-escapes are never
+  decoded or re-encoded. Images must be `https://`: `http://` images are
+  dropped unless the host name is listed in `upgradeHttp` (only for hosts that
+  serve the same path over `https://`) and the URL names no port. Item pages
+  and links accept `http://` and `https://`. Relative values resolve against
+  `base`; without it they are dropped. IP literals, `localhost`, internal or
+  single-label hosts, and URLs carrying a user name or password are dropped.
+  The host rule is exported on its own as `isPublicUrlHost()` from
+  `@apifuse/provider-sdk/url-host`, a dependency-free entry for browser code.
+- A dropped value is left out of the output (`null`) and reported once in the
+  request log (`events.outputUrlDropped`, grouped by kind, reason and the
+  `field` label you pass; the log shape is `OutputUrlEventsLogPayload`). An
+  upstream value never fails the operation; a malformed `base`, `upgradeHttp`
+  entry or `itemPageFrom` template throws on every call.
 - The value types `ImageUrl`, `ItemPageUrl` and `LinkUrl` reject a plain
   `string` at compile time, so an unchecked upstream value cannot reach these
   fields; string literals in fixtures still type-check. A value forced in with

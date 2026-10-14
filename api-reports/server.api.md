@@ -2775,6 +2775,33 @@ interface OperationWebSocketTransport {
     subprotocols?: readonly string[];
 }
 
+// @public
+export const OUTPUT_URL_DROP_REASONS: readonly ["not_url", "relative", "scheme", "insecure", "host", "credentials"];
+
+// @public
+export const OUTPUT_URL_KINDS: readonly ["image", "item_page", "link"];
+
+// @public
+export type OutputUrlDropGroup = {
+    kind: OutputUrlKind;
+    reason: OutputUrlDropReason;
+    field?: string;
+    count: number;
+    example?: string;
+};
+
+// @public
+export type OutputUrlDropReason = (typeof OUTPUT_URL_DROP_REASONS)[number];
+
+// @public
+export type OutputUrlEventsLogPayload = {
+    telemetryFailed?: true;
+    outputUrlDropped: OutputUrlDropGroup[];
+};
+
+// @public
+export type OutputUrlKind = (typeof OUTPUT_URL_KINDS)[number];
+
 // @public (undocumented)
 const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
     kind: z.ZodLiteral<"predicate">;

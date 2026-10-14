@@ -9,28 +9,31 @@ export type OutputUrlDropGroup = {
 	reason: OutputUrlDropReason;
 	field?: string;
 	count: number;
-	/** First dropped value of the group, query and fragment removed; absent for credential-bearing URLs. */
+	/**
+	 * First dropped value of the group, query and fragment removed, redacted and
+	 * bounded; only the scheme for reason `scheme`; `[<typeof>]` for a value that
+	 * is not a string; absent for a value whose authority carries `@`.
+	 */
 	example?: string;
 };
 
+/** `events` of the request log line: the output URLs mappers left out during the request. */
 export type OutputUrlEventsLogPayload = {
 	telemetryFailed?: true;
 	outputUrlDropped: OutputUrlDropGroup[];
 };
-
-/** Never sent: the `events` key is log-only. Declared for the contributor contract. */
-type OutputUrlEventsHeaderPayload = { count: number };
 
 /**
  * Request-log observation events for output URLs that a constructor left out
  * (`toImageUrl`, `toItemPageUrl`, `toLinkUrl`, ...). Log-only: the `events`
  * key never reaches the gateway telemetry header. Groups are keyed by the
  * declared field label, so their number is bounded by the mapper code, not by
- * the size of the response.
+ * the size of the response. The header payload type is `Record<string, never>`
+ * because `events` sits outside HEADER_PRIORITY and none is ever produced.
  */
 export class OutputUrlTelemetryCollector
 	implements
-		TelemetryContributor<OutputUrlEventsLogPayload, OutputUrlEventsHeaderPayload>,
+		TelemetryContributor<OutputUrlEventsLogPayload, Record<string, never>>,
 		OutputUrlDropSink
 {
 	readonly key = "events" as const;
@@ -71,7 +74,7 @@ export class OutputUrlTelemetryCollector
 		};
 	}
 
-	toHeaderPayload(_log: OutputUrlEventsLogPayload): OutputUrlEventsHeaderPayload | undefined {
+	toHeaderPayload(_log: OutputUrlEventsLogPayload): Record<string, never> | undefined {
 		return undefined;
 	}
 

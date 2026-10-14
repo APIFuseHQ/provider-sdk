@@ -332,6 +332,12 @@ Apply either helper to the leaf, before `.optional()`/`.nullable()`/`.default()`
 ### Images and item links
 
 Public output names a picture or a page by declaring it, not by its field name.
+New providers and new fields use the helpers now. Adopting a helper on an
+existing field rotates the operation's compatibility hash (the annotation is
+part of the contract) and, for a field that was not nullable, widens it to
+admit `null`; existing providers move in the migration order of the openspec
+change `add-output-url-kinds` (registry classification first, then the pilot
+repositories, then the fleet wave), not ahead of it.
 
 | What the value is | Schema | Mapper |
 |---|---|---|
@@ -344,14 +350,24 @@ Public output names a picture or a page by declaring it, not by its field name.
 - Keep existing field names (`image_url`, `detail_url`, ...); the annotation says
   what they are. New fields use the fleet names `image_url`, `image_urls`,
   `thumbnail_url`, `url`.
+- A missing or left-out value is `null`, the fleet's "upstream did not
+  provide it": the constructors return `null` and `image()`, `itemPage()` and
+  `link()` admit it without `.nullable()`. Add `.optional()` only when the key
+  itself may be absent. `imageList()` is empty instead.
 - Pass `field: "items[].image_url"` so a dropped value is attributable in the
   request log. Keep it a static label, not a per-row path.
-- `upgradeHttp` lists only hosts you measured serving the same path over
-  `https://`. Every other `http://` image is dropped and reported.
+- `upgradeHttp` lists only host names you measured serving the same path over
+  `https://`. An `http://` image on another host, or one naming a port, is
+  dropped and reported.
 - `itemPageFrom("https://www.example.com/items/{item_id}", { item_id })`
-  percent-encodes each value as one component and yields `undefined` when a
+  percent-encodes each value as one component and yields `null` when a
   value is missing. Assemble a page only from a template you verified opens
   the item.
+- Upstream values never throw. Arguments you write do, on every call whatever
+  the value, so any mapper test catches them: a `base` that is not an
+  absolute `http(s)` URL, an `upgradeHttp` entry that is not a host name, an
+  `itemPageFrom` template that is not absolute `http(s)://`, a placeholder
+  without a value entry.
 - An item has one own page and one main picture: a second `itemPage()` or
   non-thumbnail `image()` in the same object is a declaration error. Declare
   other URLs with `link()`.
