@@ -386,6 +386,57 @@ repositories, then the fleet wave), not ahead of it.
 - Values are plain URL strings at runtime. Do not invent width, height or alt
   text; the item's title is its caption.
 
+#### Coverage warnings and the migration codemod
+
+`apifuse check` prints two warnings under "Output URL coverage". They never
+change the exit status and no count turns them into a failure:
+
+| Warning | Evidence | Turned off by |
+|---|---|---|
+| `output-url-unclassified` | a recorded fixture output holds an absolute `http(s)` URL, or the schema declares `format: "uri"` (`z.string().url()`), at a string field no helper declares | declaring it `image()`, `itemPage()` or `link()` |
+| `output-url-item-coverage` | the output has an object array, declares no `image()`, `imageList()` or `itemPage()` field anywhere, and the operation has no `noMedia` | adding the picture/page field, or `noMedia("<upstream evidence>")` |
+
+URLs inside a field the schema does not declare as a string (a passthrough
+`z.unknown()` payload) are not warned: there is nothing to declare. An
+auxiliary array (facets, filters) next to an annotated item array is not
+warned either; the item warning is per operation.
+
+`apifuse migrate-url-kinds [path] [--check] [--json] [--no-typecheck]` moves an
+existing provider to the helpers. It reads the source statically (nothing is
+executed) and is a detector, not a gate: it always exits 0 and a second run
+changes nothing.
+
+- A field reached from an operation's `output` whose name is a fleet name and
+  whose recorded fixture values are absolute URLs is declared with the helper:
+  `image_url` → `image()`, `thumbnail_url` → `image({ thumbnail: true })`,
+  `image_urls` → `imageList()`, `thumbnail_urls` →
+  `imageList({ thumbnail: true })`, `url` → `itemPage()`. The field's own
+  `.nullable()` is dropped and `.nullish()` becomes `.optional()` (the helpers
+  admit `null`); `.optional()`, `.describe()`, `.describeKey()`, `.meta()` and
+  a `describeKey(field, key)` wrapper are kept; `.url()`, `.min()`, `.trim()`
+  are implied.
+- The mapper assignments it can trace are wrapped in the constructor: object
+  literals the handler returns (through local functions, `.map()`/`.flatMap()`,
+  `push()` accumulators, spreads and conditionals) and object literals
+  validated with `<schema>.parse()`. A label is added (`{ field: "items[].image_url" }`)
+  when the field has one path.
+- Other names whose fixture values are absolute URLs, or that are declared
+  `.url()` (`detail_url`, `product_url`, `source_url`, ...), get a
+  `// TODO(url-kind): ...` marker; decide `itemPage()`, `image()` or `link()`
+  and remove it before landing.
+- Left alone, each with its reason: no fixture value (`no_url_evidence`, record
+  one first), a relative or non-URL fixture value (`non_url_fixture_value`,
+  wrap with `{ base }` by hand), an `http://` picture (`insecure_image_fixture`,
+  decide `upgradeHttp` first), a picture file under `url`
+  (`kind_ambiguous`), a chain the helper cannot carry such as `.regex()`,
+  `.transform()` or a list item's own `.describeKey()` (`unsupported_chain`),
+  and a field declared through a shared schema constant (`shared_schema`).
+- It then type-checks the result in memory and lists the type errors its edits
+  introduce: those are mapper values it could not trace or hand-written types
+  that still say `string`. Wrap each value in the constructor and update the
+  type. Run the formatter afterwards; the rewritten chains are written on one
+  line and new imports are appended.
+
 ### Real-handler E2E in standard tests
 
 `runStandardTests(provider)` validates declarations and fixtures but reports a

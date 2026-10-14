@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import {
 	DEPLOYMENT_INTENT_CHECK_MESSAGE,
 	LEGACY_DEPLOY_FILE_RULE,
+	OUTPUT_URL_COVERAGE_CHECK_MESSAGE,
 	PROMPT_ASSETS_CHECK_MESSAGE,
 	PROVIDER_JSON_CHECK_MESSAGE,
 	REDUNDANT_DEPLOYMENT_DEFAULT_RULE,
@@ -128,6 +129,49 @@ describe("apifuse check", () => {
 		);
 
 		expect(index?.passed).toBe(false);
+	});
+
+	it("prints output URL coverage warnings without failing the check", async () => {
+		const providerDir = makeProviderDir("apifuse-check-output-url-coverage-");
+		writeValidLocaleCatalogs(providerDir);
+		writeFileSync(
+			join(providerDir, "index.ts"),
+			`
+import { z } from "zod";
+
+export default {
+  id: "coverage-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  allowedHosts: ["api.example.com"],
+  reviewed: "community",
+  auth: { mode: "none" },
+  meta: { displayName: "Coverage Provider", category: "other" },
+  operations: {
+    lookup: {
+      description: "Deterministic coverage fixture lookup operation for check tests.",
+      input: z.object({ q: z.string() }),
+      output: z.object({ items: z.array(z.object({ name: z.string(), detail_url: z.string() })) }),
+      handler: async () => ({ items: [] }),
+      fixtures: {
+        request: { q: "btc" },
+        response: { items: [{ name: "a", detail_url: "https://shop.example.com/p/1" }] },
+      },
+      healthCheckUnsupported: { reason: "Unit test operation." },
+    },
+  },
+};
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const coverage = results.find((result) => result.message === OUTPUT_URL_COVERAGE_CHECK_MESSAGE);
+
+		expect(coverage?.passed).toBe(true);
+		expect(coverage?.details).toEqual([
+			expect.stringContaining("WARN output-url-unclassified lookup items[].detail_url:"),
+			expect.stringContaining("WARN output-url-item-coverage lookup $:"),
+		]);
 	});
 
 	it("fails on a runtime boundary finding in request-path source", async () => {

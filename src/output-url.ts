@@ -447,7 +447,8 @@ function isOutputUrlKind(value: unknown): value is OutputUrlKind {
 	return OUTPUT_URL_KINDS.some((kind) => kind === value);
 }
 
-function appendPropertyPath(path: string, property: string): string {
+/** Appends one property to a response-value path in the projection notation (`items[].image_url`). */
+export function appendPropertyPath(path: string, property: string): string {
 	const segment = /^[A-Za-z_][A-Za-z0-9_]*$/.test(property)
 		? property
 		: `[${JSON.stringify(property)}]`;

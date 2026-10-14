@@ -19,6 +19,10 @@ import { redundantDeploymentDefaults } from "../src/cli/deployment-intent.js";
 import { isProviderError } from "../src/errors.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { lintProviderWithInformation, type ProviderLintMode } from "../src/lint.js";
+import {
+	formatOutputUrlCoverageWarning,
+	reportOutputUrlCoverage,
+} from "../src/output-url-coverage.js";
 import { safeParseSchemaSync } from "../src/schema.js";
 
 const HELP_TEXT = `Usage: apifuse check [path]
@@ -149,6 +153,7 @@ export async function runChecks(
 		checkOperations(provider),
 		checkFixtures(provider),
 		checkSchemas(provider),
+		checkOutputUrlCoverage(provider),
 		checkAuthoringLint(provider, providerSourceFiles, localeCatalogEn, options.lintMode),
 		checkProviderMetadata(provider),
 		await checkDeploymentIntent(providerRoot, provider),
@@ -383,6 +388,33 @@ function checkSchemas(provider: ProviderDefinition | undefined): CheckResult {
 		passed: failures.length === 0,
 		details: failures,
 	};
+}
+
+export const OUTPUT_URL_COVERAGE_CHECK_MESSAGE =
+	"Output URL coverage (warnings only; never changes the exit status)";
+
+/**
+ * The output URL coverage warnings (openspec `add-output-url-kinds`): an
+ * undeclared absolute URL in a recorded fixture output, and an object array
+ * without any picture or page field. Always passes, whatever it prints; no
+ * count turns a warning into a failure.
+ */
+function checkOutputUrlCoverage(provider: ProviderDefinition | undefined): CheckResult {
+	if (!provider) return { message: OUTPUT_URL_COVERAGE_CHECK_MESSAGE, passed: true, details: [] };
+	try {
+		return {
+			message: OUTPUT_URL_COVERAGE_CHECK_MESSAGE,
+			passed: true,
+			details: reportOutputUrlCoverage(provider.operations).map(formatOutputUrlCoverageWarning),
+		};
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return {
+			message: OUTPUT_URL_COVERAGE_CHECK_MESSAGE,
+			passed: true,
+			details: [`WARN output-url-coverage the report could not run: ${reason}`],
+		};
+	}
 }
 
 /**
