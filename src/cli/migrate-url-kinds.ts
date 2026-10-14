@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, writeFileSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
 import type TS from "typescript";
@@ -6,8 +6,11 @@ import type TS from "typescript";
 import { appendPropertyPath, image, itemPage, link } from "../output-url.js";
 import {
 	collectFixtureStrings,
+	imageFileExtension,
 	isAbsoluteHttpUrl,
+	looksLikeImageFile,
 	outputPathMatches,
+	urlOrigin,
 } from "../output-url-coverage.js";
 import { getTypeScript } from "../typescript-module.js";
 
@@ -19,7 +22,9 @@ import { getTypeScript } from "../typescript-module.js";
  *   name (`image_url`, `image_urls`, `thumbnail_url`, `thumbnail_urls`, `url`)
  *   and whose recorded fixture values are absolute URLs (or that are declared
  *   `.url()`) become `image()`, `imageList()`, `image({ thumbnail: true })`,
- *   `imageList({ thumbnail: true })` or `itemPage()`. The field's own
+ *   `imageList({ thumbnail: true })` or `itemPage()`. `url` becomes
+ *   `itemPage()` only with evidence beyond the name (`itemPageDoubts`),
+ *   otherwise it gets a `TODO(url-kind)` marker naming the doubt. The field's own
  *   `.nullable()` is dropped (the helpers admit `null`), `.nullish()` becomes
  *   `.optional()`, `.optional()`/`.describe*()`/`.meta()` are kept.
  * - Mapper assignments it can trace statically (from the handler's return
@@ -70,6 +75,7 @@ const CONSTRUCTOR: Readonly<Record<HelperKind, string>> = {
 };
 
 const LIST_HELPERS: ReadonlySet<HelperKind> = new Set(["imageList", "thumbnailList"]);
+const LINK_HELPERS: ReadonlySet<HelperKind> = new Set(["itemPage", "link"]);
 const HELPER_FUNCTIONS = new Set(["image", "imageList", "itemPage", "link"]);
 const CONSTRUCTOR_FUNCTIONS = new Set([
 	"toImageUrl",
@@ -103,6 +109,47 @@ const PASS_THROUGH_CALLS = new Set([
 	"Array.of",
 ]);
 const SKIP_DIRECTORIES = ["node_modules", ".git", "dist", ".worktree", ".worktrees"];
+// Words of a parent property that name something other than the item itself
+// (`booking_links[].url`, `seller.url`, `nav_items[].url`): its `url` is that
+// thing's page, not the item's.
+const NON_ITEM_CONTAINER_WORDS = new Set([
+	"link",
+	"links",
+	"related",
+	"seller",
+	"sellers",
+	"shop",
+	"shops",
+	"store",
+	"stores",
+	"nav",
+	"navigation",
+	"menu",
+	"menus",
+]);
+// Words of a sibling property that identify the item the object describes.
+const IDENTITY_WORDS = new Set(["id", "name", "title"]);
+// Second-level labels registries sell under a two-letter country code
+// (`co.jp`, `or.kr`, `com.au`): the site is one label further left.
+const COUNTRY_SECOND_LEVEL = new Set([
+	"ac",
+	"ad",
+	"co",
+	"com",
+	"ed",
+	"edu",
+	"go",
+	"gov",
+	"gr",
+	"lg",
+	"mil",
+	"ne",
+	"net",
+	"or",
+	"org",
+	"re",
+]);
+const SDK_PACKAGE = "@apifuse/provider-sdk";
 const TODO_MARKER = "TODO(url-kind)";
 // Upper bound on the nodes one walk visits, so a pathological call graph ends.
 const WALK_BUDGET = 100_000;
@@ -145,6 +192,8 @@ export type UrlKindFieldRewrite = {
 	readonly helper: string;
 	readonly before: string;
 	readonly after: string;
+	/** What the author still decides, e.g. a picture host that also serves `http://` elsewhere. */
+	readonly notes?: readonly string[];
 };
 
 export type UrlKindMapperWrap = {
@@ -154,12 +203,21 @@ export type UrlKindMapperWrap = {
 	readonly constructor: string;
 };
 
+/**
+ * Why a URL field got a marker instead of a helper: a name the codemod does
+ * not map (`other_name`), or a `url` without evidence that it is the item's
+ * own page (`item_page_unproven`, the doubts in `detail`).
+ */
+export type UrlKindTodoReason = "other_name" | "item_page_unproven";
+
 export type UrlKindTodo = {
 	readonly file: string;
 	readonly line: number;
 	readonly property: string;
 	readonly paths: readonly string[];
 	readonly evidence: string;
+	readonly reason: UrlKindTodoReason;
+	readonly detail?: string;
 };
 
 export type UrlKindSkip = {
@@ -174,11 +232,31 @@ export type UrlKindSkip = {
 export type UrlKindResidual = {
 	readonly file: string;
 	readonly line: number;
+	/** TypeScript diagnostic code (`TS2322` is 2322). */
+	readonly code: number;
 	readonly message: string;
 };
 
+/**
+ * Whether the SDK the provider resolves exports what the edits import.
+ * `missing`: `@apifuse/provider-sdk` does not resolve (dependencies not
+ * installed); `outdated`: it resolves but lacks a helper or constructor (an
+ * older pin). Either way nothing is written and the type check does not run.
+ */
+export type UrlKindSdkCheck = {
+	readonly status: "ok" | "missing" | "outdated" | "not-needed";
+	readonly version?: string;
+	readonly detail?: string;
+};
+
 export type MigrateUrlKindsResult = {
-	readonly status: "migrated" | "would-migrate" | "unchanged";
+	/**
+	 * `refused`: nothing was written, see `reason` (not a provider root, an
+	 * unreadable tsconfig, no operation found, or an SDK without the helpers
+	 * outside `--check`).
+	 */
+	readonly status: "migrated" | "would-migrate" | "unchanged" | "refused";
+	readonly reason?: string;
 	readonly operations: number;
 	readonly changedFiles: readonly string[];
 	readonly rewrites: readonly UrlKindFieldRewrite[];
@@ -187,7 +265,11 @@ export type MigrateUrlKindsResult = {
 	readonly skipped: readonly UrlKindSkip[];
 	/** Type errors the edits introduce (a mapper site the codemod could not trace). */
 	readonly residual: readonly UrlKindResidual[];
-	readonly residualCheck: "ran" | "skipped";
+	/** `unresolved`: not run because the SDK precondition failed (see `sdk`). */
+	readonly residualCheck: "ran" | "skipped" | "unresolved";
+	readonly sdk: UrlKindSdkCheck;
+	/** Recoverable `tsconfig.json` diagnostics; the scan ran with what TypeScript could read. */
+	readonly configDiagnostics: readonly string[];
 };
 
 export type MigrateUrlKindsOptions = {
@@ -244,9 +326,37 @@ export function migrateUrlKindsRepository(
 ): MigrateUrlKindsResult {
 	const ts = getTypeScript();
 	const root = resolve(providerRoot);
-	const program = createProgram(ts, root);
+	const refused = (reason: string, configDiagnostics: readonly string[] = []) =>
+		({
+			status: "refused",
+			reason,
+			operations: 0,
+			changedFiles: [],
+			rewrites: [],
+			mapperWraps: [],
+			todos: [],
+			skipped: [],
+			residual: [],
+			residualCheck: "skipped",
+			sdk: { status: "not-needed" },
+			configDiagnostics,
+		}) satisfies MigrateUrlKindsResult;
+	if (!existsSync(root) || !statSync(root).isDirectory())
+		return refused(`${root} is not a directory.`);
+	if (!existsSync(resolve(root, "index.ts")))
+		return refused(`${root} has no index.ts; pass the provider repository root.`);
+	const created = createProgram(ts, root);
+	if ("error" in created) return refused(created.error);
+	const { program, configDiagnostics } = created;
 	const checker = program.getTypeChecker();
 	const analysis = new Analysis(ts, program, checker, root);
+	if (!program.getSourceFiles().some((source) => analysis.isProjectFile(source)))
+		return refused(`${root} has no TypeScript source file to scan.`, configDiagnostics);
+	if (analysis.operations.length === 0)
+		return refused(
+			`${root} declares no operation (an object with output and a handler or fixtures).`,
+			configDiagnostics,
+		);
 	const plan = analysis.plan();
 
 	const changedTexts = new Map<string, string>();
@@ -256,41 +366,154 @@ export function migrateUrlKindsRepository(
 		const next = applyEdits(source.text, edits);
 		if (next !== source.text) changedTexts.set(fileName, next);
 	}
-
-	let residual: UrlKindResidual[] = [];
-	const typecheck = options.typecheck ?? true;
-	if (typecheck && changedTexts.size > 0)
-		residual = residualDiagnostics(ts, program, changedTexts, analysis);
-
 	const changedFiles = [...changedTexts.keys()].map((file) => analysis.display(file)).sort();
-	if (!options.check)
-		for (const [fileName, text] of changedTexts) writeFileSync(fileName, text, "utf8");
-
-	return {
-		status: changedTexts.size === 0 ? "unchanged" : options.check ? "would-migrate" : "migrated",
+	const report = {
 		operations: analysis.operations.length,
 		changedFiles,
 		rewrites: plan.rewrites,
 		mapperWraps: plan.mapperWraps,
 		todos: plan.todos,
 		skipped: plan.skipped,
+		configDiagnostics,
+	};
+
+	// The edits import helpers and constructors: an SDK that does not export
+	// them would turn every edit into a module error, and a type check against
+	// it would report those as untraced values.
+	const sdk =
+		changedTexts.size === 0
+			? ({ status: "not-needed" } as const)
+			: inspectSdk(ts, program, plan.imports, analysis);
+	if (sdk.status === "missing" || sdk.status === "outdated") {
+		if (!options.check)
+			return {
+				...report,
+				status: "refused",
+				reason: `${sdk.detail} Nothing was written; --check previews the edits.`,
+				residual: [],
+				residualCheck: "unresolved",
+				sdk,
+			};
+		return {
+			...report,
+			status: "would-migrate",
+			residual: [],
+			residualCheck: "unresolved",
+			sdk,
+		};
+	}
+
+	let residual: UrlKindResidual[] = [];
+	const typecheck = options.typecheck ?? true;
+	if (typecheck && changedTexts.size > 0)
+		residual = residualDiagnostics(ts, program, changedTexts, analysis);
+
+	if (!options.check)
+		for (const [fileName, text] of changedTexts) writeFileSync(fileName, text, "utf8");
+
+	return {
+		...report,
+		status: changedTexts.size === 0 ? "unchanged" : options.check ? "would-migrate" : "migrated",
 		residual,
 		residualCheck: typecheck && changedTexts.size > 0 ? "ran" : "skipped",
+		sdk,
 	};
 }
 
-function createProgram(ts: typeof import("typescript"), root: string): TS.Program {
+/**
+ * Resolves each module the edits import from (as the provider's own type
+ * check would) and checks it exports the names. Reads the version from the
+ * resolved package.
+ */
+function inspectSdk(
+	ts: typeof import("typescript"),
+	program: TS.Program,
+	imports: ReadonlyMap<string, { readonly names: ReadonlySet<string>; readonly from: string }>,
+	analysis: Analysis,
+): UrlKindSdkCheck {
+	const options = program.getCompilerOptions();
+	let version: string | undefined;
+	const missing: string[] = [];
+	for (const [module, { names, from }] of [...imports].sort(([left], [right]) =>
+		left.localeCompare(right),
+	)) {
+		const resolved = ts.resolveModuleName(module, from, options, ts.sys).resolvedModule;
+		if (!resolved)
+			return {
+				status: "missing",
+				detail: `${module} does not resolve from ${analysis.display(from)}: install the provider's dependencies (bun install) and rerun.`,
+			};
+		version ??= resolved.packageId?.version;
+		const exported = moduleExports(ts, program, resolved.resolvedFileName);
+		for (const name of [...names].sort())
+			if (!exported.has(name)) missing.push(`${name} (${module})`);
+	}
+	const label = `${SDK_PACKAGE}${version ? ` ${version}` : ""}`;
+	if (missing.length > 0)
+		return {
+			status: "outdated",
+			...(version ? { version } : {}),
+			detail: `${label} does not export ${missing.join(", ")}: bump the provider's SDK pin to a release with the URL kind helpers first, then rerun.`,
+		};
+	return { status: "ok", ...(version ? { version } : {}) };
+}
+
+function moduleExports(
+	ts: typeof import("typescript"),
+	program: TS.Program,
+	fileName: string,
+): Set<string> {
+	let candidate = program;
+	let source = program.getSourceFile(fileName);
+	if (!source) {
+		candidate = ts.createProgram({
+			rootNames: [fileName],
+			options: { ...program.getCompilerOptions(), noEmit: true },
+		});
+		source = candidate.getSourceFile(fileName);
+	}
+	if (!source) return new Set();
+	const checker = candidate.getTypeChecker();
+	const symbol = checker.getSymbolAtLocation(source);
+	if (!symbol) return new Set();
+	return new Set(checker.getExportsOfModule(symbol).map((exported) => exported.name));
+}
+
+function createProgram(
+	ts: typeof import("typescript"),
+	root: string,
+): { program: TS.Program; configDiagnostics: string[] } | { error: string } {
 	const configPath = resolve(root, "tsconfig.json");
 	let rootNames: string[];
 	let compilerOptions: TS.CompilerOptions;
+	const configDiagnostics: string[] = [];
 	if (existsSync(configPath)) {
+		let unrecoverable: TS.Diagnostic | undefined;
 		const parsed = ts.getParsedCommandLineOfConfigFile(
 			configPath,
 			{},
-			{ ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} },
+			{
+				...ts.sys,
+				onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+					unrecoverable = diagnostic;
+				},
+			},
 		);
-		rootNames = parsed?.fileNames ?? [];
-		compilerOptions = parsed?.options ?? {};
+		if (!parsed || unrecoverable)
+			return {
+				error: `tsconfig.json cannot be read: ${unrecoverable ? ts.flattenDiagnosticMessageText(unrecoverable.messageText, " ") : "no configuration"}.`,
+			};
+		const diagnostics = ts.getConfigFileParsingDiagnostics(parsed);
+		const format = (diagnostic: TS.Diagnostic) =>
+			`TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, " ")}`;
+		// A JSON syntax error (TS1xxx) leaves the configuration half read.
+		const syntax = diagnostics.find(
+			(diagnostic) => diagnostic.code >= 1000 && diagnostic.code < 2000,
+		);
+		if (syntax) return { error: `tsconfig.json cannot be parsed: ${format(syntax)}.` };
+		for (const diagnostic of diagnostics) configDiagnostics.push(format(diagnostic));
+		rootNames = parsed.fileNames;
+		compilerOptions = parsed.options;
 	} else {
 		rootNames = ts.sys.readDirectory(root, [".ts", ".tsx"], SKIP_DIRECTORIES, ["**/*"]);
 		compilerOptions = {
@@ -301,10 +524,13 @@ function createProgram(ts: typeof import("typescript"), root: string): TS.Progra
 			skipLibCheck: true,
 		};
 	}
-	return ts.createProgram({
-		rootNames: rootNames.filter((file) => !isSkippedPath(root, file)),
-		options: { ...compilerOptions, noEmit: true, resolveJsonModule: true, skipLibCheck: true },
-	});
+	return {
+		program: ts.createProgram({
+			rootNames: rootNames.filter((file) => !isSkippedPath(root, file)),
+			options: { ...compilerOptions, noEmit: true, resolveJsonModule: true, skipLibCheck: true },
+		}),
+		configDiagnostics,
+	};
 }
 
 function isSkippedPath(root: string, fileName: string): boolean {
@@ -382,6 +608,7 @@ function residualDiagnostics(
 		residual.push({
 			file: file ? analysis.display(file.fileName) : "",
 			line,
+			code: diagnostic.code,
 			message: message.length > 240 ? `${message.slice(0, 239)}…` : message,
 		});
 	}
@@ -1263,6 +1490,8 @@ class Analysis {
 		mapperWraps: UrlKindMapperWrap[];
 		todos: UrlKindTodo[];
 		skipped: UrlKindSkip[];
+		/** Names the edits import, by module, with a file that imports them. */
+		imports: Map<string, { names: Set<string>; from: string }>;
 	} {
 		const ts = this.ts;
 		const edits = new Map<string, Edit[]>();
@@ -1347,7 +1576,7 @@ class Analysis {
 				if (!evidence || nonUrl.length > 0) continue;
 				if (this.hasTodo(field)) continue;
 				const proof = absolute[0] ? `fixture ${origin(absolute[0].value)}` : "declared .url()";
-				todos.push({ ...base, evidence: proof });
+				todos.push({ ...base, evidence: proof, reason: "other_name" });
 				addEdit(source, this.todoEdit(field, proof));
 				continue;
 			}
@@ -1395,6 +1624,27 @@ class Analysis {
 				);
 				continue;
 			}
+			if (helper === "itemPage") {
+				// The name alone does not make a page the item's own: a booking,
+				// related, seller or navigation link is also called `url`.
+				const doubts = this.itemPageDoubts(
+					name,
+					reaches,
+					absolute.map(({ value }) => value),
+				);
+				if (doubts.length > 0) {
+					if (this.hasTodo(field)) continue;
+					const proof = `fixture ${origin(absolute[0]?.value ?? "")}`;
+					todos.push({
+						...base,
+						evidence: proof,
+						reason: "item_page_unproven",
+						detail: doubts.join("; "),
+					});
+					addEdit(source, this.todoEdit(field, proof, doubts));
+					continue;
+				}
+			}
 			const rewritten = this.rewriteField(parsed, helper);
 			if ("unsupported" in rewritten) {
 				skip(
@@ -1414,6 +1664,9 @@ class Analysis {
 				end: field.initializer.end,
 				text: rewritten.text,
 			});
+			const notes = LINK_HELPERS.has(helper)
+				? []
+				: this.insecureHostNotes(absolute.map(({ value }) => value));
 			rewrites.push({
 				...base,
 				helper: HELPER_CALL[helper],
@@ -1422,6 +1675,7 @@ class Analysis {
 					.replace(/\s+/g, " ")
 					.replace(/\s*\.\s*/g, "."),
 				after: rewritten.text,
+				...(notes.length > 0 ? { notes } : {}),
 			});
 			targets.set(field, { helper, label });
 		}
@@ -1542,12 +1796,16 @@ class Analysis {
 			});
 		}
 
+		const imports = new Map<string, { names: Set<string>; from: string }>();
 		for (const [fileName, names] of neededImports) {
 			const source = this.program.getSourceFile(fileName);
-			if (source) {
-				const edit = this.importEdit(source, names);
-				if (edit) addEdit(source, edit);
-			}
+			if (!source) continue;
+			const planned = this.importEdit(source, names);
+			if (!planned) continue;
+			addEdit(source, planned.edit);
+			const entry = imports.get(planned.module) ?? { names: new Set<string>(), from: fileName };
+			for (const name of planned.names) entry.names.add(name);
+			imports.set(planned.module, entry);
 		}
 
 		for (const [fileName, list] of edits) {
@@ -1576,7 +1834,155 @@ class Analysis {
 			mapperWraps: byLocation(mapperWraps),
 			todos: byLocation(todos),
 			skipped: byLocation(skipped),
+			imports,
 		};
+	}
+
+	// -------------------------------------------------------------------------
+	// Evidence that a `url` is the item's own page
+
+	/**
+	 * Why a `url` field is not proven to be the item's own page; empty when
+	 * every place the output reaches it agrees it is. Proof is all of: the
+	 * object holding it is not a links/related/seller/shop/store/nav/menu
+	 * container, a sibling id/name/title identifies the item, no sibling holds
+	 * another page URL, and every fixture value is on a site the provider
+	 * declares as upstream (`allowedHosts`, `upstream.baseUrl`).
+	 */
+	private itemPageDoubts(
+		name: string,
+		reaches: readonly Reach[],
+		values: readonly string[],
+	): string[] {
+		const doubts = new Set<string>();
+		for (const reach of reaches) {
+			const parentPath = parentPathOf(reach.path, name);
+			if (parentPath === undefined) continue;
+			const container = lastKeyOf(parentPath);
+			if (
+				container !== undefined &&
+				words(container).some((word) => NON_ITEM_CONTAINER_WORDS.has(word))
+			)
+				doubts.add(`it sits under ${container}, which names other pages than the item`);
+			const siblings = this.siblingsOf(reach.operation, parentPath, name);
+			if (!siblings.some((sibling) => words(sibling.name).some((word) => IDENTITY_WORDS.has(word))))
+				doubts.add("no id/name/title field beside it identifies an item");
+			for (const sibling of siblings) {
+				if (sibling.classified || FLEET_FIELD_HELPERS.has(sibling.name)) continue;
+				const page = [...reach.operation.fixtureStrings].find(
+					([valuePath, found]) =>
+						outputPathMatches(sibling.path, valuePath) &&
+						found.some((value) => isAbsoluteHttpUrl(value) && !looksLikeImageFile(value)),
+				);
+				if (page) doubts.add(`${sibling.name} beside it also holds a page URL`);
+			}
+		}
+		const upstream = this.upstreamSites();
+		if (upstream.size === 0)
+			doubts.add(
+				"the provider declares no upstream host (allowedHosts, upstream.baseUrl) to compare",
+			);
+		else
+			for (const value of values) {
+				const host = hostnameOf(value);
+				if (host !== undefined && !upstream.has(siteOf(host)))
+					doubts.add(
+						`fixture host ${host} is not on an upstream site (${[...upstream].sort().join(", ")})`,
+					);
+			}
+		return [...doubts];
+	}
+
+	/** Direct children of `parentPath` the operation's output declares, other than `name`. */
+	private siblingsOf(
+		operation: Operation,
+		parentPath: string,
+		name: string,
+	): { name: string; path: string; classified: boolean }[] {
+		const ts = this.ts;
+		const table = this.operationTables.get(operation);
+		if (!table) return [];
+		const out = new Map<string, { name: string; path: string; classified: boolean }>();
+		for (const [path, fields] of table)
+			for (const field of fields) {
+				if (!ts.isPropertyAssignment(field)) continue;
+				const sibling = propertyNameText(ts, field.name);
+				if (sibling === undefined || sibling === name) continue;
+				if (appendPropertyPath(parentPath, sibling) !== path) continue;
+				const classified = this.parseField(field.initializer).kind === "helper";
+				const known = out.get(path);
+				out.set(path, {
+					name: sibling,
+					path,
+					classified: classified || known?.classified === true,
+				});
+			}
+		return [...out.values()];
+	}
+
+	private upstreamSiteCache: ReadonlySet<string> | undefined;
+
+	/** Sites (registrable domains) of the hosts the provider declares it calls. */
+	private upstreamSites(): ReadonlySet<string> {
+		if (this.upstreamSiteCache) return this.upstreamSiteCache;
+		const ts = this.ts;
+		const hosts = new Set<string>();
+		const addHost = (value: unknown) => {
+			if (typeof value !== "string") return;
+			const host = /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
+				? hostnameOf(value)
+				: value.replace(/^\*\./, "").toLowerCase();
+			if (host) hosts.add(host);
+		};
+		for (const source of this.sourceFiles()) {
+			const visit = (node: TS.Node): void => {
+				if (ts.isPropertyAssignment(node) && propertyNameText(ts, node.name) === "allowedHosts") {
+					const value = this.evaluate(node.initializer, 0, new Set());
+					if (Array.isArray(value)) for (const entry of value) addHost(entry);
+				}
+				ts.forEachChild(node, visit);
+			};
+			visit(source);
+		}
+		for (const operation of this.operations) {
+			const upstream = this.property(operation.node, "upstream");
+			const value = upstream ? this.evaluate(upstream, 0, new Set()) : undefined;
+			if (value !== null && typeof value === "object" && !Array.isArray(value))
+				addHost((value as Record<string, unknown>).baseUrl);
+		}
+		this.upstreamSiteCache = new Set([...hosts].map(siteOf));
+		return this.upstreamSiteCache;
+	}
+
+	/**
+	 * A picture declared on https evidence whose host serves `http://` in
+	 * another recorded fixture: the constructor drops those values unless the
+	 * author lists the host in `upgradeHttp`.
+	 */
+	private insecureHostNotes(values: readonly string[]): string[] {
+		const notes: string[] = [];
+		const hosts = new Set(values.map(hostnameOf).filter((host) => host !== undefined));
+		for (const host of [...hosts].sort()) {
+			let where: string | undefined;
+			for (const operation of this.operations) {
+				for (const [path, found] of operation.fixtureStrings)
+					if (
+						found.some(
+							(value) =>
+								/^http:\/\//i.test(value) && isAbsoluteHttpUrl(value) && hostnameOf(value) === host,
+						)
+					) {
+						where = `${operation.name}:${path}`;
+						break;
+					}
+				if (where) break;
+			}
+			if (where)
+				notes.push(
+					`${host} serves both schemes (http:// in fixture ${where}); add upgradeHttp: [${JSON.stringify(host)}] to the constructor once it is measured to serve the same path over https, or those values become null.`,
+				);
+		}
+		return notes;
 	}
 
 	private methodHandler(object: TS.ObjectLiteralExpression): TS.SignatureDeclaration | undefined {
@@ -1614,16 +2020,28 @@ class Analysis {
 
 	private hasTodo(field: TS.PropertyAssignment): boolean {
 		const source = field.getSourceFile();
-		const ranges = this.ts.getLeadingCommentRanges(source.text, field.getFullStart()) ?? [];
-		return ranges.some((range) => source.text.slice(range.pos, range.end).includes(TODO_MARKER));
+		// The trivia before the field: a marker on its own line, or an inline
+		// `/* ... */` one (TypeScript counts that as the previous token's
+		// trailing comment, not a leading one).
+		return source.text.slice(field.getFullStart(), field.getStart(source)).includes(TODO_MARKER);
 	}
 
-	private todoEdit(field: TS.PropertyAssignment, proof: string): Edit {
+	private todoEdit(
+		field: TS.PropertyAssignment,
+		proof: string,
+		doubts: readonly string[] = [],
+	): Edit {
 		const source = field.getSourceFile();
 		const start = field.getStart(source);
 		const lineStart = source.text.lastIndexOf("\n", start - 1) + 1;
 		const indent = source.text.slice(lineStart, start);
-		const message = `${TODO_MARKER}: absolute URL (${proof}); declare itemPage() if it is the item's own page, image() if it is its picture, otherwise link().`;
+		const message = (
+			doubts.length > 0
+				? `${TODO_MARKER}: not proven to be the item's own page (${proof}; ${doubts.join("; ")}); declare itemPage() if it is, otherwise link().`
+				: `${TODO_MARKER}: absolute URL (${proof}); declare itemPage() if it is the item's own page, image() if it is its picture, otherwise link().`
+		)
+			.replaceAll("*/", "* /")
+			.replaceAll("\n", " ");
 		if (/^\s*$/.test(indent)) return { start, end: start, text: `// ${message}\n${indent}` };
 		return { start, end: start, text: `/* ${message} */ ` };
 	}
@@ -1671,10 +2089,14 @@ class Analysis {
 		return names;
 	}
 
-	private importEdit(source: TS.SourceFile, names: ReadonlySet<string>): Edit | undefined {
+	private importEdit(
+		source: TS.SourceFile,
+		names: ReadonlySet<string>,
+	): { edit: Edit; module: string; names: string[] } | undefined {
 		const ts = this.ts;
 		const imported = new Set<string>();
 		let target: TS.NamedImports | undefined;
+		let targetModule = SDK_PACKAGE;
 		let lastImportEnd = 0;
 		let quote = '"';
 		for (const statement of source.statements) {
@@ -1689,17 +2111,28 @@ class Analysis {
 			if (!bindings || !ts.isNamedImports(bindings)) continue;
 			for (const element of bindings.elements)
 				if (!element.isTypeOnly && !element.propertyName) imported.add(element.name.text);
-			if (!target || module === "@apifuse/provider-sdk") target = bindings;
+			if (!target || module === SDK_PACKAGE) {
+				target = bindings;
+				targetModule = module;
+			}
 		}
 		const missing = [...names].filter((name) => !imported.has(name)).sort();
 		if (missing.length === 0) return undefined;
 		if (target && target.elements.length > 0) {
 			const last = target.elements[target.elements.length - 1];
-			if (last) return { start: last.end, end: last.end, text: `, ${missing.join(", ")}` };
+			if (last)
+				return {
+					edit: { start: last.end, end: last.end, text: `, ${missing.join(", ")}` },
+					module: targetModule,
+					names: missing,
+				};
 		}
-		const text = `import { ${missing.join(", ")} } from ${quote}@apifuse/provider-sdk${quote};`;
-		if (lastImportEnd > 0) return { start: lastImportEnd, end: lastImportEnd, text: `\n${text}` };
-		return { start: 0, end: 0, text: `${text}\n\n` };
+		const text = `import { ${missing.join(", ")} } from ${quote}${SDK_PACKAGE}${quote};`;
+		const edit =
+			lastImportEnd > 0
+				? { start: lastImportEnd, end: lastImportEnd, text: `\n${text}` }
+				: { start: 0, end: 0, text: `${text}\n\n` };
+		return { edit, module: SDK_PACKAGE, names: missing };
 	}
 }
 
@@ -1716,31 +2149,58 @@ function removeOverlaps(edits: readonly Edit[]): Edit[] {
 	return kept;
 }
 
-const IMAGE_FILE = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i;
-
-function looksLikeImageFile(value: string): boolean {
-	try {
-		return IMAGE_FILE.test(new URL(value).pathname);
-	} catch {
-		return false;
-	}
-}
-
 function extension(value: string): string {
-	try {
-		return IMAGE_FILE.exec(new URL(value).pathname)?.[0] ?? "";
-	} catch {
-		return "";
-	}
+	return imageFileExtension(value) ?? "";
 }
 
 function origin(value: string): string {
+	return urlOrigin(value) ?? truncate(value);
+}
+
+function hostnameOf(value: string): string | undefined {
 	try {
-		const url = new URL(value);
-		return `${url.protocol}//${url.host}/…`;
+		return new URL(value).hostname.toLowerCase().replace(/\.+$/, "") || undefined;
 	} catch {
-		return truncate(value);
+		return undefined;
 	}
+}
+
+/** The registrable domain of a host, approximately: `item.rakuten.co.jp` is `rakuten.co.jp`. */
+function siteOf(host: string): string {
+	const labels = host.toLowerCase().replace(/\.+$/, "").split(".");
+	if (labels.length <= 2) return labels.join(".");
+	const top = labels[labels.length - 1] ?? "";
+	const second = labels[labels.length - 2] ?? "";
+	const width = top.length === 2 && COUNTRY_SECOND_LEVEL.has(second) ? 3 : 2;
+	return labels.slice(-width).join(".");
+}
+
+/** Lower-case words of a property name (`relatedLinks`, `nav_items` → `related`, `links`; `nav`, `items`). */
+function words(name: string): string[] {
+	return name
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((word) => word.length > 0);
+}
+
+/** The path of the object holding `name` at `path` (`items[]` for `items[].url`). */
+function parentPathOf(path: string, name: string): string | undefined {
+	if (path === appendPropertyPath("", name)) return "";
+	const bare = `.${name}`;
+	if (path.endsWith(bare) && appendPropertyPath(path.slice(0, -bare.length), name) === path)
+		return path.slice(0, -bare.length);
+	const quoted = `[${JSON.stringify(name)}]`;
+	if (path.endsWith(quoted)) return path.slice(0, -quoted.length);
+	return undefined;
+}
+
+/** The nearest property name of a path, past `[]` and `.*` (`booking_links` for `booking_links[]`). */
+function lastKeyOf(path: string): string | undefined {
+	const trimmed = path.replace(/(?:\[\]|\.\*)+$/, "");
+	const quoted = /\["((?:[^"\\]|\\.)*)"\]$/.exec(trimmed);
+	if (quoted?.[1] !== undefined) return JSON.parse(`"${quoted[1]}"`) as string;
+	return /(?:^|\.)([A-Za-z_][A-Za-z0-9_]*)$/.exec(trimmed)?.[1];
 }
 
 function truncate(value: string): string {

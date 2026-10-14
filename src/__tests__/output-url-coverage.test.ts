@@ -58,6 +58,40 @@ describe("output URL coverage report", () => {
 		expect(warning?.fix).toContain("image()");
 	});
 
+	it("tells an http:// picture to publish https before declaring image(), which would fail on it", () => {
+		const [warning] = reportOutputUrlCoverage({
+			detail: {
+				output: z.object({ cover: z.string().nullable(), url: itemPage() }),
+				fixtures: { response: { cover: "http://tong.example.com/c.jpg", url: null } },
+			},
+		});
+		expect(warning?.message).toContain("http://tong.example.com/…");
+		expect(warning?.fix).toContain('toImageUrl(raw, { upgradeHttp: ["tong.example.com"] })');
+		expect(warning?.fix).toContain("re-record the fixture, then declare image()");
+		expect(warning?.fix).toContain("fails the declaration check");
+		expect(warning?.fix.startsWith("declare it with image()")).toBe(false);
+		// the advice it no longer gives: image() refuses the recorded value
+		expect(image().safeParse("http://tong.example.com/c.jpg").success).toBe(false);
+	});
+
+	it("keeps the upgrade advice when one path mixes https and http:// pictures", () => {
+		const [warning] = reportOutputUrlCoverage({
+			search: {
+				output: z.object({ items: z.array(z.object({ cover: z.string(), url: itemPage() })) }),
+				fixtures: {
+					response: {
+						items: [
+							{ cover: "https://tong.example.com/a.jpg", url: null },
+							{ cover: "http://tong.example.com/b.jpg", url: null },
+						],
+					},
+				},
+			},
+		});
+		expect(warning?.message).toContain("http://tong.example.com/…");
+		expect(warning?.fix).toContain('upgradeHttp: ["tong.example.com"]');
+	});
+
 	it("warns about a declared format: uri string without a fixture value", () => {
 		const warnings = reportOutputUrlCoverage({
 			detail: {

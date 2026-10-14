@@ -401,16 +401,33 @@ URLs inside a field the schema does not declare as a string (a passthrough
 auxiliary array (facets, filters) next to an annotated item array is not
 warned either; the item warning is per operation.
 
+An `http://` picture is not turned off by declaring `image()`: the helper
+admits `https://` only, so the declaration check fails on the recorded value.
+Make the mapper publish https first (`toImageUrl(raw, { upgradeHttp: ["host"] })`
+once the host is measured to serve the same path over https, or an https value
+from the upstream), re-record the fixture, then declare `image()`.
+
 `apifuse migrate-url-kinds [path] [--check] [--json] [--no-typecheck]` moves an
 existing provider to the helpers. It reads the source statically (nothing is
-executed) and is a detector, not a gate: it always exits 0 and a second run
-changes nothing.
+executed) and is a detector, not a gate: a second run changes nothing, and it
+exits 0 whenever it ran. It exits 1 without writing on an unknown option, a
+path without `index.ts`, an unreadable `tsconfig.json`, a repository without
+operations, or an SDK that does not export the helpers (`bun install`, or bump
+the pin first; `--check` still previews the edits and says the type check did
+not run). `--help` prints the usage and writes nothing.
 
 - A field reached from an operation's `output` whose name is a fleet name and
   whose recorded fixture values are absolute URLs is declared with the helper:
   `image_url` → `image()`, `thumbnail_url` → `image({ thumbnail: true })`,
   `image_urls` → `imageList()`, `thumbnail_urls` →
-  `imageList({ thumbnail: true })`, `url` → `itemPage()`. The field's own
+  `imageList({ thumbnail: true })`, `url` → `itemPage()`. The name alone
+  does not make a `url` the item's own page: it becomes `itemPage()` only when
+  the object holding it is not a links/related/seller/shop/store/nav/menu
+  container, an id/name/title field beside it identifies the item, no other
+  field beside it holds a page URL, and every fixture value is on a site the
+  provider declares upstream (`allowedHosts`, `upstream.baseUrl`). Otherwise it
+  gets a `TODO(url-kind)` marker naming the doubt; declare `itemPage()` if it
+  is the item's page, otherwise `link()`. The field's own
   `.nullable()` is dropped and `.nullish()` becomes `.optional()` (the helpers
   admit `null`); `.optional()`, `.describe()`, `.describeKey()`, `.meta()` and
   a `describeKey(field, key)` wrapper are kept; `.url()`, `.min()`, `.trim()`
@@ -420,6 +437,9 @@ changes nothing.
   `push()` accumulators, spreads and conditionals) and object literals
   validated with `<schema>.parse()`. A label is added (`{ field: "items[].image_url" }`)
   when the field has one path.
+- A picture declared on https evidence whose host serves `http://` in another
+  recorded fixture is noted (`serves both schemes`): add the host to the
+  constructor's `upgradeHttp` once measured, or those values become `null`.
 - Other names whose fixture values are absolute URLs, or that are declared
   `.url()` (`detail_url`, `product_url`, `source_url`, ...), get a
   `// TODO(url-kind): ...` marker; decide `itemPage()`, `image()` or `link()`
@@ -430,7 +450,13 @@ changes nothing.
   decide `upgradeHttp` first), a picture file under `url`
   (`kind_ambiguous`), a chain the helper cannot carry such as `.regex()`,
   `.transform()` or a list item's own `.describeKey()` (`unsupported_chain`),
-  and a field declared through a shared schema constant (`shared_schema`).
+  a field declared through a shared schema constant (`shared_schema`), a list
+  name declared as one string or the reverse (`shape_mismatch`, fix the name
+  or the shape), a fixture value the helper refuses such as a `localhost` or
+  credentialed URL (`unpublishable_fixture_value`), a file that already
+  declares the helper or constructor name (`name_collision`, rename the local
+  one or edit by hand), and an edit inside text another edit replaces
+  (`overlapping_edit`, rerun after reviewing the first).
 - It then type-checks the result in memory and lists the type errors its edits
   introduce: those are mapper values it could not trace or hand-written types
   that still say `string`. Wrap each value in the constructor and update the

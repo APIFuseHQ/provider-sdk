@@ -19,6 +19,8 @@ import {
 	APIFUSE_URL_KIND_META_KEY,
 	appendPropertyPath,
 	inspectOutputUrlKinds,
+	isRecord,
+	localReference,
 } from "./output-url.js";
 
 export const OUTPUT_URL_COVERAGE_RULES = {
@@ -47,10 +49,6 @@ export interface OutputUrlCoverageOperation {
 }
 
 type JsonRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is JsonRecord {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 const ABSOLUTE_HTTP_URL = /^https?:\/\/[^\s/?#]+[^\s]*$/i;
 
@@ -135,16 +133,6 @@ interface OutputShape {
 	objectArrays: string[];
 }
 
-function localReference(root: JsonRecord, reference: string): unknown {
-	if (!reference.startsWith("#/")) return undefined;
-	let current: unknown = root;
-	for (const encoded of reference.slice(2).split("/")) {
-		if (!isRecord(current)) return undefined;
-		current = current[encoded.replaceAll("~1", "/").replaceAll("~0", "~")];
-	}
-	return current;
-}
-
 /** String leaves (annotated or not) and object-array paths of an output JSON Schema. */
 function describeOutputShape(schema: unknown): OutputShape {
 	const strings: StringLeaf[] = [];
@@ -210,46 +198,78 @@ function describeOutputShape(schema: unknown): OutputShape {
 
 const IMAGE_FILE = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i;
 
-function looksLikeImageFile(value: string): boolean {
+/** The picture-file extension of a URL's path (`.jpg`), or `undefined`. */
+export function imageFileExtension(value: string): string | undefined {
 	try {
-		return IMAGE_FILE.test(new URL(value).pathname);
+		return IMAGE_FILE.exec(new URL(value).pathname)?.[0];
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
-function exampleOrigin(value: string): string {
+/** True when the URL's path ends in a picture-file extension. */
+export function looksLikeImageFile(value: string): boolean {
+	return imageFileExtension(value) !== undefined;
+}
+
+/**
+ * `scheme://host/…` of an absolute URL, or `undefined`. Fixtures are
+ * sanitized, but a query or path is noise in a report line.
+ */
+export function urlOrigin(value: string): string | undefined {
 	try {
 		const url = new URL(value);
-		// The origin only: fixtures are sanitized, but a query or path is noise here.
 		return `${url.protocol}//${url.host}/…`;
 	} catch {
-		return "an absolute URL";
+		return undefined;
 	}
 }
 
 function unclassifiedWarning(
 	operationId: string,
 	path: string,
-	example: string | undefined,
+	values: readonly string[],
 ): OutputUrlCoverageWarning {
+	const absolute = values.filter((value) => isAbsoluteHttpUrl(value));
+	// A picture value decides the suggestion and an http:// picture how to get
+	// there, so the line cites that one.
+	const pictures = absolute.filter((value) => looksLikeImageFile(value));
+	const insecure = pictures.find((value) => /^http:/i.test(value));
+	const example = insecure ?? pictures[0] ?? absolute[0];
 	const evidence =
 		example === undefined
 			? 'it is declared format: "uri" (z.string().url())'
-			: `the recorded fixture holds ${exampleOrigin(example)}`;
-	const helper =
-		example === undefined
-			? "image() for a picture, itemPage() for the item's own page or link() for any other URL"
-			: looksLikeImageFile(example)
-				? "image() (imageList() for a list) if it is the item's picture, otherwise link()"
-				: "itemPage() if it is the item's own page, otherwise link()";
+			: `the recorded fixture holds ${urlOrigin(example) ?? "an absolute URL"}`;
+	let fix: string;
+	if (example === undefined)
+		fix =
+			"declare it with image() for a picture, itemPage() for the item's own page or link() for any other URL.";
+	else if (!looksLikeImageFile(example))
+		fix = "declare it with itemPage() if it is the item's own page, otherwise link().";
+	else if (insecure === undefined)
+		fix =
+			"declare it with image() (imageList() for a list) if it is the item's picture, otherwise link().";
+	else {
+		// image() admits https only: declared over an http:// fixture, the
+		// declaration check fails instead of warning.
+		const host = hostOf(insecure);
+		fix = `if it is the item's picture, first make the mapper publish https: toImageUrl(raw, { upgradeHttp: [${JSON.stringify(host)}] }) once ${host} is measured to serve the same path over https, or an https value from the upstream; re-record the fixture, then declare image() (imageList() for a list). Declaring image() over the http:// fixture fails the declaration check. Otherwise link().`;
+	}
 	return {
 		rule: OUTPUT_URL_COVERAGE_RULES.unclassifiedUrl,
 		operationId,
 		path: displayPath(path),
 		message: `${evidence}, but no URL kind helper declares this field.`,
-		fix: `declare it with ${helper}.`,
+		fix,
 	};
+}
+
+function hostOf(value: string): string {
+	try {
+		return new URL(value).hostname;
+	} catch {
+		return value;
+	}
 }
 
 /**
@@ -280,8 +300,7 @@ export function reportOutputUrlCoverage(
 		for (const [path, values] of [...fixtureStrings.entries()].sort(([left], [right]) =>
 			left.localeCompare(right),
 		)) {
-			const example = values.find((value) => isAbsoluteHttpUrl(value));
-			if (example === undefined) continue;
+			if (!values.some((value) => isAbsoluteHttpUrl(value))) continue;
 			// A path the schema declares with a helper is covered; a path the
 			// schema does not declare as a string (a passthrough payload) cannot
 			// be declared and is not warned.
@@ -289,14 +308,14 @@ export function reportOutputUrlCoverage(
 			const leaf = unannotated.find((candidate) => outputPathMatches(candidate.path, path));
 			if (!leaf || warned.has(leaf.path)) continue;
 			warned.add(leaf.path);
-			warnings.push(unclassifiedWarning(operationId, path, example));
+			warnings.push(unclassifiedWarning(operationId, path, values));
 		}
 		for (const leaf of unannotated) {
 			if (leaf.format !== "uri" || warned.has(leaf.path)) continue;
 			// Another branch (an intersection, a union) declares it with a helper.
 			if (annotated.some((candidate) => outputPathMatches(candidate.path, leaf.path))) continue;
 			warned.add(leaf.path);
-			warnings.push(unclassifiedWarning(operationId, leaf.path, undefined));
+			warnings.push(unclassifiedWarning(operationId, leaf.path, []));
 		}
 
 		if (operation.noMedia !== undefined || shape.objectArrays.length === 0) continue;

@@ -31,6 +31,7 @@ const SCHEMAS = `import { z } from "@apifuse/provider-sdk/provider";
 export const SellerSchema = z.object({
   name: z.string(),
   url: z.string().nullable(),
+  detail_url: z.string(),
 });
 
 const BaseItemSchema = z.object({
@@ -38,7 +39,6 @@ const BaseItemSchema = z.object({
   image_url: z.string().nullable(),
   url: z.string().url().nullish().describe("Item page"),
   thumbnail_url: z.string().optional(),
-  detail_url: z.string(),
   source_path: z.string(),
 });
 
@@ -78,10 +78,9 @@ function mapItem(row: Row) {
     image_url,
     url: row.link,
     ...(row.thumb ? { thumbnail_url: row.thumb } : {}),
-    detail_url: row.detail,
     source_path: row.source,
     image_urls: row.gallery,
-    seller: { name: row.seller.name, url: row.seller.home ?? null },
+    seller: { name: row.seller.name, url: row.seller.home ?? null, detail_url: row.detail },
   };
 }
 
@@ -104,7 +103,7 @@ export function strictItem(row: Row) {
 
 // Neither reached from the handler nor validated: the type check reports it.
 export function typedItem(row: Row): Item {
-  const item = { name: row.title, image_url: row.img ?? null, url: null, detail_url: "", source_path: "" };
+  const item = { name: row.title, image_url: row.img ?? null, url: null, source_path: "" };
   return item;
 }
 `;
@@ -117,13 +116,17 @@ const recorded = {
   image_url: "https://cdn.example.com/kettle.jpg",
   url: "https://shop.example.com/p/1",
   thumbnail_url: "https://cdn.example.com/kettle-s.jpg",
-  detail_url: "https://shop.example.com/p/1/detail",
   source_path: "/catalog/1",
   image_urls: ["https://cdn.example.com/kettle-1.jpg"],
-  seller: { name: "Shop", url: "https://shop.example.com/s/9" },
+  seller: {
+    name: "Shop",
+    url: "https://shop.example.com/s/9",
+    detail_url: "https://shop.example.com/s/9/about",
+  },
 };
 
 export const searchOperation = {
+  upstream: { baseUrl: "https://api.example.com/v1" },
   output: OutputSchema,
   handler: async (_ctx: unknown, input: { rows: Row[] }) => mapOutput(input.rows),
   fixtures: {
@@ -139,17 +142,43 @@ export const searchOperation = {
 };
 `;
 
+const DEFAULT_FILES: Readonly<Record<string, string>> = {
+	"schemas.ts": SCHEMAS,
+	"mapper.ts": MAPPER,
+	"index.ts": INDEX,
+};
+
+/**
+ * `sdk`: `link` installs this SDK checkout, `none` installs nothing, an
+ * object installs a fake older SDK whose entry points declare only `z`.
+ */
 function writeFixtureRepository(
-	files: Readonly<Record<string, string>> = {
-		"schemas.ts": SCHEMAS,
-		"mapper.ts": MAPPER,
-		"index.ts": INDEX,
-	},
+	files: Readonly<Record<string, string>> = DEFAULT_FILES,
+	sdk: "link" | "none" | { readonly version: string } = "link",
 ): string {
 	const dir = mkdtempSync(join(tmpdir(), "apifuse-migrate-url-kinds-"));
 	tempDirs.push(dir);
-	mkdirSync(join(dir, "node_modules", "@apifuse"), { recursive: true });
-	symlinkSync(SDK_ROOT, join(dir, "node_modules", "@apifuse", "provider-sdk"), "dir");
+	const sdkDir = join(dir, "node_modules", "@apifuse", "provider-sdk");
+	if (sdk === "link") {
+		mkdirSync(join(dir, "node_modules", "@apifuse"), { recursive: true });
+		symlinkSync(SDK_ROOT, sdkDir, "dir");
+	} else if (sdk !== "none") {
+		mkdirSync(sdkDir, { recursive: true });
+		writeFileSync(
+			join(sdkDir, "package.json"),
+			JSON.stringify({
+				name: "@apifuse/provider-sdk",
+				version: sdk.version,
+				type: "module",
+				exports: {
+					".": { types: "./index.d.ts" },
+					"./provider": { types: "./provider.d.ts" },
+				},
+			}),
+		);
+		writeFileSync(join(sdkDir, "index.d.ts"), "export declare const z: any;\n");
+		writeFileSync(join(sdkDir, "provider.d.ts"), "export declare const z: any;\n");
+	}
 	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture", type: "module" }));
 	writeFileSync(
 		join(dir, "tsconfig.json"),
@@ -218,8 +247,10 @@ describe("apifuse migrate-url-kinds", () => {
 		expect(schemas).toContain(
 			'import { z, image, imageList, itemPage } from "@apifuse/provider-sdk/provider";',
 		);
-		// nested object, own .nullable() dropped
-		expect(schemas).toContain("  url: itemPage(),\n});");
+		// a seller's page is not the item's: marked, and so is the other URL beside it
+		expect(schemas).toContain(
+			"  // TODO(url-kind): not proven to be the item's own page (fixture https://shop.example.com/…; it sits under seller, which names other pages than the item; detail_url beside it also holds a page URL); declare itemPage() if it is, otherwise link().\n  url: z.string().nullable(),",
+		);
 		expect(schemas).toContain("  image_url: image(),");
 		// .nullish() becomes .optional(), .url() dropped, .describe() kept
 		expect(schemas).toContain('  url: itemPage().optional().describe("Item page"),');
@@ -230,21 +261,23 @@ describe("apifuse migrate-url-kinds", () => {
 		expect(schemas).toContain(
 			"  // TODO(url-kind): absolute URL (fixture https://shop.example.com/…); declare itemPage()",
 		);
-		expect(schemas).toContain("  detail_url: z.string(),");
+		expect(schemas).toContain("  detail_url: z.string(),\n});");
 		// a relative fixture value is no URL evidence
 		expect(schemas).toContain("  source_path: z.string(),");
 
 		expect(
 			result.rewrites.map((item) => `${item.property}@${item.paths.join("|")} -> ${item.after}`),
 		).toEqual([
-			"url@items[].seller.url -> itemPage()",
 			"image_url@items[].image_url -> image()",
 			'url@items[].url -> itemPage().optional().describe("Item page")',
 			"thumbnail_url@items[].thumbnail_url -> image({ thumbnail: true }).optional()",
 			"image_urls@items[].image_urls -> imageList()",
 		]);
-		expect(result.todos.map((item) => `${item.property} ${item.evidence}`)).toEqual([
-			"detail_url fixture https://shop.example.com/…",
+		expect(
+			result.todos.map((item) => `${item.property}@${item.paths.join("|")} ${item.reason}`),
+		).toEqual([
+			"url@items[].seller.url item_page_unproven",
+			"detail_url@items[].seller.detail_url other_name",
 		]);
 		expect(
 			result.skipped.map((item) => `${item.property}@${item.paths.join("|")} ${item.reason}`),
@@ -269,7 +302,7 @@ describe("apifuse migrate-url-kinds", () => {
 			'    image_urls: toImageUrls(row.gallery, { field: "items[].image_urls" }),',
 		);
 		expect(mapper).toContain(
-			'seller: { name: row.seller.name, url: toItemPageUrl(row.seller.home ?? null, { field: "items[].seller.url" }) },',
+			"seller: { name: row.seller.name, url: row.seller.home ?? null, detail_url: row.detail },",
 		);
 		// the parse anchor
 		expect(mapper).toContain(
@@ -277,12 +310,16 @@ describe("apifuse migrate-url-kinds", () => {
 		);
 		// literals and undeclared fields stay
 		expect(mapper).toContain('banner: { image_url: "http://img.example.com/banner.jpg" },');
-		expect(mapper).toContain("    detail_url: row.detail,");
 		expect(mapper).toContain("for (const row of rows) photos.push({ url: row.detail });");
 		// the untraced typed mapper is reported, not guessed
 		expect(result.residualCheck).toBe("ran");
+		expect(result.sdk.status).toBe("ok");
 		expect(result.residual).toEqual([
-			expect.objectContaining({ file: "mapper.ts", message: expect.stringContaining("ImageUrl") }),
+			expect.objectContaining({
+				file: "mapper.ts",
+				code: 2322,
+				message: expect.stringContaining("ImageUrl"),
+			}),
 		]);
 		expect(mapper).toContain("image_url: row.img ?? null, url: null");
 	});
@@ -328,9 +365,7 @@ describe("apifuse migrate-url-kinds", () => {
 		expect(neutral(property(base(after), "image_url"), false)).toEqual(
 			property(base(before), "image_url"),
 		);
-		expect(neutral(property(extra(after), "seller"), false)).toEqual(
-			property(extra(before), "seller"),
-		);
+		expect(property(extra(after), "seller")).toEqual(property(extra(before), "seller"));
 		// z.string().url().nullish() -> itemPage().optional() and z.array(z.string().url()) -> imageList(): equal with format kept
 		expect(neutral(property(base(after), "url"), true)).toEqual(property(base(before), "url"));
 		expect(neutral(property(extra(after), "image_urls"), true)).toEqual(
@@ -428,7 +463,7 @@ export const OutputSchema = z.object({
   blank: z.object({ image_url: z.string() }),
   nullable_items: z.object({ image_urls: z.array(z.string().nullable()) }),
   described_items: z.object({ image_urls: z.array(describeKey(z.string().url(), "fields.image")) }),
-  by_id: z.record(z.string(), z.object({ url: z.string() })),
+  by_id: z.record(z.string(), z.object({ name: z.string(), url: z.string() })),
   external: z.object({ image_url: z.string() }),
   external_ref: z.object({ image_url: z.string() }),
   gallery: z.array(z.object({ image_url: z.string() })),
@@ -447,7 +482,7 @@ export function mapOutput(path: string) {
     blank: { image_url: path },
     nullable_items: { image_urls: [path] },
     described_items: { image_urls: [path] },
-    by_id: { first: { url: path } },
+    by_id: { first: { name: path, url: path } },
     external: externalResolve({ image_url: path }),
     external_ref: externalResolve(raw),
     gallery: Array.from([path], (src) => ({ image_url: src })),
@@ -458,6 +493,7 @@ export function mapOutput(path: string) {
 import { mapOutput } from "./mapper";
 
 export const op = {
+  upstream: { baseUrl: "https://api.example.com" },
   output: OutputSchema,
   handler: async (_ctx: unknown, input: { path: string }) => mapOutput(input.path),
   fixtures: {
@@ -467,7 +503,7 @@ export const op = {
       blank: { image_url: "" },
       nullable_items: { image_urls: ["https://cdn.example.com/a.jpg", null] },
       described_items: { image_urls: ["https://cdn.example.com/a.jpg"] },
-      by_id: { first: { url: "https://shop.example.com/p/1" } },
+      by_id: { first: { name: "First", url: "https://shop.example.com/p/1" } },
       external: { image_url: "https://cdn.example.com/b.jpg" },
       external_ref: { image_url: "https://cdn.example.com/c.jpg" },
       gallery: [{ image_url: "https://cdn.example.com/d.jpg" }],
@@ -498,12 +534,399 @@ export const op = {
 			'gallery: Array.from([path], (src) => ({ image_url: toImageUrl(src, { field: "gallery[].image_url" }) })),',
 		);
 		expect(mapper).toContain(
-			'by_id: { first: { url: toItemPageUrl(path, { field: "by_id.*.url" }) } },',
+			'by_id: { first: { name: path, url: toItemPageUrl(path, { field: "by_id.*.url" }) } },',
 		);
 		expect(result.skipped.map((item) => `${item.paths.join("|")} ${item.reason}`)).toEqual([
 			"blank.image_url non_url_fixture_value",
 			"nullable_items.image_urls unsupported_chain",
 			"described_items.image_urls unsupported_chain",
 		]);
+	});
+});
+
+const URL_EVIDENCE_SCHEMAS = `import { z } from "@apifuse/provider-sdk/provider";
+
+export const OutputSchema = z.object({
+  items: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      url: z.string(),
+      seller: z.object({ id: z.string(), name: z.string(), url: z.string() }),
+    }),
+  ),
+  booking_links: z.array(z.object({ name: z.string(), url: z.string() })),
+  related_links: z.array(z.object({ title: z.string(), url: z.string() })),
+  nav_items: z.array(z.object({ title: z.string(), url: z.string() })),
+  products: z.array(z.object({ name: z.string(), url: z.string(), product_url: z.string() })),
+  tags: z.array(z.object({ url: z.string() })),
+  articles: z.array(z.object({ title: z.string(), url: z.string() })),
+});
+`;
+
+const URL_EVIDENCE_INDEX = `import { OutputSchema } from "./schemas";
+
+const SHOP_HOST = "api.shop.example.co.jp";
+
+export const provider = { allowedHosts: [SHOP_HOST] };
+
+type Row = { id: string; title: string; link: string; seller: { id: string; name: string; url: string } };
+
+export const op = {
+  output: OutputSchema,
+  handler: async (_ctx: unknown, input: { rows: Row[] }) => ({
+    items: input.rows.map((row) => ({ id: row.id, title: row.title, url: row.link, seller: row.seller })),
+    booking_links: [],
+    related_links: [],
+    nav_items: [],
+    products: [],
+    tags: [],
+    articles: [],
+  }),
+  fixtures: {
+    request: { rows: [] },
+    response: {
+      items: [
+        {
+          id: "1",
+          title: "Kettle",
+          url: "https://item.shop.example.co.jp/p/1",
+          seller: { id: "s9", name: "Shop", url: "https://item.shop.example.co.jp/s/9" },
+        },
+      ],
+      booking_links: [{ name: "Tickets", url: "https://tickets.example.net/e/1" }],
+      related_links: [{ title: "More", url: "https://item.shop.example.co.jp/r/2" }],
+      nav_items: [{ title: "Home", url: "https://item.shop.example.co.jp/" }],
+      products: [
+        {
+          name: "Kettle",
+          url: "https://item.shop.example.co.jp/p/1",
+          product_url: "https://item.shop.example.co.jp/p/1/detail",
+        },
+      ],
+      tags: [{ url: "https://item.shop.example.co.jp/t/x" }],
+      articles: [{ title: "News", url: "https://news.example.org/a/1" }],
+    },
+  },
+};
+`;
+
+describe("apifuse migrate-url-kinds: url needs evidence beyond its name", () => {
+	it("declares itemPage() only for an identified item on an upstream site and marks the rest", () => {
+		const dir = writeFixtureRepository({
+			"schemas.ts": URL_EVIDENCE_SCHEMAS,
+			"index.ts": URL_EVIDENCE_INDEX,
+		});
+		const result = migrateUrlKindsRepository(dir, { typecheck: false });
+		const schemas = readFileSync(join(dir, "schemas.ts"), "utf8");
+		const index = readFileSync(join(dir, "index.ts"), "utf8");
+
+		expect(result.rewrites.map((item) => `${item.paths.join("|")} -> ${item.after}`)).toEqual([
+			"items[].url -> itemPage()",
+		]);
+		expect(index).toContain('url: toItemPageUrl(row.link, { field: "items[].url" })');
+		expect(
+			result.todos.map((item) => `${item.paths.join("|")} ${item.reason}: ${item.detail ?? ""}`),
+		).toEqual([
+			"items[].seller.url item_page_unproven: it sits under seller, which names other pages than the item",
+			"booking_links[].url item_page_unproven: it sits under booking_links, which names other pages than the item; fixture host tickets.example.net is not on an upstream site (example.co.jp)",
+			"related_links[].url item_page_unproven: it sits under related_links, which names other pages than the item",
+			"nav_items[].url item_page_unproven: it sits under nav_items, which names other pages than the item",
+			"products[].url item_page_unproven: product_url beside it also holds a page URL",
+			"products[].product_url other_name: ",
+			"tags[].url item_page_unproven: no id/name/title field beside it identifies an item",
+			"articles[].url item_page_unproven: fixture host news.example.org is not on an upstream site (example.co.jp)",
+		]);
+		// the marker carries the doubt into the source
+		expect(schemas).toContain(
+			"booking_links: z.array(z.object({ name: z.string(), /* TODO(url-kind): not proven to be the item's own page (fixture https://tickets.example.net/…; it sits under booking_links",
+		);
+		expect(schemas).toContain(
+			"seller: z.object({ id: z.string(), name: z.string(), /* TODO(url-kind): not proven to be the item's own page (fixture https://item.shop.example.co.jp/…; it sits under seller, which names other pages than the item); declare itemPage() if it is, otherwise link(). */ url: z.string() }),",
+		);
+
+		const second = migrateUrlKindsRepository(dir, { typecheck: false });
+		expect(second.status).toBe("unchanged");
+		expect(second.todos).toEqual([]);
+		expect(readFileSync(join(dir, "schemas.ts"), "utf8")).toBe(schemas);
+	});
+
+	it("marks url when the provider declares no upstream host to compare", () => {
+		const dir = writeFixtureRepository({
+			"schemas.ts": URL_EVIDENCE_SCHEMAS,
+			"index.ts": URL_EVIDENCE_INDEX.replace(
+				"export const provider = { allowedHosts: [SHOP_HOST] };",
+				"export const host = SHOP_HOST;",
+			),
+		});
+		const result = migrateUrlKindsRepository(dir, { check: true, typecheck: false });
+		expect(result.rewrites).toEqual([]);
+		expect(result.todos.find((item) => item.paths[0] === "items[].url")?.detail).toBe(
+			"the provider declares no upstream host (allowedHosts, upstream.baseUrl) to compare",
+		);
+	});
+});
+
+describe("apifuse migrate-url-kinds: http pictures elsewhere", () => {
+	it("notes a picture host that serves http:// in another operation's fixture", () => {
+		const dir = writeFixtureRepository({
+			"index.ts": `import { z } from "@apifuse/provider-sdk/provider";
+
+export const search = {
+  output: z.object({ items: z.array(z.object({ name: z.string(), image_url: z.string() })) }),
+  handler: async () => ({ items: [] }),
+  fixtures: {
+    request: {},
+    response: { items: [{ name: "a", image_url: "https://tong.example.com/a.jpg" }] },
+  },
+};
+
+export const detail = {
+  output: z.object({ name: z.string(), cover: z.string() }),
+  handler: async () => ({ name: "", cover: "" }),
+  fixtures: {
+    request: {},
+    response: { name: "a", cover: "http://tong.example.com/b.jpg" },
+  },
+};
+`,
+		});
+		const result = migrateUrlKindsRepository(dir, { check: true, typecheck: false });
+		expect(result.rewrites).toEqual([
+			expect.objectContaining({
+				paths: ["items[].image_url"],
+				after: "image()",
+				notes: [
+					'tong.example.com serves both schemes (http:// in fixture detail:cover); add upgradeHttp: ["tong.example.com"] to the constructor once it is measured to serve the same path over https, or those values become null.',
+				],
+			}),
+		]);
+	});
+});
+
+describe("apifuse migrate-url-kinds: SDK precondition", () => {
+	it("refuses to write against an SDK without the helpers and does not report its module errors as untraced values", () => {
+		const dir = writeFixtureRepository(DEFAULT_FILES, { version: "2.2.0-beta.60" });
+		const written = migrateUrlKindsRepository(dir);
+		expect(written.status).toBe("refused");
+		expect(written.sdk).toEqual(
+			expect.objectContaining({ status: "outdated", version: "2.2.0-beta.60" }),
+		);
+		expect(written.reason).toContain(
+			"@apifuse/provider-sdk 2.2.0-beta.60 does not export toImageUrl (@apifuse/provider-sdk), toImageUrls (@apifuse/provider-sdk), toItemPageUrl (@apifuse/provider-sdk), image (@apifuse/provider-sdk/provider)",
+		);
+		expect(written.reason).toContain("Nothing was written");
+		expect(written.residualCheck).toBe("unresolved");
+		expect(written.residual).toEqual([]);
+		// the plan is still shown
+		expect(written.rewrites.length).toBeGreaterThan(0);
+		expect(readFileSync(join(dir, "schemas.ts"), "utf8")).toBe(SCHEMAS);
+		expect(readFileSync(join(dir, "mapper.ts"), "utf8")).toBe(MAPPER);
+
+		const preview = migrateUrlKindsRepository(dir, { check: true });
+		expect(preview.status).toBe("would-migrate");
+		expect(preview.residualCheck).toBe("unresolved");
+		expect(preview.residual).toEqual([]);
+	});
+
+	it("says the SDK is not installed instead of type-checking against nothing", () => {
+		const dir = writeFixtureRepository(DEFAULT_FILES, "none");
+		const result = migrateUrlKindsRepository(dir, { check: true });
+		expect(result.sdk.status).toBe("missing");
+		expect(result.sdk.detail).toContain("does not resolve");
+		expect(result.sdk.detail).toContain("bun install");
+		expect(result.residualCheck).toBe("unresolved");
+		expect(migrateUrlKindsRepository(dir).status).toBe("refused");
+		expect(readFileSync(join(dir, "schemas.ts"), "utf8")).toBe(SCHEMAS);
+	});
+});
+
+describe("apifuse migrate-url-kinds: refusals", () => {
+	it("refuses a path that is not a provider repository", () => {
+		const empty = mkdtempSync(join(tmpdir(), "apifuse-migrate-url-kinds-empty-"));
+		tempDirs.push(empty);
+		expect(migrateUrlKindsRepository(empty)).toEqual(
+			expect.objectContaining({ status: "refused", reason: expect.stringContaining("index.ts") }),
+		);
+		expect(migrateUrlKindsRepository(join(empty, "missing")).status).toBe("refused");
+
+		const noOperations = writeFixtureRepository({ "index.ts": "export const x = 1;\n" });
+		expect(migrateUrlKindsRepository(noOperations)).toEqual(
+			expect.objectContaining({
+				status: "refused",
+				reason: expect.stringContaining("declares no operation"),
+			}),
+		);
+
+		const brokenConfig = writeFixtureRepository();
+		writeFileSync(join(brokenConfig, "tsconfig.json"), '{ "compilerOptions": { "strict": true ');
+		expect(migrateUrlKindsRepository(brokenConfig)).toEqual(
+			expect.objectContaining({
+				status: "refused",
+				reason: expect.stringContaining("tsconfig.json"),
+			}),
+		);
+		expect(readFileSync(join(brokenConfig, "schemas.ts"), "utf8")).toBe(SCHEMAS);
+	});
+});
+
+describe("apifuse migrate-url-kinds: value walk and skip reasons", () => {
+	it("traces Array.of/Array.from projections, element picks, flatMap, a method handler and a projected local", () => {
+		const dir = writeFixtureRepository({
+			"schemas.ts": `import { z } from "@apifuse/provider-sdk/provider";
+import { CollidingSchema } from "./colliding";
+
+const picture = () => z.object({ image_url: z.string() });
+
+export const OutputSchema = z.object({
+  of_entry: z.object({ image_url: z.string() }),
+  from_entry: z.object({ image_url: z.string() }),
+  first: z.object({ image_url: z.string() }),
+  last: z.object({ image_url: z.string() }),
+  found: z.object({ image_url: z.string() }),
+  flat: z.array(z.object({ image_url: z.string() })),
+  picked: picture(),
+  wrong_list: z.object({ image_urls: z.string() }),
+  local: z.object({ image_url: z.string() }),
+  colliding: CollidingSchema,
+});
+`,
+			"colliding.ts": `import { z } from "@apifuse/provider-sdk/provider";
+
+const image = "local";
+
+export const CollidingSchema = z.object({ image_url: z.string(), label: z.literal(image) });
+`,
+			"index.ts": `import { OutputSchema } from "./schemas";
+
+const PIC = "https://cdn.example.com/a.jpg";
+
+export const op = {
+  output: OutputSchema,
+  async handler(_ctx: unknown, input: { rows: string[]; nested: string[][] }) {
+    const result = { item: { image_url: input.rows[0] ?? "" } };
+    return {
+      of_entry: Array.of({ entry: { image_url: input.rows[0] } })[0].entry,
+      from_entry: Array.from(input.rows, (src) => ({ entry: { image_url: src } }))[0].entry,
+      first: input.rows.map((src) => ({ image_url: src }))[0],
+      last: input.rows.map((src) => ({ image_url: src })).at(-1),
+      found: input.rows.map((src) => ({ image_url: src })).find(Boolean),
+      flat: input.nested.flatMap((group) => group.map((src) => ({ image_url: src }))),
+      picked: result.item,
+      wrong_list: { image_urls: input.rows[0] },
+      local: { image_url: input.rows[0] },
+      colliding: { image_url: input.rows[0], label: "local" },
+    };
+  },
+  fixtures: {
+    request: { rows: [], nested: [] },
+    response: {
+      of_entry: { image_url: PIC },
+      from_entry: { image_url: PIC },
+      first: { image_url: PIC },
+      last: { image_url: PIC },
+      found: { image_url: PIC },
+      flat: [{ image_url: PIC }],
+      picked: { image_url: PIC },
+      wrong_list: { image_urls: PIC },
+      local: { image_url: "https://intranet.local/a.jpg" },
+      colliding: { image_url: PIC, label: "local" },
+    },
+  },
+};
+`,
+		});
+		const result = migrateUrlKindsRepository(dir, { typecheck: false });
+		const index = readFileSync(join(dir, "index.ts"), "utf8");
+		const wrap = (label: string, value: string) =>
+			`image_url: toImageUrl(${value}, { field: "${label}" })`;
+
+		expect(index).toContain(
+			`of_entry: Array.of({ entry: { ${wrap("of_entry.image_url", "input.rows[0]")} } })[0].entry,`,
+		);
+		expect(index).toContain(
+			`from_entry: Array.from(input.rows, (src) => ({ entry: { ${wrap("from_entry.image_url", "src")} } }))[0].entry,`,
+		);
+		expect(index).toContain(
+			`first: input.rows.map((src) => ({ ${wrap("first.image_url", "src")} }))[0],`,
+		);
+		expect(index).toContain(
+			`last: input.rows.map((src) => ({ ${wrap("last.image_url", "src")} })).at(-1),`,
+		);
+		expect(index).toContain(
+			`found: input.rows.map((src) => ({ ${wrap("found.image_url", "src")} })).find(Boolean),`,
+		);
+		expect(index).toContain(
+			`flat: input.nested.flatMap((group) => group.map((src) => ({ ${wrap("flat[].image_url", "src")} }))),`,
+		);
+		expect(index).toContain(
+			`const result = { item: { ${wrap("picked.image_url", 'input.rows[0] ?? ""')} } };`,
+		);
+		// left alone: not declared with a helper
+		expect(index).toContain("wrong_list: { image_urls: input.rows[0] },");
+		expect(index).toContain("local: { image_url: input.rows[0] },");
+		expect(index).toContain('colliding: { image_url: input.rows[0], label: "local" },');
+
+		expect(
+			result.skipped.map((item) => `${item.file} ${item.paths.join("|")} ${item.reason}`),
+		).toEqual([
+			"colliding.ts colliding.image_url name_collision",
+			"schemas.ts wrong_list.image_urls shape_mismatch",
+			"schemas.ts local.image_url unpublishable_fixture_value",
+		]);
+	});
+});
+
+describe("apifuse migrate-url-kinds command line", () => {
+	const run = (args: readonly string[], cwd: string) => {
+		const outcome = Bun.spawnSync(["bun", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+		return {
+			code: outcome.exitCode,
+			stdout: outcome.stdout.toString(),
+			stderr: outcome.stderr.toString(),
+		};
+	};
+	const dispatcher = join(SDK_ROOT, "bin", "apifuse.ts");
+	const bin = join(SDK_ROOT, "bin", "apifuse-migrate-url-kinds.ts");
+
+	it("never writes for --help, -h or an unknown option", () => {
+		const dir = writeFixtureRepository();
+		const help = run([dispatcher, "migrate-url-kinds", "--help"], dir);
+		expect(help.code).toBe(0);
+		expect(help.stdout).toContain("Usage: apifuse migrate-url-kinds");
+		expect(run([bin, "-h"], dir).code).toBe(0);
+		const typo = run([dispatcher, "migrate-url-kinds", "--dry-run"], dir);
+		expect(typo.code).toBe(1);
+		expect(typo.stderr).toContain("unknown option --dry-run");
+		const json = run([dispatcher, "migrate-url-kinds", "--chek", "--json"], dir);
+		expect(json.code).toBe(1);
+		expect(JSON.parse(json.stdout)).toEqual(
+			expect.objectContaining({ status: "usage-error", reason: "unknown option --chek" }),
+		);
+		expect(readFileSync(join(dir, "schemas.ts"), "utf8")).toBe(SCHEMAS);
+		expect(readFileSync(join(dir, "mapper.ts"), "utf8")).toBe(MAPPER);
+	});
+
+	it("reads the path argument when the bin is run directly and exits 1 on a refused path", () => {
+		const dir = writeFixtureRepository();
+		const direct = run([bin, dir, "--check", "--json", "--no-typecheck"], SDK_ROOT);
+		expect(direct.code).toBe(0);
+		const payload = JSON.parse(direct.stdout) as { providerRoot: string; status: string };
+		expect(payload.providerRoot).toBe(dir);
+		expect(payload.status).toBe("would-migrate");
+
+		const text = run([dispatcher, "migrate-url-kinds", dir, "--check", "--no-typecheck"], SDK_ROOT);
+		expect(text.code).toBe(0);
+		expect(text.stdout).toContain("migrate-url-kinds: would change 2 file(s)");
+		expect(text.stdout).toContain(
+			"  todo    schemas.ts:5 url (fixture https://shop.example.com/…)",
+		);
+
+		const empty = mkdtempSync(join(tmpdir(), "apifuse-migrate-url-kinds-empty-"));
+		tempDirs.push(empty);
+		const refused = run([dispatcher, "migrate-url-kinds", empty], SDK_ROOT);
+		expect(refused.code).toBe(1);
+		expect(refused.stdout).toContain("migrate-url-kinds: refused:");
+		expect(readFileSync(join(dir, "schemas.ts"), "utf8")).toBe(SCHEMAS);
 	});
 });
