@@ -169,11 +169,15 @@ function classify(
 	return { status: "ok", url: candidate };
 }
 
+// Any authority with `@` may carry a user name or password, whatever the
+// scheme and whether or not it parses, so such values never reach the log.
+const USERINFO_AUTHORITY = /^(?:[a-z][a-z0-9+.-]*:)?\/\/[^/?#]*@/i;
+
 function exampleValue(raw: unknown, reason: OutputUrlDropReason): string | undefined {
 	if (reason === "credentials") return undefined;
-	if (raw instanceof URL) return raw.href;
-	if (typeof raw === "string") return raw.trim();
-	return `[${typeof raw}]`;
+	const text = raw instanceof URL ? raw.href : typeof raw === "string" ? raw.trim() : undefined;
+	if (text === undefined) return `[${typeof raw}]`;
+	return USERINFO_AUTHORITY.test(text) ? undefined : text;
 }
 
 function construct(
@@ -421,7 +425,42 @@ export function inspectOutputUrlKinds(schema: unknown): {
 		return undefined;
 	};
 
-	const visit = (candidate: unknown, path: string): void => {
+	// Properties an object node declares itself or through `allOf` branches
+	// (z.intersection): they all land on the same response object.
+	const ownProperties = (node: JsonRecord, seen = new Set<object>()): Array<[string, unknown]> => {
+		if (seen.has(node)) return [];
+		seen.add(node);
+		const out: Array<[string, unknown]> = isRecord(node.properties)
+			? Object.entries(node.properties)
+			: [];
+		if (Array.isArray(node.allOf))
+			for (const branch of node.allOf) {
+				const resolved = resolve(branch);
+				if (resolved) out.push(...ownProperties(resolved, seen));
+			}
+		return out;
+	};
+
+	const countConflicts = (node: JsonRecord, path: string): void => {
+		const pages = new Set<string>();
+		const pictures = new Set<string>();
+		for (const [property, schema] of ownProperties(node)) {
+			const leaf = singleLeaf(schema);
+			if (leaf?.[APIFUSE_URL_KIND_META_KEY] === "item_page") pages.add(property);
+			if (
+				leaf?.[APIFUSE_URL_KIND_META_KEY] === "image" &&
+				leaf[APIFUSE_IMAGE_ROLE_META_KEY] !== "thumbnail"
+			)
+				pictures.add(property);
+		}
+		const objectPath = path.length > 0 ? path : "$";
+		if (pages.size > 1)
+			conflicts.push({ path: objectPath, kind: "item_page", properties: [...pages].sort() });
+		if (pictures.size > 1)
+			conflicts.push({ path: objectPath, kind: "image", properties: [...pictures].sort() });
+	};
+
+	const visit = (candidate: unknown, path: string, allOfBranch = false): void => {
 		const node = resolve(candidate);
 		if (!node || active.has(node)) return;
 		active.add(node);
@@ -435,31 +474,19 @@ export function inspectOutputUrlKinds(schema: unknown): {
 					thumbnail: node[APIFUSE_IMAGE_ROLE_META_KEY] === "thumbnail",
 				});
 			}
+			// An allOf branch's properties are counted with its parent object.
+			if (!allOfBranch && (isRecord(node.properties) || Array.isArray(node.allOf)))
+				countConflicts(node, path);
 			const properties = node.properties;
-			if (isRecord(properties)) {
-				const pages: string[] = [];
-				const pictures: string[] = [];
-				for (const property of Object.keys(properties).sort()) {
-					const leaf = singleLeaf(properties[property]);
-					if (leaf?.[APIFUSE_URL_KIND_META_KEY] === "item_page") pages.push(property);
-					if (
-						leaf?.[APIFUSE_URL_KIND_META_KEY] === "image" &&
-						leaf[APIFUSE_IMAGE_ROLE_META_KEY] !== "thumbnail"
-					)
-						pictures.push(property);
+			if (isRecord(properties))
+				for (const property of Object.keys(properties).sort())
 					visit(properties[property], appendPropertyPath(path, property));
-				}
-				const objectPath = path.length > 0 ? path : "$";
-				if (pages.length > 1)
-					conflicts.push({ path: objectPath, kind: "item_page", properties: pages });
-				if (pictures.length > 1)
-					conflicts.push({ path: objectPath, kind: "image", properties: pictures });
-			}
 			if (isRecord(node.items)) visit(node.items, `${path}[]`);
 			if (Array.isArray(node.prefixItems))
 				for (const item of node.prefixItems) visit(item, `${path}[]`);
 			if (isRecord(node.additionalProperties)) visit(node.additionalProperties, `${path}.*`);
-			for (const keyword of ["allOf", "anyOf", "oneOf"] as const) {
+			if (Array.isArray(node.allOf)) for (const branch of node.allOf) visit(branch, path, true);
+			for (const keyword of ["anyOf", "oneOf"] as const) {
 				const variants = node[keyword];
 				if (Array.isArray(variants)) for (const variant of variants) visit(variant, path);
 			}

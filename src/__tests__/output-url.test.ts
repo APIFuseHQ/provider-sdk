@@ -32,6 +32,7 @@ import { observeOutputUrlDrops } from "../runtime/output-url-observer.js";
 import { OutputUrlTelemetryCollector } from "../runtime/output-url-telemetry.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/request-telemetry.js";
 import { createServerApp, type ProviderServerLogEvent } from "../server/serve.js";
+import { event } from "../stream.js";
 import type { OperationRiskClass, ProviderDefinition } from "../types.js";
 import { defineTestProvider as defineProvider } from "./test-utils.js";
 
@@ -182,10 +183,16 @@ describe("toImageUrl", () => {
 				String(raw),
 			).toStrictEqual([reason]);
 		}
-		const { drops: credential } = drops(() =>
-			toImageUrl("https://user:secret@cdn.example.com/a.jpg"),
-		);
-		expect(credential[0]).not.toHaveProperty("value");
+		for (const raw of [
+			"https://user:secret@cdn.example.com/a.jpg",
+			"ftp://user:secret@files.example.com/a.jpg",
+			"https://user:secret@",
+			"//user:secret@cdn.example.com/a.jpg",
+		]) {
+			const { drops: recorded } = drops(() => toImageUrl(raw));
+			expect(recorded, raw).toHaveLength(1);
+			expect(recorded[0], raw).not.toHaveProperty("value");
+		}
 	});
 
 	it("treats a missing value as absent, not as a drop", () => {
@@ -358,11 +365,35 @@ describe("output URL declaration rules", () => {
 		});
 		const found = violations(declaration({ search: operationWith(output) }));
 		expect(found.map((violation) => [violation.ruleId, violation.path])).toStrictEqual([
-			[DECLARATION_RULE_IDS.outputUrlKindUnique, "operations.search.output items[]"],
-			[DECLARATION_RULE_IDS.outputUrlKindUnique, "operations.search.output items[]"],
+			[DECLARATION_RULE_IDS.outputUrlKindUnique, "operations.search.output.items[]"],
+			[DECLARATION_RULE_IDS.outputUrlKindUnique, "operations.search.output.items[]"],
 		]);
 		expect(found[0]?.message).toContain("detail_url, url");
 		expect(found[1]?.message).toContain("image_url, photo_url");
+	});
+
+	it("count the properties of intersected objects together", () => {
+		const output = z.object({
+			items: z.array(
+				z.intersection(
+					z.object({ image_url: image(), url: itemPage() }),
+					z.object({ photo_url: image(), thumbnail_url: image({ thumbnail: true }) }),
+				),
+			),
+		});
+		expect(
+			violations(declaration({ search: operationWith(output) })).map((violation) => [
+				violation.ruleId,
+				violation.path,
+				violation.message,
+			]),
+		).toStrictEqual([
+			[
+				DECLARATION_RULE_IDS.outputUrlKindUnique,
+				"operations.search.output.items[]",
+				"image_url, photo_url are all declared image(); an item has one main picture.",
+			],
+		]);
 	});
 
 	it("reject noMedia next to image or item page fields, but not next to links", () => {
@@ -446,6 +477,52 @@ describe("output URL observation events", () => {
 			],
 		});
 		expect(new OutputUrlTelemetryCollector().toLogPayload(spans)).toBeUndefined();
+	});
+
+	it("observe drops made while a stream is pulled", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const app = createServerApp(
+			declaration({
+				photos: {
+					riskClass: READ,
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: {
+						kind: "sse",
+						events: { photo: z.object({ image_url: image().optional() }) },
+					},
+					async *handler() {
+						for (const raw of ["https://cdn.example.com/1.jpg", "http://img.example.com/2.jpg"]) {
+							await Promise.resolve();
+							yield event("photo", {
+								image_url: toImageUrl(raw, { field: "photo.image_url" }),
+							});
+						}
+					},
+				},
+			}),
+			{ logger: (entry) => events.push(entry) },
+		);
+		const response = await app.request("/v1/photos", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req-sse", input: {} }),
+		});
+		const text = await response.text();
+		expect(text).toContain('"image_url":"https://cdn.example.com/1.jpg"');
+		expect(text).not.toContain("img.example.com");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// test-invalid: contributor fields are not exposed on the shared log event type.
+		const log = events.at(-1) as { events?: { outputUrlDropped: unknown[] } };
+		expect(log.events?.outputUrlDropped).toStrictEqual([
+			{
+				kind: "image",
+				reason: "insecure",
+				field: "photo.image_url",
+				count: 1,
+				example: "http://img.example.com/2.jpg",
+			},
+		]);
 	});
 
 	it("reach the request log, never the response or the gateway header", async () => {

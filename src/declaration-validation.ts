@@ -291,7 +291,12 @@ function validateOutputUrlKindDeclaration(
 			const helper = conflict.kind === "item_page" ? "itemPage()" : "image()";
 			violations.push({
 				ruleId: DECLARATION_RULE_IDS.outputUrlKindUnique,
-				path: `${path} ${conflict.path}`,
+				path:
+					conflict.path === "$"
+						? path
+						: conflict.path.startsWith("[")
+							? `${path}${conflict.path}`
+							: `${path}.${conflict.path}`,
 				message: `${conflict.properties.join(", ")} are all declared ${helper}; an item has one ${conflict.kind === "item_page" ? "own page" : "main picture"}.`,
 				fix:
 					conflict.kind === "item_page"

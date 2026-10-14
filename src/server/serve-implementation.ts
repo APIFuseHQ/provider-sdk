@@ -3360,7 +3360,8 @@ async function handleOperation(
 	const streamLifecycle: RequestStreamLifecycle = {
 		redact: scope.redact,
 		runStep<T>(fn: () => Promise<T>): Promise<T> {
-			return scope.runStreamStep(fn);
+			// Stream pulls run mappers too; their drops belong to this request's log.
+			return scope.runStreamStep(() => observeOutputUrlDrops(scope.outputUrlTelemetry, fn));
 		},
 		registerCleanup(streamCleanup): void {
 			scope.registerStreamCleanup(streamCleanup);
