@@ -306,6 +306,32 @@ describe("declarative health scenarios", () => {
 		expect(() => defineHealthScenario(candidate)).toThrow();
 	});
 
+	it("admits relative-date offsets from -365 to 365 days", () => {
+		const node = (offsetDays: number) => ({
+			relativeDate: {
+				anchor: "operation_started_at" as const,
+				offsetDays,
+				timeZone: "Asia/Seoul" as const,
+				format: "YYYY-MM-DD" as const,
+			},
+		});
+		const withStartOffset = (offsetDays: number) => {
+			const scenario = validScenario();
+			const step = scenario.steps[0];
+			if (step?.kind !== "operation") throw new Error("expected operation step");
+			step.inputTemplate = { start_date: node(offsetDays), end_date: node(0) };
+			return scenario;
+		};
+		for (const offsetDays of [-365, -182, -1, 0, 1, 365]) {
+			expect(defineHealthScenario(withStartOffset(offsetDays))).toEqual(
+				withStartOffset(offsetDays),
+			);
+		}
+		for (const offsetDays of [-366, 366, -0.5, 1.5]) {
+			expect(() => defineHealthScenario(withStartOffset(offsetDays))).toThrow();
+		}
+	});
+
 	it("rejects selector depth, property byte length, and index bounds", () => {
 		const selector = {
 			...validScenario(),

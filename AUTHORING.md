@@ -269,10 +269,14 @@ inference. Invalid configs name the offending field, such as `auth.mode` or
 ### Replay-safe fixtures
 
 Keep public operation schemas strict: date fields should accept absolute dates,
-not relative tokens. Inside `fixtures.request` only, the SDK resolves `+Nd` and
-`+Nd:YYYYMMDD` (1–365 days ahead) before import-time schema validation and
-stores the resolved request in provider metadata. Health-check case inputs use
-the same resolver when a probe runs. The default calendar is **KST**, including
+not relative tokens. Inside `fixtures.request` only, the SDK resolves `+Nd`,
+`-Nd`, and their `:YYYYMMDD` forms (sign required, -365 to 365 days; `+0d` is
+today) before import-time schema validation and stores the resolved request in
+provider metadata. Health-check case inputs use the same resolver when a probe
+runs, so a window that ends today is `{ start_date: "-30d", end_date: "+0d" }`.
+A declarative scenario writes the same window as two `relativeDate` nodes with
+`offsetDays: -30` and `offsetDays: 0`; both are evaluated from one anchor
+instant, so keep the start offset at or below the end offset. The default calendar is **KST**, including
 the 15:00–23:59 UTC window when KST is already on the next day.
 
 `fixtures.recordedAt` is the KST `YYYY-MM-DD` date when the response evidence
