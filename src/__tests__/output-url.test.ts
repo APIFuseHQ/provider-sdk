@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { extractProviderContract } from "../contract.js";
+import { describeSchema, zodSchemaToJson } from "../contract-serialization.js";
 import {
 	DECLARATION_INVALID_CODE,
 	DECLARATION_RULE_IDS,
@@ -98,6 +99,37 @@ describe("output URL schema primitives", () => {
 			{ path: "thumbnail_url", kind: "image", thumbnail: true },
 			{ path: "url", kind: "item_page", thumbnail: false },
 		]);
+	});
+
+	it("emit the contract schema of the helper alone for a redundant nullable", () => {
+		const hash = (schema: z.ZodType) =>
+			(describeSchema(schema) as { jsonSchemaHash?: string }).jsonSchemaHash;
+		const spellings: Array<[z.ZodType, z.ZodType]> = [
+			[z.object({ image_url: image() }), z.object({ image_url: image().nullable() })],
+			[z.object({ url: itemPage() }), z.object({ url: itemPage().nullable().nullable() })],
+			[z.object({ source_url: link().optional() }), z.object({ source_url: link().nullish() })],
+			[
+				z.object({ source_url: link().describeKey("schemaDescriptions.index.d0001") }),
+				z.object({
+					source_url: link().describeKey("schemaDescriptions.index.d0001").nullable(),
+				}),
+			],
+		];
+		for (const [helper, redundant] of spellings) {
+			expect(zodSchemaToJson(redundant)).toEqual(zodSchemaToJson(helper));
+			expect(hash(redundant)).toBe(hash(helper));
+		}
+		// The same contract as the plain nullable string it replaces, but for the annotation.
+		expect(zodSchemaToJson(z.object({ image_url: image().nullable() }))).toMatchObject({
+			properties: {
+				image_url: {
+					anyOf: [{ type: "string", [APIFUSE_URL_KIND_META_KEY]: "image" }, { type: "null" }],
+				},
+			},
+		});
+		// Contracts written without the helpers are emitted exactly as before.
+		const plain = z.object({ name: z.string().nullable().nullable() });
+		expect(JSON.stringify(zodSchemaToJson(plain))).toBe(JSON.stringify(z.toJSONSchema(plain)));
 	});
 
 	it("still find the kind under a redundant nullable", () => {

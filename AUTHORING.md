@@ -354,6 +354,11 @@ repositories, then the fleet wave), not ahead of it.
   provide it": the constructors return `null` and `image()`, `itemPage()` and
   `link()` admit it without `.nullable()`. Add `.optional()` only when the key
   itself may be absent. `imageList()` is empty instead.
+- Adopting on an existing `.nullable()` field drops the wrapper:
+  `z.string().nullable()` becomes `image()`, not `image().nullable()`. The
+  contract is the same either way (the SDK emits a redundant `null` branch
+  around a helper as the helper alone), but the helper already admits `null`,
+  so the wrapper only adds noise.
 - Pass `field: "items[].image_url"` so a dropped value is attributable in the
   request log. Keep it a static label, not a per-row path.
 - `upgradeHttp` lists only host names you measured serving the same path over

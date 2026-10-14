@@ -335,6 +335,8 @@ const product = {
 - A missing or left-out value is `null` (the fleet's "upstream did not
   provide it"): constructors return `null`, and `image()`, `itemPage()` and
   `link()` admit it without `.nullable()`. `imageList()` is empty instead.
+  When an existing field was `z.string().nullable()`, write `image()`; a
+  redundant `.nullable()` on a helper emits the same contract schema.
 - Constructors publish the URL's serialization (`new URL(value).href`), so the
   published host is the host that was checked; an already serialized URL,
   such as a signed URL, is kept byte for byte and percent-escapes are never
