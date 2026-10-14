@@ -1504,12 +1504,31 @@ function extractBalancedCallArguments(source: string, startIndex: number): strin
 function collectLiteralErrorOptionValues(
 	args: string,
 	optionNames: readonly string[],
+	/**
+	 * Receives every option name the object sets without a plain string literal:
+	 * a variable or expression value (`category: mapped.category`), a shorthand
+	 * member (`{ code, category }`), or a top-level spread whose text names it
+	 * (`...(mapped.category ? { category: mapped.category } : {})`).
+	 */
+	nonLiteral?: Set<string>,
 ): Record<string, string> {
 	const collected: Record<string, string> = {};
 	let braceDepth = 0;
 	let parenDepth = 0;
 	let bracketDepth = 0;
 	let previousSignificantChar = "";
+	// Start of the top-level `...spread` member being read, or -1.
+	let spreadStart = -1;
+	const closeSpread = (end: number) => {
+		if (spreadStart < 0) return;
+		const text = args.slice(spreadStart, end);
+		for (const name of optionNames) {
+			if (new RegExp(`(?<![A-Za-z0-9_$])${name}(?![A-Za-z0-9_$])`).test(text)) {
+				nonLiteral?.add(name);
+			}
+		}
+		spreadStart = -1;
+	};
 	for (let index = 0; index < args.length; index++) {
 		const char = args[index] ?? "";
 		if (char === '"' || char === "'" || char === "`") {
@@ -1544,6 +1563,7 @@ function collectLiteralErrorOptionValues(
 			braceDepth++;
 		} else if (char === "}") {
 			braceDepth--;
+			if (braceDepth === 0) closeSpread(index);
 		} else if (char === "(") {
 			parenDepth++;
 		} else if (char === ")") {
@@ -1552,12 +1572,20 @@ function collectLiteralErrorOptionValues(
 			bracketDepth++;
 		} else if (char === "]") {
 			bracketDepth--;
+		} else if (char === "," && braceDepth === 1 && parenDepth === 0 && bracketDepth === 0) {
+			closeSpread(index);
 		} else if (
 			braceDepth === 1 &&
 			parenDepth === 0 &&
 			bracketDepth === 0 &&
 			(previousSignificantChar === "{" || previousSignificantChar === ",")
 		) {
+			if (args.startsWith("...", index)) {
+				spreadStart = index + 3;
+				index += 2;
+				previousSignificantChar = ".";
+				continue;
+			}
 			const optionName = optionNames.find((name) => startsWithOptionName(args, index, name));
 			if (optionName === undefined) {
 				previousSignificantChar = char;
@@ -1587,6 +1615,8 @@ function collectLiteralErrorOptionValues(
 							(nextChar === "," || nextChar === "}" || nextChar === "")
 						) {
 							collected[optionName] ??= value;
+						} else {
+							nonLiteral?.add(optionName);
 						}
 						index = end;
 						previousSignificantChar = quote;
@@ -1594,6 +1624,10 @@ function collectLiteralErrorOptionValues(
 					}
 					return collected;
 				}
+				nonLiteral?.add(optionName);
+			} else if (args[cursor] === "," || args[cursor] === "}") {
+				// Shorthand member: the value is a variable of the same name.
+				nonLiteral?.add(optionName);
 			}
 		}
 		previousSignificantChar = char;
@@ -1617,6 +1651,12 @@ type ThrownErrorConstructionSite = {
 	readonly fixKey?: string;
 	/** Literal `category` option, when the site sets one. */
 	readonly category?: string;
+	/**
+	 * The site sets `category` from something other than a string literal (a
+	 * variable, a shorthand member, or a spread that names it), so it may carry
+	 * any category.
+	 */
+	readonly nonLiteralCategory?: true;
 };
 
 const THROWN_ERROR_SCANNED_OPTION_NAMES = ["code", "messageKey", "fixKey", "category"] as const;
@@ -1632,13 +1672,19 @@ function collectThrownErrorConstructionSites(source: string): ThrownErrorConstru
 		const argsStart = match.index + match[0].length;
 		const args = extractBalancedCallArguments(source, argsStart);
 		if (args !== undefined) {
-			const values = collectLiteralErrorOptionValues(args, THROWN_ERROR_SCANNED_OPTION_NAMES);
+			const nonLiteral = new Set<string>();
+			const values = collectLiteralErrorOptionValues(
+				args,
+				THROWN_ERROR_SCANNED_OPTION_NAMES,
+				nonLiteral,
+			);
 			sites.push({
 				errorClass: match[1] ?? "",
 				...(values.code === undefined ? {} : { code: values.code }),
 				...(values.messageKey === undefined ? {} : { messageKey: values.messageKey }),
 				...(values.fixKey === undefined ? {} : { fixKey: values.fixKey }),
 				...(values.category === undefined ? {} : { category: values.category }),
+				...(nonLiteral.has("category") ? { nonLiteralCategory: true as const } : {}),
 			});
 		}
 		THROWN_ERROR_CONSTRUCTION_PATTERN.lastIndex = argsStart;
@@ -3550,8 +3596,13 @@ function derivedExpectedErrorCategory(
  *
  * A site whose `code` is not a literal (a helper that receives the code) may be
  * the one that throws this code, so it counts; a site with another literal
- * code does not. With no candidate site at all the derived resolution is the
- * answer, which for a provider code that nothing registers is `apifuse`.
+ * code does not. A candidate site that sets `category` from something other
+ * than a literal (a mapping table's `...(mapped.category ? { category:
+ * mapped.category } : {})`, a helper's `{ code, category }`) may carry an
+ * upstream category, so it counts as possibly `upstream_failure` beside its
+ * literal/derived resolution — the same reading as a non-literal `code`. With
+ * no candidate site at all the derived resolution is the answer, which for a
+ * provider code that nothing registers is `apifuse`.
  */
 function expectedErrorEnvelopeSources(
 	code: string,
@@ -3564,14 +3615,15 @@ function expectedErrorEnvelopeSources(
 	const candidates = sites.filter((site) => site.code === code || site.code === undefined);
 	if (candidates.length === 0) return new Set([sourceForCategory(derived ?? "provider_error")]);
 	return new Set(
-		candidates.map((site) => {
+		candidates.flatMap((site): ProviderErrorSource[] => {
 			const literal =
 				site.category !== undefined && isProviderErrorCategory(site.category)
 					? site.category
 					: undefined;
 			const fallback =
 				site.errorClass === "ValidationError" ? "input_validation" : "provider_error";
-			return sourceForCategory(literal ?? derived ?? fallback);
+			const resolved = sourceForCategory(literal ?? derived ?? fallback);
+			return site.nonLiteralCategory === true ? [resolved, "upstream_failure"] : [resolved];
 		}),
 	);
 }
@@ -3693,7 +3745,7 @@ function lintHealthCheckExpectedErrors(provider: {
 							? `A code registered as ${registered.category} is an upstream refusal, not an absence; throw the registered code the upstream answer means (NO_DATA for an empty result).`
 							: servedStatus === 409 || servedStatus === 410 || servedStatus === 422
 								? `A declared status of ${servedStatus} classes the code as an upstream refusal (upstream_rejected → upstream_rule); an absence is a 404-class answer.`
-								: `A provider code thrown without a category is classed provider_error (source "apifuse"). Set category: "upstream_http" on the new ProviderError(...) that throws it — the linter reads literal construction sites, so a helper that builds the error must set the category there.`;
+								: `A provider code thrown without a category is classed provider_error (source "apifuse"). Set category: "upstream_http" on the new ProviderError(...) that throws it — the linter reads construction sites, so a helper that builds the error must set the category there (a literal, or a variable or spread it passes through).`;
 					diagnostics.push({
 						rule: "health-check-expected-error-unmatchable",
 						level: "error",

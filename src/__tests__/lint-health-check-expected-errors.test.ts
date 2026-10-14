@@ -125,6 +125,37 @@ describe("health-check expectedErrors lint", () => {
 		).toEqual([]);
 	});
 
+	it("accepts a mapping table that spreads the category in only when the row sets one", () => {
+		// korea-disaster-alert upstream/errors.ts: the throw site reads code and
+		// category from a table row, so the category is not a literal there. The
+		// row may carry an upstream category, so the site may serve the
+		// upstream's envelope; the entry is not provably dead.
+		const tableThrow = [
+			"const CODE_MAP = {",
+			'\t"03": { code: "NO_FORECAST", retryable: false, message: "nothing today", category: "upstream_http" },',
+			"};",
+			"const mapped = CODE_MAP[resultCode];",
+			"throw new ProviderError(mapped.message, {",
+			"\tcode: mapped.code,",
+			"\tretryable: mapped.retryable,",
+			"\t...(mapped.category ? { category: mapped.category } : {}),",
+			"\t...(mapped.fix ? { fix: mapped.fix } : {}),",
+			"\tdetails: { upstreamResultCode: resultCode, source },",
+			"});",
+		].join("\n");
+		expect(
+			lint([expected(404, "NO_FORECAST")], [{ code: "NO_FORECAST", status: 404 }], tableThrow),
+		).toEqual([]);
+	});
+
+	it("accepts a helper that passes code and category through as shorthand members", () => {
+		const helperThrow =
+			"function upstreamAnswer(message, code, category) { return new ProviderError(message, { code, category }); }";
+		expect(
+			lint([expected(404, "NO_FORECAST")], [{ code: "NO_FORECAST", status: 404 }], helperThrow),
+		).toEqual([]);
+	});
+
 	it("rejects a code the operation neither declares nor the SDK registers", () => {
 		const diagnostics = lint([expected(404, "NO_FORECAST")]);
 		expect(diagnostics).toHaveLength(1);
