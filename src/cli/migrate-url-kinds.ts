@@ -1198,14 +1198,15 @@ class Analysis {
 		const builtin = ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
 		if (builtin === "of") {
 			// Array.of(a, b): each argument is one element.
-			if (projection.length === 0) for (const argument of args) next(argument, elementPath);
+			for (const argument of args) next(argument, elementPath, env, false, projection);
 			return;
 		}
 		if (builtin === "from" && args[1]) {
 			// Array.from(source, mapper): the elements are the mapper's returns.
 			const mapper = this.functionOf(args[1]);
-			if (mapper && projection.length === 0)
-				for (const returned of this.returnsOf(mapper)) next(returned, elementPath, env);
+			if (mapper)
+				for (const returned of this.returnsOf(mapper))
+					next(returned, elementPath, env, false, projection);
 			return;
 		}
 		for (const argument of args) next(argument, path, env, flat, projection);
