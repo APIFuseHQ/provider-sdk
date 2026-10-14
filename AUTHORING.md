@@ -329,6 +329,38 @@ unless the schema at that path declares them one way or the other. Declare every
 Apply either helper to the leaf, before `.optional()`/`.nullable()`/`.default()`;
 `publicField()` over a wrapper that hides a `sensitive()` leaf throws at definition time.
 
+### Images and item links
+
+Public output names a picture or a page by declaring it, not by its field name.
+
+| What the value is | Schema | Mapper |
+|---|---|---|
+| The item's main picture | `image()` | `toImageUrl(raw, { base?, upgradeHttp?, field? })` |
+| A smaller rendition of it | `image({ thumbnail: true })` | same |
+| More pictures, upstream order | `imageList()` | `toImageUrls(raws, options)` (drops duplicates) |
+| The item's own page | `itemPage()` | `toItemPageUrl(raw)` or `itemPageFrom(template, values)` |
+| Any other URL (source, download, booking, map image) | `link()` | `toLinkUrl(raw)` |
+
+- Keep existing field names (`image_url`, `detail_url`, ...); the annotation says
+  what they are. New fields use the fleet names `image_url`, `image_urls`,
+  `thumbnail_url`, `url`.
+- Pass `field: "items[].image_url"` so a dropped value is attributable in the
+  request log. Keep it a static label, not a per-row path.
+- `upgradeHttp` lists only hosts you measured serving the same path over
+  `https://`. Every other `http://` image is dropped and reported.
+- `itemPageFrom("https://www.example.com/items/{item_id}", { item_id })`
+  percent-encodes each value as one component and yields `undefined` when a
+  value is missing. Assemble a page only from a template you verified opens
+  the item.
+- An item has one own page and one main picture: a second `itemPage()` or
+  non-thumbnail `image()` in the same object is a declaration error. Declare
+  other URLs with `link()`.
+- `noMedia: noMedia("<upstream evidence>")` records that the operation's items
+  have no picture and no page upstream. It cannot sit next to `image()`,
+  `imageList()` or `itemPage()` fields.
+- Values are plain URL strings at runtime. Do not invent width, height or alt
+  text; the item's title is its caption.
+
 ### Real-handler E2E in standard tests
 
 `runStandardTests(provider)` validates declarations and fixtures but reports a

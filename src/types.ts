@@ -886,6 +886,17 @@ export interface HealthCheckUnsupported {
 }
 
 /**
+ * Operation-level statement that the items this operation returns have no
+ * picture and no own page upstream. Build it with `noMedia(reason)`; the
+ * reason names the upstream evidence. Mutually exclusive with `image()`,
+ * `imageList()` and `itemPage()` fields in the operation's output.
+ */
+export interface NoMediaDeclaration {
+	/** The upstream evidence, e.g. "Upstream rows carry station codes and readings only." */
+	readonly reason: string;
+}
+
+/**
  * Provider-level monitoring metadata for credential-bearing health checks.
  * Describes ONLY env-secret keys the runtime needs and the service account
  * to use; SHALL NOT carry probe schedules, sample inputs, or assertion
@@ -2527,6 +2538,8 @@ export interface OperationDefinition<
 		InferSchemaOutput<TOutput>
 	>;
 	healthCheckUnsupported?: HealthCheckUnsupported;
+	/** The operation's items have no picture and no own page upstream; see `noMedia()`. */
+	noMedia?: NoMediaDeclaration;
 }
 
 /**

@@ -95,6 +95,8 @@ import {
 } from "../runtime/egress-lease.js";
 import { createEnvContext } from "../runtime/env.js";
 import { executeOperation } from "../runtime/executor.js";
+import { observeOutputUrlDrops } from "../runtime/output-url-observer.js";
+import { OutputUrlTelemetryCollector } from "../runtime/output-url-telemetry.js";
 import { createHttpClient } from "../runtime/http.js";
 import { NativeTelemetryCollector } from "../runtime/native-telemetry.js";
 import {
@@ -2356,6 +2358,8 @@ type RequestScopeFinishResult = {
 };
 
 type RequestScope = RequestScopeContext & {
+	/** Observation events for output URLs that mappers left out (log-only). */
+	outputUrlTelemetry: OutputUrlTelemetryCollector;
 	seedCredentials(rawBody: unknown, kind: "operation" | "auth" | "stateful"): void;
 	enrich(input: {
 		route?: string;
@@ -2580,6 +2584,7 @@ function createRequestScope(input: {
 	const browserCollector = new BrowserTelemetryCollector({ redact });
 	const cacheTelemetry = new CacheTelemetryCollector({ redact });
 	const stateTelemetry = new StateTelemetryCollector({ redact });
+	const outputUrlTelemetry = new OutputUrlTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
@@ -2591,6 +2596,7 @@ function createRequestScope(input: {
 	telemetry.register(sttCollector);
 	telemetry.register(cacheTelemetry);
 	telemetry.register(stateTelemetry);
+	telemetry.register(outputUrlTelemetry);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2680,6 +2686,7 @@ function createRequestScope(input: {
 		browserTelemetry: browserCollector,
 		cacheTelemetry,
 		stateTelemetry,
+		outputUrlTelemetry,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);
@@ -3367,17 +3374,20 @@ async function handleOperation(
 	};
 	scope.registerStreamCleanup(() => scope.runStreamStep(cleanup));
 	try {
-		const result = options.operationExecutor
-			? await options.operationExecutor({
-					provider,
-					operationId,
-					ctx,
-					request,
-					signal,
-				})
-			: await executeOperation(provider, operationId, ctx, request.input, {
-					env: createEnvContext(providerSecretNames(provider)),
-				});
+		// Mappers report the output URLs they leave out to this request's log.
+		const result = await observeOutputUrlDrops(scope.outputUrlTelemetry, () =>
+			options.operationExecutor
+				? options.operationExecutor({
+						provider,
+						operationId,
+						ctx,
+						request,
+						signal,
+					})
+				: executeOperation(provider, operationId, ctx, request.input, {
+						env: createEnvContext(providerSecretNames(provider)),
+					}),
+		);
 		if (streaming && operation) {
 			return toStreamingResponse(operation, result, streamLifecycle, request.requestId);
 		}

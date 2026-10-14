@@ -1,6 +1,7 @@
 import { describeSchema } from "./contract-serialization.js";
 import { ProviderError } from "./errors.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
+import { APIFUSE_URL_KIND_META_KEY, inspectOutputUrlKinds } from "./output-url.js";
 import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
 import { resolverClientProfileFamily, resolveStealthProfileSelection } from "./stealth/profiles.js";
 import type {
@@ -25,6 +26,8 @@ export const DECLARATION_RULE_IDS = {
 	operationUpstreamProxy: "operation-upstream-proxy-unsupported",
 	pinnedWireFieldPathValid: "public-schema-pinned-wire-field-valid",
 	resolverClientProfileFamily: "resolver-client-profile-family",
+	outputUrlKindUnique: "output-url-kind-unique",
+	noMediaContradiction: "no-media-contradiction",
 } as const;
 
 export type DeclarationRuleId =
@@ -62,6 +65,7 @@ export function validateFailClosedDeclaration(provider: ProviderDefinition): voi
 	validateProxyDeclaration(provider, violations);
 	validateResolverClientProfileDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
+	validateOutputUrlKindDeclaration(provider, violations);
 	if (violations.length > 0) throw declarationInvalidError(violations);
 }
 
@@ -166,6 +170,7 @@ function collectOperationDeclarationViolations(
 ): void {
 	validateSchemaDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
+	validateOutputUrlKindDeclaration(provider, violations);
 }
 
 function validateHealthDeclaration(
@@ -255,6 +260,54 @@ function validateSchemaDeclaration(
 				});
 			}
 		}
+	}
+}
+
+/**
+ * An item has one own page and one main picture: an object that declares two
+ * `itemPage()` properties, or two non-thumbnail single `image()` properties,
+ * leaves consumers to guess which one is meant. `noMedia` states the items
+ * have neither, so it cannot sit next to such fields.
+ */
+function validateOutputUrlKindDeclaration(
+	provider: OperationDeclarationRulesInput,
+	violations: DeclarationViolation[],
+): void {
+	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
+		let jsonSchema: unknown;
+		try {
+			const described = describeSchema(operation.output as Parameters<typeof describeSchema>[0]);
+			jsonSchema =
+				described && typeof described === "object" && !Array.isArray(described)
+					? Reflect.get(described, "jsonSchema")
+					: undefined;
+		} catch {
+			// operation-schema-serializable reports the conversion failure.
+			continue;
+		}
+		const path = `operations.${operationId}.output`;
+		const { entries, conflicts } = inspectOutputUrlKinds(jsonSchema);
+		for (const conflict of conflicts) {
+			const helper = conflict.kind === "item_page" ? "itemPage()" : "image()";
+			violations.push({
+				ruleId: DECLARATION_RULE_IDS.outputUrlKindUnique,
+				path: `${path} ${conflict.path}`,
+				message: `${conflict.properties.join(", ")} are all declared ${helper}; an item has one ${conflict.kind === "item_page" ? "own page" : "main picture"}.`,
+				fix:
+					conflict.kind === "item_page"
+						? "Keep itemPage() on the item's own page and declare the other URLs with link()."
+						: "Keep image() on the main picture; use image({ thumbnail: true }) for a smaller rendition or imageList() for more pictures.",
+			});
+		}
+		if (operation.noMedia === undefined) continue;
+		const media = entries.filter((entry) => entry.kind !== "link");
+		if (media.length === 0) continue;
+		violations.push({
+			ruleId: DECLARATION_RULE_IDS.noMediaContradiction,
+			path: `operations.${operationId}.noMedia`,
+			message: `noMedia is declared but the output has ${APIFUSE_URL_KIND_META_KEY} fields ${media.map((entry) => `${entry.path} (${entry.kind})`).join(", ")}.`,
+			fix: `Remove operations.${operationId}.noMedia, or remove the image/item page fields if the upstream has none.`,
+		});
 	}
 }
 

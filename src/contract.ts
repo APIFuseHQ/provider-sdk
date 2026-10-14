@@ -105,6 +105,7 @@ function extractOperation(
 	const hints = toJsonValue(operation.hints);
 	const healthCheck = extractHealthCheck(operation.healthCheck);
 	const healthCheckUnsupported = extractHealthCheckUnsupported(operation.healthCheckUnsupported);
+	const noMedia = toJsonValue(operation.noMedia);
 
 	return {
 		id: operationId,
@@ -134,6 +135,7 @@ function extractOperation(
 		...(hints === undefined ? {} : { hints }),
 		...(healthCheck === undefined ? {} : { healthCheck }),
 		...(healthCheckUnsupported === undefined ? {} : { healthCheckUnsupported }),
+		...(noMedia === undefined ? {} : { noMedia }),
 	};
 }
 
