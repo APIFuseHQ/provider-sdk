@@ -141,6 +141,90 @@ Add ONE guard step per stale-if-error probe:
   by the serve layer, so `return result.value` discarding `result.meta` does
   not suppress the signal.
 
+## Declared absence served as an error: `expectedErrors`
+Some upstreams answer "nothing to return" with an error, not an empty body: no
+weather alert issued today is HTTP 404 `NO_DATA`, not `items: []`. A guard
+cannot see that — the monitor ends the attempt the moment an operation step
+answers non-2xx, before any guard runs — so without a declaration every quiet
+day is recorded `down`.
+
+Declare the answer on the operation step itself. The monitor matches the
+provider's own error envelope (`source: "upstream_failure"`) on `status` and
+`code` together, completes the attempt with `attribute` as the guard
+attribution, and never retries it:
+
+```ts
+{
+  id: "read-weather-alerts",
+  result: "response",
+  kind: "operation",
+  operationId: "weather-alerts",
+  inputTemplate: {},
+  expectedErrors: [
+    {
+      status: 404,
+      code: "NO_DATA",
+      attribute: [
+        {
+          operationId: "weather-alerts",
+          status: "degraded",
+          reasonCode: "expected_absence",
+          reasonKey: "health.operations.weather-alerts.national.calm",
+        },
+      ],
+    },
+  ],
+}
+```
+
+- Only `expected_absence` is admitted here. A stale-cache serve is a 2xx; a
+  non-2xx is either the declared absence or a real failure.
+- `code` must be a code the operation serves — declared in its `errorCodes`
+  or SDK-registered — with the same status, and served as the upstream's own
+  envelope: a registered upstream code such as `NO_DATA`, or a provider code
+  thrown with `category: "upstream_http"` (`apifuse check` fails otherwise: a
+  mismatched entry never matches and the quiet day stays `down`). Auth and
+  rate-limit codes, 401/403/429, 409/410/422 and every 5xx are never an
+  absence and are rejected.
+- The upstream must answer that code for nothing else. If the same status and
+  code also mean a real fault, split the codes in the handler first.
+- Keep the row guard (`array_length_gte` on the 2xx body) as well: an
+  `expectedErrors` entry answers the error envelope, the guard answers the
+  empty success body.
+
+## Announced upstream maintenance: `maintenanceWindows`
+When the upstream publishes a maintenance notice (the service is unavailable
+between two times), declare that window on `healthProbe` with the notice's
+URL. Failing samples inside the window are published as an expected absence,
+not an outage, and incidents whose failing samples all fall inside it are
+retracted, also when the window is declared after it happened (up to 90 days
+back).
+
+```ts
+healthProbe: {
+  maintenanceWindows: [
+    {
+      // Notice: JST 2026-10-14 02:00-08:00
+      startsAt: "2026-10-13T17:00:00Z",
+      endsAt: "2026-10-13T23:00:00Z",
+      sourceUrl: "https://buyee.jp/information/public/info_3077",
+      declaredAt: "2026-10-14T09:00:00Z",
+    },
+  ],
+},
+```
+
+- UTC only: convert the notice's local time (JST 02:00 is 17:00Z the day
+  before). An offset or a time without `Z` is rejected.
+- Declare only what the upstream announced, with the announcement's URL. The
+  platform retracts incidents on the strength of it.
+- `operations: ["search", ...]` narrows the window to the operations the
+  notice covers; omit it when the whole upstream is unavailable.
+- Probes keep running through the window. A failure that outlasts `endsAt` is
+  an outage from `endsAt` on, so copy the announced times; do not pad them.
+- `startsAt` may be at most 90 days before `declaredAt`; older samples are
+  gone. There is no recurring form: declare each announced window.
+
 ## Fail-closed: envelope level
 - Upstream error headers/codes → structured `ProviderError` with a stable
   `code` (`UPSTREAM_AUTH_ERROR`, `UPSTREAM_ERROR`, `NO_DATA`, ...).
@@ -178,6 +262,7 @@ details/logs only.
 - [ ] Every list op probe fails on 0 rows for a dense query
 - [ ] One semantic field asserted on a real row
 - [ ] Every `staleIfErrorMs` read has a `served_stale_cache` guard, placed first
+- [ ] Each announced upstream maintenance is a `maintenanceWindows` entry (UTC, notice URL)
 - [ ] Swallowed-error test exists (non-ok mock → handler rejects)
 - [ ] Non-empty upstream → zero normalized rows throws
 - [ ] No upstream free text in customer-facing error messages

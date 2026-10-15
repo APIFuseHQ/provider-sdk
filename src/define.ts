@@ -14,6 +14,7 @@ import {
 	isEngineOwnedTelemetryEnvName,
 } from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
+import { UpstreamMaintenanceWindowsSchema } from "./upstream-maintenance.js";
 import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -1787,6 +1788,7 @@ const PROVIDER_HEALTH_MONITOR_FIELDS = new Set([
 	"credentialInputs",
 	"probeOverrides",
 	"serviceAccount",
+	"maintenanceWindows",
 ]);
 const PROVIDER_HEALTH_MONITOR_PROBE_OVERRIDE_FIELDS = new Set([
 	"interval",
@@ -2006,6 +2008,56 @@ function validateProviderHealthMonitor(
 		throw new ValidationError(
 			`Provider "${providerId}" has invalid ${field}.serviceAccount: must be a non-empty string.`,
 		);
+	validateMaintenanceWindowShapes(providerId, healthMonitorRecord.maintenanceWindows, field);
+}
+
+function maintenanceWindowField(
+	field: "healthMonitor" | "healthProbe",
+	path: PropertyKey[],
+): string {
+	return path.reduce<string>(
+		(fieldPath, segment) =>
+			typeof segment === "number" ? `${fieldPath}[${segment}]` : `${fieldPath}.${String(segment)}`,
+		`${field}.maintenanceWindows`,
+	);
+}
+
+function validateMaintenanceWindowShapes(
+	providerId: string,
+	maintenanceWindows: unknown,
+	field: "healthMonitor" | "healthProbe",
+): void {
+	if (maintenanceWindows === undefined) return;
+	const parsed = UpstreamMaintenanceWindowsSchema.safeParse(maintenanceWindows);
+	if (parsed.success) return;
+	const issue = parsed.error.issues[0];
+	const fieldPath = maintenanceWindowField(field, issue?.path ?? []);
+	throw new ValidationError(
+		`Provider "${providerId}" has invalid ${fieldPath}: ${issue?.message ?? "invalid maintenance window"}.`,
+		{
+			fix: `Declare ${field}.maintenanceWindows as a non-empty list of { startsAt, endsAt, sourceUrl, declaredAt, operations? }: UTC instants ending in Z with endsAt later than startsAt, startsAt at most 90 days before declaredAt, and sourceUrl the upstream's own announcement.`,
+		},
+	);
+}
+
+/** A maintenance window may only name operations this provider defines. */
+function validateMaintenanceWindowOperations(
+	providerId: string,
+	operations: Record<string, ProviderOperation>,
+	healthMonitor: ProviderHealthMonitorConfig | undefined,
+	field: "healthMonitor" | "healthProbe",
+): void {
+	for (const [windowIndex, window] of (healthMonitor?.maintenanceWindows ?? []).entries()) {
+		for (const [operationIndex, operationId] of (window.operations ?? []).entries()) {
+			if (!Object.hasOwn(operations, operationId))
+				throw new ValidationError(
+					`Provider "${providerId}" ${field}.maintenanceWindows[${windowIndex}].operations[${operationIndex}] names unknown operation "${operationId}".`,
+					{
+						fix: `Name an operation this provider defines, or omit ${field}.maintenanceWindows[${windowIndex}].operations when the whole upstream is under maintenance.`,
+					},
+				);
+		}
+	}
 }
 
 function validateHealthCheckCase(
@@ -3061,6 +3113,12 @@ function finalizeProvider<
 		config.healthJourneys,
 	);
 	validateOperationHealthChecks(config.id, config.operations, journeyCoveredOperations);
+	validateMaintenanceWindowOperations(
+		config.id,
+		config.operations,
+		config.healthProbe ?? config.healthMonitor,
+		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
+	);
 	validateOperationNoMedia(config.id, config.operations);
 	validateOperationFixtures(config.id, operations);
 	const provider: Omit<ProviderDefinition, "operations"> & {

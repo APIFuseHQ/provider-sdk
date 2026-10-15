@@ -53,6 +53,7 @@ export {
 	defineHealthScenario,
 	HealthScenarioSchema,
 	HealthStepSchema,
+	ExpectedErrorSchema,
 	ExtractStepSchema,
 	FindFirstSchema,
 	GUARD_REASON_CODES,
@@ -87,6 +88,8 @@ export type {
 	CredentialReference,
 	CredentialRefDeclaration,
 	EstablishedConnectionReference,
+	ExpectedAbsenceAttribution,
+	ExpectedError,
 	ExtractStep,
 	FindFirst,
 	GuardAttribution,
@@ -117,6 +120,12 @@ export type {
 	ExtractResult,
 	ValueType,
 } from "./health-scenario.js";
+export {
+	UPSTREAM_MAINTENANCE_LOOKBACK_DAYS,
+	UpstreamMaintenanceWindowSchema,
+	UpstreamMaintenanceWindowsSchema,
+} from "./upstream-maintenance.js";
+export type { UpstreamMaintenanceWindow } from "./upstream-maintenance.js";
 export type { DevServerOptions } from "./dev.js";
 export { createDevServer, startDevServer } from "./dev.js";
 export * from "./errors.js";

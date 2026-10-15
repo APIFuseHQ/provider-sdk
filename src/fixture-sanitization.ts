@@ -44,6 +44,10 @@ const ASSIGNMENT_VALUE_DELIMITER = /[\s,;&]/;
  * never consumed, so an assignment inside another value is still found.
  */
 const ASSIGNMENT_KEY = /(["']?)(?<![\w-])([\w-]+)\1\s*[:=]\s*/gi;
+/** A maximal run without whitespace, quotes or angle brackets: one URL-like candidate. */
+const UNQUOTED_RUN = /[^\s"'<>]+/g;
+/** A bare relative reference's query starts with a `key=` parameter (`callback?code=...`). */
+const QUERY_PARAMETER_START = /^[\w.~%+-]+=/;
 
 /** Matches credential field names without treating benign prefixes such as `author` as `auth`. */
 export function isSensitiveFixtureKey(key: string): boolean {
@@ -96,6 +100,21 @@ export function sanitizeOrdinaryFixture(value: JsonValue): JsonValue {
 
 /** Sanitizes a primitive fixture string only when textual-secret heuristics match. */
 export function sanitizeFixtureString(value: string): string {
+	return sanitizeSecretText(value, false);
+}
+
+/**
+ * Health-monitor capture evidence strings (ADR-0013): every `sanitizeFixtureString` rule, plus
+ * keyless `Bearer`/`Negotiate`/`NTLM` tokens of any length, keyless `Basic` tokens that decode to
+ * `user-id:password`, and the query and fragment of non-`http(s)` URL-like runs (other schemes,
+ * protocol-relative and relative references). A separate entry point so recorded fixture strings
+ * keep their bytes.
+ */
+export function sanitizeCaptureEvidenceString(value: string): string {
+	return sanitizeSecretText(value, true);
+}
+
+function sanitizeSecretText(value: string, capture: boolean): string {
 	let sanitized = value.replace(PEM_PRIVATE_KEY, REDACTED_FIXTURE_VALUE);
 	const retainedUrls: string[] = [];
 	sanitized = sanitized.replace(URL_RUN, (url) => {
@@ -103,7 +122,13 @@ export function sanitizeFixtureString(value: string): string {
 			retainedUrls.push(isCredentialBearingUrl(url) ? sanitizeUrlForLogs(url) : url) - 1;
 		return `APIFUSEURL${index}X`;
 	});
-	sanitized = redactCredentialSpans(sanitized, [credentialHeaderSpans, sensitiveAssignmentSpans]);
+	if (capture) sanitized = sanitized.replace(UNQUOTED_RUN, stripUrlLikeQuery);
+	sanitized = redactCredentialSpans(
+		sanitized,
+		capture
+			? [credentialHeaderSpans, keylessCredentialSpans, sensitiveAssignmentSpans]
+			: [credentialHeaderSpans, sensitiveAssignmentSpans],
+	);
 	sanitized = sanitized.replace(OPAQUE_TOKEN_RUN, (candidate) =>
 		isSensitiveFixtureValue(candidate) ? REDACTED_FIXTURE_VALUE : candidate,
 	);
@@ -170,6 +195,23 @@ export function sanitizeUrlForLogs(value: string): string {
 	} catch {
 		return sanitizePathname(value.split(/[?#]/, 1)[0]);
 	}
+}
+
+/**
+ * A run is URL-like when the part before its first `?`/`#` contains a `/` (another `scheme://`,
+ * protocol-relative `//host`, or a relative path) or when it is a bare `name?key=` reference.
+ * `http(s)` URLs were already replaced by `URL_RUN`. The scrubbed path is kept; a non-empty query
+ * becomes `?[REDACTED]` and a fragment is dropped. One pass over each run keeps the scan linear.
+ */
+function stripUrlLikeQuery(run: string): string {
+	const cut = run.search(/[?#]/);
+	if (cut === -1 || cut === run.length - 1) return run;
+	const head = run.slice(0, cut);
+	const fragment = run.indexOf("#", cut);
+	const query = run[cut] === "?" ? run.slice(cut + 1, fragment === -1 ? undefined : fragment) : "";
+	if (!head.includes("/") && !QUERY_PARAMETER_START.test(query)) return run;
+	const path = sanitizePathname(head);
+	return query.length > 0 ? `${path}?${REDACTED_FIXTURE_VALUE}` : path;
 }
 
 /**

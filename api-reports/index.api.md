@@ -1868,6 +1868,21 @@ export function executeOperation<const TProvider extends ProviderDefinition, con
     env?: EnvContext;
 }): Promise<unknown>;
 
+// @public
+export type ExpectedAbsenceAttribution = Omit<GuardAttribution, "reasonCode"> & {
+    reasonCode: "expected_absence";
+};
+
+// @public
+export type ExpectedError = {
+    status: number;
+    code: string;
+    attribute: NonEmpty<ExpectedAbsenceAttribution>;
+};
+
+// @public (undocumented)
+export const ExpectedErrorSchema: z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>;
+
 // @public (undocumented)
 export function extractCaptchaCandidates(modelText: string, options?: OcrCaptchaOptions): readonly OcrCaptchaCandidate[];
 
@@ -2611,6 +2626,7 @@ export const HealthStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     retry: z.ZodOptional<z.ZodType<RetryPolicy, unknown, z.core.$ZodTypeInternals<RetryPolicy, unknown>>>;
     candidate: z.ZodOptional<z.ZodUnion<readonly [z.ZodType<CandidatePolicy, unknown, z.core.$ZodTypeInternals<CandidatePolicy, unknown>>, z.ZodType<CandidateBlock, unknown, z.core.$ZodTypeInternals<CandidateBlock, unknown>>]>>;
     journal: z.ZodOptional<z.ZodType<JournalPolicy, unknown, z.core.$ZodTypeInternals<JournalPolicy, unknown>>>;
+    expectedErrors: z.ZodOptional<z.ZodPipe<z.ZodArray<z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>>, z.ZodTransform<[ExpectedError, ...ExpectedError[]], ExpectedError[]>>>;
 }, z.core.$strict>, z.ZodObject<{
     id: z.ZodString;
     result: z.ZodString;
@@ -4300,6 +4316,7 @@ export type OperationStep = StepBase & {
     retry?: RetryPolicy;
     candidate?: CandidatePolicy | CandidateBlock;
     journal?: JournalPolicy;
+    expectedErrors?: NonEmpty<ExpectedError>;
 };
 
 // @public (undocumented)
@@ -4318,6 +4335,7 @@ export const OperationStepSchema: z.ZodObject<{
     retry: z.ZodOptional<z.ZodType<RetryPolicy, unknown, z.core.$ZodTypeInternals<RetryPolicy, unknown>>>;
     candidate: z.ZodOptional<z.ZodUnion<readonly [z.ZodType<CandidatePolicy, unknown, z.core.$ZodTypeInternals<CandidatePolicy, unknown>>, z.ZodType<CandidateBlock, unknown, z.core.$ZodTypeInternals<CandidateBlock, unknown>>]>>;
     journal: z.ZodOptional<z.ZodType<JournalPolicy, unknown, z.core.$ZodTypeInternals<JournalPolicy, unknown>>>;
+    expectedErrors: z.ZodOptional<z.ZodPipe<z.ZodArray<z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>>, z.ZodTransform<[ExpectedError, ...ExpectedError[]], ExpectedError[]>>>;
 }, z.core.$strict>;
 
 // Warning: (ae-forgotten-export) The symbol "OperationSseTransport" needs to be exported by the entry point index.d.ts
@@ -5462,6 +5480,7 @@ export interface ProviderHealthMonitorConfig {
     credentialInputs?: Record<string, string>;
     defaultDegradedThresholdMs?: number;
     defaultProbeTimeoutMs?: number;
+    maintenanceWindows?: NonEmpty<UpstreamMaintenanceWindow>;
     // Warning: (ae-forgotten-export) The symbol "HealthMonitorProbeOverride" needs to be exported by the entry point index.d.ts
     probeOverrides?: Record<string, HealthMonitorProbeOverride>;
     requiredSecrets?: string[];
@@ -8687,6 +8706,24 @@ export function unwrapEnvelope(data: unknown, path?: string): unknown;
 // @public
 export function unwrapGovEnvelope(raw: unknown): unknown;
 
+// @public
+export const UPSTREAM_MAINTENANCE_LOOKBACK_DAYS = 90;
+
+// @public
+export type UpstreamMaintenanceWindow = {
+    startsAt: string;
+    endsAt: string;
+    sourceUrl: string;
+    declaredAt: string;
+    operations?: NonEmpty<string>;
+};
+
+// @public (undocumented)
+export const UpstreamMaintenanceWindowSchema: z.ZodType<UpstreamMaintenanceWindow>;
+
+// @public (undocumented)
+export const UpstreamMaintenanceWindowsSchema: z.ZodType<NonEmpty<UpstreamMaintenanceWindow>>;
+
 // @public (undocumented)
 const VALID_OPERATION_ERROR_STATUSES: readonly [400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504];
 
@@ -8810,12 +8847,12 @@ export { z }
 // dist/server/serve-implementation.d.ts:199:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:272:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:682:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1745:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1833:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1841:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1842:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2029:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1757:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1845:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1853:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1854:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

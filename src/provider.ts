@@ -104,6 +104,8 @@ export type {
 	CredentialReference,
 	EstablishedConnectionReference,
 	ExtractResult,
+	ExpectedAbsenceAttribution,
+	ExpectedError,
 	ExtractStep,
 	FindFirst,
 	GuardAttribution,
@@ -142,6 +144,7 @@ export {
 	CandidatePolicySchema,
 	CredentialRefDeclarationSchema,
 	defineHealthScenario,
+	ExpectedErrorSchema,
 	ExtractStepSchema,
 	FindFirstSchema,
 	GUARD_REASON_CODES,
@@ -165,6 +168,12 @@ export {
 	StepReferenceSchema,
 	ValueTypeSchema,
 } from "./health-scenario.js";
+export {
+	UPSTREAM_MAINTENANCE_LOOKBACK_DAYS,
+	UpstreamMaintenanceWindowSchema,
+	UpstreamMaintenanceWindowsSchema,
+} from "./upstream-maintenance.js";
+export type { UpstreamMaintenanceWindow } from "./upstream-maintenance.js";
 export {
 	getProviderLocalePath,
 	type ProviderErrorMessageParams,
