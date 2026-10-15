@@ -75,6 +75,9 @@ export const APIFUSE_DESCRIPTION_KEY_META_KEY = "x-apifuse-description-key";
 // @public
 export const APIFUSE_HANDLE_META_KEY: "x-apifuse-handle";
 
+// @public
+export const APIFUSE_IMAGE_ROLE_META_KEY = "x-apifuse-image-role";
+
 // @public (undocumented)
 export const APIFUSE_REDACTION_MARKER = "<redacted>";
 
@@ -89,6 +92,9 @@ export const APIFUSE_STREAM_DONE_EVENT = "apifuse.done";
 
 // @public (undocumented)
 export const APIFUSE_STREAM_ERROR_EVENT = "apifuse.error";
+
+// @public
+export const APIFUSE_URL_KIND_META_KEY = "x-apifuse-url-kind";
 
 // @public (undocumented)
 export type ApiFuseConfig = {
@@ -3019,6 +3025,27 @@ export interface HttpTelemetrySink {
 export type IanaTimeZone = string;
 
 // @public
+export function image(options?: ImageFieldOptions): z.ZodNullable<z.ZodType<ImageUrl, string>>;
+
+// @public
+export interface ImageFieldOptions {
+    thumbnail?: boolean;
+}
+
+// @public
+export function imageList(options?: ImageFieldOptions): z.ZodArray<z.ZodType<ImageUrl, string>>;
+
+// @public
+export type ImageUrl = `https://${string}` & {
+    readonly [OUTPUT_URL_KIND]?: "image";
+};
+
+// @public
+export interface ImageUrlOptions extends OutputUrlOptions {
+    upgradeHttp?: readonly string[];
+}
+
+// @public
 export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType ? infer<TSchema> : TSchema extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
 
 // @public
@@ -3119,6 +3146,17 @@ export function isTransportError(value: unknown): value is TransportError;
 // @public (undocumented)
 export function isValidationError(value: unknown): value is ValidationError;
 
+// @public
+export function itemPage(): z.ZodNullable<z.ZodType<ItemPageUrl, string>>;
+
+// @public
+export function itemPageFrom(template: string, values: Readonly<Record<string, string | number | null | undefined>>, options?: Pick<OutputUrlOptions, "field">): ItemPageUrl | null;
+
+// @public
+export type ItemPageUrl = `http${string}://${string}` & {
+    readonly [OUTPUT_URL_KIND]?: "item_page";
+};
+
 // @public (undocumented)
 export type JournalPolicy = {
     kind: "side_effect_barrier";
@@ -3149,6 +3187,14 @@ export const JsonTemplateSchema: z.ZodType<JsonTemplate, unknown, z.core.$ZodTyp
 // @public (undocumented)
 export type JsonValue = JsonPrimitive | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
+};
+
+// @public
+export function link(): z.ZodNullable<z.ZodType<LinkUrl, string>>;
+
+// @public
+export type LinkUrl = `http${string}://${string}` & {
+    readonly [OUTPUT_URL_KIND]?: "link";
 };
 
 // @public (undocumented)
@@ -3760,6 +3806,14 @@ export type NativeVendorSkipTelemetryEvent = {
 // @public (undocumented)
 export const NEEDS_INPUT_STATUS: "needs_input";
 
+// @public
+export function noMedia(reason: string): NoMediaDeclaration;
+
+// @public
+export interface NoMediaDeclaration {
+    readonly reason: string;
+}
+
 // @public (undocumented)
 export type NonEmpty<T> = readonly [T, ...T[]];
 
@@ -4067,6 +4121,7 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     input: TInput;
     // (undocumented)
     markdownKey?: ProviderLocaleKeyInput;
+    noMedia?: NoMediaDeclaration;
     // (undocumented)
     normalizationNotesKeys?: readonly ProviderLocaleKeyInput[];
     // (undocumented)
@@ -4315,6 +4370,42 @@ interface OTLPExportOptions {
     headers?: Record<string, string>;
     // (undocumented)
     timeout?: number;
+}
+
+// @public
+export const OUTPUT_URL_DROP_REASONS: readonly ["not_url", "relative", "scheme", "insecure", "host", "credentials"];
+
+// @public
+const OUTPUT_URL_KIND: unique symbol;
+
+// @public
+export const OUTPUT_URL_KINDS: readonly ["image", "item_page", "link"];
+
+// @public
+export type OutputUrlDropGroup = {
+    kind: OutputUrlKind;
+    reason: OutputUrlDropReason;
+    field?: string;
+    count: number;
+    example?: string;
+};
+
+// @public
+export type OutputUrlDropReason = (typeof OUTPUT_URL_DROP_REASONS)[number];
+
+// @public
+export type OutputUrlEventsLogPayload = {
+    telemetryFailed?: true;
+    outputUrlDropped: OutputUrlDropGroup[];
+};
+
+// @public
+export type OutputUrlKind = (typeof OUTPUT_URL_KINDS)[number];
+
+// @public
+export interface OutputUrlOptions {
+    base?: string | URL;
+    field?: string;
 }
 
 // @public (undocumented)
@@ -4925,6 +5016,8 @@ export interface ProviderContractOperation {
     readonly inputSchema: JsonValue;
     // (undocumented)
     readonly markdownKey?: JsonValue;
+    // (undocumented)
+    readonly noMedia?: JsonValue;
     // (undocumented)
     readonly normalizationNotesKeys?: JsonValue;
     // (undocumented)
@@ -8487,10 +8580,22 @@ export function today(timezone: string): string;
 export function toFloat(v: unknown, decimals?: number): number;
 
 // @public
+export function toImageUrl(raw: unknown, options?: ImageUrlOptions): ImageUrl | null;
+
+// @public
+export function toImageUrls(raws: readonly unknown[] | null | undefined, options?: ImageUrlOptions): ImageUrl[];
+
+// @public
 export function toInt(v: unknown): number;
 
 // @public
 export function toISODate(v: unknown, timezone: string): string;
+
+// @public
+export function toItemPageUrl(raw: unknown, options?: OutputUrlOptions): ItemPageUrl | null;
+
+// @public
+export function toLinkUrl(raw: unknown, options?: OutputUrlOptions): LinkUrl | null;
 
 // @public
 export function toNumber(v: unknown): number;
@@ -8743,11 +8848,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:272:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1747:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1835:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1843:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1844:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2031:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1757:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1845:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1853:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1854:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

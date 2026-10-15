@@ -2867,6 +2867,32 @@ function validateOperationHealthChecks(
 	}
 }
 
+const NO_MEDIA_FIELDS = new Set(["reason"]);
+
+function validateOperationNoMedia(
+	providerId: string,
+	operations: Record<string, ProviderOperation>,
+): void {
+	for (const [operationName, operation] of Object.entries(operations)) {
+		const declaration: unknown = operation.noMedia;
+		if (declaration === undefined) continue;
+		const fieldPath = `operations.${operationName}.noMedia`;
+		if (!declaration || typeof declaration !== "object" || Array.isArray(declaration))
+			throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be an object.`, {
+				fix: `Declare ${fieldPath} with noMedia("<upstream evidence>").`,
+			});
+		rejectUnknownFields(declaration, NO_MEDIA_FIELDS, fieldPath, providerId);
+		const reason = Reflect.get(declaration, "reason");
+		if (typeof reason !== "string" || reason.trim().length === 0)
+			throw new ValidationError(
+				`Provider "${providerId}" ${fieldPath}.reason must be a non-empty string.`,
+				{
+					fix: `Name the upstream evidence, e.g. noMedia("Upstream rows carry station codes and readings only; the service has no item pages or photos.").`,
+				},
+			);
+	}
+}
+
 function validateOperationFixtures(
 	providerId: string,
 	operations: Record<string, ProviderOperation>,
@@ -3093,6 +3119,7 @@ function finalizeProvider<
 		config.healthProbe ?? config.healthMonitor,
 		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
 	);
+	validateOperationNoMedia(config.id, config.operations);
 	validateOperationFixtures(config.id, operations);
 	const provider: Omit<ProviderDefinition, "operations"> & {
 		operations: OperationMapConfig<TOperations, TContext>;

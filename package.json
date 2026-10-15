@@ -101,6 +101,11 @@
 			"import": "./dist/testing/index.js",
 			"default": "./dist/testing/index.js"
 		},
+		"./url-host": {
+			"types": "./dist/url-host.d.ts",
+			"import": "./dist/url-host.js",
+			"default": "./dist/url-host.js"
+		},
 		"./create": {
 			"types": "./dist/cli/create.d.ts",
 			"import": "./dist/cli/create.js",

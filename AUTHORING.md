@@ -333,6 +333,59 @@ unless the schema at that path declares them one way or the other. Declare every
 Apply either helper to the leaf, before `.optional()`/`.nullable()`/`.default()`;
 `publicField()` over a wrapper that hides a `sensitive()` leaf throws at definition time.
 
+### Images and item links
+
+Public output names a picture or a page by declaring it, not by its field name.
+New providers and new fields use the helpers now. Adopting a helper on an
+existing field rotates the operation's compatibility hash (the annotation is
+part of the contract) and, for a field that was not nullable, widens it to
+admit `null`; existing providers move in the migration order of the openspec
+change `add-output-url-kinds` (registry classification first, then the pilot
+repositories, then the fleet wave), not ahead of it.
+
+| What the value is | Schema | Mapper |
+|---|---|---|
+| The item's main picture | `image()` | `toImageUrl(raw, { base?, upgradeHttp?, field? })` |
+| A smaller rendition of it | `image({ thumbnail: true })` | same |
+| More pictures, upstream order | `imageList()` | `toImageUrls(raws, options)` (drops duplicates) |
+| The item's own page | `itemPage()` | `toItemPageUrl(raw)` or `itemPageFrom(template, values)` |
+| Any other URL (source, download, booking, map image) | `link()` | `toLinkUrl(raw)` |
+
+- Keep existing field names (`image_url`, `detail_url`, ...); the annotation says
+  what they are. New fields use the fleet names `image_url`, `image_urls`,
+  `thumbnail_url`, `url`.
+- A missing or left-out value is `null`, the fleet's "upstream did not
+  provide it": the constructors return `null` and `image()`, `itemPage()` and
+  `link()` admit it without `.nullable()`. Add `.optional()` only when the key
+  itself may be absent. `imageList()` is empty instead.
+- Adopting on an existing `.nullable()` field drops the wrapper:
+  `z.string().nullable()` becomes `image()`, not `image().nullable()`. The
+  contract is the same either way (the SDK emits a redundant `null` branch
+  around a helper as the helper alone), but the helper already admits `null`,
+  so the wrapper only adds noise.
+- Pass `field: "items[].image_url"` so a dropped value is attributable in the
+  request log. Keep it a static label, not a per-row path.
+- `upgradeHttp` lists only host names you measured serving the same path over
+  `https://`. An `http://` image on another host, or one naming a port, is
+  dropped and reported.
+- `itemPageFrom("https://www.example.com/items/{item_id}", { item_id })`
+  percent-encodes each value as one component and yields `null` when a
+  value is missing. Assemble a page only from a template you verified opens
+  the item.
+- Upstream values never throw. Arguments you write do, on every call whatever
+  the value, so any mapper test catches them: a `base` that is not an
+  absolute `http(s)` URL, an `upgradeHttp` entry that is not a host name, an
+  `itemPageFrom` template that is not absolute `http(s)://`, a placeholder
+  without a value entry.
+- An item has one own page and one main picture: a second `itemPage()` or
+  non-thumbnail `image()` in the same object is a declaration error. Declare
+  other URLs with `link()`.
+- `noMedia: noMedia("<upstream evidence>")` records that the operation's items
+  have no picture and no page upstream. It cannot sit next to `image()`,
+  `imageList()` or `itemPage()` fields.
+- Values are plain URL strings at runtime. Do not invent width, height or alt
+  text; the item's title is its caption.
+
 ### Real-handler E2E in standard tests
 
 `runStandardTests(provider)` validates declarations and fixtures but reports a

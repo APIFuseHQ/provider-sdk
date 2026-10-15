@@ -56,4 +56,5 @@ export interface ProviderContractOperation {
 	readonly hints?: JsonValue;
 	readonly healthCheck?: JsonValue;
 	readonly healthCheckUnsupported?: JsonValue;
+	readonly noMedia?: JsonValue;
 }

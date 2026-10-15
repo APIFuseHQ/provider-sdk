@@ -23,6 +23,9 @@ export const APIFUSE_DESCRIPTION_KEY_META_KEY = "x-apifuse-description-key";
 // @public
 export const APIFUSE_HANDLE_META_KEY: "x-apifuse-handle";
 
+// @public
+export const APIFUSE_IMAGE_ROLE_META_KEY = "x-apifuse-image-role";
+
 // @public (undocumented)
 export const APIFUSE_REDACTION_MARKER = "<redacted>";
 
@@ -31,6 +34,9 @@ export const APIFUSE_SENSITIVE_KIND_META_KEY = "x-apifuse-sensitive-kind";
 
 // @public (undocumented)
 export const APIFUSE_SENSITIVE_META_KEY = "x-apifuse-sensitive";
+
+// @public
+export const APIFUSE_URL_KIND_META_KEY = "x-apifuse-url-kind";
 
 // @public (undocumented)
 export type AssertionExpression = {
@@ -2285,6 +2291,27 @@ interface HttpStreamResponse {
 }
 
 // @public
+export function image(options?: ImageFieldOptions): z.ZodNullable<z.ZodType<ImageUrl, string>>;
+
+// @public
+export interface ImageFieldOptions {
+    thumbnail?: boolean;
+}
+
+// @public
+export function imageList(options?: ImageFieldOptions): z.ZodArray<z.ZodType<ImageUrl, string>>;
+
+// @public
+export type ImageUrl = `https://${string}` & {
+    readonly [OUTPUT_URL_KIND]?: "image";
+};
+
+// @public
+export interface ImageUrlOptions extends OutputUrlOptions {
+    upgradeHttp?: readonly string[];
+}
+
+// @public
 export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType ? infer<TSchema> : TSchema extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
 
 // @public
@@ -2335,6 +2362,17 @@ export function isSessionExpiredError(value: unknown): value is SessionExpiredEr
 // @public (undocumented)
 export function isTransportError(value: unknown): value is TransportError;
 
+// @public
+export function itemPage(): z.ZodNullable<z.ZodType<ItemPageUrl, string>>;
+
+// @public
+export function itemPageFrom(template: string, values: Readonly<Record<string, string | number | null | undefined>>, options?: Pick<OutputUrlOptions, "field">): ItemPageUrl | null;
+
+// @public
+export type ItemPageUrl = `http${string}://${string}` & {
+    readonly [OUTPUT_URL_KIND]?: "item_page";
+};
+
 // @public (undocumented)
 export type JournalPolicy = {
     kind: "side_effect_barrier";
@@ -2365,6 +2403,14 @@ export const JsonTemplateSchema: z.ZodType<JsonTemplate, unknown, z.core.$ZodTyp
 // @public (undocumented)
 export type JsonValue = JsonPrimitive | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
+};
+
+// @public
+export function link(): z.ZodNullable<z.ZodType<LinkUrl, string>>;
+
+// @public
+export type LinkUrl = `http${string}://${string}` & {
+    readonly [OUTPUT_URL_KIND]?: "link";
 };
 
 // @public (undocumented)
@@ -2755,6 +2801,14 @@ type NativeVendorSkipTelemetryEvent = {
     diagnostics?: NativeTelemetryDiagnostics;
 };
 
+// @public
+export function noMedia(reason: string): NoMediaDeclaration;
+
+// @public
+export interface NoMediaDeclaration {
+    readonly reason: string;
+}
+
 // @public (undocumented)
 export type NonEmpty<T> = readonly [T, ...T[]];
 
@@ -2948,6 +3002,7 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     input: TInput;
     // (undocumented)
     markdownKey?: ProviderLocaleKeyInput;
+    noMedia?: NoMediaDeclaration;
     // (undocumented)
     normalizationNotesKeys?: readonly ProviderLocaleKeyInput[];
     // (undocumented)
@@ -3158,6 +3213,27 @@ interface OperationWebSocketTransport {
     maxFrameBytes?: number;
     // (undocumented)
     subprotocols?: readonly string[];
+}
+
+// @public
+export const OUTPUT_URL_DROP_REASONS: readonly ["not_url", "relative", "scheme", "insecure", "host", "credentials"];
+
+// @public
+const OUTPUT_URL_KIND: unique symbol;
+
+// @public
+export const OUTPUT_URL_KINDS: readonly ["image", "item_page", "link"];
+
+// @public
+export type OutputUrlDropReason = (typeof OUTPUT_URL_DROP_REASONS)[number];
+
+// @public
+export type OutputUrlKind = (typeof OUTPUT_URL_KINDS)[number];
+
+// @public
+export interface OutputUrlOptions {
+    base?: string | URL;
+    field?: string;
 }
 
 // @public
@@ -5894,6 +5970,18 @@ interface SttWarning {
     message: string;
 }
 
+// @public
+export function toImageUrl(raw: unknown, options?: ImageUrlOptions): ImageUrl | null;
+
+// @public
+export function toImageUrls(raws: readonly unknown[] | null | undefined, options?: ImageUrlOptions): ImageUrl[];
+
+// @public
+export function toItemPageUrl(raw: unknown, options?: OutputUrlOptions): ItemPageUrl | null;
+
+// @public
+export function toLinkUrl(raw: unknown, options?: OutputUrlOptions): LinkUrl | null;
+
 // @public (undocumented)
 interface TraceContext {
     // (undocumented)
@@ -6053,19 +6141,19 @@ export { z }
 // dist/types.d.ts:359:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:704:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:937:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:942:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1387:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1387:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1694:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1700:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1701:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1705:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1712:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1747:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2025:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2031:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2033:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:947:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:952:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1397:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1397:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1704:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1710:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1711:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1715:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1722:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1757:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2035:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2043:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

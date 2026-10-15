@@ -382,6 +382,30 @@ export {
 	z,
 } from "./schema.js";
 export {
+	APIFUSE_IMAGE_ROLE_META_KEY,
+	APIFUSE_URL_KIND_META_KEY,
+	type ImageFieldOptions,
+	type ImageUrl,
+	type ImageUrlOptions,
+	type ItemPageUrl,
+	image,
+	imageList,
+	itemPage,
+	itemPageFrom,
+	type LinkUrl,
+	link,
+	noMedia,
+	OUTPUT_URL_DROP_REASONS,
+	OUTPUT_URL_KINDS,
+	type OutputUrlDropReason,
+	type OutputUrlKind,
+	type OutputUrlOptions,
+	toImageUrl,
+	toImageUrls,
+	toItemPageUrl,
+	toLinkUrl,
+} from "./output-url.js";
+export {
 	createServerApp,
 	createServerAppAsync,
 	ERROR_OBSERVABILITY_HEADER,
@@ -477,6 +501,7 @@ export type {
 	NativeTcpPortRange,
 	NativeTcpTlsMode,
 	NativeTlsConnectOptions,
+	NoMediaDeclaration,
 	OcrCaptchaCandidate,
 	OcrCaptchaOptions,
 	OcrCaptchaResult,
@@ -668,3 +693,7 @@ export {
 	type StateTelemetrySink,
 	type StateTelemetryViolation,
 } from "./runtime/state-telemetry.js";
+export type {
+	OutputUrlDropGroup,
+	OutputUrlEventsLogPayload,
+} from "./runtime/output-url-telemetry.js";
