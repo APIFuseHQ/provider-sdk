@@ -30,8 +30,7 @@ export const DECLARATION_RULE_IDS = {
 	noMediaContradiction: "no-media-contradiction",
 } as const;
 
-export type DeclarationRuleId =
-	(typeof DECLARATION_RULE_IDS)[keyof typeof DECLARATION_RULE_IDS];
+export type DeclarationRuleId = (typeof DECLARATION_RULE_IDS)[keyof typeof DECLARATION_RULE_IDS];
 
 export type DeclarationViolation = {
 	ruleId: DeclarationRuleId;
@@ -61,11 +60,11 @@ export function validateFailClosedDeclaration(provider: ProviderDefinition): voi
 	const violations: DeclarationViolation[] = [];
 	validateHealthDeclaration(provider, violations);
 	validatePinnedWireFieldPaths(provider, violations);
-	const outputSchemas = validateSchemaDeclaration(provider, violations);
+	const payloadSchemas = validateSchemaDeclaration(provider, violations);
 	validateProxyDeclaration(provider, violations);
 	validateResolverClientProfileDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
-	validateOutputUrlKindDeclaration(provider, outputSchemas, violations);
+	validateOutputUrlKindDeclaration(provider, payloadSchemas, violations);
 	if (violations.length > 0) throw declarationInvalidError(violations);
 }
 
@@ -168,9 +167,9 @@ function collectOperationDeclarationViolations(
 	provider: OperationDeclarationRulesInput,
 	violations: DeclarationViolation[],
 ): void {
-	const outputSchemas = validateSchemaDeclaration(provider, violations);
+	const payloadSchemas = validateSchemaDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
-	validateOutputUrlKindDeclaration(provider, outputSchemas, violations);
+	validateOutputUrlKindDeclaration(provider, payloadSchemas, violations);
 }
 
 function validateHealthDeclaration(
@@ -228,19 +227,22 @@ function healthJourneyPath(journey: HealthJourneyDefinition, index: number): str
 
 /**
  * Checks that every operation schema converts to JSON Schema and returns the
- * converted output schemas by operation id (absent when conversion failed or
- * the schema is not zod), so later rules read them without converting again.
+ * converted payload schemas by operation id, so later rules read them without
+ * converting again. Payload schemas are the output and every SSE event schema,
+ * keyed by declaration path; a failed conversion is left out.
  */
 function validateSchemaDeclaration(
 	provider: OperationDeclarationRulesInput,
 	violations: DeclarationViolation[],
-): Map<string, unknown> {
-	const outputSchemas = new Map<string, unknown>();
+): Map<string, Map<string, unknown>> {
+	const payloadSchemas = new Map<string, Map<string, unknown>>();
 	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
-		const outputPath = `operations.${operationId}.output`;
+		const inputPath = `operations.${operationId}.input`;
+		const operationPayloads = new Map<string, unknown>();
+		payloadSchemas.set(operationId, operationPayloads);
 		const schemaEntries: Array<[string, unknown]> = [
-			[`operations.${operationId}.input`, operation.input],
-			[outputPath, operation.output],
+			[inputPath, operation.input],
+			[`operations.${operationId}.output`, operation.output],
 		];
 		// SSE event schemas reach contract extraction the same way input/output do,
 		// so a transform-bearing event schema would abort extraction at runtime while
@@ -257,7 +259,7 @@ function validateSchemaDeclaration(
 		for (const [path, schema] of schemaEntries) {
 			try {
 				const jsonSchema = zodSchemaToJson(schema);
-				if (path === outputPath) outputSchemas.set(operationId, jsonSchema);
+				if (path !== inputPath) operationPayloads.set(path, jsonSchema);
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				violations.push({
@@ -269,51 +271,61 @@ function validateSchemaDeclaration(
 			}
 		}
 	}
-	return outputSchemas;
+	return payloadSchemas;
 }
 
 /**
  * An item has one own page and one main picture: an object that declares two
  * `itemPage()` properties, or two non-thumbnail single `image()` properties,
  * leaves consumers to guess which one is meant. `noMedia` states the items
- * have neither, so it cannot sit next to such fields.
+ * have neither, so it cannot sit next to such fields. SSE event schemas are
+ * payloads published in the contract too, so they follow the same rule.
  */
 function validateOutputUrlKindDeclaration(
 	provider: OperationDeclarationRulesInput,
-	outputSchemas: ReadonlyMap<string, unknown>,
+	payloadSchemas: ReadonlyMap<string, ReadonlyMap<string, unknown>>,
 	violations: DeclarationViolation[],
 ): void {
 	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
+		const operationPath = `operations.${operationId}`;
+		const media: string[] = [];
 		// operation-schema-serializable reports a failed conversion.
-		const path = `operations.${operationId}.output`;
-		const { entries, conflicts } = inspectOutputUrlKinds(outputSchemas.get(operationId));
-		for (const conflict of conflicts) {
-			const helper = conflict.kind === "item_page" ? "itemPage()" : "image()";
-			violations.push({
-				ruleId: DECLARATION_RULE_IDS.outputUrlKindUnique,
-				path:
-					conflict.path === "$"
-						? path
-						: conflict.path.startsWith("[")
-							? `${path}${conflict.path}`
-							: `${path}.${conflict.path}`,
-				message: `${conflict.properties.join(", ")} are all declared ${helper}; an item has one ${conflict.kind === "item_page" ? "own page" : "main picture"}.`,
-				fix:
-					conflict.kind === "item_page"
-						? "Keep itemPage() on the item's own page and declare the other URLs with link()."
-						: "Keep image() on the main picture; use image({ thumbnail: true }) for a smaller rendition or imageList() for more pictures.",
-			});
+		for (const [path, schema] of payloadSchemas.get(operationId) ?? []) {
+			const { entries, conflicts } = inspectOutputUrlKinds(schema);
+			// Output fields keep their output-relative label; event fields name their event.
+			const label = path.slice(`${operationPath}.`.length);
+			for (const entry of entries)
+				if (entry.kind !== "link")
+					media.push(
+						`${label === "output" ? entry.path : projectSchemaPath(label, entry.path)} (${entry.kind})`,
+					);
+			for (const conflict of conflicts) {
+				const helper = conflict.kind === "item_page" ? "itemPage()" : "image()";
+				violations.push({
+					ruleId: DECLARATION_RULE_IDS.outputUrlKindUnique,
+					path: projectSchemaPath(path, conflict.path),
+					message: `${conflict.properties.join(", ")} are all declared ${helper}; an item has one ${conflict.kind === "item_page" ? "own page" : "main picture"}.`,
+					fix:
+						conflict.kind === "item_page"
+							? "Keep itemPage() on the item's own page and declare the other URLs with link()."
+							: "Keep image() on the main picture; use image({ thumbnail: true }) for a smaller rendition or imageList() for more pictures.",
+				});
+			}
 		}
-		if (operation.noMedia === undefined) continue;
-		const media = entries.filter((entry) => entry.kind !== "link");
-		if (media.length === 0) continue;
+		if (operation.noMedia === undefined || media.length === 0) continue;
 		violations.push({
 			ruleId: DECLARATION_RULE_IDS.noMediaContradiction,
-			path: `operations.${operationId}.noMedia`,
-			message: `noMedia is declared but the output has ${APIFUSE_URL_KIND_META_KEY} fields ${media.map((entry) => `${entry.path} (${entry.kind})`).join(", ")}.`,
-			fix: `Remove operations.${operationId}.noMedia, or remove the image/item page fields if the upstream has none.`,
+			path: `${operationPath}.noMedia`,
+			message: `noMedia is declared but the output has ${APIFUSE_URL_KIND_META_KEY} fields ${media.join(", ")}.`,
+			fix: `Remove ${operationPath}.noMedia, or remove the image/item page fields if the upstream has none.`,
 		});
 	}
+}
+
+/** Joins a schema's declaration path and a path inside it (`$` is the schema itself). */
+function projectSchemaPath(base: string, inner: string): string {
+	if (inner === "$") return base;
+	return inner.startsWith("[") ? `${base}${inner}` : `${base}.${inner}`;
 }
 
 const MANAGED_PROXY_VENDORS = new Set<ProviderProxyProvider>(["smartproxy", "nodemaven"]);

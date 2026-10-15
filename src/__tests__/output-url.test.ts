@@ -573,6 +573,36 @@ describe("output URL declaration rules", () => {
 		]);
 	});
 
+	it("apply the same rules to SSE event schemas", () => {
+		const photos = operationWith(z.object({ ok: z.boolean() }), {
+			noMedia: noMedia("Upstream has no photos."),
+			transport: {
+				kind: "sse",
+				events: {
+					photo: z.object({ image_url: image(), photo_url: image(), source_url: link() }),
+				},
+			},
+		});
+		expect(
+			violations(declaration({ photos })).map((violation) => [
+				violation.ruleId,
+				violation.path,
+				violation.message,
+			]),
+		).toStrictEqual([
+			[
+				DECLARATION_RULE_IDS.outputUrlKindUnique,
+				"operations.photos.transport.events.photo",
+				"image_url, photo_url are all declared image(); an item has one main picture.",
+			],
+			[
+				DECLARATION_RULE_IDS.noMediaContradiction,
+				"operations.photos.noMedia",
+				"noMedia is declared but the output has x-apifuse-url-kind fields transport.events.photo.image_url (image), transport.events.photo.photo_url (image).",
+			],
+		]);
+	});
+
 	it("reject noMedia next to image or item page fields, but not next to links", () => {
 		const withPicture = operationWith(
 			z.object({ items: z.array(z.object({ image_url: image() })) }),
