@@ -439,7 +439,8 @@ export function noMedia(reason: string): NoMediaDeclaration {
 
 type JsonRecord = Record<string, unknown>;
 
-function isRecord(value: unknown): value is JsonRecord {
+/** A plain object (not `null`, not an array). */
+export function isRecord(value: unknown): value is JsonRecord {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -447,7 +448,8 @@ function isOutputUrlKind(value: unknown): value is OutputUrlKind {
 	return OUTPUT_URL_KINDS.some((kind) => kind === value);
 }
 
-function appendPropertyPath(path: string, property: string): string {
+/** Appends one property to a response-value path in the projection notation (`items[].image_url`). */
+export function appendPropertyPath(path: string, property: string): string {
 	const segment = /^[A-Za-z_][A-Za-z0-9_]*$/.test(property)
 		? property
 		: `[${JSON.stringify(property)}]`;
@@ -455,7 +457,8 @@ function appendPropertyPath(path: string, property: string): string {
 	return `${path}.${segment}`;
 }
 
-function localReference(root: JsonRecord, reference: string): unknown {
+/** Resolves a local JSON Pointer `$ref` (`#/$defs/item`) against the schema root. */
+export function localReference(root: JsonRecord, reference: string): unknown {
 	if (!reference.startsWith("#/")) return undefined;
 	let current: unknown = root;
 	for (const encoded of reference.slice(2).split("/")) {

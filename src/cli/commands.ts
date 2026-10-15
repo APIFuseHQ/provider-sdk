@@ -6,6 +6,7 @@ export type ApifuseCommandName =
 	| "migrate-shape"
 	| "migrate-operation-declaration"
 	| "migrate-deployment"
+	| "migrate-url-kinds"
 	| "submit-check"
 	| "bounty-check"
 	| "record"
@@ -89,6 +90,14 @@ export const COMMAND_MANIFEST: Record<
 		],
 		modulePath: "./apifuse-migrate-deployment",
 	},
+	"migrate-url-kinds": {
+		name: "migrate-url-kinds",
+		summary:
+			"Declare output URL fields with image()/imageList()/itemPage() from fixture evidence, wrap the mapper assignments it can trace, and mark other URL fields TODO(url-kind).",
+		usage: "apifuse migrate-url-kinds [path] [--check] [--json] [--no-typecheck]",
+		examples: ["apifuse migrate-url-kinds .", "apifuse migrate-url-kinds . --check --json"],
+		modulePath: "./apifuse-migrate-url-kinds",
+	},
 	"submit-check": {
 		name: "submit-check",
 		summary:
@@ -150,6 +159,7 @@ export const COMMAND_ORDER: ApifuseCommandName[] = [
 	"migrate-shape",
 	"migrate-operation-declaration",
 	"migrate-deployment",
+	"migrate-url-kinds",
 	"submit-check",
 	"record",
 	"test",
