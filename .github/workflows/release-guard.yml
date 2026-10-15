@@ -16,12 +16,12 @@ jobs:
     steps:
       # Keep the validation and guard implementation on the trusted base ref.
       # The candidate is a sibling checkout and is only the subject under test.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: candidate
           fetch-depth: 0
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: release-control
