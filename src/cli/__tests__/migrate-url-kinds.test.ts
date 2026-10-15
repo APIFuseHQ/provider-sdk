@@ -877,6 +877,170 @@ export const op = {
 	});
 });
 
+describe("apifuse migrate-url-kinds: pick, omit and redeclared keys", () => {
+	it("leaves a declaration alone that .omit()/.pick() removed or .extend()/.merge()/a later key replaced", () => {
+		const dir = writeFixtureRepository({
+			"schemas.ts": `import { z } from "@apifuse/provider-sdk/provider";
+
+// Another contract's shape too: no output below holds its image_url.
+export const Base = z.object({ name: z.string(), image_url: z.string() });
+
+export const OutputSchema = z.object({
+  omitted: Base.omit({ image_url: true }).extend({ image_url: z.string().describe("omitted") }),
+  picked: Base.pick({ name: true }).extend({ image_url: z.string().describe("picked") }),
+  extended: Base.extend({ image_url: z.string().describe("extended") }),
+  merged: Base.merge(z.object({ image_url: z.string().describe("merged") })),
+  spread: z.object({ ...Base.shape, image_url: z.string().describe("spread") }),
+});
+`,
+			"index.ts": `import { OutputSchema } from "./schemas";
+
+const card = { name: "a", image_url: "https://cdn.example.com/a.jpg" };
+
+export const op = {
+  output: OutputSchema,
+  handler: async (_ctx: unknown, input: { img: string }) => ({
+    omitted: { name: "a", image_url: input.img },
+    picked: { name: "a", image_url: input.img },
+    extended: { name: "a", image_url: input.img },
+    merged: { name: "a", image_url: input.img },
+    spread: { name: "a", image_url: input.img },
+  }),
+  fixtures: {
+    request: { img: "" },
+    response: { omitted: card, picked: card, extended: card, merged: card, spread: card },
+  },
+};
+`,
+		});
+		const result = migrateUrlKindsRepository(dir, { typecheck: false });
+		const schemas = readFileSync(join(dir, "schemas.ts"), "utf8");
+		const index = readFileSync(join(dir, "index.ts"), "utf8");
+
+		expect(schemas).toContain(
+			"export const Base = z.object({ name: z.string(), image_url: z.string() });",
+		);
+		expect(
+			result.rewrites.map((item) => `${item.line} ${item.paths.join("|")} -> ${item.after}`),
+		).toEqual([
+			'7 omitted.image_url -> image().describe("omitted")',
+			'8 picked.image_url -> image().describe("picked")',
+			'9 extended.image_url -> image().describe("extended")',
+			'10 merged.image_url -> image().describe("merged")',
+			'11 spread.image_url -> image().describe("spread")',
+		]);
+		for (const key of ["omitted", "picked", "extended", "merged", "spread"])
+			expect(index).toContain(
+				`${key}: { name: "a", image_url: toImageUrl(input.img, { field: "${key}.image_url" }) },`,
+			);
+		expect(result.skipped).toEqual([]);
+	});
+
+	it("wraps a mapper assignment only where the output keeps the field", () => {
+		const dir = writeFixtureRepository({
+			"schemas.ts": `import { z } from "@apifuse/provider-sdk/provider";
+
+const Card = z.object({ name: z.string(), image_url: z.string() });
+
+export const OutputSchema = z.object({
+  full: Card,
+  named: Card.pick({ name: true }),
+  bare: Card.omit({ image_url: true }).partial(),
+  kind: Card.keyof(),
+});
+`,
+			"index.ts": `import { OutputSchema } from "./schemas";
+
+export const op = {
+  output: OutputSchema,
+  handler: async (_ctx: unknown, input: { title: string; img: string; alt: string }) => ({
+    full: { name: input.title, image_url: input.img },
+    named: { name: input.title, image_url: input.alt },
+    bare: { name: input.title, image_url: input.alt },
+    kind: "name" as const,
+  }),
+  fixtures: {
+    request: { title: "", img: "", alt: "" },
+    response: {
+      full: { name: "a", image_url: "https://cdn.example.com/a.jpg" },
+      named: { name: "a" },
+      bare: { name: "a" },
+      kind: "name",
+    },
+  },
+};
+`,
+		});
+		const result = migrateUrlKindsRepository(dir, { typecheck: false });
+		const schemas = readFileSync(join(dir, "schemas.ts"), "utf8");
+		const index = readFileSync(join(dir, "index.ts"), "utf8");
+
+		expect(schemas).toContain("const Card = z.object({ name: z.string(), image_url: image() });");
+		expect(result.rewrites.map((item) => `${item.paths.join("|")} -> ${item.after}`)).toEqual([
+			"full.image_url -> image()",
+		]);
+		expect(index).toContain(
+			'full: { name: input.title, image_url: toImageUrl(input.img, { field: "full.image_url" }) },',
+		);
+		expect(index).toContain("named: { name: input.title, image_url: input.alt },");
+		expect(index).toContain("bare: { name: input.title, image_url: input.alt },");
+		expect(result.mapperWraps.map((item) => `${item.line} ${item.property}`)).toEqual([
+			"6 image_url",
+		]);
+	});
+
+	it("reads a mask bound through a factory and typed external keys, and reports keys it cannot read instead of keeping every field", () => {
+		const dir = writeFixtureRepository({
+			"schemas.ts": `import { z } from "@apifuse/provider-sdk/provider";
+
+declare function externalShape(): Record<string, z.ZodString>;
+declare function typedShape(): { image_url: z.ZodString };
+
+const Card = z.object({ name: z.string(), image_url: z.string() });
+const keys = ["name"] as const;
+const only = (mask: { name?: true; image_url?: true }) => Card.pick(mask);
+
+export const OutputSchema = z.object({
+  bound: only({ name: true }),
+  computed: Card.pick(Object.fromEntries(keys.map((key) => [key, true] as const))),
+  external: Card.extend(externalShape()),
+  typed: Card.extend(typedShape()),
+  tail: z.object({ image_url: z.string(), ...externalShape() }),
+});
+`,
+			"index.ts": `import { OutputSchema } from "./schemas";
+
+const card = { name: "a", image_url: "https://cdn.example.com/a.jpg" };
+
+export const op = {
+  output: OutputSchema,
+  handler: async () => ({ bound: card, computed: card, external: card, typed: card, tail: card }),
+  fixtures: {
+    request: {},
+    response: { bound: card, computed: card, external: card, typed: card, tail: card },
+  },
+};
+`,
+		});
+		const result = migrateUrlKindsRepository(dir, { typecheck: false });
+		const schemas = readFileSync(join(dir, "schemas.ts"), "utf8");
+
+		expect(schemas).toContain(
+			"const Card = z.object({ name: z.string(), image_url: z.string() });",
+		);
+		expect(result.rewrites).toEqual([]);
+		expect(
+			result.skipped.map(
+				(item) => `${item.line} ${item.paths.join("|")} ${item.reason} ${item.detail}`,
+			),
+		).toEqual([
+			"12 computed unsupported_chain .pick() takes a mask this run cannot read; the fields behind it are left alone, migrate them by hand.",
+			"13 external unsupported_chain .extend() adds keys this run cannot read; the fields behind it are left alone, migrate them by hand.",
+			"15 tail unsupported_chain a member whose keys this run cannot read may replace the fields declared before it; those are left alone, migrate them by hand.",
+		]);
+	});
+});
+
 describe("apifuse migrate-url-kinds command line", () => {
 	const run = (args: readonly string[], cwd: string) => {
 		const outcome = Bun.spawnSync(["bun", ...args], { cwd, stdout: "pipe", stderr: "pipe" });

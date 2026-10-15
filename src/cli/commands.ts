@@ -95,10 +95,7 @@ export const COMMAND_MANIFEST: Record<
 		summary:
 			"Declare output URL fields with image()/imageList()/itemPage() from fixture evidence, wrap the mapper assignments it can trace, and mark other URL fields TODO(url-kind).",
 		usage: "apifuse migrate-url-kinds [path] [--check] [--json] [--no-typecheck]",
-		examples: [
-			"apifuse migrate-url-kinds .",
-			"apifuse migrate-url-kinds . --check --json",
-		],
+		examples: ["apifuse migrate-url-kinds .", "apifuse migrate-url-kinds . --check --json"],
 		modulePath: "./apifuse-migrate-url-kinds",
 	},
 	"submit-check": {

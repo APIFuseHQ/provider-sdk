@@ -431,7 +431,9 @@ not run). `--help` prints the usage and writes nothing.
   `.nullable()` is dropped and `.nullish()` becomes `.optional()` (the helpers
   admit `null`); `.optional()`, `.describe()`, `.describeKey()`, `.meta()` and
   a `describeKey(field, key)` wrapper are kept; `.url()`, `.min()`, `.trim()`
-  are implied.
+  are implied. A field counts as reached only where the output keeps it: not
+  one `.pick()` leaves out or `.omit()` removes, nor one a later key,
+  spread, `.extend()` or `.merge()` redeclares.
 - The mapper assignments it can trace are wrapped in the constructor: object
   literals the handler returns (through local functions, `.map()`/`.flatMap()`,
   `push()` accumulators, spreads and conditionals) and object literals
@@ -450,6 +452,9 @@ not run). `--help` prints the usage and writes nothing.
   decide `upgradeHttp` first), a picture file under `url`
   (`kind_ambiguous`), a chain the helper cannot carry such as `.regex()`,
   `.transform()` or a list item's own `.describeKey()` (`unsupported_chain`),
+  an object whose keys it cannot read such as a `.pick()`/`.omit()` mask that
+  is not a literal or an `.extend()`/`.merge()`/spread of an open record type
+  (`unsupported_chain`, the fields behind it are not reached),
   a field declared through a shared schema constant (`shared_schema`), a list
   name declared as one string or the reverse (`shape_mismatch`, fix the name
   or the shape), a fixture value the helper refuses such as a `localhost` or

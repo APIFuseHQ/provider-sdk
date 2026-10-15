@@ -153,6 +153,9 @@ const SDK_PACKAGE = "@apifuse/provider-sdk";
 const TODO_MARKER = "TODO(url-kind)";
 // Upper bound on the nodes one walk visits, so a pathological call graph ends.
 const WALK_BUDGET = 100_000;
+const OBJECT_CONSTRUCTORS = new Set(["object", "strictObject", "looseObject", "interface"]);
+// Chain methods whose arguments add keys that replace the receiver's.
+const EXTENDING_METHODS = new Set(["extend", "safeExtend", "merge"]);
 
 // Single-string chain: kept, dropped (implied by the helper), or refused.
 const SINGLE_KEEP = new Set(["optional", "describe", "describeKey", "meta"]);
@@ -314,6 +317,23 @@ type ValueWalk = {
 	readonly onSite: (site: FieldNode, fields: ReadonlySet<FieldNode>) => void;
 	readonly seen: Set<string>;
 };
+
+/** What a schema walk reports. */
+type SchemaSink = {
+	/** A declaration the output reaches, at `path`. */
+	readonly field: (field: FieldNode, path: string) => void;
+	/** A projection whose keys the run cannot read: nothing behind it is reached. */
+	readonly opaque?: (node: TS.Node, path: string, detail: string) => void;
+};
+
+/**
+ * The own keys of an object schema the chain around it keeps: those in `only`
+ * (a `.pick()`) and not in `except` (an `.omit()`, or a key a later
+ * `.extend()`/`.merge()`/property redeclares).
+ */
+type Keep = { readonly only?: ReadonlySet<string>; readonly except: ReadonlySet<string> };
+
+const KEEP_ALL: Keep = { except: new Set() };
 
 /** A field the run declares with a helper (rewritten now, or already a helper). */
 type Target = { readonly helper: HelperKind; readonly label: string | undefined };
@@ -622,6 +642,27 @@ function publishable(helper: HelperKind, value: string): boolean {
 	return schema.safeParse(value).success;
 }
 
+function keeps(keep: Keep, name: string): boolean {
+	return (keep.only === undefined || keep.only.has(name)) && !keep.except.has(name);
+}
+
+/** `inner` inside `outer`: a key survives only where both keep it. */
+function narrowKeep(outer: Keep, inner: Keep): Keep {
+	if (inner === KEEP_ALL) return outer;
+	if (outer === KEEP_ALL) return inner;
+	const only =
+		outer.only && inner.only
+			? new Set([...outer.only].filter((key) => inner.only?.has(key)))
+			: (outer.only ?? inner.only);
+	return { only, except: new Set([...outer.except, ...inner.except]) };
+}
+
+function keepKey(keep: Keep): string {
+	if (keep.only === undefined && keep.except.size === 0) return "";
+	const only = keep.only ? [...keep.only].sort().join(",") : "*";
+	return `${only}-${[...keep.except].sort().join(",")}`;
+}
+
 function propertyNameText(
 	ts: typeof import("typescript"),
 	name: TS.PropertyName,
@@ -637,6 +678,8 @@ class Analysis {
 	readonly operations: Operation[] = [];
 	private readonly reaches = new Map<FieldNode, Reach[]>();
 	private readonly operationTables = new Map<Operation, Map<string, Set<FieldNode>>>();
+	/** Projections in an output whose keys the run cannot read, with the paths reaching them. */
+	private readonly unreadable = new Map<TS.Node, { detail: string; paths: Set<string> }>();
 	private envCounter = 0;
 	private readonly emptyEnv: Env = { id: 0, bindings: new Map() };
 
@@ -652,14 +695,21 @@ class Analysis {
 			if (!output) continue;
 			const table = new Map<string, Set<FieldNode>>();
 			this.operationTables.set(operation, table);
-			this.walkSchema(output, "", this.emptyEnv, new Set(), (field, path) => {
-				const reaches = this.reaches.get(field) ?? [];
-				if (!reaches.some((reach) => reach.operation === operation && reach.path === path))
-					reaches.push({ operation, path });
-				this.reaches.set(field, reaches);
-				const fields = table.get(path) ?? new Set<FieldNode>();
-				fields.add(field);
-				table.set(path, fields);
+			this.walkSchema(output, "", this.emptyEnv, new Set(), {
+				field: (field, path) => {
+					const reaches = this.reaches.get(field) ?? [];
+					if (!reaches.some((reach) => reach.operation === operation && reach.path === path))
+						reaches.push({ operation, path });
+					this.reaches.set(field, reaches);
+					const fields = table.get(path) ?? new Set<FieldNode>();
+					fields.add(field);
+					table.set(path, fields);
+				},
+				opaque: (node, path, detail) => {
+					const entry = this.unreadable.get(node) ?? { detail, paths: new Set<string>() };
+					entry.paths.add(path);
+					this.unreadable.set(node, entry);
+				},
 			});
 		}
 	}
@@ -899,30 +949,31 @@ class Analysis {
 		path: string,
 		env: Env,
 		seen: Set<string>,
-		sink: (field: FieldNode, path: string) => void,
+		sink: SchemaSink,
+		keep: Keep = KEEP_ALL,
 	): void {
 		const ts = this.ts;
 		const target = this.unwrap(node);
-		const key = this.nodeKey(target, path, env);
+		const key = this.nodeKey(target, path, env, keepKey(keep));
 		if (seen.has(key) || seen.size > WALK_BUDGET || path.split(/\.|\[\]/).length > 40) return;
 		seen.add(key);
 
 		if (ts.isObjectLiteralExpression(target)) {
-			this.walkShape(target, path, env, seen, sink);
+			this.walkShape(target, path, env, seen, sink, keep);
 			return;
 		}
 		if (ts.isIdentifier(target)) {
 			const value = this.valueOf(target, env);
-			if (value) this.walkSchema(value.expression, path, value.env, seen, sink);
+			if (value) this.walkSchema(value.expression, path, value.env, seen, sink, keep);
 			return;
 		}
 		if (ts.isPropertyAccessExpression(target)) {
 			if (target.name.text === "shape") {
-				this.walkSchema(target.expression, path, env, seen, sink);
+				this.walkSchema(target.expression, path, env, seen, sink, keep);
 				return;
 			}
 			const value = this.valueOf(target.name, env);
-			if (value) this.walkSchema(value.expression, path, value.env, seen, sink);
+			if (value) this.walkSchema(value.expression, path, value.env, seen, sink, keep);
 			return;
 		}
 		if (!ts.isCallExpression(target)) return;
@@ -937,7 +988,7 @@ class Analysis {
 					case "strictObject":
 					case "looseObject":
 					case "interface":
-						if (args[0]) this.walkSchema(args[0], path, env, seen, sink);
+						if (args[0]) this.walkSchema(args[0], path, env, seen, sink, keep);
 						return;
 					case "array":
 						if (args[0]) this.walkSchema(args[0], `${path}[]`, env, seen, sink);
@@ -956,7 +1007,7 @@ class Analysis {
 							const options = this.unwrap(argument);
 							if (ts.isArrayLiteralExpression(options))
 								for (const option of options.elements)
-									this.walkSchema(option, path, env, seen, sink);
+									this.walkSchema(option, path, env, seen, sink, keep);
 						}
 						return;
 					case "intersection":
@@ -964,7 +1015,7 @@ class Analysis {
 					case "nullable":
 					case "nullish":
 					case "readonly":
-						for (const argument of args) this.walkSchema(argument, path, env, seen, sink);
+						for (const argument of args) this.walkSchema(argument, path, env, seen, sink, keep);
 						return;
 					case "record":
 					case "partialRecord": {
@@ -976,7 +1027,7 @@ class Analysis {
 						const fn = args[0] ? this.functionOf(args[0]) : undefined;
 						if (fn)
 							for (const returned of this.returnsOf(fn))
-								this.walkSchema(returned, path, env, seen, sink);
+								this.walkSchema(returned, path, env, seen, sink, keep);
 						return;
 					}
 					default:
@@ -987,20 +1038,31 @@ class Analysis {
 				this.walkSchema(receiver, `${path}[]`, env, seen, sink);
 				return;
 			}
-			this.walkSchema(receiver, path, env, seen, sink);
-			if (["extend", "safeExtend", "merge", "and", "or"].includes(method))
-				for (const argument of args) this.walkSchema(argument, path, env, seen, sink);
+			// Only the receiver's keys the method keeps are in the output: not
+			// what `.pick()` leaves out or `.omit()` removes, nor what
+			// `.extend()`/`.merge()` redeclares.
+			const own = this.receiverKeep(method, args, env);
+			if (own) this.walkSchema(receiver, path, env, seen, sink, narrowKeep(keep, own));
+			else
+				sink.opaque?.(
+					target,
+					path,
+					`.${method}() ${EXTENDING_METHODS.has(method) ? "adds keys" : "takes a mask"} this run cannot read; the fields behind it are left alone, migrate them by hand.`,
+				);
+			if (EXTENDING_METHODS.has(method) || method === "and" || method === "or")
+				for (const argument of args) this.walkSchema(argument, path, env, seen, sink, keep);
 			return;
 		}
 		if (ts.isIdentifier(callee) && HELPER_FUNCTIONS.has(callee.text)) return;
 		const fn = this.functionOf(callee);
 		if (fn) {
 			const inner = this.bind(fn, args, env, target);
-			for (const returned of this.returnsOf(fn)) this.walkSchema(returned, path, inner, seen, sink);
+			for (const returned of this.returnsOf(fn))
+				this.walkSchema(returned, path, inner, seen, sink, keep);
 			return;
 		}
 		// A schema wrapper outside the project (field(), untrustedContent(), ...).
-		for (const argument of args) this.walkSchema(argument, path, env, seen, sink);
+		for (const argument of args) this.walkSchema(argument, path, env, seen, sink, keep);
 	}
 
 	private walkShape(
@@ -1008,27 +1070,193 @@ class Analysis {
 		path: string,
 		env: Env,
 		seen: Set<string>,
-		sink: (field: FieldNode, path: string) => void,
+		sink: SchemaSink,
+		keep: Keep,
 	): void {
 		const ts = this.ts;
-		for (const element of object.properties) {
-			if (ts.isSpreadAssignment(element)) {
-				this.walkSchema(element.expression, path, env, seen, sink);
-				continue;
-			}
-			if (ts.isPropertyAssignment(element)) {
-				const name = propertyNameText(ts, element.name);
-				if (name === undefined) continue;
-				const childPath = appendPropertyPath(path, name);
-				if (this.isRewritableFile(element.getSourceFile())) sink(element, childPath);
-				this.walkSchema(element.initializer, childPath, env, seen, sink);
-				continue;
-			}
-			if (ts.isShorthandPropertyAssignment(element)) {
-				const childPath = appendPropertyPath(path, element.name.text);
-				this.walkSchema(element.name, childPath, env, seen, sink);
-			}
+		const elements = object.properties;
+		// A key declared later in the literal, directly or by a spread, replaces
+		// an earlier one: each member is walked without the keys after it.
+		// `undefined`: a later member whose keys the run cannot read.
+		const after: (ReadonlySet<string> | undefined)[] = [];
+		let later: Set<string> | undefined = new Set();
+		for (let index = elements.length - 1; index >= 0; index -= 1) {
+			after[index] = later && new Set(later);
+			const element = elements[index];
+			// The first member's keys replace nothing.
+			if (!later || !element || index === 0) continue;
+			const keys = ts.isSpreadAssignment(element)
+				? (this.objectKeys(element.expression, env) ?? this.typeKeys(element.expression, false))
+				: this.memberName(element);
+			if (keys === undefined) {
+				sink.opaque?.(
+					element,
+					path,
+					"a member whose keys this run cannot read may replace the fields declared before it; those are left alone, migrate them by hand.",
+				);
+				later = undefined;
+			} else for (const name of typeof keys === "string" ? [keys] : keys) later.add(name);
 		}
+		elements.forEach((element, index) => {
+			const shadowed = after[index];
+			if (!shadowed) return;
+			const local = narrowKeep(keep, { except: shadowed });
+			if (ts.isSpreadAssignment(element)) {
+				this.walkSchema(element.expression, path, env, seen, sink, local);
+				return;
+			}
+			const name = this.memberName(element);
+			if (name === undefined || !keeps(local, name)) return;
+			const childPath = appendPropertyPath(path, name);
+			if (ts.isPropertyAssignment(element)) {
+				if (this.isRewritableFile(element.getSourceFile())) sink.field(element, childPath);
+				this.walkSchema(element.initializer, childPath, env, seen, sink);
+				return;
+			}
+			if (ts.isShorthandPropertyAssignment(element))
+				this.walkSchema(element.name, childPath, env, seen, sink);
+		});
+	}
+
+	private memberName(element: TS.ObjectLiteralElementLike): string | undefined {
+		const ts = this.ts;
+		if (ts.isShorthandPropertyAssignment(element)) return element.name.text;
+		if (ts.isSpreadAssignment(element)) return undefined;
+		return propertyNameText(ts, element.name);
+	}
+
+	/**
+	 * Which of its receiver's own keys a chain method keeps; undefined when the
+	 * run cannot read them (a mask or an added schema out of reach).
+	 */
+	private receiverKeep(method: string, args: readonly TS.Expression[], env: Env): Keep | undefined {
+		if (method === "pick" || method === "omit") {
+			const mask = args[0] ? this.maskKeys(args[0], env) : undefined;
+			if (!mask) return undefined;
+			return method === "pick" ? { only: mask, except: new Set() } : { except: mask };
+		}
+		if (EXTENDING_METHODS.has(method)) {
+			const except = new Set<string>();
+			for (const argument of args) {
+				// `.merge()` takes a schema, `.extend()` a shape.
+				const keys = this.objectKeys(argument, env) ?? this.typeKeys(argument, method === "merge");
+				if (!keys) return undefined;
+				for (const name of keys) except.add(name);
+			}
+			return { except };
+		}
+		// An enum of the receiver's key names: none of its fields.
+		if (method === "keyof") return { only: new Set(), except: new Set() };
+		return KEEP_ALL;
+	}
+
+	/**
+	 * The keys the type checker gives a shape, or a schema's `shape`, the walk
+	 * cannot reach (an SDK or external schema); undefined for an open or
+	 * untyped one.
+	 */
+	private typeKeys(node: TS.Expression, schema: boolean): Set<string> | undefined {
+		const ts = this.ts;
+		let type = this.checker.getTypeAtLocation(node);
+		if (schema) {
+			const shape = type.getProperty("shape");
+			if (!shape) return undefined;
+			type = this.checker.getTypeOfSymbolAtLocation(shape, node);
+		}
+		if (
+			type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) ||
+			type.isUnion() ||
+			this.checker.getIndexInfosOfType(type).length > 0
+		)
+			return undefined;
+		return new Set(type.getProperties().map((property) => property.name));
+	}
+
+	/** The keys a `.pick()`/`.omit()` mask selects; undefined unless it is a literal the run reads. */
+	private maskKeys(node: TS.Expression, env: Env): Set<string> | undefined {
+		const ts = this.ts;
+		let expression = this.unwrap(node);
+		let scope = env;
+		// A mask passed through a factory's parameter or a constant.
+		for (let depth = 0; ts.isIdentifier(expression) && depth < 16; depth += 1) {
+			const value = this.valueOf(expression, scope);
+			if (!value) return undefined;
+			expression = this.unwrap(value.expression);
+			scope = value.env;
+		}
+		if (!ts.isObjectLiteralExpression(expression)) return undefined;
+		const keys = new Set<string>();
+		for (const element of expression.properties) {
+			if (!ts.isPropertyAssignment(element)) return undefined;
+			const name = propertyNameText(ts, element.name);
+			const selected = this.evaluate(element.initializer, 0, new Set());
+			if (name === undefined || typeof selected !== "boolean") return undefined;
+			if (selected) keys.add(name);
+		}
+		return keys;
+	}
+
+	/**
+	 * The own keys of the object schema or shape `node` stands for; undefined
+	 * when part of it is out of reach (an external schema, an unread mask).
+	 */
+	private objectKeys(node: TS.Expression, env: Env, depth = 0): Set<string> | undefined {
+		const ts = this.ts;
+		if (depth > 40) return undefined;
+		const target = this.unwrap(node);
+		if (ts.isObjectLiteralExpression(target)) {
+			const keys = new Set<string>();
+			for (const element of target.properties) {
+				const found = ts.isSpreadAssignment(element)
+					? this.objectKeys(element.expression, env, depth + 1)
+					: this.memberName(element);
+				if (found === undefined) return undefined;
+				for (const name of typeof found === "string" ? [found] : found) keys.add(name);
+			}
+			return keys;
+		}
+		if (ts.isPropertyAccessExpression(target) && target.name.text === "shape")
+			return this.objectKeys(target.expression, env, depth + 1);
+		if (ts.isIdentifier(target) || ts.isPropertyAccessExpression(target)) {
+			const value = this.valueOf(ts.isIdentifier(target) ? target : target.name, env);
+			return value ? this.objectKeys(value.expression, value.env, depth + 1) : undefined;
+		}
+		if (!ts.isCallExpression(target)) return undefined;
+		const callee = this.unwrap(target.expression);
+		const args = target.arguments;
+		if (ts.isPropertyAccessExpression(callee)) {
+			const method = callee.name.text;
+			const receiver = callee.expression;
+			if (this.isZod(receiver))
+				return OBJECT_CONSTRUCTORS.has(method) && args[0]
+					? this.objectKeys(args[0], env, depth + 1)
+					: undefined;
+			if (method === "array") return undefined;
+			const own = this.objectKeys(receiver, env, depth + 1);
+			const keep = this.receiverKeep(method, args, env);
+			if (!own || !keep) return undefined;
+			const keys = new Set([...own].filter((name) => keeps(keep, name)));
+			// Added keys: what an extend redeclares, and an intersection's other side.
+			if (EXTENDING_METHODS.has(method)) for (const name of keep.except) keys.add(name);
+			if (method === "and")
+				for (const argument of args) {
+					const other = this.objectKeys(argument, env, depth + 1);
+					if (!other) return undefined;
+					for (const name of other) keys.add(name);
+				}
+			return keys;
+		}
+		const fn = this.functionOf(callee);
+		const returns = fn ? this.returnsOf(fn) : [];
+		if (!fn || returns.length === 0) return undefined;
+		const inner = this.bind(fn, args, env, target);
+		const keys = new Set<string>();
+		for (const returned of returns) {
+			const found = this.objectKeys(returned, inner, depth + 1);
+			if (!found) return undefined;
+			for (const name of found) keys.add(name);
+		}
+		return keys;
 	}
 
 	// -------------------------------------------------------------------------
@@ -1521,6 +1749,16 @@ class Analysis {
 			return names.has(name);
 		};
 
+		for (const [node, { detail, paths }] of this.unreadable)
+			skipped.push({
+				file: this.display(node.getSourceFile().fileName),
+				line: this.line(node),
+				property: "",
+				paths: [...paths].sort(),
+				reason: "unsupported_chain",
+				detail,
+			});
+
 		const fields = [...this.reaches.entries()].sort(
 			([left], [right]) =>
 				left.getSourceFile().fileName.localeCompare(right.getSourceFile().fileName) ||
@@ -1782,10 +2020,12 @@ class Analysis {
 			}
 			this.walkParseAnchors((schema, argument) => {
 				const table = new Map<string, Set<FieldNode>>();
-				this.walkSchema(schema, "", this.emptyEnv, new Set(), (field, path) => {
-					const found = table.get(path) ?? new Set<FieldNode>();
-					found.add(field);
-					table.set(path, found);
+				this.walkSchema(schema, "", this.emptyEnv, new Set(), {
+					field: (field, path) => {
+						const found = table.get(path) ?? new Set<FieldNode>();
+						found.add(field);
+						table.set(path, found);
+					},
 				});
 				if (![...table.values()].some((found) => isTarget(found))) return;
 				this.walkValue(argument, "", this.emptyEnv, {
