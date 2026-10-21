@@ -1817,6 +1817,35 @@ describe("provider HTTP server", () => {
 		});
 	});
 
+	it("ignores a capture directive on an auth route (capture is operation-only)", async () => {
+		const request = (engine?: unknown) =>
+			app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req_auth_capture",
+					flowId: "flow_1",
+					providerId: "test-provider",
+					context: {},
+					...(engine === undefined ? {} : { engine }),
+				}),
+			});
+		const baseline = await request();
+		const withDirective = await request({
+			capture: {
+				version: 1,
+				nonce: "0123456789abcdef0123456789abcdef",
+				providerId: "test-provider",
+				operationId: "start",
+				requestId: "req_auth_capture",
+				expiresAt: new Date(Date.now() + 30_000).toISOString(),
+			},
+		});
+
+		expect(withDirective.status).toBe(baseline.status);
+		expect(await withDirective.text()).toBe(await baseline.text());
+	});
+
 	it("logs auth request correlation identifiers", async () => {
 		const events: ProviderServerLogEvent[] = [];
 		const appWithLogger = createServerApp(createTestProvider(), {

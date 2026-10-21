@@ -6,16 +6,19 @@
  * directive only, attaches MASKED evidence of it to the operation response —
  * whether the handler returned or failed closed. This module is the pure,
  * boundary-owned masking and shaping core of that evidence; the directive
- * verification, upstream buffering, and response attachment wiring land in a
- * follow-up PR.
+ * verification and response attachment live in `server/upstream-capture.ts`,
+ * the buffering in `runtime/upstream-capture-recorder.ts`.
  *
  * Masking is defense-in-depth, runs entirely inside the provider process, and
  * redacts this set:
  *
+ *   0. Declared `observability.sensitive.upstream` paths, in the raw upstream
+ *      body coordinates (catchtable my-profile: `data.displayName`). Applied
+ *      first. The server emits evidence only for an operation that declares them.
  *   1. Declared `observability.sensitive.output` paths. They are OUTPUT
  *      coordinates: they match only a body shaped like the operation's output,
  *      not a vendor upstream body (catchtable my-profile declares `email` while
- *      the upstream carries `data.email`).
+ *      the upstream carries `data.email`); the upstream paths above cover that.
  *   2. Reserved secret-like keys (`isReservedSensitiveKey`: phone, otp,
  *      payment_url, token, ...) and credential-named keys
  *      (`isSensitiveFixtureKey`) at any depth, as whole values.
@@ -37,7 +40,8 @@
  *     `PHPSESSID`, `authKey`, `loginKey`) unless the value is a registered
  *     request secret;
  *   - opaque tokens under 24 characters in prose (outside an auth-scheme echo);
- *   - personal data under undeclared or upstream-shaped keys (see 1);
+ *   - personal data under keys that neither the upstream nor the output paths
+ *     declare (see 0 and 1);
  *   - an unregistered secret used as an object key: keys get only registered-value
  *     redaction, because the entropy heuristic would rewrite long field names;
  *   - structure inside non-JSON bodies (HTML, form-encoded, XML): such a body is
@@ -80,6 +84,12 @@ export interface UpstreamCaptureSource {
 
 export interface CaptureEvidenceOptions {
 	/**
+	 * Operation-declared upstream sensitive paths (`observability.sensitive.upstream`),
+	 * in the raw upstream body coordinates, with the same grammar as the output paths.
+	 * Applied before the output paths and the heuristics.
+	 */
+	readonly sensitiveUpstreamPaths?: readonly string[];
+	/**
 	 * Operation-declared output sensitive paths (`observability.sensitive.output`),
 	 * dot-separated with `*` matching any array element or object key — e.g.
 	 * `items.*.paymentUrl`. Each matching value is redacted before the other masks
@@ -117,7 +127,10 @@ export function buildCaptureEvidence(
 	options: CaptureEvidenceOptions,
 ): CaptureEvidence {
 	const redactKnown = (text: string) => redactDiagnosticText(text, options.redactKnownSecrets);
-	const declaredMasked = maskSensitivePaths(source.body, options.sensitiveOutputPaths ?? []);
+	const declaredMasked = maskSensitivePaths(
+		maskSensitivePaths(source.body, options.sensitiveUpstreamPaths ?? []),
+		options.sensitiveOutputPaths ?? [],
+	);
 	const evidence: CaptureEvidence = {
 		version: CAPTURE_EVIDENCE_VERSION,
 		upstreamStatus: source.status,

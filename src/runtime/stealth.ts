@@ -69,6 +69,7 @@ import {
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
 import { redirectHopHeaders } from "./redirect-hop-headers.js";
+import { activeUpstreamCaptureRecorder } from "./upstream-capture-recorder.js";
 import {
 	evaluateRedirectHop,
 	invalidRedirectPolicy,
@@ -858,6 +859,7 @@ async function normalizeResponseWithSignal(
 	requestUrl?: string,
 	maxBodyBytes?: number,
 	signal?: AbortSignal,
+	upstreamExchange: "upstream" | "sdk-diagnostic" = "upstream",
 ): Promise<StealthResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
 	const cookies = new StealthCookieJar(
@@ -869,6 +871,17 @@ async function normalizeResponseWithSignal(
 			? await readResponseArrayBuffer(response, signal)
 			: await readResponseBodyWithLimit(response, maxBodyBytes, signal);
 	const body = new TextDecoder().decode(bodyBytes);
+	// Inert unless the server accepted a capture directive for this request (ADR-0013).
+	// The SDK's own proxy diagnostic probe is not the handler's upstream exchange.
+	if (upstreamExchange === "upstream") {
+		activeUpstreamCaptureRecorder()?.record({
+			url: response.url || requestUrl || "",
+			status: response.status,
+			contentType: response.headers.get("content-type") ?? undefined,
+			byteLength: bodyBytes.byteLength,
+			bodyText: body,
+		});
+	}
 
 	return {
 		status: response.status,
@@ -2944,6 +2957,7 @@ function createSessionFetcher(
 							undefined,
 							undefined,
 							clientOptions.signal,
+							"sdk-diagnostic",
 						);
 						return classifyProxyAuthDiagnosticMessage(normalized.body);
 					} catch (error) {

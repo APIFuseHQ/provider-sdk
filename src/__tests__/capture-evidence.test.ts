@@ -127,12 +127,13 @@ describe("buildCaptureEvidence", () => {
 		});
 	});
 
-	it("records the known miss: output paths do not match an upstream-shaped body", () => {
+	it("records the known miss: output paths alone do not match an upstream-shaped body", () => {
 		// catchtable my-profile: declared output paths are output coordinates
 		// (`name`, `display_name`, `phone`, `email`); the upstream body nests the
-		// same data under `data` with vendor key names. Only `phone` is caught, by
-		// the reserved-key set. Upstream-coordinate masking is an open item on
-		// apifuse#2602 before the wiring PR; change this test when it lands.
+		// same data under `data` with vendor key names. Without upstream paths only
+		// `phone` is caught, by the reserved-key set. The server never emits this:
+		// an operation without `observability.sensitive.upstream` answers a capture
+		// directive with `upstream_sensitive_paths_undeclared` (serve-upstream-capture tests).
 		const body = evidenceBody(
 			{
 				data: {
@@ -151,6 +152,47 @@ describe("buildCaptureEvidence", () => {
 				phone: REDACTED_FIXTURE_VALUE,
 				email: "tester@example.com",
 			},
+		});
+	});
+
+	it("masks a field the transform renames through the declared upstream path", () => {
+		// Output `display_name` comes from upstream `data.displayName`: the output
+		// path cannot see it, the upstream path does.
+		const body = evidenceBody(
+			{
+				data: {
+					name: "Kim Tester",
+					displayName: "tester-kim",
+					phone: "010-0000-0000",
+					email: "tester@example.com",
+					grade: "gold",
+				},
+			},
+			{
+				sensitiveOutputPaths: ["name", "display_name", "phone", "email"],
+				sensitiveUpstreamPaths: ["data.name", "data.displayName", "data.email", "data.phone"],
+			},
+		);
+		expect(body).toEqual({
+			data: {
+				name: REDACTED_FIXTURE_VALUE,
+				displayName: REDACTED_FIXTURE_VALUE,
+				phone: REDACTED_FIXTURE_VALUE,
+				email: REDACTED_FIXTURE_VALUE,
+				grade: "gold",
+			},
+		});
+	});
+
+	it("applies upstream paths before output paths and the heuristics", () => {
+		const body = evidenceBody(
+			{ members: [{ nick: "a" }, { nick: "b" }], display_name: "x", ref: "short" },
+			{ sensitiveUpstreamPaths: ["members.*.nick"], sensitiveOutputPaths: ["display_name"] },
+		);
+		expect(body).toEqual({
+			members: [{ nick: REDACTED_FIXTURE_VALUE }, { nick: REDACTED_FIXTURE_VALUE }],
+			display_name: REDACTED_FIXTURE_VALUE,
+			ref: "short",
 		});
 	});
 

@@ -1,0 +1,12 @@
+---
+"@apifuse/provider-sdk": minor
+---
+
+Wire health-monitor upstream capture (ADR-0013, apifuse change `add-health-monitor-upstream-capture`).
+
+- Operations can declare `observability.sensitive.upstream`: dot paths with `*` wildcards in the raw upstream response body, validated by `defineProvider()` like `input` and `output`. `buildCaptureEvidence` applies them first, then the output paths, then its heuristics, so a field the transform renames (output `display_name` from upstream `data.displayName`) is masked.
+- The operation request envelope accepts an engine-owned `engine.capture` directive, built only by the Gateway for a health-monitor capture request: `{ version: 1, nonce, providerId, operationId, requestId, expiresAt }`. The server removes `engine` before execution, so handlers, `ctx`, `ctx.env`, `ctx.request`, `input`, and operation executors never see it. It is accepted only when the version, provider, route operation, and `requestId` match, the nonce is 32 lowercase hex characters not accepted before by the process, and `now < expiresAt <= now + 125 s`. Any other directive leaves the response byte for byte unchanged and logs `provider_capture_directive` with the reason only. Streaming transports, auth routes, and stateful-forwarded executions never capture.
+- For an accepted directive the native `ctx.http` and `ctx.stealth` response readers record the last exchange (URL path, status, content type, body text; no headers), and the JSON operation response gets a top-level `engine: { capture }` on the success and the error path: masked `evidence`, or a skip reason (`upstream_sensitive_paths_undeclared`, `no_upstream_exchange`, `upstream_body_too_large`, `evidence_too_large`). The error envelope is unchanged.
+- `@apifuse/provider-sdk/server` exports `CAPTURE_DIRECTIVE_VERSION`, `CAPTURE_DIRECTIVE_MAX_TTL_MS`, `CAPTURE_DIRECTIVE_CLOCK_SKEW_MS`, `CAPTURE_UPSTREAM_BODY_MAX_BYTES`, `CAPTURE_EVIDENCE_MAX_BYTES`, `CAPTURE_SKIP_REASONS`, `CAPTURE_DIRECTIVE_INACTIVE_REASONS`, and the types `CaptureDirective`, `CaptureEvidence`, `CaptureSkipReason`, `CaptureDirectiveInactiveReason`, `OperationCaptureOutcome`, `OperationEngineResponse`, `ExecutableOperationRequest`. `ProviderServerOperationExecutorInput.request` is typed without `engine`.
+
+Without a directive nothing changes. An SDK older than this release rejects `observability.sensitive.upstream` at `defineProvider()`, so a provider declares it only after its SDK pin carries this release; the Gateway can ship first because older SDKs strip the unknown `engine` key.

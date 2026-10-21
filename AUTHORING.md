@@ -333,6 +333,31 @@ unless the schema at that path declares them one way or the other. Declare every
 Apply either helper to the leaf, before `.optional()`/`.nullable()`/`.default()`;
 `publicField()` over a wrapper that hides a `sensitive()` leaf throws at definition time.
 
+#### Sensitive paths for captured payloads
+
+`observability.sensitive` adds dot paths (`*` matches any array element or object
+key) for values to redact where the platform captures payloads: `input` and
+`output` in the operation's own coordinates, and `upstream` in the raw upstream
+response body the handler fetched.
+
+```ts
+observability: {
+  sensitive: {
+    output: ["name", "display_name", "email", "phone"],
+    upstream: ["data.name", "data.displayName", "data.email", "data.phone"],
+  },
+},
+```
+
+`upstream` is read only by the health monitor's operator-initiated upstream
+capture (ADR-0013), which records the last `ctx.http` or `ctx.stealth` body of a
+probe and masks it inside the provider process before it leaves. Output paths
+cannot see a field the handler renames or nests (output `display_name` from
+upstream `data.displayName`), so declare its upstream coordinates. Capture emits
+evidence only for an operation that declares `upstream`; declare `[]` once you
+have checked that the raw body carries no personal data. Without the declaration
+a capture request gets a skip reason and no body. Customer traffic never captures.
+
 ### Images and item links
 
 Public output names a picture or a page by declaring it, not by its field name.

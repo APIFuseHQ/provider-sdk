@@ -11,6 +11,7 @@ import {
 	createServerApp,
 	type ProviderServerLogEvent,
 	type ProviderServerOperationExecutorInput,
+	ProviderServerStatefulForwardEnvelopeSchema,
 } from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
 
@@ -293,6 +294,55 @@ describe("signed stateful operation forwarding", () => {
 			input: { value: "forwarded" },
 		});
 		expect(received?.ctx.request).toBeDefined();
+	});
+
+	it("drops a capture directive from a forwarded operation request (ADR-0013)", async () => {
+		// The forwarder never carries `engine`: the emitted envelope schema refuses it,
+		// and a received one strips it, so an owner pod never runs with capture active.
+		const directive = {
+			version: 1,
+			nonce: "0123456789abcdef0123456789abcdef",
+			providerId: "stateful-test-provider",
+			operationId: "echo",
+			requestId: "req-stateful-forward",
+			expiresAt: new Date(Date.now() + 30_000).toISOString(),
+		};
+		const operationRequest = {
+			requestId: "req-stateful-forward",
+			input: { value: "forwarded" },
+			engine: { capture: directive },
+		};
+		expect(
+			ProviderServerStatefulForwardEnvelopeSchema.safeParse(
+				forwardingEnvelope({ operationRequest }),
+			).success,
+		).toBe(false);
+
+		const provider = createTestProvider({ defaultExecutions: 0 });
+		let received: ProviderServerOperationExecutorInput | undefined;
+		const app = createServerApp(provider, {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async (input) => {
+				received = input;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp, operationRequest });
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ data: { accepted: true } });
+		expect(received?.request).toEqual({
+			requestId: "req-stateful-forward",
+			input: { value: "forwarded" },
+		});
 	});
 
 	it("logs proxy telemetry recorded by a forwarded operation", async () => {

@@ -236,6 +236,16 @@ import {
 	createDiagnosticEnvObserver,
 } from "./sensitive-values.js";
 import { resolveServerTraceContextOptions } from "./trace-output.js";
+import { runWithUpstreamCaptureRecorder } from "../runtime/upstream-capture-recorder.js";
+import {
+	type CaptureDirectiveInactiveReason,
+	type CaptureSkipReason,
+	evaluateCaptureDirective,
+	isJsonObject,
+	type OperationCaptureOutcome,
+	type OperationCaptureSession,
+	openOperationCaptureSession,
+} from "./upstream-capture.js";
 import {
 	type AuthFlowRequest,
 	AuthFlowRequestSchema,
@@ -315,9 +325,13 @@ export const ProviderServerStatefulForwardEnvelopeSchema = z
 			.refine((value) => Number.isFinite(Date.parse(value)))
 			.optional(),
 		idempotencyKey: z.string().min(1).optional(),
-		operationRequest: OperationRequestSchema.extend({
-			connection: OperationConnectionSchema.strict().optional(),
-		}).strict(),
+		// `engine` is Gateway-to-pod state: the forwarder never carries it, so an
+		// owner pod never sees a capture directive (ADR-0013).
+		operationRequest: OperationRequestSchema.omit({ engine: true })
+			.extend({
+				connection: OperationConnectionSchema.strict().optional(),
+			})
+			.strict(),
 	})
 	.strict();
 
@@ -366,10 +380,14 @@ export type ProviderServerOperationExecutorInput<
 	readonly provider: ProviderDefinition<TContext>;
 	readonly operationId: string;
 	readonly ctx: TContext;
-	readonly request: OperationRequest & { readonly deadlineAt?: string };
+	/** The envelope without its engine-owned `engine` field, which the server consumes. */
+	readonly request: ExecutableOperationRequest & { readonly deadlineAt?: string };
 	readonly signal?: AbortSignal;
 	readonly internalStatefulForward?: ProviderServerStatefulForwardEnvelope;
 };
+
+/** An operation request as execution sees it: the engine-owned `engine` field removed. */
+export type ExecutableOperationRequest = Omit<OperationRequest, "engine">;
 
 export type ProviderServerOperationExecutor<
 	TContext extends Partial<ProviderContext> = ProviderContext,
@@ -869,7 +887,7 @@ type RequestScopeContext = {
 
 function createProviderContext(
 	provider: ProviderDefinition,
-	request: OperationRequest,
+	request: ExecutableOperationRequest,
 	operationId: string,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
@@ -1480,6 +1498,20 @@ export type ProviderServerLogEvent =
 			 * `engine_env_ignored`. Absent when the selection was unambiguous.
 			 */
 			warnings?: readonly string[];
+	  }
+	| {
+			/**
+			 * Operator-only line for a request that carried `engine.capture`
+			 * (ADR-0013): why capture stayed inactive, or the outcome of an accepted
+			 * directive. Never carries a directive field, a nonce, or evidence.
+			 */
+			level: "info";
+			event: "provider_capture_directive";
+			providerId: string;
+			operationId: string;
+			requestId: string;
+			result: "inactive" | "captured" | "skipped";
+			reason?: CaptureDirectiveInactiveReason | CaptureSkipReason;
 	  }
 	| ProviderStateBackendLogEvent
 	| SelfTestCancellationLogEvent;
@@ -2893,6 +2925,156 @@ async function finalizeRequestResponse(
 	}
 }
 
+/** A request whose capture directive was accepted (ADR-0013). */
+type ActiveOperationCapture = {
+	readonly session: OperationCaptureSession;
+	/**
+	 * Built and logged once, after the handler settled. `undefined` only when the
+	 * build threw: the response then carries no `engine` key.
+	 */
+	outcome(): OperationCaptureOutcome | undefined;
+	/** Logs a post-acceptance inactive reason once, when no outcome is attached. */
+	markInactive(reason: CaptureDirectiveInactiveReason): void;
+};
+
+/**
+ * Evaluates `engine.capture` for an operation request. Returns `undefined` (capture
+ * inactive, response unchanged) for an absent field and for every rejection, which
+ * is logged with its reason only. Never throws.
+ */
+function openCaptureForOperation(input: {
+	readonly provider: ProviderDefinition;
+	readonly operationId: string;
+	readonly requestId: string;
+	readonly directive: unknown;
+	readonly streaming: boolean;
+	readonly logger: ProviderServerLogger;
+	readonly redact: DiagnosticRedactor;
+}): ActiveOperationCapture | undefined {
+	if (input.directive === undefined) return undefined;
+	let logged = false;
+	const log = (
+		result: "inactive" | "captured" | "skipped",
+		reason?: CaptureDirectiveInactiveReason | CaptureSkipReason,
+	): void => {
+		if (logged) return;
+		logged = true;
+		try {
+			input.logger({
+				level: "info",
+				event: "provider_capture_directive",
+				providerId: input.provider.id,
+				operationId: redactDiagnosticText(input.operationId, input.redact),
+				requestId: redactDiagnosticText(input.requestId, input.redact),
+				result,
+				...(reason === undefined ? {} : { reason }),
+			});
+		} catch {
+			// Operator logging never changes the response.
+		}
+	};
+	try {
+		const operation = Object.hasOwn(input.provider.operations, input.operationId)
+			? input.provider.operations[input.operationId]
+			: undefined;
+		if (!operation) {
+			log("inactive", "unknown_operation");
+			return undefined;
+		}
+		if (input.streaming) {
+			log("inactive", "streaming_transport");
+			return undefined;
+		}
+		const decision = evaluateCaptureDirective({
+			directive: input.directive,
+			providerId: input.provider.id,
+			operationId: input.operationId,
+			requestId: input.requestId,
+			nowMs: Date.now(),
+		});
+		if (!decision.active) {
+			log("inactive", decision.reason);
+			return undefined;
+		}
+		const sensitive = operation.observability?.sensitive;
+		const session = openOperationCaptureSession({
+			sensitiveUpstreamPaths: sensitive?.upstream,
+			sensitiveOutputPaths: sensitive?.output,
+			redact: input.redact,
+		});
+		let settled = false;
+		let outcome: OperationCaptureOutcome | undefined;
+		return {
+			session,
+			outcome() {
+				if (settled) return outcome;
+				settled = true;
+				try {
+					outcome = session.outcome();
+					log(outcome.outcome, outcome.outcome === "skipped" ? outcome.reason : undefined);
+				} catch {
+					outcome = undefined;
+					log("inactive", "evidence_build_failed");
+				}
+				return outcome;
+			},
+			markInactive(reason) {
+				log("inactive", reason);
+			},
+		};
+	} catch {
+		log("inactive", "malformed");
+		return undefined;
+	}
+}
+
+/** Adds the top-level `engine` key to an SDK-shaped JSON envelope (`{ data, meta? }`, `{ error }`). */
+function withCaptureOutcome<T extends object>(
+	body: T,
+	capture: ActiveOperationCapture,
+): T | (T & { engine: { capture: OperationCaptureOutcome } }) {
+	const outcome = capture.outcome();
+	return outcome === undefined ? body : { ...body, engine: { capture: outcome } };
+}
+
+/**
+ * A raw `Response` result (an operation executor's, or a handler's whose output
+ * schema admits one) keeps its representation, except that a JSON-object body
+ * carries the SDK's `engine` key, replacing any `engine` provider code wrote:
+ * capture outcomes come from the SDK boundary only. Other bodies are returned
+ * unchanged and carry no outcome.
+ */
+async function rawResponseWithCaptureOutcome(
+	response: Response,
+	capture: ActiveOperationCapture,
+): Promise<Response> {
+	const mediaType = (response.headers.get("content-type") ?? "")
+		.split(";", 1)[0]
+		?.trim()
+		.toLowerCase();
+	let parsed: unknown;
+	if (mediaType === "application/json" || mediaType?.endsWith("+json")) {
+		try {
+			parsed = JSON.parse(await response.clone().text());
+		} catch {
+			parsed = undefined;
+		}
+	}
+	if (!isJsonObject(parsed)) {
+		capture.markInactive("non_json_response");
+		return response;
+	}
+	const outcome = capture.outcome();
+	if (outcome === undefined) return response;
+	const headers = new Headers(response.headers);
+	headers.delete("content-length");
+	return new Response(JSON.stringify({ ...parsed, engine: { capture: outcome } }), {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 function toJsonSuccessResponse(
 	result: unknown,
 	ctx?: ProviderContext,
@@ -3298,6 +3480,13 @@ function materializeAuthFlowTurn(
 	return localizeAuthTurn(turn, { catalogs, locale });
 }
 
+/** Capture is operation-only (ADR-0013): an auth turn drops `engine.capture` unread. */
+function withoutAuthCaptureDirective(request: AuthFlowRequest): AuthFlowRequest {
+	if (!request.engine || !Object.hasOwn(request.engine, "capture")) return request;
+	const { capture: _capture, ...engine } = request.engine;
+	return { ...request, engine };
+}
+
 function withAuthRequestHeaders(request: AuthFlowRequest, headers: Headers): AuthFlowRequest {
 	return {
 		...request,
@@ -3310,7 +3499,7 @@ function withAuthRequestHeaders(request: AuthFlowRequest, headers: Headers): Aut
 
 async function handleOperation(
 	provider: ProviderDefinition,
-	request: OperationRequest,
+	request: ExecutableOperationRequest,
 	operationId: string,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
@@ -3609,7 +3798,7 @@ function verifyStatefulForwardingRequest(input: {
 
 function operationRequestFromForwardingEnvelope(
 	envelope: ProviderServerStatefulForwardEnvelope,
-): OperationRequest & { readonly deadlineAt?: string } {
+): ExecutableOperationRequest & { readonly deadlineAt?: string } {
 	return {
 		...envelope.operationRequest,
 		...(envelope.deadlineAt !== undefined ? { deadlineAt: envelope.deadlineAt } : {}),
@@ -4056,6 +4245,7 @@ function createServerAppWithCapabilityModules(
 
 	app.post("/v1/:operation", async (c) => {
 		let rawBody: unknown;
+		let capture: ActiveOperationCapture | undefined;
 		const operation = c.req.param("operation");
 		const requestScope = createRequestScope({
 			provider,
@@ -4074,7 +4264,8 @@ function createServerAppWithCapabilityModules(
 				.json()
 				.catch(() => undefined);
 			requestScope.seedCredentials(rawBody, "operation");
-			const body = OperationRequestSchema.parse(rawBody);
+			// The engine-owned field is consumed here and never reaches execution.
+			const { engine, ...body } = OperationRequestSchema.parse(rawBody);
 			const requestHeaders = Object.fromEntries(c.req.raw.headers.entries());
 			body.headers = { ...requestHeaders, ...body.headers };
 			requestScope.enrich({
@@ -4089,17 +4280,36 @@ function createServerAppWithCapabilityModules(
 				? provider.operations[operation]?.transport?.kind !== "json"
 				: false;
 			if (streaming) requestScope.watchAbort(c.req.raw.signal);
+			capture = openCaptureForOperation({
+				provider,
+				operationId: operation,
+				requestId: body.requestId,
+				directive: engine?.capture,
+				streaming,
+				logger,
+				redact: requestScope.redact,
+			});
+			const recorder = capture?.session.recorder;
 			const execute = async () => {
-				const handled = await handleOperation(
-					provider,
-					body,
-					operation,
-					options,
-					state,
-					requestScope,
-					c.req.raw.signal,
-				);
-				const response = handled instanceof Response ? handled : c.json(handled);
+				const run = () =>
+					handleOperation(
+						provider,
+						body,
+						operation,
+						options,
+						state,
+						requestScope,
+						c.req.raw.signal,
+					);
+				const handled = recorder
+					? await runWithUpstreamCaptureRecorder(recorder, run)
+					: await run();
+				const response =
+					handled instanceof Response
+						? capture
+							? await rawResponseWithCaptureOutcome(handled, capture)
+							: handled
+						: c.json(capture ? withCaptureOutcome(handled, capture) : handled);
 				return streaming
 					? responseWithRequestScopeHeaders(
 							response,
@@ -4123,21 +4333,19 @@ function createServerAppWithCapabilityModules(
 			const requestId = extractRequestId(rawBody);
 			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
-			const response = c.json(
-				toErrorResponse(
-					error,
-					requestId,
-					observabilityDetails,
-					requestScope.redact,
-					errorEnvelopeLocalization({
-						catalogs: localeCatalogs,
-						requestHeaders: c.req.raw.headers,
-						rawBody,
-						...(declaredErrorCode ? { declaredErrorCode } : {}),
-					}),
-				),
-				status,
+			const envelope = toErrorResponse(
+				error,
+				requestId,
+				observabilityDetails,
+				requestScope.redact,
+				errorEnvelopeLocalization({
+					catalogs: localeCatalogs,
+					requestHeaders: c.req.raw.headers,
+					rawBody,
+					...(declaredErrorCode ? { declaredErrorCode } : {}),
+				}),
 			);
+			const response = c.json(capture ? withCaptureOutcome(envelope, capture) : envelope, status);
 			return finalizeRequestResponse(requestScope, response, {
 				kind: "failed",
 				status,
@@ -4188,7 +4396,7 @@ function createServerAppWithCapabilityModules(
 				});
 				requestScope.seedCredentials(rawBody, "auth");
 				const body = withAuthRequestHeaders(
-					AuthFlowRequestSchema.parse(rawBody),
+					withoutAuthCaptureDirective(AuthFlowRequestSchema.parse(rawBody)),
 					c.req.raw.headers,
 				);
 				requestScope.enrich({
