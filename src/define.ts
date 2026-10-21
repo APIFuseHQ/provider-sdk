@@ -1427,7 +1427,7 @@ function validateOperationObservability(
 			throw new ValidationError(
 				`Provider "${providerId}" operation "${operationName}" has invalid operations.${operationName}.observability: must be an object.`,
 				{
-					fix: `Use observability: { sensitive: { input: ["field"], output: ["items.*.secret"] } }.`,
+					fix: `Use observability: { sensitive: { input: ["field"], output: ["items.*.secret"], upstream: ["data.items.*.secret"] } }.`,
 				},
 			);
 		}
@@ -1445,10 +1445,10 @@ function validateOperationObservability(
 		}
 		rejectUnknownFields(
 			sensitive,
-			new Set(["input", "output"]),
+			new Set(["input", "output", "upstream"]),
 			`operations.${operationName}.observability.sensitive`,
 		);
-		for (const side of ["input", "output"] as const) {
+		for (const side of ["input", "output", "upstream"] as const) {
 			const paths = sensitive[side];
 			if (paths === undefined) continue;
 			if (!Array.isArray(paths)) {

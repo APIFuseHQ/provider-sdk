@@ -103,6 +103,7 @@ export {
 	createServerAppAsync,
 	ERROR_OBSERVABILITY_HEADER,
 	type ErrorObservabilityDetails,
+	type ExecutableOperationRequest,
 	type ProviderServerCloseOptions,
 	type ProviderServerHandle,
 	type ProviderErrorCauseFrame,
@@ -115,6 +116,21 @@ export {
 	type ServeOptions,
 	serve,
 } from "./serve.js";
+export {
+	CAPTURE_DIRECTIVE_CLOCK_SKEW_MS,
+	CAPTURE_DIRECTIVE_INACTIVE_REASONS,
+	CAPTURE_DIRECTIVE_MAX_TTL_MS,
+	CAPTURE_DIRECTIVE_VERSION,
+	CAPTURE_EVIDENCE_MAX_BYTES,
+	CAPTURE_SKIP_REASONS,
+	CAPTURE_UPSTREAM_BODY_MAX_BYTES,
+	type CaptureDirective,
+	type CaptureDirectiveInactiveReason,
+	type CaptureEvidence,
+	type CaptureSkipReason,
+	type OperationCaptureOutcome,
+	type OperationEngineResponse,
+} from "./upstream-capture.js";
 export type {
 	ProviderStateBackendLogEvent,
 	ProviderStoreBackendReport,

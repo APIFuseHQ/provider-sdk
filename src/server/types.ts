@@ -34,6 +34,20 @@ export const OperationRequestSchema = z.object({
 	tenantId: z.string().optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	trace: z.record(z.string(), z.string()).optional(),
+	/**
+	 * Engine-owned request state, set only by the Gateway. The server consumes it
+	 * before execution: it is never projected into `ctx`, `ctx.env`, `ctx.request`,
+	 * or `input`, and the stateful forwarder never carries it.
+	 *
+	 * `capture` is the health-monitor capture directive (ADR-0013, `CaptureDirective`).
+	 * Any shape parses here, and a malformed `engine` value parses as absent, so a
+	 * directive the server does not accept leaves the response exactly as without
+	 * the field. Unknown `engine` keys are stripped.
+	 */
+	engine: z
+		.object({ capture: z.unknown().optional() })
+		.optional()
+		.catch(() => undefined),
 });
 
 export const ErrorEnvelopeSchema = z.object({
@@ -104,6 +118,8 @@ export const AuthFlowRequestSchema = z.object({
 	engine: z
 		.object({
 			egressLease: z.string().min(1).max(16_384).optional(),
+			/** Capture is operation-only (ADR-0013): accepted here and ignored, never read. */
+			capture: z.unknown().optional(),
 		})
 		.strict()
 		.optional(),

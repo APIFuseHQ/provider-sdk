@@ -53,6 +53,7 @@ import {
 
 import { startHttpTelemetry } from "./http-telemetry-guard.js";
 import { scopedHttpTelemetry } from "./http-telemetry-binding.js";
+import { activeUpstreamCaptureRecorder } from "./upstream-capture-recorder.js";
 
 const DEFAULT_HTTP_BASE_URL = "http://localhost";
 
@@ -379,10 +380,18 @@ function toHttpTransportError(
 	});
 }
 
-async function toNativeHttpResponse(response: Response): Promise<HttpResponse> {
+async function toNativeHttpResponse(response: Response, requestUrl: string): Promise<HttpResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
 	const bodyBytes = new Uint8Array(await response.arrayBuffer());
 	const rawText = new TextDecoder().decode(bodyBytes);
+	// Inert unless the server accepted a capture directive for this request (ADR-0013).
+	activeUpstreamCaptureRecorder()?.record({
+		url: response.url || requestUrl,
+		status: response.status,
+		contentType: response.headers.get("content-type") ?? undefined,
+		byteLength: bodyBytes.byteLength,
+		bodyText: rawText,
+	});
 	const data = parseHttpData(rawText, headers);
 
 	return {
@@ -856,7 +865,7 @@ async function fetchNativeHttp(
 		// bodies drained above stay under the deadline on purpose: nothing else
 		// bounds them, and their content is never returned to the caller.
 		disarmTimeout();
-		return await toNativeHttpResponse(response);
+		return await toNativeHttpResponse(response, requestUrl);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
 			throw redactSensitiveError(

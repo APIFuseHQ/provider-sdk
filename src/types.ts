@@ -72,6 +72,24 @@ export interface OperationObservabilitySensitiveConfig {
 	 * for array elements, for example `items.*.paymentUrl`.
 	 */
 	output?: readonly OperationSensitivePath[];
+	/**
+	 * Dot paths, in the RAW upstream response body, of values to redact from
+	 * health-monitor capture evidence (ADR-0013). Same grammar as `input` and
+	 * `output`; `*` matches any array element or object key, for example
+	 * `data.displayName` or `data.members.*.email`.
+	 *
+	 * `output` paths are output coordinates and do not match a vendor body whose
+	 * fields the handler renames or nests (output `display_name` from upstream
+	 * `data.displayName`), so the upstream coordinates are declared here. The SDK
+	 * applies these paths first, then `output`, then its key and value heuristics.
+	 *
+	 * Capture evidence is emitted only for an operation that declares this array:
+	 * `[]` states, after review, that the raw body carries no provider-sensitive
+	 * field. An operation without it answers a capture directive with the skip
+	 * reason `upstream_sensitive_paths_undeclared` and no body. Customer traffic
+	 * and every other observability path are unaffected by this field.
+	 */
+	upstream?: readonly OperationSensitivePath[];
 }
 
 export interface OperationObservabilityConfig {
