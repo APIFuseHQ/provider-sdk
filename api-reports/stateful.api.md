@@ -526,12 +526,12 @@ const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
     deadlineAt: z.ZodOptional<z.ZodString>;
     idempotencyKey: z.ZodOptional<z.ZodString>;
     operationRequest: z.ZodObject<{
-        requestId: z.ZodString;
         input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+        trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        requestId: z.ZodString;
         connectionId: z.ZodOptional<z.ZodString>;
         tenantId: z.ZodOptional<z.ZodString>;
-        headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
-        trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         connection: z.ZodOptional<z.ZodObject<{
             id: z.ZodString;
             mode: z.ZodEnum<{

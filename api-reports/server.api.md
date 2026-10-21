@@ -144,6 +144,7 @@ export const AuthFlowRequestSchema: z.ZodObject<{
     context: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     engine: z.ZodOptional<z.ZodObject<{
         egressLease: z.ZodOptional<z.ZodString>;
+        capture: z.ZodOptional<z.ZodUnknown>;
     }, z.core.$strict>>;
     connection: z.ZodOptional<z.ZodObject<{
         id: z.ZodString;
@@ -622,6 +623,64 @@ const candidateReferenceSchema: z.ZodObject<{
 }, z.core.$strict>;
 
 // @public
+export const CAPTURE_DIRECTIVE_CLOCK_SKEW_MS = 5000;
+
+// @public
+export const CAPTURE_DIRECTIVE_INACTIVE_REASONS: readonly ["malformed", "unsupported_version", "provider_mismatch", "operation_mismatch", "request_id_mismatch", "nonce_malformed", "expires_at_malformed", "expired", "expires_too_far", "nonce_replayed", "nonce_ledger_full", "unknown_operation", "streaming_transport", "non_json_response", "evidence_build_failed"];
+
+// @public
+export const CAPTURE_DIRECTIVE_MAX_TTL_MS = 120000;
+
+// @public
+export const CAPTURE_DIRECTIVE_VERSION: 1;
+
+// @public
+export const CAPTURE_EVIDENCE_MAX_BYTES = 524288;
+
+// @public
+export const CAPTURE_EVIDENCE_VERSION: 1;
+
+// @public
+export const CAPTURE_SKIP_REASONS: readonly ["no_upstream_exchange", "upstream_sensitive_paths_undeclared", "upstream_body_too_large", "evidence_too_large"];
+
+// @public
+export const CAPTURE_UPSTREAM_BODY_MAX_BYTES = 1048576;
+
+// @public
+export interface CaptureDirective {
+    readonly expiresAt: string;
+    readonly nonce: string;
+    // (undocumented)
+    readonly operationId: string;
+    // (undocumented)
+    readonly providerId: string;
+    readonly requestId: string;
+    // (undocumented)
+    readonly version: typeof CAPTURE_DIRECTIVE_VERSION;
+}
+
+// @public (undocumented)
+export type CaptureDirectiveInactiveReason = (typeof CAPTURE_DIRECTIVE_INACTIVE_REASONS)[number];
+
+// @public
+export interface CaptureEvidence {
+    // Warning: (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly body: JsonValue;
+    // (undocumented)
+    readonly requestPath: string;
+    readonly upstreamContentType?: string;
+    // (undocumented)
+    readonly upstreamStatus: number;
+    // (undocumented)
+    readonly version: typeof CAPTURE_EVIDENCE_VERSION;
+}
+
+// @public (undocumented)
+export type CaptureSkipReason = (typeof CAPTURE_SKIP_REASONS)[number];
+
+// @public
 type ChallengeSolution = {
     readonly form: "token";
     readonly token: string;
@@ -915,6 +974,9 @@ export type ErrorObservabilityDetails = {
     upstreamStatus?: number;
     providerObservability?: ProviderErrorObservability;
 };
+
+// @public
+export type ExecutableOperationRequest = Omit<OperationRequest, "engine">;
 
 // Warning: (ae-forgotten-export) The symbol "GuardAttribution" needs to be exported by the entry point index.d.ts
 //
@@ -2441,6 +2503,17 @@ interface OcrWarning {
 // @public (undocumented)
 type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
+// @public
+export type OperationCaptureOutcome = {
+    readonly version: typeof CAPTURE_DIRECTIVE_VERSION;
+    readonly outcome: "captured";
+    readonly evidence: CaptureEvidence;
+} | {
+    readonly version: typeof CAPTURE_DIRECTIVE_VERSION;
+    readonly outcome: "skipped";
+    readonly reason: CaptureSkipReason;
+};
+
 // @public (undocumented)
 export type OperationConnection = z.infer<typeof OperationConnectionSchema>;
 
@@ -2569,6 +2642,12 @@ interface OperationDeprecationMetadata {
     replacement?: string;
 }
 
+// @public
+export interface OperationEngineResponse {
+    // (undocumented)
+    readonly capture: OperationCaptureOutcome;
+}
+
 // @public (undocumented)
 interface OperationErrorCode {
     // (undocumented)
@@ -2654,6 +2733,7 @@ interface OperationObservabilitySensitiveConfig {
     // Warning: (ae-forgotten-export) The symbol "OperationSensitivePath" needs to be exported by the entry point index.d.ts
     input?: readonly OperationSensitivePath[];
     output?: readonly OperationSensitivePath[];
+    upstream?: readonly OperationSensitivePath[];
 }
 
 // @public (undocumented)
@@ -2687,6 +2767,9 @@ export const OperationRequestSchema: z.ZodObject<{
     tenantId: z.ZodOptional<z.ZodString>;
     headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
     trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    engine: z.ZodCatch<z.ZodOptional<z.ZodObject<{
+        capture: z.ZodOptional<z.ZodUnknown>;
+    }, z.core.$strip>>>;
 }, z.core.$strip>;
 
 // @public (undocumented)
@@ -3875,6 +3958,14 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     sdkVersion: string;
     runtimeTarget?: ProviderRuntimeTarget;
     warnings?: readonly string[];
+} | {
+    level: "info";
+    event: "provider_capture_directive";
+    providerId: string;
+    operationId: string;
+    requestId: string;
+    result: "inactive" | "captured" | "skipped";
+    reason?: CaptureDirectiveInactiveReason | CaptureSkipReason;
 } | ProviderStateBackendLogEvent | SelfTestCancellationLogEvent;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderRequestCost" needs to be exported by the entry point index.d.ts
@@ -3906,7 +3997,7 @@ export type ProviderServerOperationExecutorInput<TContext extends Partial<Provid
     readonly provider: ProviderDefinition<TContext>;
     readonly operationId: string;
     readonly ctx: TContext;
-    readonly request: OperationRequest & {
+    readonly request: ExecutableOperationRequest & {
         readonly deadlineAt?: string;
     };
     readonly signal?: AbortSignal;
@@ -3960,12 +4051,12 @@ const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
     deadlineAt: z.ZodOptional<z.ZodString>;
     idempotencyKey: z.ZodOptional<z.ZodString>;
     operationRequest: z.ZodObject<{
-        requestId: z.ZodString;
         input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+        trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        requestId: z.ZodString;
         connectionId: z.ZodOptional<z.ZodString>;
         tenantId: z.ZodOptional<z.ZodString>;
-        headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
-        trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
         connection: z.ZodOptional<z.ZodObject<{
             id: z.ZodString;
             mode: z.ZodEnum<{
@@ -6156,7 +6247,6 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // Warnings were encountered during analysis:
 //
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:187:5 - (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1503:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1512:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1542:5 - (ae-forgotten-export) The symbol "StepReference" needs to be exported by the entry point index.d.ts
@@ -6181,43 +6271,43 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:18:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:176:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:199:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:129:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:357:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:359:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:586:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:586:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:704:5 - (ae-forgotten-export) The symbol "HealthCheckAssertionContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:704:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:709:5 - (ae-forgotten-export) The symbol "HealthScenario" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:721:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:947:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:952:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1011:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1397:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1397:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1598:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1599:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1704:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1710:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1711:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1715:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1722:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1757:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1845:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1853:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1854:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1863:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2014:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2029:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2035:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2043:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2051:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2145:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:19:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:193:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:216:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:147:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:375:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:377:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:604:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:604:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:701:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:722:5 - (ae-forgotten-export) The symbol "HealthCheckAssertionContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:722:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:727:5 - (ae-forgotten-export) The symbol "HealthScenario" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:739:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:965:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:970:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1029:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1415:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1415:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1616:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1617:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1722:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1728:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1729:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1733:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1740:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1775:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1863:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1871:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1872:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1881:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2032:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2047:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2053:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2059:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2061:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2069:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2163:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
