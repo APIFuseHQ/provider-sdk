@@ -6,6 +6,7 @@ import {
 	PROVIDER_STATE_REDIS_URL_ENV,
 	REDIS_URL_ENV,
 } from "../config/loader.js";
+import { withDiagnosticFallbackScope } from "../runtime/diagnostic-redactor.js";
 import { createProviderRuntimeStateFromEnv } from "../runtime/state.js";
 import { type ProviderServerLogEvent, serve } from "../server/serve.js";
 import { providerStateBackendLogEvent } from "../server/state-backend-report.js";
@@ -36,7 +37,11 @@ async function withEnv<T>(
 		if (value !== undefined) process.env[name] = value;
 	}
 	try {
-		return await run();
+		// Boot reads the store URLs through readDiagnosticEnv, which registers
+		// their credential components (the synthetic "apifuse" user below) in
+		// the process-wide redaction fallback. Scope that fallback to this
+		// call so the synthetic credentials do not redact later files' output.
+		return await withDiagnosticFallbackScope(run);
 	} finally {
 		for (const [name, value] of previous) {
 			if (value === undefined) delete process.env[name];

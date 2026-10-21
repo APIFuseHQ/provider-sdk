@@ -1000,7 +1000,7 @@ describe("createStealthClient", () => {
 
 	it("preserves multiple cookies when Headers.getSetCookie is unavailable", async () => {
 		const headers = toHeaders({
-			"set-cookie": "sid=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/, csrf=def; Path=/",
+			"set-cookie": "sid=abc; Expires=Wed, 21 Oct 2099 07:28:00 GMT; Path=/, csrf=def; Path=/",
 		});
 		Object.defineProperty(headers, "getSetCookie", { value: undefined });
 
@@ -1014,7 +1014,7 @@ describe("createStealthClient", () => {
 
 		expect(response.cookies.getAll()).toEqual({ sid: "abc", csrf: "def" });
 		expect(response.rawHeaders).toEqual([
-			["set-cookie", "sid=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/, csrf=def; Path=/"],
+			["set-cookie", "sid=abc; Expires=Wed, 21 Oct 2099 07:28:00 GMT; Path=/, csrf=def; Path=/"],
 		]);
 	});
 
