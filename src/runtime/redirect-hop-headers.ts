@@ -12,6 +12,18 @@ const REDIRECT_BODY_HEADERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * A redirect that changes the method also drops `Origin`: the rewritten
+ * request is a GET, and Fetch's "append a request Origin header" gives a GET
+ * navigation or same-origin GET none. Real Chrome 149 sends no `Origin` on the
+ * GET after a form submission or page fetch() answered with 302 or 303, and
+ * keeps it after a 307 (chrome-redirect-hop-capture.json).
+ */
+const METHOD_CHANGE_DROPPED_HEADERS: ReadonlySet<string> = new Set([
+	...REDIRECT_BODY_HEADERS,
+	"origin",
+]);
+
+/**
  * Credentials a redirect never carries to another origin. Fetch removes
  * `Authorization` on a cross-origin redirect; `Proxy-Authorization` is a
  * credential of the same kind.
@@ -44,7 +56,7 @@ function schemefulSite(url: URL): string {
  * the previous hop sent. Both stealth redirect walkers compute every hop's
  * headers here, so the rules hold on every path:
  *
- * - a method change drops the request-body headers;
+ * - a method change drops the request-body headers and `Origin`;
  * - a cross-origin hop drops `Authorization` and `Proxy-Authorization`;
  * - a cross-site hop drops an explicit `Cookie`, after which the session
  *   cookie jar supplies cookies by its own domain rules, as a browser does.
@@ -62,7 +74,7 @@ export function redirectHopHeaders<T>(
 	return Object.fromEntries(
 		Object.entries(headers).filter(([name]) => {
 			const lower = name.toLowerCase();
-			if (hop.methodChanged && REDIRECT_BODY_HEADERS.has(lower)) return false;
+			if (hop.methodChanged && METHOD_CHANGE_DROPPED_HEADERS.has(lower)) return false;
 			if (crossOrigin && CROSS_ORIGIN_CREDENTIAL_HEADERS.has(lower)) return false;
 			if (crossSite && lower === "cookie") return false;
 			return true;

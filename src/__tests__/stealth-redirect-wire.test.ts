@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import chromeRedirectHopCapture from "../../chrome-redirect-hop-capture.json";
 
 type Received = { path: string; method: string; headers: Record<string, string> };
 type Scenario = {
@@ -7,10 +8,14 @@ type Scenario = {
 	error?: { name?: string; code?: string };
 };
 
+type RawReceived = { path: string; method: string; names: string[] };
+
 // The real wreq-js transport, run in a subprocess so the wreq-js module mock in
 // stealth-client.test.ts cannot replace it: these assertions are about the
 // bytes a server receives, including anything wreq merges in on its own.
-async function runWireScenarios(): Promise<Record<string, Scenario>> {
+async function runWireScenarios(): Promise<
+	Record<string, Scenario> & { raw: Record<string, RawReceived[]> }
+> {
 	const subprocess = Bun.spawn({
 		cmd: [
 			process.execPath,
@@ -25,7 +30,7 @@ async function runWireScenarios(): Promise<Record<string, Scenario>> {
 		new Response(subprocess.stderr).text(),
 	]);
 	if (exitCode !== 0) throw new Error(`stealth redirect wire fixture failed: ${stderr}`);
-	return JSON.parse(stdout) as Record<string, Scenario>;
+	return JSON.parse(stdout) as Record<string, Scenario> & { raw: Record<string, RawReceived[]> };
 }
 
 const wire = await runWireScenarios();
@@ -75,4 +80,24 @@ describe("stealth redirect hops on the real transport", () => {
 		expect(foreign.headers.authorization).toBeUndefined();
 		expect(foreign.headers.cookie).toBeUndefined();
 	});
+});
+
+describe("stealth redirect hop header order on the real transport", () => {
+	// Raw HTTP/1.1 bytes, compared with what real Chrome 149 sent to the same
+	// kind of listener (chrome-redirect-hop-capture.json, *_h1).
+	const cases = [
+		["navigation302", chromeRedirectHopCapture.navigation_302_h1.hops],
+		["redirectsRunNavigation302", chromeRedirectHopCapture.navigation_302_h1.hops],
+		["formPost302", chromeRedirectHopCapture.form_post_302_h1.hops],
+		["formPost303", chromeRedirectHopCapture.form_post_303_h1.hops],
+		["formPost307", chromeRedirectHopCapture.form_post_307_h1.hops],
+	] as const;
+
+	for (const [name, captured] of cases) {
+		it(`writes Chrome's first-request and redirected-hop order for ${name}`, () => {
+			const received = wire.raw[name] ?? [];
+			expect(received.map((request) => request.method)).toEqual(captured.map((hop) => hop.method));
+			expect(received.map((request) => request.names)).toEqual(captured.map((hop) => hop.order));
+		});
+	}
 });

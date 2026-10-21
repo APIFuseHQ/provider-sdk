@@ -6,7 +6,6 @@ import {
 	PROVIDER_STATE_REDIS_URL_ENV,
 	REDIS_URL_ENV,
 } from "../config/loader.js";
-import { withDiagnosticFallbackScope } from "../runtime/diagnostic-redactor.js";
 import { createProviderRuntimeStateFromEnv } from "../runtime/state.js";
 import { type ProviderServerLogEvent, serve } from "../server/serve.js";
 import { providerStateBackendLogEvent } from "../server/state-backend-report.js";
@@ -37,11 +36,7 @@ async function withEnv<T>(
 		if (value !== undefined) process.env[name] = value;
 	}
 	try {
-		// Boot reads the store URLs through readDiagnosticEnv, which registers
-		// their credential components (the synthetic "apifuse" user below) in
-		// the process-wide redaction fallback. Scope that fallback to this
-		// call so the synthetic credentials do not redact later files' output.
-		return await withDiagnosticFallbackScope(run);
+		return await run();
 	} finally {
 		for (const [name, value] of previous) {
 			if (value === undefined) delete process.env[name];
@@ -78,7 +73,7 @@ describe("providerStateBackendLogEvent", () => {
 		const event = await withEnv(
 			{
 				[PROVIDER_STATE_REDIS_URL_ENV]:
-					"redis://apifuse:hunterbramble@provider-state-redis.fusepie-backend.svc.cluster.local:6379",
+					"redis://statebackenduser:hunterbramble@provider-state-redis.fusepie-backend.svc.cluster.local:6379",
 				[PROVIDER_CACHE_REDIS_URL_ENV]: "redis://redis.fusepie-backend.svc.cluster.local:6379",
 			},
 			() => bootEvent(),
@@ -103,7 +98,7 @@ describe("providerStateBackendLogEvent", () => {
 			sdkVersion: "0.0.0-test",
 		});
 		expect(JSON.stringify(event)).not.toContain("hunterbramble");
-		expect(JSON.stringify(event)).not.toContain("apifuse:");
+		expect(JSON.stringify(event)).not.toContain("statebackenduser:");
 	});
 
 	// The apifuse#2144 shape: state silently riding the cache instance, which

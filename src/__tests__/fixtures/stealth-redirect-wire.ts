@@ -1,6 +1,7 @@
 // Runs the real stealth transport (wreq-js, no module mock) against two local
 // servers and prints what each one received. stealth-redirect-wire.test.ts
 // spawns this file so the wreq-js mock in other test files cannot reach it.
+import net from "node:net";
 import { createStealthClient } from "../../runtime/stealth.js";
 
 type Received = { path: string; method: string; headers: Record<string, string> };
@@ -35,6 +36,71 @@ const first = recordingServer((url) => {
 });
 const origin = `http://127.0.0.1:${first.server.port}`;
 const credentials = { Authorization: "Bearer caller-token", Cookie: "sid=caller-session" };
+
+// HTTP/1.1 header order as written on the wire: Bun.serve does not keep it, so
+// this listener reads the raw request bytes.
+type RawReceived = { path: string; method: string; names: string[] };
+const rawReceived: RawReceived[] = [];
+const raw = net.createServer((socket) => {
+	let buffer = Buffer.alloc(0);
+	socket.on("data", (chunk) => {
+		buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+		while (true) {
+			const end = buffer.indexOf("\r\n\r\n");
+			if (end < 0) return;
+			const lines = buffer.subarray(0, end).toString("latin1").split("\r\n");
+			const [method = "", target = ""] = (lines.shift() ?? "").split(" ");
+			const names = lines.map((line) => line.slice(0, line.indexOf(":")));
+			const lengthLine = lines.find((line) => /^content-length:/i.test(line));
+			const length = lengthLine ? Number(lengthLine.slice(lengthLine.indexOf(":") + 1)) : 0;
+			if (buffer.length < end + 4 + length) return;
+			buffer = buffer.subarray(end + 4 + length);
+			const url = new URL(target, "http://raw");
+			rawReceived.push({ path: url.pathname, method, names });
+			const status = url.pathname === "/done" ? 200 : Number(url.searchParams.get("status"));
+			socket.write(
+				status === 200
+					? "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\ndone"
+					: `HTTP/1.1 ${status} Redirect\r\nlocation: /done\r\ncontent-length: 0\r\n\r\n`,
+			);
+		}
+	});
+	socket.on("error", () => {});
+});
+await new Promise<void>((resolve) => raw.listen(0, "127.0.0.1", resolve));
+const rawOrigin = `http://127.0.0.1:${(raw.address() as net.AddressInfo).port}`;
+
+const rawResults: Record<string, RawReceived[]> = {};
+async function rawScenario(name: string, run: () => Promise<unknown>) {
+	rawReceived.length = 0;
+	await run();
+	rawResults[name] = [...rawReceived];
+}
+
+const browserHeaders = { Referer: `${rawOrigin}/page`, Cookie: "probe_sid=abc123" };
+await rawScenario("navigation302", () =>
+	createStealthClient(rawOrigin).fetch("/start?status=302", { headers: browserHeaders }),
+);
+for (const status of [302, 303, 307]) {
+	await rawScenario(`formPost${status}`, () =>
+		createStealthClient(rawOrigin).fetch(`/submit?status=${status}`, {
+			method: "POST",
+			body: "q=probe",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Origin: rawOrigin,
+				...browserHeaders,
+			},
+			stealth: { requestClass: "form-post" },
+		}),
+	);
+}
+await rawScenario("redirectsRunNavigation302", () =>
+	createStealthClient(rawOrigin)
+		.createSession()
+		.redirects.run({ url: "/start?status=302", headers: browserHeaders }),
+);
+raw.close();
 
 async function scenario(name: string, run: () => Promise<unknown>) {
 	first.received.length = 0;
@@ -89,4 +155,4 @@ const results = Object.fromEntries([
 
 first.server.stop(true);
 other.server.stop(true);
-console.log(JSON.stringify(results));
+console.log(JSON.stringify({ ...results, raw: rawResults }));
