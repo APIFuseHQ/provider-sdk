@@ -19,6 +19,7 @@ import {
 	CAPTURE_DIRECTIVE_CLOCK_SKEW_MS,
 	CAPTURE_DIRECTIVE_MAX_TTL_MS,
 	CAPTURE_EVIDENCE_MAX_BYTES,
+	type CaptureDirectiveInactiveReason,
 	CaptureNonceLedger,
 	evaluateCaptureDirective,
 	openOperationCaptureSession,
@@ -59,7 +60,7 @@ describe("evaluateCaptureDirective", () => {
 	});
 
 	it("rejects each failed rule with its reason", () => {
-		const cases: Array<[string, unknown]> = [
+		const cases: Array<[CaptureDirectiveInactiveReason, unknown]> = [
 			["malformed", null],
 			["malformed", "directive"],
 			["malformed", [directive()]],

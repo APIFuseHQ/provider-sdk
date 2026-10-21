@@ -3038,8 +3038,9 @@ function withCaptureOutcome<T extends object>(
 }
 
 /**
- * A handler's raw `Response` keeps its representation, except that a JSON-object
- * body carries the SDK's `engine` key, replacing any `engine` the handler wrote:
+ * A raw `Response` result (an operation executor's, or a handler's whose output
+ * schema admits one) keeps its representation, except that a JSON-object body
+ * carries the SDK's `engine` key, replacing any `engine` provider code wrote:
  * capture outcomes come from the SDK boundary only. Other bodies are returned
  * unchanged and carry no outcome.
  */

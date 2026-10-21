@@ -118,6 +118,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			TraceContext_2 VALID_OPERATION_ERROR_STATUSES WebSocketOperationConfig
 			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			CAPTURE_DIRECTIVE_INACTIVE_REASONS CAPTURE_SKIP_REASONS CaptureDirectiveInactiveReason CaptureSkipReason ExecutableOperationRequest
 		`,
 	),
 	"provider.api.md": forgottenExports(

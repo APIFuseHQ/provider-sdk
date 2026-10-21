@@ -14,10 +14,11 @@ import { defineProvider, ProviderError, sensitive } from "../provider.js";
 import {
 	CAPTURE_DIRECTIVE_MAX_TTL_MS,
 	type CaptureDirective,
+	type CaptureDirectiveInactiveReason,
 	createServerAppAsync,
+	type ExecutableOperationRequest,
 	type OperationCaptureOutcome,
 	type ProviderServerLogEvent,
-	type ProviderServerOperationExecutorInput,
 } from "../server/index.js";
 import { event } from "../stream.js";
 import type { CredentialContext, HttpClient } from "../types.js";
@@ -98,7 +99,7 @@ const handlerTraces: string[] = [];
 const UPSTREAM_PATHS = ["data.name", "data.displayName", "data.email", "data.phone"];
 const OUTPUT_PATHS = ["display_name"];
 const ProfileOutput = z.object({
-	display_name: sensitive(z.string(), "name"),
+	display_name: sensitive(z.string(), "personal_data"),
 	grade: z.string(),
 });
 
@@ -132,7 +133,7 @@ const provider = buildProvider({
 				return { display_name: row.displayName, grade: row.grade };
 			},
 		},
-		profileStrict: {
+		"profile-strict": {
 			riskClass: "read",
 			input: z.object({}),
 			output: ProfileOutput,
@@ -145,7 +146,7 @@ const provider = buildProvider({
 				});
 			},
 		},
-		profileUndeclared: {
+		"profile-undeclared": {
 			riskClass: "read",
 			input: z.object({}),
 			output: ProfileOutput,
@@ -175,22 +176,14 @@ const provider = buildProvider({
 				return { size: JSON.stringify(response.data).length };
 			},
 		},
-		rawForged: {
+		"raw-forged": {
 			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			observability: { sensitive: { upstream: UPSTREAM_PATHS } },
 			healthCheckUnsupported: { reason: "Assembled test operation against a local upstream." },
-			handler: async (ctx) => {
-				await fetchProfile(ctx);
-				return new Response(
-					JSON.stringify({
-						data: { ok: true },
-						engine: { capture: { version: 1, outcome: "captured", evidence: "forged" } },
-					}),
-					{ headers: { "content-type": "application/json" } },
-				);
-			},
+			// Served through a host operation executor below, which can return a raw Response.
+			handler: async () => ({ ok: true }),
 		},
 		feed: {
 			riskClass: "read",
@@ -228,11 +221,11 @@ function envelope(requestId: string, engine?: unknown): string {
 		requestId,
 		input: {},
 		connection: {
-			id: "con-capture",
+			id: "con-assembled",
 			mode: "credentials",
 			secrets: { accessToken: ACCESS_TOKEN, sessionCookie: SESSION_COOKIE },
 			metadata: {},
-			externalRef: "ext-capture",
+			externalRef: "ext-assembled",
 		},
 		...(engine === undefined ? {} : { engine }),
 	});
@@ -312,9 +305,9 @@ describe("capture directive on the assembled operation route", () => {
 	});
 
 	it("keeps the fail-closed error envelope unchanged and attaches evidence beside it", async () => {
-		const baseline = await call(app, "profileStrict", "req-fail-closed");
-		const captured = await call(app, "profileStrict", "req-fail-closed", {
-			capture: directive({ requestId: "req-fail-closed", operationId: "profileStrict" }),
+		const baseline = await call(app, "profile-strict", "req-fail-closed");
+		const captured = await call(app, "profile-strict", "req-fail-closed", {
+			capture: directive({ requestId: "req-fail-closed", operationId: "profile-strict" }),
 		});
 
 		expect(baseline.status).toBe(502);
@@ -342,9 +335,9 @@ describe("capture directive on the assembled operation route", () => {
 		expect(
 			captureOf((await call(app, "profile", requestId, { capture: accepted })).text)?.outcome,
 		).toBe("captured");
-		const rejected: Array<[string, unknown]> = [
+		const rejected: Array<[CaptureDirectiveInactiveReason, unknown]> = [
 			["nonce_replayed", accepted],
-			["operation_mismatch", directive({ requestId, operationId: "profileStrict" })],
+			["operation_mismatch", directive({ requestId, operationId: "profile-strict" })],
 			["request_id_mismatch", directive({ requestId: "req-other", operationId: "profile" })],
 			[
 				"expired",
@@ -395,8 +388,8 @@ describe("capture directive on the assembled operation route", () => {
 	});
 
 	it("answers the skip reason and no body for an operation without upstream paths", async () => {
-		const response = await call(app, "profileUndeclared", "req-undeclared", {
-			capture: directive({ requestId: "req-undeclared", operationId: "profileUndeclared" }),
+		const response = await call(app, "profile-undeclared", "req-undeclared", {
+			capture: directive({ requestId: "req-undeclared", operationId: "profile-undeclared" }),
 		});
 		expect(response.status).toBe(200);
 		expect(captureOf(response.text)).toEqual({
@@ -428,12 +421,31 @@ describe("capture directive on the assembled operation route", () => {
 		});
 	});
 
-	it("replaces an engine key a handler wrote into a raw JSON Response", async () => {
-		const plain = await call(app, "rawForged", "req-raw");
-		expect(JSON.parse(plain.text).engine.capture.evidence).toBe("forged");
-		const captured = await call(app, "rawForged", "req-raw", {
-			capture: directive({ requestId: "req-raw", operationId: "rawForged" }),
+	it("replaces an engine key an executor wrote into a raw JSON Response", async () => {
+		// The default executor validates the declared output, so a raw Response reaches the
+		// route only through a host operation executor; it still calls the real ctx.http.
+		const rawApp = await createServerAppAsync(provider, {
+			logger: () => {},
+			operationExecutor: async ({ ctx }) => {
+				await fetchProfile(ctx);
+				return new Response(
+					JSON.stringify({
+						data: { ok: true },
+						engine: { capture: { version: 1, outcome: "captured", evidence: "forged" } },
+					}),
+					{ headers: { "content-type": "application/json" } },
+				);
+			},
 		});
+		const plain = await call(rawApp, "raw-forged", "req-raw");
+		expect(JSON.parse(plain.text)).toEqual({
+			data: { ok: true },
+			engine: { capture: { version: 1, outcome: "captured", evidence: "forged" } },
+		});
+		const captured = await call(rawApp, "raw-forged", "req-raw", {
+			capture: directive({ requestId: "req-raw", operationId: "raw-forged" }),
+		});
+		expect(JSON.parse(captured.text).data).toEqual({ ok: true });
 		const capture = captureOf(captured.text);
 		expect(capture?.outcome).toBe("captured");
 		expect(captured.text).not.toContain("forged");
@@ -466,19 +478,19 @@ describe("capture directive on the assembled operation route", () => {
 		expect(trace).not.toContain("engine");
 		expect(trace).not.toContain("capture");
 
-		let received: ProviderServerOperationExecutorInput | undefined;
+		let received: ExecutableOperationRequest | undefined;
 		const executorApp = await createServerAppAsync(provider, {
 			logger: () => {},
 			operationExecutor: async (input) => {
-				received = input;
+				received = input.request;
 				return { display_name: "x", grade: "gold" };
 			},
 		});
 		const second = directive({ requestId: "req-executor", operationId: "profile" });
 		await call(executorApp, "profile", "req-executor", { capture: second });
 		expect(received).toBeDefined();
-		expect(Object.hasOwn(received?.request ?? {}, "engine")).toBe(false);
-		expect(JSON.stringify(received?.request)).not.toContain(second.nonce);
+		expect(Object.hasOwn(received ?? {}, "engine")).toBe(false);
+		expect(JSON.stringify(received)).not.toContain(second.nonce);
 	});
 
 	it("logs the outcome of an accepted directive without values", async () => {

@@ -175,9 +175,10 @@ error envelope object is unchanged. `capture` (`OperationCaptureOutcome`) is
 (serialized evidence over `CAPTURE_EVIDENCE_MAX_BYTES`, 512 KiB). The evidence
 is `buildCaptureEvidence` over the last exchange (body parsed as JSON when it
 parses, else the string), with the operation's upstream and output paths and the
-request's `DiagnosticRedactor`. A handler's raw `Response` keeps its
+request's `DiagnosticRedactor`. A raw `Response` result (from an operation
+executor, or a handler whose output schema admits one) keeps its
 representation, except that a JSON-object body gets the SDK's `engine` key,
-replacing any `engine` the handler wrote, so a capture outcome only ever comes
+replacing any `engine` provider code wrote, so a capture outcome only ever comes
 from the SDK; any other raw body is returned unchanged with no outcome
 (`non_json_response` in the log). If building the evidence throws, the response
 carries no `engine` key (`evidence_build_failed` in the log).

@@ -116,6 +116,7 @@ export {
 	type ServeOptions,
 	serve,
 } from "./serve.js";
+export { CAPTURE_EVIDENCE_VERSION } from "../capture-evidence.js";
 export {
 	CAPTURE_DIRECTIVE_CLOCK_SKEW_MS,
 	CAPTURE_DIRECTIVE_INACTIVE_REASONS,
