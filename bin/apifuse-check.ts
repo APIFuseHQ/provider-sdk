@@ -77,6 +77,22 @@ function normalizeArgs(argv: string[]): string[] {
 }
 
 export function resolveProviderRoot(inputPath: string): string {
+	const providerRoot = findProviderRoot(inputPath);
+	if (providerRoot === undefined) {
+		throw new Error(`Could not find provider root for: ${inputPath}`);
+	}
+	return providerRoot;
+}
+
+/**
+ * Walk up from `inputPath` to the nearest directory holding an `index.ts`.
+ * Returns undefined when no provider root exists above the path, so a caller
+ * that legitimately runs outside a provider (the scaffolded `postinstall`
+ * hook inside a Dockerfile's install layer, before `COPY . .`) can tell
+ * "nothing to act on" apart from a real error. Throws only when the input
+ * path itself does not exist.
+ */
+export function findProviderRoot(inputPath: string): string | undefined {
 	const resolvedInput = resolveFromParents(inputPath);
 
 	if (!existsSync(resolvedInput)) {
@@ -100,7 +116,7 @@ export function resolveProviderRoot(inputPath: string): string {
 		currentDirectory = parentDirectory;
 	}
 
-	throw new Error(`Could not find provider root for: ${inputPath}`);
+	return undefined;
 }
 
 function resolveFromParents(inputPath: string): string {

@@ -88,6 +88,34 @@ function runSyncAssetsCli(providerRoot: string, extraArgs: string[] = []) {
 }
 
 describe("apifuse sync-assets", () => {
+	it("--if-provider-root exits 0 and writes nothing where no index.ts exists (Dockerfile install layer)", () => {
+		const installLayer = makeTempDir("sync-assets-install-layer-");
+		writeFileSync(join(installLayer, "package.json"), '{"name":"probe","private":true}\n');
+
+		const hook = runSyncAssetsCli(installLayer, ["--if-provider-root"]);
+		expect(hook.status).toBe(0);
+		expect(hook.stdout).toContain("nothing to sync");
+		expect(existsSync(join(installLayer, "AGENTS.md"))).toBe(false);
+		expect(existsSync(join(installLayer, PROMPT_ASSET_MANIFEST_PATH))).toBe(false);
+
+		// Without the flag the same directory is still an error: a human running
+		// sync-assets in the wrong place must hear about it.
+		const plain = runSyncAssetsCli(installLayer);
+		expect(plain.status).toBe(1);
+		expect(plain.stderr).toContain("Could not find provider root");
+	});
+
+	it("--if-provider-root regenerates like a normal run once a provider root exists", async () => {
+		const cwd = makeTempDir("sync-assets-hook-on-provider-");
+		const providerRoot = await materializeScaffold(cwd);
+		rmSync(join(providerRoot, "AGENTS.md"));
+
+		const hook = runSyncAssetsCli(providerRoot, ["--if-provider-root"]);
+		expect(hook.status).toBe(0);
+		expect(hook.stdout).toContain("wrote    AGENTS.md");
+		expect(verifyPromptAssets(providerRoot).ok).toBe(true);
+	});
+
 	it("treats a fresh scaffold as in sync: --check passes and a run is a no-op", async () => {
 		const cwd = makeTempDir("sync-assets-fresh-");
 		const providerRoot = await materializeScaffold(cwd);
