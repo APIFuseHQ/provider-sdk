@@ -7,6 +7,7 @@ import {
 import type { ProviderServerStatefulForwardEnvelope } from "../server/serve.js";
 import { signStatefulRequestBody, statefulSignedHeaders } from "../stateful-signing.js";
 import type { SessionKey } from "./session-key.js";
+import type { StatefulForwardingRuntimeContext } from "./stateful-provider-runtime-context.js";
 import type {
 	StatefulOperationRequest,
 	StatefulOperationResult,
@@ -204,7 +205,7 @@ function buildForwardingEnvelope(input: {
 		operationRequest: {
 			requestId: input.request.requestId,
 			input: input.request.input as Record<string, unknown>,
-			connection: metadata.connection,
+			...(metadata.connection !== undefined ? { connection: metadata.connection } : {}),
 			...(metadata.tenantId ? { tenantId: metadata.tenantId } : {}),
 			headers: sanitizeForwardedHeaders(metadata.headers),
 			...(metadata.trace ? { trace: metadata.trace } : {}),
@@ -213,7 +214,7 @@ function buildForwardingEnvelope(input: {
 }
 
 function forwardedMetadata(request: StatefulOperationRequest): {
-	readonly connection: OperationConnection;
+	readonly connection?: OperationConnection;
 	readonly tenantId?: string;
 	readonly headers?: Record<string, string>;
 	readonly trace?: Record<string, string>;
@@ -226,14 +227,53 @@ function forwardedMetadata(request: StatefulOperationRequest): {
 		});
 	}
 	const operationRequest = forwardingContext.operationRequest;
-	const connection = OperationConnectionSchema.parse(operationRequest?.connection);
-	const tenantId = forwardedTenantId(operationRequest?.tenantId);
+	if (!isForwardedOperationRequest(operationRequest)) {
+		throw new StatefulOwnerForwardingError({
+			code: "STATEFUL_FORWARDING_CONTEXT_MISSING",
+			message:
+				"Stateful operation forwarding requires the request context's operationRequest; only its connection may be absent.",
+		});
+	}
+	const connection = forwardedConnection(operationRequest.connection);
+	const tenantId = forwardedTenantId(operationRequest.tenantId);
 	return {
-		connection,
+		...(connection !== undefined ? { connection } : {}),
 		...(tenantId !== undefined ? { tenantId } : {}),
-		...(operationRequest?.headers ? { headers: operationRequest.headers } : {}),
-		...(operationRequest?.trace ? { trace: operationRequest.trace } : {}),
+		...(operationRequest.headers ? { headers: operationRequest.headers } : {}),
+		...(operationRequest.trace ? { trace: operationRequest.trace } : {}),
 	};
+}
+
+/**
+ * `forwarding.operationRequest` is optional in the consumer-facing type, so a
+ * type-valid `{ forwarding: {} }` reaches here. It is the request context
+ * itself, not one optional field of it: forwarding without it would send the
+ * operation stripped of its connection, tenant scope, headers and trace. Only
+ * the `connection` inside it may be absent (a connectionless operation), so
+ * a missing or non-object `operationRequest` fails at the source like a
+ * missing forwarding context.
+ */
+function isForwardedOperationRequest(
+	value: StatefulForwardingRuntimeContext["operationRequest"] | null,
+): value is NonNullable<StatefulForwardingRuntimeContext["operationRequest"]> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The connection is optional on both sides of the hop, exactly like the owner's
+ * received `operationRequest.connection`: an operation declared with
+ * `auth.mode: "none"` reaches the source pod without one, and the owner must
+ * execute it without one. Absent stays absent; the envelope never carries a
+ * synthesized placeholder. A placeholder would key the owner's proxy affinity
+ * by its id or `externalRef` (an empty `externalRef` keys it under `""`, which
+ * is not an affinity scope), while an absent connection gets the fallback a
+ * direct call without a connection gets: the provider id, or the provider and
+ * operation ids under operation affinity. A connection that is present is
+ * forwarded exactly as before.
+ */
+function forwardedConnection(value: unknown): OperationConnection | undefined {
+	if (value === undefined) return undefined;
+	return OperationConnectionSchema.parse(value);
 }
 
 /**
