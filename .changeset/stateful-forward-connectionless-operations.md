@@ -1,0 +1,7 @@
+---
+"@apifuse/provider-sdk": patch
+---
+
+Forward connectionless stateful operations to their owner pod. `HttpStatefulOwnerForwarder` required `operationRequest.connection` on the source side while the owner route has always accepted it as optional, so an operation that reaches a non-owner pod without a connection (an `auth.mode: "none"` operation such as a parcel or ride watch) failed at the source with `400 invalid_request` instead of being forwarded. The forwarder now treats the connection as optional, exactly like the owner: an absent connection is omitted from the envelope (never synthesized), and the owner executes the operation without one, so its proxy affinity gets the same fallback key a direct call without a connection gets (the provider id, or the provider and operation ids under operation affinity). A connection that is present is forwarded unchanged, byte for byte. Providers that worked around this by forwarding a placeholder `none`-mode connection should drop the placeholder after upgrading: a placeholder keys the owner's affinity by its id, or under `""` when its id and `externalRef` are empty.
+
+Rolling deploys are safe in both directions: an owner pod on an earlier version already accepts an envelope without a connection, and a source pod on an earlier version still fails at the source as before.

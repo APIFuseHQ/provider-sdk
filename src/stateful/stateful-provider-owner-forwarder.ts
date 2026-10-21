@@ -204,7 +204,7 @@ function buildForwardingEnvelope(input: {
 		operationRequest: {
 			requestId: input.request.requestId,
 			input: input.request.input as Record<string, unknown>,
-			connection: metadata.connection,
+			...(metadata.connection !== undefined ? { connection: metadata.connection } : {}),
 			...(metadata.tenantId ? { tenantId: metadata.tenantId } : {}),
 			headers: sanitizeForwardedHeaders(metadata.headers),
 			...(metadata.trace ? { trace: metadata.trace } : {}),
@@ -213,7 +213,7 @@ function buildForwardingEnvelope(input: {
 }
 
 function forwardedMetadata(request: StatefulOperationRequest): {
-	readonly connection: OperationConnection;
+	readonly connection?: OperationConnection;
 	readonly tenantId?: string;
 	readonly headers?: Record<string, string>;
 	readonly trace?: Record<string, string>;
@@ -226,14 +226,31 @@ function forwardedMetadata(request: StatefulOperationRequest): {
 		});
 	}
 	const operationRequest = forwardingContext.operationRequest;
-	const connection = OperationConnectionSchema.parse(operationRequest?.connection);
+	const connection = forwardedConnection(operationRequest?.connection);
 	const tenantId = forwardedTenantId(operationRequest?.tenantId);
 	return {
-		connection,
+		...(connection !== undefined ? { connection } : {}),
 		...(tenantId !== undefined ? { tenantId } : {}),
 		...(operationRequest?.headers ? { headers: operationRequest.headers } : {}),
 		...(operationRequest?.trace ? { trace: operationRequest.trace } : {}),
 	};
+}
+
+/**
+ * The connection is optional on both sides of the hop, exactly like the owner's
+ * received `operationRequest.connection`: an operation declared with
+ * `auth.mode: "none"` reaches the source pod without one, and the owner must
+ * execute it without one. Absent stays absent; the envelope never carries a
+ * synthesized placeholder. A placeholder would key the owner's proxy affinity
+ * by its id or `externalRef` (an empty `externalRef` keys it under `""`, which
+ * is not an affinity scope), while an absent connection gets the fallback a
+ * direct call without a connection gets: the provider id, or the provider and
+ * operation ids under operation affinity. A connection that is present is
+ * forwarded exactly as before.
+ */
+function forwardedConnection(value: unknown): OperationConnection | undefined {
+	if (value === undefined) return undefined;
+	return OperationConnectionSchema.parse(value);
 }
 
 /**

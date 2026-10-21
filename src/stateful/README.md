@@ -34,6 +34,10 @@ the following compatibility-sensitive behavior:
   envelope also carries operation/session identity, `sourcePodId`, `forwardedAt`, optional
   `idempotencyKey`, optional ISO `deadlineAt`, and the nested `operationRequest`. Unknown or
   malformed fields fail closed, and the owner-side executor receives `deadlineAt` on its request.
+  The nested `operationRequest.connection` is optional on both sides: a connectionless
+  (`auth.mode: "none"`) operation is forwarded without one, never with a placeholder, and the owner
+  keys its proxy affinity the way it keys a direct call without a connection (the provider id, or
+  the provider and operation ids under operation affinity).
 - Stateful forwarding is configured as a pair: `internalOperationExecutor` requires
   `statefulForwarding`, and `statefulForwarding` requires an `internalOperationExecutor`.
   `statefulForwarding` supplies the signing secret and `validateOwnerFence`; it may also set
