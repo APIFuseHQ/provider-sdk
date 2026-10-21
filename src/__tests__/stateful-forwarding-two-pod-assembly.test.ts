@@ -199,7 +199,12 @@ async function startPod(
 		},
 		shutdown: {
 			signals: false,
-			hooks: [() => manager.closeAll("server-shutdown"), () => router?.release()],
+			hooks: [
+				() => manager.closeAll("server-shutdown"),
+				async () => {
+					await router?.release();
+				},
+			],
 		},
 	});
 	const endpoint = `http://127.0.0.1:${handle.port}`;
