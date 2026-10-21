@@ -37,7 +37,10 @@ the following compatibility-sensitive behavior:
   The nested `operationRequest.connection` is optional on both sides: a connectionless
   (`auth.mode: "none"`) operation is forwarded without one, never with a placeholder, and the owner
   keys its proxy affinity the way it keys a direct call without a connection (the provider id, or
-  the provider and operation ids under operation affinity).
+  the provider and operation ids under operation affinity). The `operationRequest` itself is not
+  optional: a forwarding context without one (`{ forwarding: {} }`) fails at the source with
+  `STATEFUL_FORWARDING_CONTEXT_MISSING` instead of reaching the owner stripped of its connection,
+  tenant scope, headers and trace.
 - Stateful forwarding is configured as a pair: `internalOperationExecutor` requires
   `statefulForwarding`, and `statefulForwarding` requires an `internalOperationExecutor`.
   `statefulForwarding` supplies the signing secret and `validateOwnerFence`; it may also set

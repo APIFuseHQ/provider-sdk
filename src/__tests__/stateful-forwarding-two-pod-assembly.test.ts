@@ -35,6 +35,7 @@ const {
 	HttpStatefulOwnerForwarder,
 	InMemorySessionOwnerRegistry,
 	parseSessionKey,
+	StatefulOwnerForwardingError,
 	StatefulProviderSessionManager,
 	StatefulSessionRouter,
 	statefulForwardingContextFromProviderRequest,
@@ -416,5 +417,73 @@ describe("stateful forwarding across two served pods", () => {
 				`"scopes":["parcel:read"],"metadata":{"plan":"standard"},"externalRef":"account-1"},` +
 				`"headers":{"x-request-source":"two-pod-assembly"}}}`,
 		);
+	});
+
+	it("rejects a forwarding context without its operationRequest at the source and keeps forwarding well-formed calls", async () => {
+		const registry = new InMemorySessionOwnerRegistry();
+		const owner = await startPod("pod-a", registry);
+		const nonOwner = await startPod("pod-b", registry);
+
+		const first = await callWatch(owner, { requestId: "req-owner", trackingNumber: "T-300" });
+		expect(first.status).toBe(200);
+		const keyParts = {
+			providerId: PROVIDER_ID,
+			serviceAccountId: "connectionless",
+			connectionId: "watch-T-300",
+		};
+		const sessionKey = buildSessionKey(keyParts);
+		const ownerRecord = await registry.resolve(sessionKey);
+		expect(ownerRecord?.ownerPodId).toBe("pod-a");
+
+		// Each context is type-valid or reachable from an untyped consumer, and
+		// each lacks the request context that the connection, tenant scope,
+		// headers and trace come from. None may reach the owner as a
+		// connectionless call.
+		const contextsWithoutOperationRequest: ReadonlyArray<readonly [string, unknown]> = [
+			["forwarding: {}", { forwarding: {} }],
+			["local context with empty forwarding", withStatefulLocalProviderContext(undefined, {})],
+			["forwarding.operationRequest: null", { forwarding: { operationRequest: null } }],
+		];
+		for (const [label, runtimeContext] of contextsWithoutOperationRequest) {
+			const error = await nonOwner.router
+				.route({
+					requestId: `req-missing-${label}`,
+					sessionKey,
+					providerId: PROVIDER_ID,
+					operationId: OPERATION_ID,
+					connectionId: keyParts.connectionId,
+					serviceAccountId: keyParts.serviceAccountId,
+					input: { trackingNumber: "T-300" },
+					runtimeContext,
+				})
+				.then(
+					() => undefined,
+					(cause: unknown) => cause,
+				);
+			if (!(error instanceof StatefulOwnerForwardingError)) {
+				throw new Error(`${label}: expected StatefulOwnerForwardingError, got ${String(error)}`);
+			}
+			expect(error.code).toBe("STATEFUL_FORWARDING_CONTEXT_MISSING");
+			expect(error.message).toContain("operationRequest");
+		}
+
+		// Rejected at the source: nothing went on the wire and the owner's
+		// internal route never ran.
+		expect(nonOwner.forwardedBodies).toEqual([]);
+		expect(forwardedExecutions(owner)).toEqual([]);
+		expect(nonOwner.connectedSessionKeys).toEqual([]);
+
+		// The same session still forwards a well-formed connectionless call.
+		const forwarded = await callWatch(nonOwner, {
+			requestId: "req-non-owner",
+			trackingNumber: "T-300",
+		});
+		expect(forwarded).toEqual({
+			status: 200,
+			body: { data: { trackingNumber: "T-300", servedBy: "pod-a", invocation: 2 } },
+		});
+		expect(nonOwner.forwardedBodies).toHaveLength(1);
+		const remote = onlyItem(forwardedExecutions(owner), "forwarded owner execution");
+		expect(Object.hasOwn(remote.request, "connection")).toBe(false);
 	});
 });

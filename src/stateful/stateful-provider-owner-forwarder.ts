@@ -7,6 +7,7 @@ import {
 import type { ProviderServerStatefulForwardEnvelope } from "../server/serve.js";
 import { signStatefulRequestBody, statefulSignedHeaders } from "../stateful-signing.js";
 import type { SessionKey } from "./session-key.js";
+import type { StatefulForwardingRuntimeContext } from "./stateful-provider-runtime-context.js";
 import type {
 	StatefulOperationRequest,
 	StatefulOperationResult,
@@ -226,14 +227,36 @@ function forwardedMetadata(request: StatefulOperationRequest): {
 		});
 	}
 	const operationRequest = forwardingContext.operationRequest;
-	const connection = forwardedConnection(operationRequest?.connection);
-	const tenantId = forwardedTenantId(operationRequest?.tenantId);
+	if (!isForwardedOperationRequest(operationRequest)) {
+		throw new StatefulOwnerForwardingError({
+			code: "STATEFUL_FORWARDING_CONTEXT_MISSING",
+			message:
+				"Stateful operation forwarding requires the request context's operationRequest; only its connection may be absent.",
+		});
+	}
+	const connection = forwardedConnection(operationRequest.connection);
+	const tenantId = forwardedTenantId(operationRequest.tenantId);
 	return {
 		...(connection !== undefined ? { connection } : {}),
 		...(tenantId !== undefined ? { tenantId } : {}),
-		...(operationRequest?.headers ? { headers: operationRequest.headers } : {}),
-		...(operationRequest?.trace ? { trace: operationRequest.trace } : {}),
+		...(operationRequest.headers ? { headers: operationRequest.headers } : {}),
+		...(operationRequest.trace ? { trace: operationRequest.trace } : {}),
 	};
+}
+
+/**
+ * `forwarding.operationRequest` is optional in the consumer-facing type, so a
+ * type-valid `{ forwarding: {} }` reaches here. It is the request context
+ * itself, not one optional field of it: forwarding without it would send the
+ * operation stripped of its connection, tenant scope, headers and trace. Only
+ * the `connection` inside it may be absent (a connectionless operation), so
+ * a missing or non-object `operationRequest` fails at the source like a
+ * missing forwarding context.
+ */
+function isForwardedOperationRequest(
+	value: StatefulForwardingRuntimeContext["operationRequest"] | null,
+): value is NonNullable<StatefulForwardingRuntimeContext["operationRequest"]> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
