@@ -73,7 +73,7 @@ describe("providerStateBackendLogEvent", () => {
 		const event = await withEnv(
 			{
 				[PROVIDER_STATE_REDIS_URL_ENV]:
-					"redis://apifuse:hunterbramble@provider-state-redis.fusepie-backend.svc.cluster.local:6379",
+					"redis://statebackenduser:hunterbramble@provider-state-redis.fusepie-backend.svc.cluster.local:6379",
 				[PROVIDER_CACHE_REDIS_URL_ENV]: "redis://redis.fusepie-backend.svc.cluster.local:6379",
 			},
 			() => bootEvent(),
@@ -98,7 +98,7 @@ describe("providerStateBackendLogEvent", () => {
 			sdkVersion: "0.0.0-test",
 		});
 		expect(JSON.stringify(event)).not.toContain("hunterbramble");
-		expect(JSON.stringify(event)).not.toContain("apifuse:");
+		expect(JSON.stringify(event)).not.toContain("statebackenduser:");
 	});
 
 	// The apifuse#2144 shape: state silently riding the cache instance, which
