@@ -11,6 +11,11 @@ import {
 	RUNTIME_OPTIONS,
 	toDisplayName,
 } from "../cli/create.js";
+import {
+	PROMPT_ASSET_FILE_PATHS,
+	PROMPT_ASSET_MANIFEST_PATH,
+	PROMPT_ASSET_SYMLINKS,
+} from "../cli/prompt-assets.js";
 
 const SDK_NATIVE_CATEGORY = "sdk-native";
 
@@ -200,6 +205,40 @@ describe("provider create planning", () => {
 
 		const packageJson = findGeneratedFile(plan, "package.json");
 		expect(packageJson?.content).toContain('"sync-assets": "apifuse sync-assets ."');
+		// The install hook keeps the on-disk assets a pure function of the installed
+		// SDK, so an SDK bump that touches only package.json and the lockfile passes
+		// the freshness gate without a hand-run sync.
+		expect(packageJson?.content).toContain(
+			'"postinstall": "apifuse sync-assets . --if-provider-root"',
+		);
+	});
+
+	it("ignores the SDK-managed prompt assets in git and keeps upstream notes tracked", async () => {
+		const cwd = makeTempDir("apifuse-create-managed-asset-ignores-");
+		const plan = await buildProviderCreatePlan(createOptions(), cwd);
+		const gitignore = findGeneratedFile(plan, ".gitignore");
+		const ignored = (gitignore?.content ?? "")
+			.split("\n")
+			.filter((line) => line.length > 0 && !line.startsWith("#"));
+		const managedPaths = [
+			...PROMPT_ASSET_FILE_PATHS,
+			...Object.keys(PROMPT_ASSET_SYMLINKS),
+			PROMPT_ASSET_MANIFEST_PATH,
+		];
+		for (const managedPath of managedPaths) {
+			const covered = ignored.some(
+				(pattern) =>
+					pattern === managedPath ||
+					(pattern.includes("*") &&
+						new RegExp(`^${pattern.replace(/[.]/g, "\\.").replace(/\*/g, "[^/]+")}$`).test(
+							managedPath,
+						)),
+			);
+			expect(covered, `${managedPath} must be git-ignored`).toBe(true);
+		}
+		expect(ignored).not.toContain(".agents");
+		expect(ignored).not.toContain(".agents/skills/upstream-notes");
+		expect(ignored).not.toContain(".apifuse");
 	});
 
 	it("renders standalone ignore files for local-only artifacts", async () => {

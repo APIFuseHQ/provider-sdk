@@ -612,6 +612,10 @@ function renderPackageJson(input: { packageName: string; sdkSpecifier: string })
 			type: "module",
 			main: "./index.ts",
 			scripts: {
+				// Regenerate the SDK-managed prompt assets on every install so they are
+				// a pure function of the installed SDK version (see .gitignore.tpl).
+				// --if-provider-root: a Dockerfile's install layer has no index.ts yet.
+				postinstall: "apifuse sync-assets . --if-provider-root",
 				dev: "apifuse dev .",
 				check: "apifuse check . && bun run type-check",
 				"type-check": "tsc --noEmit",
