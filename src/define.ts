@@ -2383,7 +2383,7 @@ const SMS_ORIGIN_FIELDS_BY_KIND: Record<string, ReadonlySet<string>> = {
 	e164: new Set(["kind", "value", "display"]),
 	nationalServiceCode: new Set(["kind", "country", "value", "display"]),
 };
-const DURATION_RE = /^P(?=\d|T\d)(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$/;
+const DURATION_RE = /^P(?=\d|T\d)(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$/;
 const E164_RE = /^\+[1-9]\d{1,14}$/;
 const ISO_COUNTRY_RE = /^[A-Z]{2}$/;
 const NATIONAL_SERVICE_CODE_RE = /^[0-9]{2,15}$/;

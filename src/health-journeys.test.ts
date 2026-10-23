@@ -66,6 +66,7 @@ describe("health journey authoring", () => {
 			["30s", "PT30S"],
 			["1d", "P1D"],
 			["PT20M", "PT20M"],
+			["P1DT2H", "P1DT2H"],
 		];
 
 		for (const [interval, normalized] of accepted) {
@@ -82,6 +83,9 @@ describe("health journey authoring", () => {
 			["1day", /ISO 8601 duration/],
 			["1 day", /ISO 8601 duration/],
 			["1ms", /ISO 8601 duration/],
+			["P0DT", /ISO 8601 duration/],
+			["P1DT", /ISO 8601 duration/],
+			["PT", /ISO 8601 duration/],
 		];
 		for (const [interval, message] of rejected) {
 			expect(() => every(interval)).toThrow(message);
@@ -631,5 +635,73 @@ describe("health journey authoring", () => {
 				],
 			}),
 		).toThrow(/duplicate matcher id "phone-otp"/);
+	});
+
+	it("requires a time element after T in shared ISO 8601 durations through defineProvider", () => {
+		const matcher = defineSmsOtpMatcher({
+			id: "phone-otp",
+			country: "KR",
+			origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
+			code: { pattern: /([0-9]{4})/ },
+			maxAge: "PT15M",
+			waitTimeout: "P1DT2H",
+			clockSkew: "PT0S",
+		});
+		const buildProvider = (
+			schedule: ReturnType<typeof every>,
+			smsMatcher: ReturnType<typeof defineSmsOtpMatcher>,
+		) =>
+			defineProvider({
+				id: "duration-time-element-provider",
+				version: "1.0.0",
+				runtime: "shared",
+				meta: {
+					displayName: "Journey",
+					descriptionKey: "meta.description",
+					category: "test",
+				},
+				operations: {
+					"send-otp": dummyOperation(),
+				},
+				healthJourneys: [
+					defineHealthJourney({
+						id: "phone-auth",
+						schedule,
+						coversOperations: ["send-otp"],
+						smsMatchers: [smsMatcher],
+						steps: [{ id: "send", operationId: "send-otp", kind: "operation" }],
+						run: async () => ({ status: "ok" }),
+					}),
+				],
+			});
+
+		const provider = buildProvider(every("P1DT2H"), matcher);
+		expect(provider.healthJourneys?.[0]?.schedule.interval).toBe("P1DT2H");
+		expect(provider.healthJourneys?.[0]?.smsMatchers?.[0]).toMatchObject({
+			maxAge: "PT15M",
+			waitTimeout: "P1DT2H",
+			clockSkew: "PT0S",
+		});
+
+		for (const value of ["P0DT", "P1DT", "PT"]) {
+			expect(() => buildProvider({ kind: "interval", interval: value }, matcher)).toThrow(
+				'Provider "duration-time-element-provider" healthJourneys.phone-auth.schedule.interval must be an ISO 8601 duration for example PT8H or PT2M30S.',
+			);
+			expect(() => buildProvider(every("PT8H"), { ...matcher, maxAge: value })).toThrow(
+				"healthJourneys.phone-auth.smsMatchers[0].maxAge must be an ISO 8601 duration for example PT8H or PT2M30S.",
+			);
+			expect(() =>
+				defineSmsOtpMatcher({
+					id: "phone-otp",
+					country: "KR",
+					origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
+					code: { pattern: /([0-9]{4})/ },
+					maxAge: "PT5M",
+					waitTimeout: value,
+				}),
+			).toThrow(
+				"smsOtpMatcher.waitTimeout must be an ISO 8601 duration for example PT8H or PT2M30S.",
+			);
+		}
 	});
 });
