@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
+import { CLIENT_CANCELLED_STATUS } from "../server/client-cancelled.js";
 
 type Observability = {
 	category?: string;
@@ -73,15 +74,17 @@ function outcome(scenario: Scenario) {
 const nativeAborted = outcome(wire["native-aborted"]);
 
 describe("serve classification when the caller closes the connection mid-operation", () => {
-	it("keeps the native_connection_aborted reference result", () => {
+	it("serves native_connection_aborted with the streaming path's client-cancelled status", () => {
 		expect(wire["native-aborted"].log?.code).toBe("native_connection_aborted");
+		// The same constant the streaming path terminalizes a cancelled stream with.
+		expect(CLIENT_CANCELLED_STATUS).toBe(400);
 		expect(nativeAborted).toEqual({
-			status: 502,
+			status: CLIENT_CANCELLED_STATUS,
 			category: "client_cancelled",
 			retryable: false,
 			source: "client",
 			bodyRetryable: false,
-			logStatus: 502,
+			logStatus: CLIENT_CANCELLED_STATUS,
 			logCategory: "client_cancelled",
 			logRetryable: false,
 		});
