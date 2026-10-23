@@ -26,6 +26,7 @@ import {
 	resolveProviderEngineMode,
 } from "../runtime/engine-mode.js";
 import { SDK_VERSION } from "./sdk-version.js";
+import { CLIENT_CANCELLED_STATUS } from "./client-cancelled.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
@@ -44,6 +45,7 @@ import {
 	SDKError,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
+	type TransportError,
 } from "../errors.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
@@ -1859,9 +1861,28 @@ function errorChainHasCode(error: unknown, expected: string): boolean {
 	return false;
 }
 
+// ctx.http and ctx.stealth reject with `transport_cancelled` when their
+// signal aborts, but that signal merges the inbound request's signal with any
+// `signal` the provider passed itself (and, on the stateful route, the
+// forwarding deadline), so the code alone does not say who cancelled. Only an
+// aborted inbound request, the caller closing the connection, makes it the
+// caller's. The native client's `native_connection_aborted` always counts.
+// The observability category and the served status both follow this.
+function isClientCancelledTransportError(
+	error: TransportError,
+	inboundSignal: AbortSignal | undefined,
+): boolean {
+	const code = providerErrorCode(error);
+	return (
+		code === "native_connection_aborted" ||
+		(code === "transport_cancelled" && inboundSignal?.aborted === true)
+	);
+}
+
 function providerObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
+	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails | undefined {
 	const declaredRetryable = sdkOwnsErrorResolution(error)
 		? undefined
@@ -1901,6 +1922,7 @@ function providerObservabilityDetails(
 		return undefined;
 	}
 	const errorCode = providerErrorCode(error);
+	const isClientCancellation = isClientCancelledTransportError(error, inboundSignal);
 	const isProxyPoolCode =
 		errorCode === PROXY_POOL_EXHAUSTED_CODE ||
 		errorCode === PROXY_EDGE_AUTH_REJECTED_CODE ||
@@ -1921,7 +1943,7 @@ function providerObservabilityDetails(
 							errorCode === "native_connection_failed" ||
 							errorCode === "native_connection_closed"
 						? "network"
-						: errorCode === "native_connection_aborted"
+						: isClientCancellation
 							? "client_cancelled"
 							: error.upstreamStatus
 								? categoryForStatus(error.upstreamStatus)
@@ -1959,9 +1981,10 @@ function derivedErrorCategory(
 function classifiedErrorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
+	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails {
 	const effectiveDeclaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
-	const providerDetails = providerObservabilityDetails(error, effectiveDeclaration);
+	const providerDetails = providerObservabilityDetails(error, effectiveDeclaration, inboundSignal);
 	if (providerDetails) return providerDetails;
 
 	if (error instanceof z.ZodError || isValidationError(error)) {
@@ -2010,11 +2033,17 @@ function classifiedErrorObservabilityDetails(
 	};
 }
 
+/**
+ * `inboundSignal` is the served request's own signal (`c.req.raw.signal`).
+ * Pass it wherever the request is known, so a transport cancellation caused by
+ * the caller leaving is told apart from one the provider or a deadline caused.
+ */
 function errorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
+	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails {
-	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode);
+	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode, inboundSignal);
 	const providerObservability = safeProviderErrorObservability(error);
 	return {
 		...details,
@@ -2070,7 +2099,11 @@ function isEmittableErrorStatus(value: unknown): value is ProviderErrorStatus {
 	);
 }
 
-function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): ProviderErrorStatus {
+function toStatusCode(
+	error: unknown,
+	declaredErrorCode?: OperationErrorCode,
+	inboundSignal?: AbortSignal,
+): ProviderErrorStatus {
 	if (error instanceof z.ZodError) {
 		return 400;
 	}
@@ -2091,6 +2124,7 @@ function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): P
 			}
 		}
 		if (isTransportError(error)) {
+			if (isClientCancelledTransportError(error, inboundSignal)) return CLIENT_CANCELLED_STATUS;
 			return providerErrorCode(error) === "transport_timeout" ? 504 : 502;
 		}
 		if (isValidationError(error)) {
@@ -2380,7 +2414,6 @@ type RequestScope = RequestScopeContext & {
 };
 
 const STREAM_CLEANUP_TIMEOUT_MS = 100;
-const CLIENT_CANCELLED_STATUS = 400;
 
 function clientCancelledError(): ProviderError {
 	return new ProviderError("Request stream was cancelled by the client.", {
@@ -2527,6 +2560,8 @@ function createRequestScope(input: {
 	logger?: ProviderServerLogger;
 	setHeader?: (name: string, value: string) => void;
 	declaredErrorCode?: (error: unknown) => OperationErrorCode | undefined;
+	/** The served request's signal; see `errorObservabilityDetails`. */
+	inboundSignal?: AbortSignal;
 }): RequestScope {
 	const sensitiveRegistry = createDiagnosticRedactor([], input.staticSensitiveValues);
 	const redact = (text: string) => redactDiagnosticText(text, sensitiveRegistry.redact);
@@ -2649,7 +2684,9 @@ function createRequestScope(input: {
 		const providerTelemetryHeader = telemetry.toHeaderValue();
 		const declaredErrorCode = error === undefined ? undefined : input.declaredErrorCode?.(error);
 		const errorObservability =
-			error === undefined ? undefined : errorObservabilityDetails(error, declaredErrorCode);
+			error === undefined
+				? undefined
+				: errorObservabilityDetails(error, declaredErrorCode, input.inboundSignal);
 		return {
 			...(providerTelemetryHeader ? { providerTelemetryHeader } : {}),
 			...(errorObservability ? { errorObservability } : {}),
@@ -2750,7 +2787,8 @@ function createRequestScope(input: {
 				const declaredErrorCode =
 					error === undefined ? undefined : input.declaredErrorCode?.(error);
 				const status =
-					outcome.status ?? (error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
+					outcome.status ??
+					(error === undefined ? 200 : toStatusCode(error, declaredErrorCode, input.inboundSignal));
 				finishedResult = headerSnapshot(error);
 				const cost = finishRequestCost(requestCost);
 				try {
@@ -3868,6 +3906,7 @@ function createServerAppWithCapabilityModules(
 			logger,
 			setHeader: (name, value) => c.header(name, value),
 			declaredErrorCode: (error) => declaredErrorCodeFor(error, operationId, operationErrorCodes),
+			inboundSignal: c.req.raw.signal,
 		});
 		try {
 			if (!options.internalOperationExecutor) {
@@ -4018,7 +4057,7 @@ function createServerAppWithCapabilityModules(
 			});
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operationId, operationErrorCodes);
-			const status = toStatusCode(error, declaredErrorCode);
+			const status = toStatusCode(error, declaredErrorCode, c.req.raw.signal);
 			if (
 				isProviderError(error) &&
 				providerErrorCode(error) === "STATEFUL_FORWARDING_REPLAY_CACHE_FULL"
@@ -4030,7 +4069,11 @@ function createServerAppWithCapabilityModules(
 				...(operationId ? { route: operationId, operationId } : {}),
 				...(requestId ? { requestId } : {}),
 			});
-			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
+			const observabilityDetails = errorObservabilityDetails(
+				error,
+				declaredErrorCode,
+				c.req.raw.signal,
+			);
 			const response = c.json(
 				toErrorResponse(
 					error,
@@ -4067,6 +4110,7 @@ function createServerAppWithCapabilityModules(
 			logger,
 			setHeader: (name, value) => c.header(name, value),
 			declaredErrorCode: (error) => declaredErrorCodeFor(error, operation, operationErrorCodes),
+			inboundSignal: c.req.raw.signal,
 		});
 		try {
 			rawBody = await c.req.raw
@@ -4119,10 +4163,14 @@ function createServerAppWithCapabilityModules(
 			});
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operation, operationErrorCodes);
-			const status = toStatusCode(error, declaredErrorCode);
+			const status = toStatusCode(error, declaredErrorCode, c.req.raw.signal);
 			const requestId = extractRequestId(rawBody);
 			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
-			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
+			const observabilityDetails = errorObservabilityDetails(
+				error,
+				declaredErrorCode,
+				c.req.raw.signal,
+			);
 			const response = c.json(
 				toErrorResponse(
 					error,
@@ -4175,6 +4223,7 @@ function createServerAppWithCapabilityModules(
 				headers: Object.fromEntries(c.req.raw.headers.entries()),
 				logger,
 				setHeader: (name, value) => c.header(name, value),
+				inboundSignal: c.req.raw.signal,
 			});
 			try {
 				rawBody = await c.req.raw
@@ -4223,10 +4272,10 @@ function createServerAppWithCapabilityModules(
 					status: response.status,
 				});
 			} catch (error) {
-				const status = toStatusCode(error);
+				const status = toStatusCode(error, undefined, c.req.raw.signal);
 				const requestId = extractRequestId(rawBody);
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
-				const observabilityDetails = errorObservabilityDetails(error);
+				const observabilityDetails = errorObservabilityDetails(error, undefined, c.req.raw.signal);
 				const response = c.json(
 					toErrorResponse(
 						error,
