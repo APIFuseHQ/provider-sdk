@@ -833,7 +833,7 @@ SDK observability is emitted separately in the
 `X-ApiFuse-Error-Observability` response header as compact, single-line JSON:
 
 ```json
-{"category":"upstream_http","taxonomyVersion":"2026-05-26","retryable":true,"upstreamStatus":502}
+{"category":"upstream_http","taxonomyVersion":"2026-10-23","retryable":true,"upstreamStatus":502}
 ```
 
 Treat this header as telemetry, not as provider-controlled public error detail.

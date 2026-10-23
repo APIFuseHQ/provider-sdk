@@ -1619,8 +1619,8 @@ function zodDetails(
 // Category-level projection with code-aware honesty overrides: a missing
 // deployment secret is an APIFuse-side defect even though its category
 // (credential_unavailable) usually means a caller credential problem, an
-// internal stateful-routing deadline is APIFuse-owned despite its timeout
-// category, and the built-in upstream failure families keep their upstream
+// internal stateful-routing deadline is APIFuse-owned whatever category it
+// carries, and the built-in upstream failure families keep their upstream
 // attribution even under an explicit non-upstream category. An unset category
 // needs no override: a registered upstream code already carries its category
 // (SDK_UPSTREAM_ERROR_CODE_REGISTRY), and the source follows from it.
@@ -2061,7 +2061,7 @@ function classifiedErrorObservabilityDetails(
 
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return {
-			category: "timeout",
+			category: "stateful_forwarding_deadline",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: false,
 		};

@@ -2139,7 +2139,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "upstream_http",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -2226,7 +2226,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.source).toBe("upstream_rule");
 		const observability = JSON.parse(response.headers.get("X-ApiFuse-Error-Observability") ?? "{}");
 		expect(observability.category).toBe("upstream_rejected");
-		expect(observability.taxonomyVersion).toBe("2026-08-07");
+		expect(observability.taxonomyVersion).toBe("2026-10-23");
 	});
 
 	it("classifies operation-declared rejection statuses as upstream_rejected", async () => {
@@ -2333,7 +2333,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "timeout",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
 	});
@@ -2418,7 +2418,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "network",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
 	});
@@ -2445,7 +2445,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "provider_error",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -2466,7 +2466,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details).not.toHaveProperty("upstreamStatus");
 		expect(errorObservability(response)).toEqual({
 			category: "upstream_http",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 			upstreamStatus: 502,
 		});
@@ -2485,7 +2485,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details).toEqual({ retryable: true, providerPolicy: "independent" });
 		expect(errorObservability(response)).toEqual({
 			category: "upstream_http",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 			upstreamStatus: 502,
 		});
@@ -2531,7 +2531,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "credential_expired",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
 	});
@@ -2572,7 +2572,7 @@ describe("provider HTTP server", () => {
 		expect(response.status).toBe(401);
 		expect(errorObservability(response)).toEqual({
 			category: "credential_expired",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 			providerObservability,
 		});
@@ -2603,7 +2603,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "credential_expired",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -2630,7 +2630,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "upstream_http",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 			upstreamStatus: 400,
 		});
@@ -2659,7 +2659,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "anti_bot_blocked",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -2687,7 +2687,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "proxy_pool",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
 	});
@@ -2856,7 +2856,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details?.errorClass).toBe("Error");
 		expect(errorObservability(response)).toEqual({
 			category: "internal_error",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -2916,7 +2916,7 @@ describe("provider HTTP server", () => {
 			expect(bodyText).not.toContain('"stack"');
 			expect(errorObservability(response)).toEqual({
 				category: "internal_error",
-				taxonomyVersion: "2026-08-07",
+				taxonomyVersion: "2026-10-23",
 				retryable: false,
 			});
 
@@ -4022,7 +4022,7 @@ describe("provider HTTP server", () => {
 		);
 		expect(errorObservability(response)).toEqual({
 			category: "input_validation",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -4044,7 +4044,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "output_validation",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -4122,7 +4122,7 @@ describe("operation-declared error resolution", () => {
 		expect(body.error.retryable).toBe(true);
 		expect(header).toEqual({
 			category: "upstream_schema_drift",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
 		expect(events).toHaveLength(1);
@@ -4450,7 +4450,7 @@ describe("operation-declared error resolution", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "provider_error",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: false,
 		});
 	});
@@ -4708,7 +4708,7 @@ describe("SDK-owned secret enforcement over HTTP", () => {
 			expect(body.error.details).toBeUndefined();
 			expect(errorObservability(response)).toEqual({
 				category: "credential_unavailable",
-				taxonomyVersion: "2026-08-07",
+				taxonomyVersion: "2026-10-23",
 				retryable: false,
 			});
 
