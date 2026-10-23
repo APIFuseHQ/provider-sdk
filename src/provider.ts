@@ -327,6 +327,8 @@ export type {
 	ProviderLocaleKey,
 	ProviderLocaleKeyInput,
 	ProviderLogoProfile,
+	NodemavenConnectionType,
+	ProviderProxyNodemavenOptions,
 	ProviderProxyPolicy,
 	ProviderPublicConnectionMode,
 	ProviderPublicProfile,

@@ -133,6 +133,9 @@ export function invalidateResolverSolution(resolver: ResolverContext, challenge:
 // @public (undocumented)
 type Iso3166Alpha2CountryCode = Uppercase<string>;
 
+// @public
+type NodemavenConnectionType = "residential" | "mobile";
+
 // @public (undocumented)
 interface ProviderCache {
     // (undocumented)
@@ -262,6 +265,14 @@ type ProviderChallengeKind = ProviderChallenge["kind"];
 // @public (undocumented)
 type ProviderProxyMode = "disabled" | "optional" | "required";
 
+// @public
+interface ProviderProxyNodemavenOptions {
+    isp?: readonly string[];
+    ttlSeconds?: number;
+    // Warning: (ae-forgotten-export) The symbol "NodemavenConnectionType" needs to be exported by the entry point resolver-public.d.ts
+    type?: NodemavenConnectionType;
+}
+
 // @public (undocumented)
 interface ProviderProxyPolicy {
     // (undocumented)
@@ -272,6 +283,9 @@ interface ProviderProxyPolicy {
     };
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyMode" needs to be exported by the entry point resolver-public.d.ts
     mode: ProviderProxyMode;
+    // Warning: (ae-forgotten-export) The symbol "ProviderProxyNodemavenOptions" needs to be exported by the entry point resolver-public.d.ts
+    nodemaven?: ProviderProxyNodemavenOptions;
+    operations?: readonly string[];
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point resolver-public.d.ts
     //
     // @deprecated (undocumented)
@@ -638,8 +652,8 @@ interface TraceRecorder {
 // dist/runtime/resolver.d.ts:68:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:70:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
 // dist/types.d.ts:357:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:947:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:952:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:983:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:988:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 
 // (No @packageDocumentation comment for this package)
 

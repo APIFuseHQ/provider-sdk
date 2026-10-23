@@ -3807,6 +3807,9 @@ export type NativeVendorSkipTelemetryEvent = {
 export const NEEDS_INPUT_STATUS: "needs_input";
 
 // @public
+export type NodemavenConnectionType = "residential" | "mobile";
+
+// @public
 export function noMedia(reason: string): NoMediaDeclaration;
 
 // @public
@@ -5669,6 +5672,13 @@ export type ProviderProxyConfig = boolean | ProviderProxyPolicy;
 // @public (undocumented)
 export type ProviderProxyMode = "disabled" | "optional" | "required";
 
+// @public
+export interface ProviderProxyNodemavenOptions {
+    isp?: readonly string[];
+    ttlSeconds?: number;
+    type?: NodemavenConnectionType;
+}
+
 // @public (undocumented)
 export interface ProviderProxyPolicy {
     // (undocumented)
@@ -5678,6 +5688,8 @@ export interface ProviderProxyPolicy {
         city?: string;
     };
     mode: ProviderProxyMode;
+    nodemaven?: ProviderProxyNodemavenOptions;
+    operations?: readonly string[];
     // @deprecated (undocumented)
     provider?: ProviderProxyProvider;
     providers?: ProviderProxyProvider[];
@@ -8842,17 +8854,17 @@ export { z }
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:67:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:71:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:174:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:191:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:199:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:272:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:184:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:201:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:209:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:282:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1757:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1845:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1853:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1854:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1806:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1894:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1902:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1903:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2090:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
