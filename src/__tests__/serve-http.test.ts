@@ -15,6 +15,7 @@ import {
 	TransportError,
 	ValidationError,
 } from "../errors.js";
+import { NativeNetworkError } from "../runtime/native-network.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
 import * as diagnosticRedactor from "../runtime/diagnostic-redactor.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
@@ -510,6 +511,25 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 						fix: "Increase timeout option",
 						details: { next_action: "retry_with_longer_timeout" },
 					});
+				},
+			},
+			nativeConnectionTimeout: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new NativeNetworkError("Native connection timed out", "native_connection_timeout");
+				},
+			},
+			nativeConnectionIdleTimeout: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new NativeNetworkError(
+						"Native connection idle timeout",
+						"native_connection_idle_timeout",
+					);
 				},
 			},
 			transportNetwork: {
@@ -2309,6 +2329,64 @@ describe("provider HTTP server", () => {
 				source: "upstream_failure",
 				fix: "Increase timeout option",
 				details: { next_action: "retry_with_longer_timeout" },
+			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "timeout",
+			taxonomyVersion: "2026-08-07",
+			retryable: true,
+		});
+	});
+
+	it("serves a native connect timeout like transport_timeout: 504 and Request timed out", async () => {
+		const post = (operation: string, requestId: string) =>
+			app.request(`/v1/${operation}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId, input: { value: "hello" } }),
+			});
+		const native = await post("nativeConnectionTimeout", "req_native_timeout");
+		const transport = await post("transportTimeout", "req_timeout");
+
+		expect(native.status).toBe(504);
+		expect(native.status).toBe(transport.status);
+		expect(await native.json()).toEqual({
+			error: {
+				code: "native_connection_timeout",
+				message: "Request timed out",
+				requestId: "req_native_timeout",
+				retryable: true,
+				source: "upstream_failure",
+			},
+		});
+		// The category was already timeout; it does not change.
+		expect(errorObservability(native)).toEqual({
+			category: "timeout",
+			taxonomyVersion: "2026-08-07",
+			retryable: true,
+		});
+		expect(errorObservability(native)).toEqual(errorObservability(transport));
+		const transportError = (await transport.json()).error;
+		expect(transportError.message).toBe("Request timed out");
+		expect(transportError.source).toBe("upstream_failure");
+		expect(transportError.retryable).toBe(true);
+	});
+
+	it("keeps a native idle read timeout on 502 Upstream request failed", async () => {
+		const response = await app.request("/v1/nativeConnectionIdleTimeout", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_native_idle", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(502);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "native_connection_idle_timeout",
+				message: "Upstream request failed",
+				requestId: "req_native_idle",
+				retryable: true,
+				source: "upstream_failure",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
