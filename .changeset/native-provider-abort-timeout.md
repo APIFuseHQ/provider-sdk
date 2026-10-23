@@ -1,0 +1,5 @@
+---
+"@apifuse/provider-sdk": patch
+---
+
+Classify a `native_connection_aborted` error from `ctx.native` by its abort reason. Serve never hands the inbound request's signal to the native client, so this code only means a `signal` the provider passed itself aborted the connect. The native client now keeps that signal's reason as the error's `cause`. When the reason is a `TimeoutError` (`AbortSignal.timeout`), the request is classified, served and worded like `transport_timeout`: category `timeout`, status 504, source `upstream_failure`, `retryable: true`, message "Request timed out", while the body keeps the `native_connection_aborted` code. Any other reason is classified like a `transport_cancelled` the provider's own signal caused on `ctx.http`: category `upstream_http`, status 502, source `upstream_failure`, `retryable: false`, instead of `client_cancelled` with status 400 and source `client`. A caller cancellation (`transport_cancelled` while the inbound request is aborted), `native_connection_timeout`, `native_connection_idle_timeout`, `native_connection_failed` and `native_connection_closed` are unchanged.

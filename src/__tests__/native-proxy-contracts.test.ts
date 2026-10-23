@@ -507,9 +507,10 @@ describe("native server error classification", () => {
 		}
 	});
 
-	it("classifies every native transport error code without falling through to upstream_http", async () => {
+	it("classifies every native transport error code; only a provider's own abort reaches upstream_http", async () => {
 		const expected = {
-			native_connection_aborted: "client_cancelled",
+			// Like ctx.http's transport_cancelled from the provider's own signal.
+			native_connection_aborted: "upstream_http",
 			native_connection_closed: "network",
 			native_connection_failed: "network",
 			native_connection_idle_timeout: "timeout",
@@ -551,5 +552,83 @@ describe("native server error classification", () => {
 			});
 			expect(errorCategory(response)).toBe(category);
 		}
+	});
+
+	it("serves native_connection_aborted by its cause: a TimeoutError reason is a 504 timeout", async () => {
+		const timedOut = new DOMException("The operation timed out.", "TimeoutError");
+		const aborted = new DOMException("The operation was aborted.", "AbortError");
+		const causes = {
+			"timeout-reason": timedOut,
+			"abort-reason": aborted,
+			"error-reason": new Error("provider gave up"),
+			"no-reason": undefined,
+		} as const;
+		const operations = Object.fromEntries(
+			Object.entries(causes).map(([id, cause]) => [
+				id,
+				{
+					riskClass: "read" as const,
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						throw new NativeNetworkError(
+							"Native connection was aborted",
+							"native_connection_aborted",
+							cause,
+						);
+					},
+				},
+			]),
+		);
+		const provider = createProviderDefinitionDouble({ id: "native-abort-cause", operations });
+		const app = createServerApp(provider, { logger: () => undefined });
+		const served: Record<string, unknown> = {};
+		for (const id of Object.keys(causes)) {
+			const response = await app.request(`/v1/${id}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: `request-${id}`, input: {} }),
+			});
+			const body = (await response.json()) as {
+				error: { code: string; message: string; source: string; retryable: boolean };
+			};
+			served[id] = {
+				status: response.status,
+				observability: JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null"),
+				code: body.error.code,
+				message: body.error.message,
+				source: body.error.source,
+				retryable: body.error.retryable,
+			};
+		}
+		const providerAbort = {
+			status: 502,
+			observability: {
+				category: "upstream_http",
+				taxonomyVersion: expect.any(String),
+				retryable: false,
+			},
+			code: "native_connection_aborted",
+			message: "Upstream request failed",
+			source: "upstream_failure",
+			retryable: false,
+		};
+		expect(served).toEqual({
+			"timeout-reason": {
+				status: 504,
+				observability: {
+					category: "timeout",
+					taxonomyVersion: expect.any(String),
+					retryable: true,
+				},
+				code: "native_connection_aborted",
+				message: "Request timed out",
+				source: "upstream_failure",
+				retryable: true,
+			},
+			"abort-reason": providerAbort,
+			"error-reason": providerAbort,
+			"no-reason": providerAbort,
+		});
 	});
 });

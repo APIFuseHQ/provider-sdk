@@ -26,11 +26,7 @@ type Scenario = {
 	log?: FailureLog;
 };
 type Wire = Record<
-	| "http-sequential"
-	| "stealth-sequential"
-	| "native-aborted"
-	| "http-provider-abort"
-	| "http-upstream-503",
+	"http-sequential" | "stealth-sequential" | "http-provider-abort" | "http-upstream-503",
 	Scenario
 >;
 
@@ -71,27 +67,22 @@ function outcome(scenario: Scenario) {
 	};
 }
 
-const nativeAborted = outcome(wire["native-aborted"]);
+// The same constant the streaming path terminalizes a cancelled stream with.
+const clientCancelled = {
+	status: CLIENT_CANCELLED_STATUS,
+	category: "client_cancelled",
+	retryable: false,
+	source: "client",
+	bodyRetryable: false,
+	logStatus: CLIENT_CANCELLED_STATUS,
+	logCategory: "client_cancelled",
+	logRetryable: false,
+};
 
 describe("serve classification when the caller closes the connection mid-operation", () => {
-	it("serves native_connection_aborted with the streaming path's client-cancelled status", () => {
-		expect(wire["native-aborted"].log?.code).toBe("native_connection_aborted");
-		// The same constant the streaming path terminalizes a cancelled stream with.
-		expect(CLIENT_CANCELLED_STATUS).toBe(400);
-		expect(nativeAborted).toEqual({
-			status: CLIENT_CANCELLED_STATUS,
-			category: "client_cancelled",
-			retryable: false,
-			source: "client",
-			bodyRetryable: false,
-			logStatus: CLIENT_CANCELLED_STATUS,
-			logCategory: "client_cancelled",
-			logRetryable: false,
-		});
-	});
-
 	for (const scenario of ["http-sequential", "stealth-sequential"] as const) {
-		it(`classifies ${scenario}'s transport_cancelled like native_connection_aborted`, () => {
+		it(`serves ${scenario}'s transport_cancelled with the streaming path's client-cancelled status`, () => {
+			expect(CLIENT_CANCELLED_STATUS).toBe(400);
 			const result = wire[scenario];
 			// The cancellation really came from the inbound connection closing
 			// while the second sequential upstream read was in flight.
@@ -99,9 +90,8 @@ describe("serve classification when the caller closes the connection mid-operati
 			expect(result.log?.code).toBe("transport_cancelled");
 			expect(result.served?.body.error?.code).toBe("transport_cancelled");
 			expect(result.log?.causeChain?.[0]?.errorClass).toBe("AbortError");
-			// Same category, source, served status and retryability as the
-			// native cancellation branch; never upstream_http/upstream_failure.
-			expect(outcome(result)).toEqual(nativeAborted);
+			// Never upstream_http/upstream_failure.
+			expect(outcome(result)).toEqual(clientCancelled);
 			expect(result.served?.observability?.upstreamStatus).toBeUndefined();
 		});
 	}

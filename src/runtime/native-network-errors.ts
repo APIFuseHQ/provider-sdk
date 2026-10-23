@@ -27,6 +27,10 @@ export class NativeNetworkError extends TransportError {
 			status: 0,
 			...(cause ? { cause } : {}),
 			...(isEgressPolicyFailure ? { category: "provider_error" as const, retryable: false } : {}),
+			// A cancellation is not retryable as such, like ctx.http's
+			// `transport_cancelled`. Serve still reports an `AbortSignal.timeout`
+			// abort as a retryable timeout (isProviderTimeoutAbortTransportError).
+			...(code === "native_connection_aborted" ? { retryable: false } : {}),
 		});
 		this.name = "NativeNetworkError";
 	}

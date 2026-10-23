@@ -580,8 +580,28 @@ function remainingMs(deadline: Deadline): number | undefined {
 	return deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
 }
 
-function abortError(): NativeNetworkError {
-	return new NativeNetworkError("Native connection was aborted", "native_connection_aborted");
+// The only signal a native connection watches is the one the provider passed
+// itself (serve never hands it the inbound request's signal). Its reason is kept
+// as the standard `cause`, the way ctx.http keeps it under `transport_cancelled`,
+// so serve can tell an `AbortSignal.timeout` apart from any other abort.
+function abortError(signal: AbortSignal | undefined): NativeNetworkError {
+	return new NativeNetworkError(
+		"Native connection was aborted",
+		"native_connection_aborted",
+		abortReasonCause(signal),
+	);
+}
+
+// Runs inside abort listeners, so it must not throw: a listener that throws
+// would leave the pending connect unsettled.
+function abortReasonCause(signal: AbortSignal | undefined): Error | undefined {
+	try {
+		const reason: unknown = signal?.reason;
+		if (reason === undefined) return undefined;
+		return reason instanceof Error ? reason : new Error(String(reason));
+	} catch {
+		return undefined;
+	}
 }
 
 function timeoutError(): NativeNetworkError {
@@ -593,7 +613,7 @@ function failedError(cause?: Error): NativeNetworkError {
 }
 
 function assertCanStart(signal: AbortSignal | undefined, deadline: Deadline): void {
-	if (signal?.aborted) throw abortError();
+	if (signal?.aborted) throw abortError(signal);
 	if (deadline !== undefined && deadline <= Date.now()) throw timeoutError();
 }
 
@@ -624,7 +644,7 @@ async function waitForSocketEvent(
 		const onReady = () => finish();
 		const onError = (cause: Error) => finish(failedError(cause));
 		const onClose = () => finish(failedError());
-		const onAbort = () => finish(abortError());
+		const onAbort = () => finish(abortError(signal));
 
 		socket.once(event, onReady);
 		socket.once("error", onError);
@@ -819,7 +839,7 @@ async function waitForSocksHandshake(
 			} else if (socket) resolve(socket);
 			else reject(failedError());
 		};
-		const onAbort = () => finish(abortError());
+		const onAbort = () => finish(abortError(signal));
 		signal?.addEventListener("abort", onAbort, { once: true });
 		const remaining = remainingMs(deadline);
 		if (remaining !== undefined) timer = setTimeout(() => finish(timeoutError()), remaining);
@@ -926,7 +946,7 @@ async function waitForConnectResponse(
 		const onError = (cause: Error) => finish(failedError(sanitizeFailure(cause)));
 		const onClose = () =>
 			finish(failedError(sanitizeFailure(new Error("HTTP CONNECT proxy closed before response"))));
-		const onAbort = () => finish(abortError());
+		const onAbort = () => finish(abortError(signal));
 		const onData = (chunk: Buffer) => {
 			buffered = Buffer.concat([buffered, chunk]);
 			if (buffered.length > 64 * 1024) {
@@ -1289,7 +1309,7 @@ async function waitForProxyResolution<T>(
 			if (error !== undefined) reject(error);
 			else resolve(value as T);
 		};
-		const onAbort = () => finish(undefined, abortError());
+		const onAbort = () => finish(undefined, abortError(signal));
 		signal?.addEventListener("abort", onAbort, { once: true });
 		const remaining = remainingMs(deadline);
 		if (remaining !== undefined) {

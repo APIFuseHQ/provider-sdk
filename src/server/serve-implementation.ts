@@ -1866,17 +1866,35 @@ function errorChainHasCode(error: unknown, expected: string): boolean {
 // `signal` the provider passed itself (and, on the stateful route, the
 // forwarding deadline), so the code alone does not say who cancelled. Only an
 // aborted inbound request, the caller closing the connection, makes it the
-// caller's. The native client's `native_connection_aborted` always counts.
+// caller's. The native client's `native_connection_aborted` never does: serve
+// does not hand the inbound signal to the native client, so only a `signal`
+// the provider passed itself aborts it, and it is classified like ctx.http's
+// provider-side `transport_cancelled`.
 // The observability category and the served status both follow this.
 function isClientCancelledTransportError(
 	error: TransportError,
 	inboundSignal: AbortSignal | undefined,
 ): boolean {
 	const code = providerErrorCode(error);
-	return (
-		code === "native_connection_aborted" ||
-		(code === "transport_cancelled" && inboundSignal?.aborted === true)
-	);
+	return code === "transport_cancelled" && inboundSignal?.aborted === true;
+}
+
+// ctx.native rejects with `native_connection_aborted` only when a `signal` the
+// provider passed itself aborts, and keeps the abort's reason as the cause. A
+// `TimeoutError` reason (`AbortSignal.timeout`) is the provider's own time limit
+// running out, so it is classified, served and worded like `transport_timeout`:
+// category timeout, status 504, retryable, "Request timed out". The body keeps
+// the `native_connection_aborted` code. The category and the retryability follow
+// this one predicate, and so do the served status and the public message through
+// isServedAsTransportTimeout.
+function isProviderTimeoutAbortTransportError(error: ProviderError): boolean {
+	if (providerErrorCode(error) !== "native_connection_aborted") return false;
+	try {
+		const cause: unknown = error.cause;
+		return cause instanceof Error && cause.name === "TimeoutError";
+	} catch {
+		return false;
+	}
 }
 
 function providerObservabilityDetails(
@@ -1923,6 +1941,7 @@ function providerObservabilityDetails(
 	}
 	const errorCode = providerErrorCode(error);
 	const isClientCancellation = isClientCancelledTransportError(error, inboundSignal);
+	const isProviderTimeoutAbort = isProviderTimeoutAbortTransportError(error);
 	const isProxyPoolCode =
 		errorCode === PROXY_POOL_EXHAUSTED_CODE ||
 		errorCode === PROXY_EDGE_AUTH_REJECTED_CODE ||
@@ -1937,7 +1956,8 @@ function providerObservabilityDetails(
 				? "anti_bot_blocked"
 				: errorCode === "transport_timeout" ||
 						errorCode === "native_connection_timeout" ||
-						errorCode === "native_connection_idle_timeout"
+						errorCode === "native_connection_idle_timeout" ||
+						isProviderTimeoutAbort
 					? "timeout"
 					: errorCode === "transport_network_error" ||
 							errorCode === "native_connection_failed" ||
@@ -1951,11 +1971,14 @@ function providerObservabilityDetails(
 	return {
 		category,
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-		retryable:
-			providerErrorOption(error, "retryable") ??
-			(category === "upstream_http" && error.upstreamStatus
-				? error.upstreamStatus >= 500
-				: isRetryableCategory(category)),
+		// The native abort error itself says retryable: false, like ctx.http's
+		// cancellation; its timeout form is retryable like transport_timeout.
+		retryable: isProviderTimeoutAbort
+			? true
+			: (providerErrorOption(error, "retryable") ??
+				(category === "upstream_http" && error.upstreamStatus
+					? error.upstreamStatus >= 500
+					: isRetryableCategory(category))),
 		...(error.upstreamStatus ? { upstreamStatus: error.upstreamStatus } : {}),
 	};
 }
@@ -2066,11 +2089,18 @@ function responseWithErrorObservability(
 
 // ctx.native's connect deadline (`timeoutMs`) expiring rejects with
 // `native_connection_timeout`, the native client's counterpart of ctx.http's
-// `transport_timeout`. Both are served alike: status 504 and the public message
-// "Request timed out". The category (timeout) was already the same for both.
+// `transport_timeout`, and a provider's own `AbortSignal.timeout` aborting
+// ctx.native rejects with `native_connection_aborted` carrying a TimeoutError
+// cause (isProviderTimeoutAbortTransportError). All three are served alike:
+// status 504 and the public message "Request timed out". Their category is
+// timeout too.
 function isServedAsTransportTimeout(error: ProviderError): boolean {
 	const code = providerErrorCode(error);
-	return code === "transport_timeout" || code === "native_connection_timeout";
+	return (
+		code === "transport_timeout" ||
+		code === "native_connection_timeout" ||
+		isProviderTimeoutAbortTransportError(error)
+	);
 }
 
 function publicProviderErrorMessage(error: ProviderError): string {
