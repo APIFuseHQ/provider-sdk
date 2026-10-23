@@ -9,7 +9,7 @@ type Observability = {
 	upstreamStatus?: number;
 };
 type ErrorBody = {
-	error?: { code?: string; source?: string; retryable?: boolean };
+	error?: { code?: string; message?: string; source?: string; retryable?: boolean };
 };
 type CauseFrame = { errorClass?: string; message?: string };
 type FailureLog = {
@@ -96,30 +96,31 @@ describe("serve classification when the caller closes the connection mid-operati
 		});
 	}
 
-	it("keeps a provider-initiated transport_cancelled off client_cancelled while the caller stays connected", () => {
+	it("classifies a provider-initiated AbortSignal.timeout transport_cancelled as timeout while the caller stays connected", () => {
 		const result = wire["http-provider-abort"];
 		// Same code as a caller cancellation, but the provider's own
 		// AbortSignal.timeout fired and the inbound connection never closed.
 		expect(result.clientAborted).toBe(false);
 		expect(result.log?.code).toBe("transport_cancelled");
 		expect(result.served?.body.error?.code).toBe("transport_cancelled");
+		expect(result.served?.body.error?.message).toBe("Request timed out");
 		expect(result.log?.causeChain?.[0]?.errorClass).toBe("TimeoutError");
-		// The classification transport_cancelled had before client_cancelled
-		// existed for it: upstream_http with no upstream status.
+		// The provider's own time limit: classified like the timeout option's
+		// transport_timeout, never client_cancelled.
 		expect(result.served?.observability).toEqual({
-			category: "upstream_http",
+			category: "timeout",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: false,
+			retryable: true,
 		});
 		expect(outcome(result)).toEqual({
-			status: 502,
-			category: "upstream_http",
-			retryable: false,
+			status: 504,
+			category: "timeout",
+			retryable: true,
 			source: "upstream_failure",
-			bodyRetryable: false,
-			logStatus: 502,
-			logCategory: "upstream_http",
-			logRetryable: false,
+			bodyRetryable: true,
+			logStatus: 504,
+			logCategory: "timeout",
+			logRetryable: true,
 		});
 	});
 

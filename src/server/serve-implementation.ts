@@ -1746,6 +1746,7 @@ function toErrorResponse(
 	observabilityDetails: ErrorObservabilityDetails,
 	redact?: DiagnosticRedactor,
 	localization?: ErrorEnvelopeLocalization,
+	inboundSignal?: AbortSignal,
 ): OperationErrorResponse {
 	const observability = observabilityDetails;
 	const source = publicErrorSource(error, observability.category);
@@ -1770,7 +1771,7 @@ function toErrorResponse(
 			typeof literalFix === "string" && literalFix.length > 0 ? literalFix : undefined,
 			localization,
 		);
-		const literalMessage = publicProviderErrorMessage(error);
+		const literalMessage = publicProviderErrorMessage(error, inboundSignal);
 		return {
 			error: {
 				code: providerErrorCode(error) ?? "provider_error",
@@ -1877,9 +1878,10 @@ function errorChainHasCode(error: unknown, expected: string): boolean {
 // `signal` a provider passes may be it or derive from it (an operationExecutor's
 // `signal`, `ctx.auth.signal`), so an aborted inbound request makes it the
 // caller's too, and otherwise it is classified like ctx.http's provider-side
-// `transport_cancelled`. A `TimeoutError` reason stays a timeout either way: the
-// provider's own time limit fired first (isProviderTimeoutAbortTransportError).
-// The observability category and the served status both follow this.
+// `transport_cancelled`. For the native client a `TimeoutError` reason stays a
+// timeout either way: the provider's own time limit fired first
+// (isProviderTimeoutAbortTransportError). The observability category and the
+// served status both follow this.
 function isClientCancelledTransportError(
 	error: TransportError,
 	inboundSignal: AbortSignal | undefined,
@@ -1888,20 +1890,37 @@ function isClientCancelledTransportError(
 	const code = providerErrorCode(error);
 	return (
 		code === "transport_cancelled" ||
-		(code === "native_connection_aborted" && !isProviderTimeoutAbortTransportError(error))
+		(code === "native_connection_aborted" &&
+			!isProviderTimeoutAbortTransportError(error, inboundSignal))
 	);
 }
 
 // ctx.native rejects with `native_connection_aborted` only when a `signal` the
-// provider passed aborts, and keeps the abort's reason as the cause. A
-// `TimeoutError` reason (`AbortSignal.timeout`) is the provider's own time limit
-// running out, so it is classified, served and worded like `transport_timeout`:
-// category timeout, status 504, retryable, "Request timed out". The body keeps
-// the `native_connection_aborted` code. The category and the retryability follow
-// this one predicate, and so do the served status and the public message through
+// provider passed aborts, and keeps the abort's reason as the cause. A provider
+// that bounds its own ctx.http request with `signal: AbortSignal.timeout(ms)`
+// gets `transport_cancelled`, and the transport keeps that signal's reason as
+// the cause too. A `TimeoutError` reason (`AbortSignal.timeout`) is the
+// provider's own time limit running out, the outcome the `timeout` request
+// option reports as `transport_timeout`, so it is classified, served and worded
+// like one: category timeout, status 504, retryable, "Request timed out". The
+// body keeps the `native_connection_aborted` or `transport_cancelled` code. A
+// `transport_cancelled` whose inbound request has aborted stays the caller's
+// (isClientCancelledTransportError), and on the stateful owner route a
+// forwarded deadline's TimeoutError never gets here: the route has already
+// rethrown it as StatefulRoutingDeadlineError. Any other reason keeps the
+// default classification. The category and the retryability follow this one
+// predicate, and so do the served status and the public message through
 // isServedAsTransportTimeout.
-function isProviderTimeoutAbortTransportError(error: ProviderError): boolean {
-	if (providerErrorCode(error) !== "native_connection_aborted") return false;
+function isProviderTimeoutAbortTransportError(
+	error: ProviderError,
+	inboundSignal: AbortSignal | undefined,
+): boolean {
+	const code = providerErrorCode(error);
+	if (code === "transport_cancelled") {
+		if (inboundSignal?.aborted === true) return false;
+	} else if (code !== "native_connection_aborted") {
+		return false;
+	}
 	try {
 		const cause: unknown = error.cause;
 		return cause instanceof Error && cause.name === "TimeoutError";
@@ -1954,7 +1973,7 @@ function providerObservabilityDetails(
 	}
 	const errorCode = providerErrorCode(error);
 	const isClientCancellation = isClientCancelledTransportError(error, inboundSignal);
-	const isProviderTimeoutAbort = isProviderTimeoutAbortTransportError(error);
+	const isProviderTimeoutAbort = isProviderTimeoutAbortTransportError(error, inboundSignal);
 	const isProxyPoolCode =
 		errorCode === PROXY_POOL_EXHAUSTED_CODE ||
 		errorCode === PROXY_EDGE_AUTH_REJECTED_CODE ||
@@ -1984,8 +2003,8 @@ function providerObservabilityDetails(
 	return {
 		category,
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-		// The native abort error itself says retryable: false, like ctx.http's
-		// cancellation; its timeout form is retryable like transport_timeout.
+		// The native abort error and ctx.http's cancellation both say
+		// retryable: false; their timeout form is retryable like transport_timeout.
 		retryable: isProviderTimeoutAbort
 			? true
 			: (providerErrorOption(error, "retryable") ??
@@ -2103,20 +2122,23 @@ function responseWithErrorObservability(
 // ctx.native's connect deadline (`timeoutMs`) expiring rejects with
 // `native_connection_timeout`, the native client's counterpart of ctx.http's
 // `transport_timeout`, and a provider's own `AbortSignal.timeout` aborting
-// ctx.native rejects with `native_connection_aborted` carrying a TimeoutError
-// cause (isProviderTimeoutAbortTransportError). All three are served alike:
-// status 504 and the public message "Request timed out". Their category is
-// timeout too.
-function isServedAsTransportTimeout(error: ProviderError): boolean {
+// ctx.native or ctx.http rejects with `native_connection_aborted` or
+// `transport_cancelled` carrying a TimeoutError cause
+// (isProviderTimeoutAbortTransportError). All of them are served alike: status
+// 504 and the public message "Request timed out". Their category is timeout too.
+function isServedAsTransportTimeout(
+	error: ProviderError,
+	inboundSignal: AbortSignal | undefined,
+): boolean {
 	const code = providerErrorCode(error);
 	return (
 		code === "transport_timeout" ||
 		code === "native_connection_timeout" ||
-		isProviderTimeoutAbortTransportError(error)
+		isProviderTimeoutAbortTransportError(error, inboundSignal)
 	);
 }
 
-function publicProviderErrorMessage(error: ProviderError): string {
+function publicProviderErrorMessage(error: ProviderError, inboundSignal?: AbortSignal): string {
 	if (isTransportError(error)) {
 		if (providerErrorCode(error) === PROXY_AUTH_IP_DENIED_CODE) {
 			return error.message;
@@ -2127,7 +2149,7 @@ function publicProviderErrorMessage(error: ProviderError): string {
 		if (providerErrorCode(error) === PROXY_POOL_EXHAUSTED_CODE) {
 			return error.message;
 		}
-		if (isServedAsTransportTimeout(error)) return "Request timed out";
+		if (isServedAsTransportTimeout(error, inboundSignal)) return "Request timed out";
 		if (providerErrorCode(error) === "transport_network_error") return "Network error";
 		// Provider-local fault: no request was issued, so an upstream-flavored
 		// message would misattribute it (category is provider_error).
@@ -2177,7 +2199,7 @@ function toStatusCode(
 		}
 		if (isTransportError(error)) {
 			if (isClientCancelledTransportError(error, inboundSignal)) return CLIENT_CANCELLED_STATUS;
-			return isServedAsTransportTimeout(error) ? 504 : 502;
+			return isServedAsTransportTimeout(error, inboundSignal) ? 504 : 502;
 		}
 		if (isValidationError(error)) {
 			return providerErrorOption(error, "category") === "output_validation" ? 500 : 400;
@@ -4181,6 +4203,7 @@ function createServerAppWithCapabilityModules(
 						rawBody,
 						...(declaredErrorCode ? { declaredErrorCode } : {}),
 					}),
+					c.req.raw.signal,
 				),
 				status,
 			);
@@ -4278,6 +4301,7 @@ function createServerAppWithCapabilityModules(
 						rawBody,
 						...(declaredErrorCode ? { declaredErrorCode } : {}),
 					}),
+					c.req.raw.signal,
 				),
 				status,
 			);
@@ -4378,6 +4402,7 @@ function createServerAppWithCapabilityModules(
 						observabilityDetails,
 						requestScope.redact,
 						localization,
+						c.req.raw.signal,
 					),
 					status,
 				);
