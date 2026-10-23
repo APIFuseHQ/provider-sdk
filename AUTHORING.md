@@ -657,6 +657,8 @@ property; the SDK's own clients do, and `bindOcrTelemetry` preserves it.
 
 Use `defineSmsOtpMatcher()` plus `defineHealthJourney()` when a real health signal requires an OTP ceremony and a safe handoff boundary. Keep matcher fields standards-backed: ISO 3166-1 alpha-2 `country`, BCP 47 `locale`, E.164 `phoneNumber` when present, ISO 8601 durations, and `nationalServiceCode` origins for local service senders. Do not add custom allowlist fields such as `senderAllowlist`; model the sender as an origin instead.
 
+Every ISO 8601 duration must be longer than zero: `PT0S`, `P0D`, and other values whose every component is zero are rejected, so omit an optional duration such as `jitter` or `cooldown` instead of setting it to zero.
+
 <!-- @magic-start:sample -->
 ```ts
 import {

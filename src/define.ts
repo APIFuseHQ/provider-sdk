@@ -2396,6 +2396,19 @@ function assertIsoDuration(value: unknown, fieldPath: string): asserts value is 
 			`${fieldPath} must be an ISO 8601 duration for example PT8H or PT2M30S.`,
 		);
 	}
+	if (isZeroLengthIsoDuration(value)) {
+		throw new ValidationError(`${fieldPath} must be a positive duration.`);
+	}
+}
+
+/**
+ * True when every component of a DURATION_RE match is zero, as in PT0S, P0D, P0DT0H0M0S, or PT0.0S.
+ * A match holds only designators, digits, and one decimal point, so a component is nonzero exactly
+ * when a digit 1-9 appears. Deciding on the written components instead of the millisecond total
+ * keeps small fractions such as PT0.0001S positive.
+ */
+function isZeroLengthIsoDuration(value: string): boolean {
+	return !/[1-9]/.test(value);
 }
 
 function isoDurationMs(value: string): number {
