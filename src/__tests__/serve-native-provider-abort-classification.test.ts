@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
+import { CLIENT_CANCELLED_STATUS } from "../server/client-cancelled.js";
 
 type Observability = {
 	category?: string;
@@ -29,7 +30,8 @@ type Wire = Record<
 	| "native-timeout-abort-before-connect"
 	| "native-provider-abort"
 	| "native-provider-abort-before-connect"
-	| "native-connect-timeout",
+	| "native-connect-timeout"
+	| "native-caller-close",
 	Scenario
 >;
 
@@ -162,5 +164,25 @@ describe("serve classification of a provider's own ctx.native signal abort", () 
 			logRetryable: true,
 		});
 		expect(result.log?.causeChain).toBeUndefined();
+	});
+
+	it("serves the caller closing the connection as a client cancellation when the provider passed the inbound signal", () => {
+		const result = wire["native-caller-close"];
+		// The connection really reached the upstream before the caller left.
+		expect(result.upstreamReached).toBe(true);
+		// What ctx.http serves for a transport_cancelled the caller caused.
+		expect(outcome(result)).toEqual({
+			status: CLIENT_CANCELLED_STATUS,
+			category: "client_cancelled",
+			retryable: false,
+			code: "native_connection_aborted",
+			message: "Upstream request failed",
+			source: "client",
+			bodyRetryable: false,
+			logStatus: CLIENT_CANCELLED_STATUS,
+			logCode: "native_connection_aborted",
+			logCategory: "client_cancelled",
+			logRetryable: false,
+		});
 	});
 });

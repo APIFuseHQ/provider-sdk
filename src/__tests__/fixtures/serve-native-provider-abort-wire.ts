@@ -1,8 +1,9 @@
 // Serves a real provider app on a real local listener and has a real HTTP
 // client call it. Each operation opens a ctx.native connection to a real local
 // upstream through the real native client and aborts it with a `signal` the
-// provider passed itself, or lets the native connect timeout fire. Prints what
-// serve answered and logged for each scenario.
+// provider passed itself, or lets the native connect timeout fire, or passes
+// the inbound request's signal and has the caller close the connection. Prints
+// what serve answered and logged for each scenario.
 // serve-native-provider-abort-classification.test.ts spawns this file, the
 // same way serve-client-cancelled-classification.test.ts spawns its wire.
 import { createServer, type Socket } from "node:net";
@@ -119,6 +120,13 @@ const provider = defineProvider({
 				return { ok: true };
 			},
 		},
+		// Run by the operationExecutor below with the inbound request's signal.
+		"native-caller-close": {
+			...operation,
+			async handler() {
+				throw new Error("served through the operationExecutor");
+			},
+		},
 		// The native client's own connect timeout, not a signal.
 		"native-connect-timeout": {
 			...operation,
@@ -137,6 +145,21 @@ const provider = defineProvider({
 
 const events: ProviderServerLogEvent[] = [];
 const app = createServerApp(provider, { logger: (event) => events.push(event) });
+// An operationExecutor gets the inbound request's own signal and hands it to
+// ctx.native, so the caller closing the connection aborts the TLS handshake.
+const executorApp = createServerApp(provider, {
+	logger: (event) => events.push(event),
+	operationExecutor: async ({ ctx, signal }) => {
+		if (!ctx.native) throw new Error("ctx.native is not bound");
+		await ctx.native.network.connectTls({
+			host: "127.0.0.1",
+			port: holdPort,
+			serverName: "localhost",
+			...(signal ? { signal } : {}),
+		});
+		return { ok: true };
+	},
+});
 
 type Served = { status: number; observability: unknown; body: unknown };
 const served = new Map<string, Served>();
@@ -145,8 +168,9 @@ const inbound = Bun.serve({
 	hostname: "127.0.0.1",
 	port: 0,
 	async fetch(request): Promise<Response> {
-		const response = await app.fetch(request);
 		const operationId = new URL(request.url).pathname.split("/").at(-1) ?? "";
+		const target = operationId === "native-caller-close" ? executorApp : app;
+		const response = await target.fetch(request);
 		served.set(operationId, {
 			status: response.status,
 			observability: JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null"),
@@ -157,17 +181,25 @@ const inbound = Bun.serve({
 	},
 });
 
-async function call(operationId: string) {
+async function call(operationId: string, closeOnceUpstreamHolds = false) {
 	holdAccepted = waiter();
 	const connectionsBefore = holdConnections;
 	const done = waiter();
 	servedWaiters.set(operationId, done);
-	const response = await fetch(`http://127.0.0.1:${inbound.port}/v1/${operationId}`, {
+	const controller = new AbortController();
+	const response = fetch(`http://127.0.0.1:${inbound.port}/v1/${operationId}`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ requestId: `request-${operationId}`, input: {} }),
+		signal: controller.signal,
 	});
-	await response.arrayBuffer();
+	if (closeOnceUpstreamHolds) {
+		await holdAccepted.promise;
+		controller.abort();
+		await response.catch(() => undefined);
+	} else {
+		await (await response).arrayBuffer();
+	}
 	await done.promise;
 	const failed = events.find(
 		(event) =>
@@ -186,6 +218,7 @@ const results = {
 	"native-provider-abort": await call("native-provider-abort"),
 	"native-provider-abort-before-connect": await call("native-provider-abort-before-connect"),
 	"native-connect-timeout": await call("native-connect-timeout"),
+	"native-caller-close": await call("native-caller-close", true),
 };
 
 inbound.stop(true);

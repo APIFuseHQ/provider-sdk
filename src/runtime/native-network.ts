@@ -581,9 +581,10 @@ function remainingMs(deadline: Deadline): number | undefined {
 }
 
 // The only signal a native connection watches is the one the provider passed
-// itself (serve never hands it the inbound request's signal). Its reason is kept
-// as the standard `cause`, the way ctx.http keeps it under `transport_cancelled`,
-// so serve can tell an `AbortSignal.timeout` apart from any other abort.
+// (serve never hands it the inbound request's signal on its own). Its reason is
+// kept as the standard `cause`, the way ctx.http keeps it under
+// `transport_cancelled`, so serve can tell an `AbortSignal.timeout` apart from
+// any other abort.
 function abortError(signal: AbortSignal | undefined): NativeNetworkError {
 	return new NativeNetworkError(
 		"Native connection was aborted",

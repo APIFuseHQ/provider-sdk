@@ -23,6 +23,7 @@ import {
 	type NativeTelemetryLogPayload,
 } from "../runtime/native-telemetry.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/request-telemetry.js";
+import { CLIENT_CANCELLED_STATUS } from "../server/client-cancelled.js";
 import {
 	createServerApp,
 	createServerAppAsync,
@@ -629,6 +630,92 @@ describe("native server error classification", () => {
 			"abort-reason": providerAbort,
 			"error-reason": providerAbort,
 			"no-reason": providerAbort,
+		});
+	});
+
+	it("serves native_connection_aborted as the caller's cancellation once the inbound request aborted, unless its reason is a TimeoutError", async () => {
+		// The provider's signal may be the inbound request's own or derive from
+		// it, so the inbound request aborts while the operation runs.
+		const causes = {
+			"inbound-abort-reason": new DOMException("The operation was aborted.", "AbortError"),
+			"inbound-no-reason": undefined,
+			"inbound-timeout-reason": new DOMException("The operation timed out.", "TimeoutError"),
+		} as const;
+		const inbound = {
+			"inbound-abort-reason": new AbortController(),
+			"inbound-no-reason": new AbortController(),
+			"inbound-timeout-reason": new AbortController(),
+		};
+		const operations = Object.fromEntries(
+			(Object.keys(causes) as (keyof typeof causes)[]).map((id) => [
+				id,
+				{
+					riskClass: "read" as const,
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						inbound[id].abort();
+						throw new NativeNetworkError(
+							"Native connection was aborted",
+							"native_connection_aborted",
+							causes[id],
+						);
+					},
+				},
+			]),
+		);
+		const provider = createProviderDefinitionDouble({ id: "native-abort-inbound", operations });
+		const app = createServerApp(provider, { logger: () => undefined });
+		const served: Record<string, unknown> = {};
+		for (const id of Object.keys(causes) as (keyof typeof causes)[]) {
+			const response = await app.request(`/v1/${id}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: `request-${id}`, input: {} }),
+				signal: inbound[id].signal,
+			});
+			const body = (await response.json()) as {
+				error: { code: string; message: string; source: string; retryable: boolean };
+			};
+			served[id] = {
+				status: response.status,
+				observability: JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null"),
+				code: body.error.code,
+				message: body.error.message,
+				source: body.error.source,
+				retryable: body.error.retryable,
+			};
+		}
+		// What ctx.http serves for a transport_cancelled while the inbound
+		// request is aborted.
+		const callerCancelled = {
+			status: CLIENT_CANCELLED_STATUS,
+			observability: {
+				category: "client_cancelled",
+				taxonomyVersion: expect.any(String),
+				retryable: false,
+			},
+			code: "native_connection_aborted",
+			message: "Upstream request failed",
+			source: "client",
+			retryable: false,
+		};
+		expect(served).toEqual({
+			"inbound-abort-reason": callerCancelled,
+			"inbound-no-reason": callerCancelled,
+			// The provider's own time limit fired first.
+			"inbound-timeout-reason": {
+				status: 504,
+				observability: {
+					category: "timeout",
+					taxonomyVersion: expect.any(String),
+					retryable: true,
+				},
+				code: "native_connection_aborted",
+				message: "Request timed out",
+				source: "upstream_failure",
+				retryable: true,
+			},
 		});
 	});
 });

@@ -1866,21 +1866,28 @@ function errorChainHasCode(error: unknown, expected: string): boolean {
 // `signal` the provider passed itself (and, on the stateful route, the
 // forwarding deadline), so the code alone does not say who cancelled. Only an
 // aborted inbound request, the caller closing the connection, makes it the
-// caller's. The native client's `native_connection_aborted` never does: serve
-// does not hand the inbound signal to the native client, so only a `signal`
-// the provider passed itself aborts it, and it is classified like ctx.http's
-// provider-side `transport_cancelled`.
+// caller's. The native client's `native_connection_aborted` follows the same
+// rule: serve does not hand the inbound signal to the native client, but the
+// `signal` a provider passes may be it or derive from it (an operationExecutor's
+// `signal`, `ctx.auth.signal`), so an aborted inbound request makes it the
+// caller's too, and otherwise it is classified like ctx.http's provider-side
+// `transport_cancelled`. A `TimeoutError` reason stays a timeout either way: the
+// provider's own time limit fired first (isProviderTimeoutAbortTransportError).
 // The observability category and the served status both follow this.
 function isClientCancelledTransportError(
 	error: TransportError,
 	inboundSignal: AbortSignal | undefined,
 ): boolean {
+	if (inboundSignal?.aborted !== true) return false;
 	const code = providerErrorCode(error);
-	return code === "transport_cancelled" && inboundSignal?.aborted === true;
+	return (
+		code === "transport_cancelled" ||
+		(code === "native_connection_aborted" && !isProviderTimeoutAbortTransportError(error))
+	);
 }
 
 // ctx.native rejects with `native_connection_aborted` only when a `signal` the
-// provider passed itself aborts, and keeps the abort's reason as the cause. A
+// provider passed aborts, and keeps the abort's reason as the cause. A
 // `TimeoutError` reason (`AbortSignal.timeout`) is the provider's own time limit
 // running out, so it is classified, served and worded like `transport_timeout`:
 // category timeout, status 504, retryable, "Request timed out". The body keeps
