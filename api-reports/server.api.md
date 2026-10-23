@@ -3167,7 +3167,7 @@ type ProbeInterval = ms.StringValue;
 export const PROCFS_CLOCK_TICKS_PER_SECOND = 100;
 
 // @public (undocumented)
-const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
 
 // @public
 export const PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV = "APIFUSE__PROVIDER_RUNTIME__SELF_TEST_MASTER_SECRET";

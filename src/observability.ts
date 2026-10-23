@@ -1,9 +1,17 @@
 // Mirrors packages/provider-observability in the platform monorepo (SoT).
-export const PROVIDER_OBSERVABILITY_TAXONOMY_VERSION = "2026-08-07";
+export const PROVIDER_OBSERVABILITY_TAXONOMY_VERSION = "2026-10-23";
 
 export const PROVIDER_ERROR_CATEGORIES = [
 	"ok",
 	"timeout",
+	// The stateful-forwarding deadline (the `deadlineAt` a source pod forwards
+	// to the session owner pod) expired while the owner pod was running the
+	// operation. An APIFuse-side routing budget, not an upstream latency
+	// verdict: the provider SDK serves it as 504
+	// STATEFUL_FORWARDING_DEADLINE_EXPIRED, source `apifuse`, retryable false.
+	// Added in 2026-10-23; a 2026-08-07 fleet reports the same event as
+	// `timeout` (provider-sdk #392) or, before that, `upstream_http`.
+	"stateful_forwarding_deadline",
 	"network",
 	"upstream_http",
 	"upstream_rate_limited",
@@ -84,8 +92,8 @@ export function sourceForCategory(category: ProviderErrorCategory): ProviderErro
 		default:
 			// ok never reaches error serialization; provider_error,
 			// internal_error, output_validation, proxy_pool,
-			// dependency_unavailable, unsupported_transport, unclassified are
-			// APIFuse-side faults.
+			// dependency_unavailable, unsupported_transport,
+			// stateful_forwarding_deadline, unclassified are APIFuse-side faults.
 			return "apifuse";
 	}
 }
