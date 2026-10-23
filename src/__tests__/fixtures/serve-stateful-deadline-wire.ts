@@ -7,8 +7,14 @@
 // answers, so the forwarded deadline, or a departing source, cancels ctx.http
 // or ctx.stealth mid-read. Prints, for each scenario, what the owner served
 // and logged and what the source's forwarder received.
+// The source-pod scenarios put the source pod itself on a second real
+// listener: the provider app whose operation executor routes through the SDK's
+// StatefulProviderRuntimeExecutor (StatefulSessionRouter, with its own
+// deadline timer, and HttpStatefulOwnerForwarder), called by a real HTTP
+// client. They print what that caller received and what the source pod logged.
 // serve-stateful-deadline-classification.test.ts spawns this file so the
 // wreq-js module mock in other test files cannot replace the stealth transport.
+import { createServer, type Socket } from "node:net";
 import { z } from "zod";
 import { defineProvider } from "../../define.js";
 import { executeOperation } from "../../runtime/executor.js";
@@ -18,12 +24,17 @@ import {
 	type ProviderServerLogEvent,
 } from "../../server/serve.js";
 import {
+	buildStatefulOperationRequest,
 	buildSessionKey,
 	createStatefulOwnerFenceValidator,
 	HttpStatefulOwnerForwarder,
 	InMemorySessionOwnerRegistry,
-	StatefulOwnerForwardingError,
 	type SessionOwnerRecord,
+	type StatefulOperationExecutor,
+	StatefulOwnerForwardingError,
+	StatefulProviderRuntimeExecutor,
+	statefulForwardingContextFromProviderRequest,
+	withStatefulLocalProviderContext,
 } from "../../stateful/index.js";
 
 type Waiter = { promise: Promise<void>; resolve: () => void };
@@ -132,6 +143,16 @@ const provider = defineProvider({
 				return { ok: true };
 			},
 		},
+		// Never answers before the source pod gives up: it fails only once the
+		// source's forwarding request is gone, so the source's own deadline
+		// timer always fires first.
+		"owner-silent": {
+			...operation,
+			async handler() {
+				await ownerInboundAborted.promise;
+				throw new Error("The source pod left before the owner answered.");
+			},
+		},
 	},
 });
 
@@ -148,35 +169,57 @@ const app = createServerApp(provider, {
 });
 
 type Served = { status: number; observability: unknown; body: unknown };
-const served = new Map<string, Served>();
-const servedWaiters = new Map<string, Waiter>();
-const owner = Bun.serve({
-	hostname: "127.0.0.1",
-	port: 0,
-	async fetch(request): Promise<Response> {
-		request.signal.addEventListener("abort", () => ownerInboundAborted.resolve(), { once: true });
-		const response = await app.fetch(request);
-		const body: unknown = await response.clone().json();
-		const requestId =
-			typeof body === "object" &&
-			body !== null &&
-			"error" in body &&
-			typeof body.error === "object" &&
-			body.error !== null &&
-			"requestId" in body.error &&
-			typeof body.error.requestId === "string"
-				? body.error.requestId
-				: "";
-		served.set(requestId, {
-			status: response.status,
-			observability: JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null"),
-			body,
-		});
-		servedWaiters.get(requestId)?.resolve();
-		return response;
-	},
-});
-const ownerEndpoint = `http://127.0.0.1:${owner.port}`;
+type Recorder = { served: Map<string, Served>; waiters: Map<string, Waiter> };
+
+function errorRequestId(body: unknown): string {
+	return typeof body === "object" &&
+		body !== null &&
+		"error" in body &&
+		typeof body.error === "object" &&
+		body.error !== null &&
+		"requestId" in body.error &&
+		typeof body.error.requestId === "string"
+		? body.error.requestId
+		: "";
+}
+
+// Serves `fetchApp` on a real listener and records the error response it built
+// for each request id, whether or not its caller is still there to read it.
+function recordingListener(
+	fetchApp: (request: Request) => Response | Promise<Response>,
+	onInboundAbort?: () => void,
+) {
+	const recorder: Recorder = { served: new Map(), waiters: new Map() };
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request): Promise<Response> {
+			if (onInboundAbort) {
+				request.signal.addEventListener("abort", onInboundAbort, { once: true });
+			}
+			const response = await fetchApp(request);
+			const body: unknown = await response.clone().json();
+			const requestId = errorRequestId(body);
+			recorder.served.set(requestId, {
+				status: response.status,
+				observability: JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null"),
+				body,
+			});
+			recorder.waiters.get(requestId)?.resolve();
+			return response;
+		},
+	});
+	return { server, recorder, endpoint: `http://127.0.0.1:${server.port}` };
+}
+
+const ownerPod = recordingListener(
+	(request) => app.fetch(request),
+	() => ownerInboundAborted.resolve(),
+);
+const owner = ownerPod.server;
+const served = ownerPod.recorder.served;
+const servedWaiters = ownerPod.recorder.waiters;
+const ownerEndpoint = ownerPod.endpoint;
 
 const sessionKey = buildSessionKey({
 	providerId: PROVIDER_ID,
@@ -285,6 +328,160 @@ async function callDirectly(operationId: string, requestId: string) {
 	return { served: served.get(requestId), log: failureLog(requestId) };
 }
 
+// The source pod. Each route is its own router (runtime executor) over its own
+// registry, all holding the session for an owner pod other than the source:
+// - live: the owner pod above
+// - skewed: the owner pod above, from a source whose clock runs 300 ms behind,
+//   so the source's deadline timer fires 300 ms after the owner's
+// - down: an owner endpoint nothing listens on
+// - reset: an owner endpoint that accepts and immediately destroys the socket
+const closedPortServer = createServer();
+await new Promise<void>((resolve) => closedPortServer.listen(0, "127.0.0.1", resolve));
+const closedPortAddress = closedPortServer.address();
+if (closedPortAddress === null || typeof closedPortAddress === "string") {
+	throw new Error("no closed port");
+}
+const closedPort = closedPortAddress.port;
+await new Promise<void>((resolve) => closedPortServer.close(() => resolve()));
+
+const resetServer = createServer((socket: Socket) => socket.destroy());
+await new Promise<void>((resolve) => resetServer.listen(0, "127.0.0.1", resolve));
+const resetAddress = resetServer.address();
+if (resetAddress === null || typeof resetAddress === "string") throw new Error("no reset port");
+const resetPort = resetAddress.port;
+
+const sourceNeverOwns: StatefulOperationExecutor = {
+	async executeLocal() {
+		throw new Error("The source pod never owns the session in this fixture.");
+	},
+};
+
+async function sourceRouter(
+	ownerRegistry: InMemorySessionOwnerRegistry,
+	endpoint: string,
+	clock?: () => Date,
+): Promise<StatefulProviderRuntimeExecutor> {
+	if (ownerRegistry !== registry) {
+		await ownerRegistry.acquire({
+			sessionKey,
+			ownerPodId: "pod-owner",
+			ownerEndpoint: endpoint,
+			leaseDurationMs: 60_000,
+		});
+	}
+	return new StatefulProviderRuntimeExecutor({
+		currentPod: { podId: "pod-source", endpoint: "http://127.0.0.1:1" },
+		registry: ownerRegistry,
+		forwarder: new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: FORWARDING_SECRET,
+		}),
+		executor: sourceNeverOwns,
+		leaseDurationMs: 60_000,
+		...(clock ? { clock } : {}),
+	});
+}
+
+const sourceRoutes = new Map<string, StatefulProviderRuntimeExecutor>([
+	["live", await sourceRouter(registry, ownerEndpoint)],
+	["skewed", await sourceRouter(registry, ownerEndpoint, () => new Date(Date.now() - 300))],
+	[
+		"down",
+		await sourceRouter(new InMemorySessionOwnerRegistry(), `http://127.0.0.1:${closedPort}`),
+	],
+	[
+		"reset",
+		await sourceRouter(new InMemorySessionOwnerRegistry(), `http://127.0.0.1:${resetPort}`),
+	],
+]);
+
+type ThrownSummary = { errorClass: string; code?: unknown; causes: ThrownSummary[] };
+
+function summarizeThrown(error: unknown, depth = 0): ThrownSummary {
+	const cause =
+		depth < 3 && error instanceof Error && Object.hasOwn(error, "cause") ? error.cause : undefined;
+	return {
+		errorClass: error instanceof Error ? error.name : typeof error,
+		...(error instanceof Error && "code" in error ? { code: error.code } : {}),
+		causes: cause === undefined ? [] : [summarizeThrown(cause, depth + 1)],
+	};
+}
+
+const sourceEvents: ProviderServerLogEvent[] = [];
+const sourceThrown = new Map<string, ThrownSummary>();
+const sourceApp = createServerApp(provider, {
+	logger: (event) => sourceEvents.push(event),
+	// The README's stateful operation executor: route the operation through the
+	// session router, which runs it locally or forwards it to the owner pod.
+	operationExecutor: async ({ ctx, request, operationId }) => {
+		const headers = request.headers ?? {};
+		const route = sourceRoutes.get(headers["x-test-route"] ?? "");
+		if (!route) throw new Error("unknown source route");
+		try {
+			const result = await route.invoke(
+				buildStatefulOperationRequest({
+					requestId: request.requestId,
+					sessionKey,
+					providerId: PROVIDER_ID,
+					operationId,
+					connectionId: "connection-1",
+					serviceAccountId: "account-1",
+					input: request.input,
+					...(headers["x-test-deadline-at"] ? { deadlineAt: headers["x-test-deadline-at"] } : {}),
+					runtimeContext: withStatefulLocalProviderContext(
+						ctx,
+						statefulForwardingContextFromProviderRequest(request),
+					),
+				}),
+			);
+			return result.output;
+		} catch (error) {
+			sourceThrown.set(request.requestId, summarizeThrown(error));
+			throw error;
+		}
+	},
+});
+const sourcePod = recordingListener((request) => sourceApp.fetch(request));
+
+async function callSourcePod(input: {
+	readonly operationId: string;
+	readonly requestId: string;
+	readonly route: "live" | "skewed" | "down" | "reset";
+	readonly deadlineInMs: number;
+	readonly ownerAnswers: boolean;
+}) {
+	holdStarted = waiter();
+	ownerInboundAborted = waiter();
+	const ownerDone = waiter();
+	servedWaiters.set(input.requestId, ownerDone);
+	const response = await fetch(`${sourcePod.endpoint}/v1/${input.operationId}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			requestId: input.requestId,
+			input: {},
+			headers: {
+				"x-test-route": input.route,
+				"x-test-deadline-at": new Date(Date.now() + input.deadlineInMs).toISOString(),
+			},
+		}),
+	});
+	const callerSaw = {
+		status: response.status,
+		observability: JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null"),
+		body: await response.json(),
+	};
+	if (input.ownerAnswers) await ownerDone.promise;
+	return {
+		caller: callerSaw,
+		thrown: sourceThrown.get(input.requestId),
+		log: sourceEvents.find(
+			(event) => event.event === "provider_request_failed" && event.requestId === input.requestId,
+		),
+		owner: served.get(input.requestId),
+	};
+}
+
 const results = {
 	"deadline-http": await forward({
 		operationId: "http-hold",
@@ -319,8 +516,38 @@ const results = {
 		requestId: "upstream-503",
 		deadlineInMs: 30_000,
 	}),
+	"source-deadline-aborts-forward": await callSourcePod({
+		operationId: "owner-silent",
+		requestId: "source-deadline-aborts-forward",
+		route: "live",
+		deadlineInMs: 400,
+		ownerAnswers: true,
+	}),
+	"source-receives-owner-deadline": await callSourcePod({
+		operationId: "http-hold",
+		requestId: "source-receives-owner-deadline",
+		route: "skewed",
+		deadlineInMs: 400,
+		ownerAnswers: true,
+	}),
+	"source-owner-down": await callSourcePod({
+		operationId: "http-hold",
+		requestId: "source-owner-down",
+		route: "down",
+		deadlineInMs: 30_000,
+		ownerAnswers: false,
+	}),
+	"source-owner-resets": await callSourcePod({
+		operationId: "http-hold",
+		requestId: "source-owner-resets",
+		route: "reset",
+		deadlineInMs: 30_000,
+		ownerAnswers: false,
+	}),
 };
 
+sourcePod.server.stop(true);
 owner.stop(true);
 upstream.stop(true);
+resetServer.close();
 console.log(JSON.stringify(results));

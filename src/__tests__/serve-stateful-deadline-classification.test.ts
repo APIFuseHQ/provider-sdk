@@ -32,6 +32,13 @@ type Scenario = {
 	served?: { status: number; observability: Observability | null; body: ErrorBody };
 	log?: FailureLog;
 };
+type ThrownSummary = { errorClass: string; code?: unknown; causes: ThrownSummary[] };
+type SourcePodScenario = {
+	caller: { status: number; observability: Observability | null; body: ErrorBody };
+	thrown?: ThrownSummary;
+	log?: FailureLog;
+	owner?: { status: number; observability: Observability | null; body: ErrorBody };
+};
 type Wire = Record<
 	| "deadline-http"
 	| "deadline-stealth"
@@ -41,7 +48,14 @@ type Wire = Record<
 	| "provider-abort"
 	| "upstream-503",
 	Scenario
->;
+> &
+	Record<
+		| "source-deadline-aborts-forward"
+		| "source-receives-owner-deadline"
+		| "source-owner-down"
+		| "source-owner-resets",
+		SourcePodScenario
+	>;
 
 // A real owner pod (the provider app behind a real local listener) receiving
 // signed envelopes from the SDK's real HTTP forwarder, its operations reading
@@ -158,7 +172,16 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 		expect(direct.log?.code).toBe("transport_cancelled");
 		expect(outcome(result)).toEqual(outcome(direct));
 		expect(result.served?.observability).toEqual(direct.served?.observability ?? null);
-		expect(outcome(result)).not.toEqual(DEADLINE_EXPIRED_OUTCOME);
+		expect(outcome(result)).toEqual({
+			status: 400,
+			category: "client_cancelled",
+			retryable: false,
+			source: "client",
+			bodyRetryable: false,
+			logStatus: 400,
+			logCategory: "client_cancelled",
+			logRetryable: false,
+		});
 	});
 
 	it("keeps a provider's own per-request abort off the deadline", () => {
@@ -207,4 +230,118 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 			status: 502,
 		});
 	});
+});
+
+function callerOutcome(scenario: SourcePodScenario) {
+	return {
+		status: scenario.caller.status,
+		category: scenario.caller.observability?.category,
+		retryable: scenario.caller.observability?.retryable,
+		code: scenario.caller.body.error?.code,
+		source: scenario.caller.body.error?.source,
+		bodyRetryable: scenario.caller.body.error?.retryable,
+		logStatus: scenario.log?.status,
+		logCode: scenario.log?.code,
+		logCategory: scenario.log?.errorCategory,
+		logErrorClass: scenario.log?.errorClass,
+	};
+}
+
+// What the caller of the source pod receives when the forwarded deadline
+// expires: the same 504 the owner serves for it.
+const CALLER_DEADLINE_EXPIRED = {
+	status: 504,
+	category: "timeout",
+	retryable: false,
+	code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+	source: "apifuse",
+	bodyRetryable: false,
+	logStatus: 504,
+	logCode: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+	logCategory: "timeout",
+	logErrorClass: "StatefulRoutingDeadlineError",
+};
+
+// A forwarding failure the source pod's serve mapper does not classify.
+const CALLER_UNCLASSIFIED_FORWARDING_FAILURE = {
+	status: 500,
+	category: "internal_error",
+	retryable: false,
+	code: "internal_error",
+	source: "apifuse",
+	bodyRetryable: false,
+	logStatus: 500,
+	logCode: "internal_error",
+	logCategory: "internal_error",
+	logErrorClass: "StatefulOwnerForwardingError",
+};
+
+describe("stateful forwarding deadline as the source pod's caller sees it", () => {
+	it("serves the deadline when the source's own deadline timer aborts the forwarding request", () => {
+		const result = wire["source-deadline-aborts-forward"];
+		expect(callerOutcome(result)).toEqual(CALLER_DEADLINE_EXPIRED);
+		expect(result.caller.body).toEqual({
+			error: {
+				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+				message: "Stateful forwarding deadline expired.",
+				requestId: "source-deadline-aborts-forward",
+				retryable: false,
+				source: "apifuse",
+			},
+		});
+		// The router's timer, scheduled from deadlineAt, aborted the forwarding
+		// fetch before the owner answered: the forwarder's own failure, caused
+		// by that timer's AbortError, is kept as the deadline's cause.
+		expect(result.thrown).toEqual({
+			errorClass: "StatefulRoutingDeadlineError",
+			causes: [
+				{
+					errorClass: "StatefulOwnerForwardingError",
+					code: "STATEFUL_FORWARDING_REQUEST_FAILED",
+					causes: [expect.objectContaining({ errorClass: "AbortError" })],
+				},
+			],
+		});
+		expect(result.log?.causeChain?.map((frame) => frame.errorClass)).toEqual([
+			"StatefulOwnerForwardingError",
+			"AbortError",
+		]);
+	});
+
+	it("serves the deadline when the owner's deadline response reaches the source first", () => {
+		const result = wire["source-receives-owner-deadline"];
+		// The source's clock runs 300 ms behind, so the owner's 504 arrives
+		// before the source's timer fires and the forwarder relays its code.
+		expect(result.owner?.status).toBe(504);
+		expect(result.owner?.body.error?.code).toBe("STATEFUL_FORWARDING_DEADLINE_EXPIRED");
+		expect(callerOutcome(result)).toEqual(CALLER_DEADLINE_EXPIRED);
+		expect(result.thrown).toEqual({
+			errorClass: "StatefulRoutingDeadlineError",
+			causes: [
+				{
+					errorClass: "StatefulOwnerForwardingError",
+					code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+					causes: [],
+				},
+			],
+		});
+	});
+
+	for (const [scenario, cause] of [
+		["source-owner-down", "ConnectionRefused"],
+		["source-owner-resets", "ECONNRESET"],
+	] as const) {
+		it(`keeps ${scenario} a forwarding failure, not the deadline`, () => {
+			const result = wire[scenario];
+			// Before the deadline: the forwarder's own request failed.
+			expect(result.thrown).toEqual({
+				errorClass: "StatefulOwnerForwardingError",
+				code: "STATEFUL_FORWARDING_REQUEST_FAILED",
+				causes: [expect.objectContaining({ code: cause })],
+			});
+			// Unchanged by this fix: the source's serve mapper has no branch for
+			// a forwarding failure.
+			expect(callerOutcome(result)).toEqual(CALLER_UNCLASSIFIED_FORWARDING_FAILURE);
+		});
+	}
 });

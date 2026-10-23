@@ -1,4 +1,5 @@
 import type { SessionKey } from "./session-key.js";
+import { forwardingDeadlineExpiryOrSelf, statefulDeadlineAbortReason } from "./deadline-expiry.js";
 import { StatefulRoutingDeadlineError } from "./errors.js";
 import {
 	NOOP_STATEFUL_PROVIDER_METRIC_EMITTER,
@@ -290,7 +291,11 @@ export class StatefulSessionRouter {
 				throw error;
 			}
 		}
-		return this.#forwarder.forward(owner, request, deadlineSignal.signal);
+		try {
+			return await this.#forwarder.forward(owner, request, deadlineSignal.signal);
+		} catch (error) {
+			throw forwardingDeadlineExpiryOrSelf(error, request, deadlineSignal.signal);
+		}
 	}
 
 	private ensureManagedLease(sessionKey: SessionKey, owner: SessionOwnerRecord): void {
@@ -538,7 +543,12 @@ function makeDeadlineSignal<TInput>(
 	}
 
 	const delayMs = Date.parse(request.deadlineAt) - now.getTime();
-	const timer = setTimeout(() => controller.abort(), delayMs);
+	// An identifiable reason, so a forwarding request this timer aborted can be
+	// told apart from any other forwarding failure.
+	const timer = setTimeout(
+		() => controller.abort(statefulDeadlineAbortReason(request.requestId)),
+		delayMs,
+	);
 	return {
 		signal: controller.signal,
 		cleanup: () => clearTimeout(timer),

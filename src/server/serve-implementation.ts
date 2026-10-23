@@ -182,6 +182,10 @@ import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import {
+	errorCauseChainIncludes,
+	statefulRoutingDeadlineErrorCausedBy,
+} from "../stateful/deadline-expiry.js";
+import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
@@ -3719,37 +3723,7 @@ function statefulDeadlineExpiryOrSelf(
 	) {
 		return error;
 	}
-	const expiry = new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt);
-	Object.defineProperty(expiry, "cause", {
-		value: error,
-		writable: true,
-		configurable: true,
-		enumerable: false,
-	});
-	return expiry;
-}
-
-function errorCauseChainIncludes(error: unknown, target: unknown): boolean {
-	if (target === null || typeof target !== "object") return false;
-	const seen = new Set<object>();
-	let current = error;
-	for (let depth = 0; depth < 5; depth++) {
-		if (current === target) return true;
-		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
-			return false;
-		}
-		if (seen.has(current)) return false;
-		seen.add(current);
-		let cause: PropertyDescriptor | undefined;
-		try {
-			cause = Object.getOwnPropertyDescriptor(current, "cause");
-		} catch {
-			return false;
-		}
-		if (!cause || !Object.hasOwn(cause, "value")) return false;
-		current = cause.value;
-	}
-	return false;
+	return statefulRoutingDeadlineErrorCausedBy(envelope.requestId, envelope.deadlineAt, error);
 }
 
 function operationRequestFromForwardingEnvelope(
