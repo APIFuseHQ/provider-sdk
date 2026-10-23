@@ -211,6 +211,7 @@ import type {
 	ProviderDefinition,
 	ProviderErrorStatus,
 	ProviderFilesContext,
+	ProviderProxyConfig,
 	ProviderRuntimeState,
 	ProviderRuntimeTarget,
 	ProviderStreamEvent,
@@ -812,6 +813,26 @@ export function resolveProviderProxyAffinityKey(
 		return `${provider.id}/${operationId}`;
 	}
 	return connectionKey ?? provider.id;
+}
+
+/**
+ * The proxy declaration in force for one operation context. A policy without
+ * `operations` applies everywhere (today's behavior); a scoped policy applies
+ * only to the listed ids, and every other operation resolves no proxy at all,
+ * exactly as a provider that declares none. Auth flows are not operations and
+ * never receive a scoped policy. Wiring this into `createProviderContext`
+ * (`proxyClientOptions.upstream`, the resolver policy and the resolver identity
+ * scope) is the implementation lane's change; the helper is the contract.
+ */
+export function resolveOperationProxyConfig(
+	provider: Pick<ProviderDefinition, "proxy">,
+	operationId: string,
+): ProviderProxyConfig | undefined {
+	const proxy = provider.proxy;
+	if (typeof proxy !== "object" || proxy === null || proxy.operations === undefined) {
+		return proxy;
+	}
+	return proxy.operations.includes(operationId) ? proxy : undefined;
 }
 
 export function resolveProviderResolverIdentityScope(
