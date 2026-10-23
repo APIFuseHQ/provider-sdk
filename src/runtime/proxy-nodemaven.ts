@@ -39,6 +39,26 @@ export const NODEMAVEN_MAX_POOL_SIZE = 50;
 const NODEMAVEN_MAX_LIFETIME_MINUTES = 1440;
 const SID_LENGTH = 10;
 
+/**
+ * `-isp-` carrier slug grammar: lowercase letters, digits and `_` (NodeMaven
+ * writes multi-word carriers with underscores, e.g. `sk_telecom`, `lg_uplus`).
+ * Verified 2026-10-23: `sk_telecom`, `lg_uplus`, `kt` are accepted for KR
+ * mobile; an unknown slug (`skt`) is refused by the gateway with HTTP 406.
+ */
+export const NODEMAVEN_ISP_SLUG_PATTERN = /^[a-z0-9_]+$/;
+/** `-ttl-` accepts 60..86400 seconds (docs: "from 60 up to 86,400"). */
+export const NODEMAVEN_TTL_SECONDS_MIN = 60;
+export const NODEMAVEN_TTL_SECONDS_MAX = 86_400;
+
+/**
+ * Encode a sticky TTL the way the NodeMaven dashboard does: whole minutes then
+ * the remaining seconds, `XmYs` (500 → `8m20s`). Callers validate the range.
+ */
+export function formatNodemavenTtl(seconds: number): string {
+	const whole = Math.floor(seconds);
+	return `${Math.floor(whole / 60)}m${whole % 60}s`;
+}
+
 export function hasNodemavenCredentials(): boolean {
 	return Boolean(readNodemavenUsername() && readNodemavenPassword());
 }
@@ -166,6 +186,31 @@ export type NodemavenSynthesis = {
 /**
  * Synthesize a NodeMaven gateway proxy URL locally from static credentials.
  * There is no allocation API — geo/session are encoded in the username.
+ *
+ * Username token order (contract, docs.nodemaven.com/residential-mobile/proxy-string):
+ *
+ *   <user> -country-<cc> -region-<r> -city-<c> -isp-<slug> -type-mobile
+ *          -ipv4-true -sid-<sid> -ttl-<XmYs> -filter-<tier>
+ *
+ * - `-isp-`, `-type-mobile` and `-ttl-` come from `policy.nodemaven` (type,
+ *   isp[poolIndex % isp.length], ttlSeconds via `formatNodemavenTtl`).
+ * - Residential policies keep the same token set and values as today
+ *   (`country`, `region`, `city`, `ipv4-true`, `sid`, `filter`); only the
+ *   position of `-ipv4-true` moves ahead of `-sid-` to match the documented
+ *   order. The sid derivation is unchanged, so sticky sessions keep their
+ *   egress. Both orders were accepted by the gateway in the 2026-10-22
+ *   measurements (lane A: 59 exits with today's order; lane D: 5 exits with
+ *   the documented order).
+ * - Mobile policies emit `-filter-` only when `APIFUSE__PROXY__NODEMAVEN_FILTER`
+ *   is set explicitly; the measured passing shape
+ *   (`<user>-country-kr-type-mobile-ipv4-true-sid-<sid>`, 12/15 on
+ *   nol.yanolja.com) carries no filter token and the mobile+filter
+ *   combination is unverified.
+ * - `diagnostics` gains `type` and, when encoded, `isp` so telemetry can tell
+ *   a mobile attempt from a residential one without exposing the username.
+ *
+ * Token emission for the new fields lands with the implementation lane; this
+ * revision only fixes the grammar and the validated policy shape.
  */
 export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): NodemavenSynthesis {
 	const username = input.credentials.username.trim();
