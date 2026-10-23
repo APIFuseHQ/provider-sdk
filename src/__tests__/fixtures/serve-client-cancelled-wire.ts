@@ -101,6 +101,16 @@ const provider = defineProvider({
 				return { ok: true };
 			},
 		},
+		// The provider aborts its own upstream read with a per-request signal
+		// while the caller stays connected: the same transport_cancelled code,
+		// but nobody on the client side cancelled.
+		"http-provider-abort": {
+			...operation,
+			async handler(ctx) {
+				await ctx.http.get("/second", { signal: AbortSignal.timeout(50), retry: false });
+				return { ok: true };
+			},
+		},
 		// An upstream that answered 503: the upstream_http branch.
 		"http-upstream-503": {
 			...operation,
@@ -166,6 +176,7 @@ const results = {
 	"http-sequential": await call("http-sequential", true),
 	"stealth-sequential": await call("stealth-sequential", true),
 	"native-aborted": await call("native-aborted", false),
+	"http-provider-abort": await call("http-provider-abort", false),
 	"http-upstream-503": await call("http-upstream-503", false),
 };
 

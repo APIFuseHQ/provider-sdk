@@ -25,7 +25,11 @@ type Scenario = {
 	log?: FailureLog;
 };
 type Wire = Record<
-	"http-sequential" | "stealth-sequential" | "native-aborted" | "http-upstream-503",
+	| "http-sequential"
+	| "stealth-sequential"
+	| "native-aborted"
+	| "http-provider-abort"
+	| "http-upstream-503",
 	Scenario
 >;
 
@@ -98,6 +102,33 @@ describe("serve classification when the caller closes the connection mid-operati
 			expect(result.served?.observability?.upstreamStatus).toBeUndefined();
 		});
 	}
+
+	it("keeps a provider-initiated transport_cancelled off client_cancelled while the caller stays connected", () => {
+		const result = wire["http-provider-abort"];
+		// Same code as a caller cancellation, but the provider's own
+		// AbortSignal.timeout fired and the inbound connection never closed.
+		expect(result.clientAborted).toBe(false);
+		expect(result.log?.code).toBe("transport_cancelled");
+		expect(result.served?.body.error?.code).toBe("transport_cancelled");
+		expect(result.log?.causeChain?.[0]?.errorClass).toBe("TimeoutError");
+		// The classification transport_cancelled had before client_cancelled
+		// existed for it: upstream_http with no upstream status.
+		expect(result.served?.observability).toEqual({
+			category: "upstream_http",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: false,
+		});
+		expect(outcome(result)).toEqual({
+			status: 502,
+			category: "upstream_http",
+			retryable: false,
+			source: "upstream_failure",
+			bodyRetryable: false,
+			logStatus: 502,
+			logCategory: "upstream_http",
+			logRetryable: false,
+		});
+	});
 
 	it("leaves an upstream HTTP failure on the upstream_http branch", () => {
 		const result = wire["http-upstream-503"];

@@ -1862,6 +1862,7 @@ function errorChainHasCode(error: unknown, expected: string): boolean {
 function providerObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
+	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails | undefined {
 	const declaredRetryable = sdkOwnsErrorResolution(error)
 		? undefined
@@ -1901,14 +1902,15 @@ function providerObservabilityDetails(
 		return undefined;
 	}
 	const errorCode = providerErrorCode(error);
-	// A cancelled request is not an upstream failure. ctx.http and ctx.stealth
-	// reject with `transport_cancelled` when their signal aborts, and serve
-	// gives them the inbound request's signal, so the usual cause is the caller
-	// closing the connection mid-operation; the native client's equivalent is
-	// `native_connection_aborted`. Neither carries an upstream status, so
-	// without this branch both would fall through to `upstream_http`.
-	const isCancellationCode =
-		errorCode === "native_connection_aborted" || errorCode === "transport_cancelled";
+	// ctx.http and ctx.stealth reject with `transport_cancelled` when their
+	// signal aborts, but that signal merges the inbound request's signal with
+	// any `signal` the provider passed itself (and, on the stateful route, the
+	// forwarding deadline), so the code alone does not say who cancelled. Only
+	// an aborted inbound request, the caller closing the connection, makes it
+	// `client_cancelled`; any other abort keeps the default below.
+	const isClientCancellation =
+		errorCode === "native_connection_aborted" ||
+		(errorCode === "transport_cancelled" && inboundSignal?.aborted === true);
 	const isProxyPoolCode =
 		errorCode === PROXY_POOL_EXHAUSTED_CODE ||
 		errorCode === PROXY_EDGE_AUTH_REJECTED_CODE ||
@@ -1929,7 +1931,7 @@ function providerObservabilityDetails(
 							errorCode === "native_connection_failed" ||
 							errorCode === "native_connection_closed"
 						? "network"
-						: isCancellationCode
+						: isClientCancellation
 							? "client_cancelled"
 							: error.upstreamStatus
 								? categoryForStatus(error.upstreamStatus)
@@ -1967,9 +1969,10 @@ function derivedErrorCategory(
 function classifiedErrorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
+	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails {
 	const effectiveDeclaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
-	const providerDetails = providerObservabilityDetails(error, effectiveDeclaration);
+	const providerDetails = providerObservabilityDetails(error, effectiveDeclaration, inboundSignal);
 	if (providerDetails) return providerDetails;
 
 	if (error instanceof z.ZodError || isValidationError(error)) {
@@ -2018,11 +2021,17 @@ function classifiedErrorObservabilityDetails(
 	};
 }
 
+/**
+ * `inboundSignal` is the served request's own signal (`c.req.raw.signal`).
+ * Pass it wherever the request is known, so a transport cancellation caused by
+ * the caller leaving is told apart from one the provider or a deadline caused.
+ */
 function errorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
+	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails {
-	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode);
+	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode, inboundSignal);
 	const providerObservability = safeProviderErrorObservability(error);
 	return {
 		...details,
@@ -2535,6 +2544,8 @@ function createRequestScope(input: {
 	logger?: ProviderServerLogger;
 	setHeader?: (name: string, value: string) => void;
 	declaredErrorCode?: (error: unknown) => OperationErrorCode | undefined;
+	/** The served request's signal; see `errorObservabilityDetails`. */
+	inboundSignal?: AbortSignal;
 }): RequestScope {
 	const sensitiveRegistry = createDiagnosticRedactor([], input.staticSensitiveValues);
 	const redact = (text: string) => redactDiagnosticText(text, sensitiveRegistry.redact);
@@ -2657,7 +2668,9 @@ function createRequestScope(input: {
 		const providerTelemetryHeader = telemetry.toHeaderValue();
 		const declaredErrorCode = error === undefined ? undefined : input.declaredErrorCode?.(error);
 		const errorObservability =
-			error === undefined ? undefined : errorObservabilityDetails(error, declaredErrorCode);
+			error === undefined
+				? undefined
+				: errorObservabilityDetails(error, declaredErrorCode, input.inboundSignal);
 		return {
 			...(providerTelemetryHeader ? { providerTelemetryHeader } : {}),
 			...(errorObservability ? { errorObservability } : {}),
@@ -3876,6 +3889,7 @@ function createServerAppWithCapabilityModules(
 			logger,
 			setHeader: (name, value) => c.header(name, value),
 			declaredErrorCode: (error) => declaredErrorCodeFor(error, operationId, operationErrorCodes),
+			inboundSignal: c.req.raw.signal,
 		});
 		try {
 			if (!options.internalOperationExecutor) {
@@ -4038,7 +4052,11 @@ function createServerAppWithCapabilityModules(
 				...(operationId ? { route: operationId, operationId } : {}),
 				...(requestId ? { requestId } : {}),
 			});
-			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
+			const observabilityDetails = errorObservabilityDetails(
+				error,
+				declaredErrorCode,
+				c.req.raw.signal,
+			);
 			const response = c.json(
 				toErrorResponse(
 					error,
@@ -4075,6 +4093,7 @@ function createServerAppWithCapabilityModules(
 			logger,
 			setHeader: (name, value) => c.header(name, value),
 			declaredErrorCode: (error) => declaredErrorCodeFor(error, operation, operationErrorCodes),
+			inboundSignal: c.req.raw.signal,
 		});
 		try {
 			rawBody = await c.req.raw
@@ -4130,7 +4149,11 @@ function createServerAppWithCapabilityModules(
 			const status = toStatusCode(error, declaredErrorCode);
 			const requestId = extractRequestId(rawBody);
 			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
-			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
+			const observabilityDetails = errorObservabilityDetails(
+				error,
+				declaredErrorCode,
+				c.req.raw.signal,
+			);
 			const response = c.json(
 				toErrorResponse(
 					error,
@@ -4183,6 +4206,7 @@ function createServerAppWithCapabilityModules(
 				headers: Object.fromEntries(c.req.raw.headers.entries()),
 				logger,
 				setHeader: (name, value) => c.header(name, value),
+				inboundSignal: c.req.raw.signal,
 			});
 			try {
 				rawBody = await c.req.raw
@@ -4234,7 +4258,7 @@ function createServerAppWithCapabilityModules(
 				const status = toStatusCode(error);
 				const requestId = extractRequestId(rawBody);
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
-				const observabilityDetails = errorObservabilityDetails(error);
+				const observabilityDetails = errorObservabilityDetails(error, undefined, c.req.raw.signal);
 				const response = c.json(
 					toErrorResponse(
 						error,
