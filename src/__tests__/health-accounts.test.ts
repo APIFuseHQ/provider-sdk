@@ -245,6 +245,45 @@ describe("healthAccounts declaration", () => {
 		);
 	});
 
+	it("rejects ISO 8601 durations whose time part is empty", () => {
+		for (const value of ["P0DT", "P1DT", "PT"]) {
+			expectRejected(
+				[accountWith({ otp: [receiptWith({ maxAge: value })] })],
+				'Provider "health-accounts-proof" healthAccounts[0].otp[0].maxAge must be an ISO 8601 duration for example PT8H or PT2M30S.',
+			);
+			expectRejected(
+				[accountWith({ wait: { timeout: value, rationale: weverseAccount.wait.rationale } })],
+				'Provider "health-accounts-proof" healthAccounts[0].wait.timeout must be an ISO 8601 duration for example PT8H or PT2M30S.',
+			);
+			expectRejected(
+				[
+					accountWith({
+						wait: {
+							timeout: "PT3M",
+							rationale: { measuredOtpValidity: value, source: "measured" },
+						},
+					}),
+				],
+				'Provider "health-accounts-proof" healthAccounts[0].wait.rationale.measuredOtpValidity must be an ISO 8601 duration for example PT8H or PT2M30S.',
+			);
+		}
+	});
+
+	it("accepts complete ISO 8601 durations through defineProvider and finalizeProvider", () => {
+		const account = defineHealthAccount({
+			...weverseAccount,
+			wait: { timeout: "P1DT2H", rationale: { measuredOtpValidity: "PT0S", source: "measured" } },
+			otp: [{ ...weverseReceipt, maxAge: "PT15M" }],
+		});
+		const provider = buildWeverseProvider([account]);
+
+		expect(provider.healthAccounts?.[0]?.wait).toEqual({
+			timeout: "P1DT2H",
+			rationale: { measuredOtpValidity: "PT0S", source: "measured" },
+		});
+		expect(provider.healthAccounts?.[0]?.otp[0].maxAge).toBe("PT15M");
+	});
+
 	it("rejects a code rule that is not an RE2 SafeRegex", () => {
 		expectRejected(
 			[
