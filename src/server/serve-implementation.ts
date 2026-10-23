@@ -3691,6 +3691,67 @@ function verifyStatefulForwardingRequest(input: {
 	}
 }
 
+/**
+ * The forwarded operation runs under one signal that merges the inbound
+ * request's signal with the forwarded deadline, so a deadline that expires
+ * mid-operation reaches ctx.http and ctx.stealth as the same
+ * `transport_cancelled` a departing caller produces, which the transport
+ * mapping would count as an upstream failure. The merged signal keeps the
+ * reason of whichever source aborted first, and those clients carry that
+ * reason as the cancellation's cause. A failure whose cause chain holds the
+ * deadline's own abort reason was therefore stopped by the deadline before
+ * anything else cancelled it: it becomes the StatefulRoutingDeadlineError the
+ * route already throws for a deadline that expires before execution, with the
+ * original failure as its cause. A caller that disconnected first, or a
+ * provider's own per-request signal, leaves a different reason, so that
+ * failure keeps its own classification.
+ */
+function statefulDeadlineExpiryOrSelf(
+	error: unknown,
+	deadlineSignal: AbortSignal | undefined,
+	envelope: Pick<ProviderServerStatefulForwardEnvelope, "requestId" | "deadlineAt">,
+): unknown {
+	if (
+		deadlineSignal?.aborted !== true ||
+		envelope.deadlineAt === undefined ||
+		error instanceof StatefulRoutingDeadlineError ||
+		!errorCauseChainIncludes(error, deadlineSignal.reason)
+	) {
+		return error;
+	}
+	const expiry = new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt);
+	Object.defineProperty(expiry, "cause", {
+		value: error,
+		writable: true,
+		configurable: true,
+		enumerable: false,
+	});
+	return expiry;
+}
+
+function errorCauseChainIncludes(error: unknown, target: unknown): boolean {
+	if (target === null || typeof target !== "object") return false;
+	const seen = new Set<object>();
+	let current = error;
+	for (let depth = 0; depth < 5; depth++) {
+		if (current === target) return true;
+		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
+			return false;
+		}
+		if (seen.has(current)) return false;
+		seen.add(current);
+		let cause: PropertyDescriptor | undefined;
+		try {
+			cause = Object.getOwnPropertyDescriptor(current, "cause");
+		} catch {
+			return false;
+		}
+		if (!cause || !Object.hasOwn(cause, "value")) return false;
+		current = cause.value;
+	}
+	return false;
+}
+
 function operationRequestFromForwardingEnvelope(
 	envelope: ProviderServerStatefulForwardEnvelope,
 ): OperationRequest & { readonly deadlineAt?: string } {
@@ -4087,14 +4148,19 @@ function createServerAppWithCapabilityModules(
 				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 				}
-				const output = await options.internalOperationExecutor!({
-					provider,
-					operationId: operationId as string,
-					ctx,
-					request,
-					internalStatefulForward: envelope,
-					signal,
-				});
+				let output: unknown;
+				try {
+					output = await options.internalOperationExecutor!({
+						provider,
+						operationId: operationId as string,
+						ctx,
+						request,
+						internalStatefulForward: envelope,
+						signal,
+					});
+				} catch (error) {
+					throw statefulDeadlineExpiryOrSelf(error, deadlineSignal, envelope);
+				}
 				return c.json({ data: output });
 			});
 			return finalizeRequestResponse(requestScope, response, {
