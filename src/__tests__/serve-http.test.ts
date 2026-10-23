@@ -2362,7 +2362,7 @@ describe("provider HTTP server", () => {
 		// The category was already timeout; it does not change.
 		expect(errorObservability(native)).toEqual({
 			category: "timeout",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
 		expect(errorObservability(native)).toEqual(errorObservability(transport));
@@ -2391,7 +2391,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "timeout",
-			taxonomyVersion: "2026-08-07",
+			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
 	});

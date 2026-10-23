@@ -40,9 +40,10 @@ const PROVIDER_ID = "stateful-deadline-category";
 const FORWARDING_SECRET = "stateful-deadline-category-secret";
 const DEADLINE_CODE = "STATEFUL_FORWARDING_DEADLINE_EXPIRED";
 // Categories the deadline was, or could be mistaken for: timeout before this
-// taxonomy, upstream_http before the owner route classified it at all,
-// unclassified when a gateway drops a category it does not know, and
-// client_cancelled for an inbound request that went away.
+// taxonomy, upstream_http before the owner route classified it at all (and
+// what a gateway that does not know this taxonomy records from the bare 504,
+// since the body carries no category), unclassified for an error no category
+// claims, and client_cancelled for an inbound request that went away.
 const NOT_THE_DEADLINE_CATEGORIES = [
 	"timeout",
 	"unclassified",
