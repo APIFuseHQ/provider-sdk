@@ -2064,6 +2064,15 @@ function responseWithErrorObservability(
 	});
 }
 
+// ctx.native's connect deadline (`timeoutMs`) expiring rejects with
+// `native_connection_timeout`, the native client's counterpart of ctx.http's
+// `transport_timeout`. Both are served alike: status 504 and the public message
+// "Request timed out". The category (timeout) was already the same for both.
+function isServedAsTransportTimeout(error: ProviderError): boolean {
+	const code = providerErrorCode(error);
+	return code === "transport_timeout" || code === "native_connection_timeout";
+}
+
 function publicProviderErrorMessage(error: ProviderError): string {
 	if (isTransportError(error)) {
 		if (providerErrorCode(error) === PROXY_AUTH_IP_DENIED_CODE) {
@@ -2075,7 +2084,7 @@ function publicProviderErrorMessage(error: ProviderError): string {
 		if (providerErrorCode(error) === PROXY_POOL_EXHAUSTED_CODE) {
 			return error.message;
 		}
-		if (providerErrorCode(error) === "transport_timeout") return "Request timed out";
+		if (isServedAsTransportTimeout(error)) return "Request timed out";
 		if (providerErrorCode(error) === "transport_network_error") return "Network error";
 		// Provider-local fault: no request was issued, so an upstream-flavored
 		// message would misattribute it (category is provider_error).
@@ -2125,7 +2134,7 @@ function toStatusCode(
 		}
 		if (isTransportError(error)) {
 			if (isClientCancelledTransportError(error, inboundSignal)) return CLIENT_CANCELLED_STATUS;
-			return providerErrorCode(error) === "transport_timeout" ? 504 : 502;
+			return isServedAsTransportTimeout(error) ? 504 : 502;
 		}
 		if (isValidationError(error)) {
 			return providerErrorOption(error, "category") === "output_validation" ? 500 : 400;
