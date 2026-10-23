@@ -1,6 +1,6 @@
 import type ms from "ms";
 import type { HandleContext, HandleKind } from "./handle.js";
-import type { HealthScenario, NonEmpty } from "./health-scenario.js";
+import type { HealthScenario, NonEmpty, SafeRegex } from "./health-scenario.js";
 import type { UpstreamMaintenanceWindow } from "./upstream-maintenance.js";
 import type { SerializedCookieJar } from "tough-cookie";
 
@@ -197,6 +197,54 @@ export interface SmsOtpMatcherDefinition {
 	clockSkew?: Iso8601Duration;
 	/** Runtime/fixture helper. Not serialized into generated registry artifacts. */
 	extractOtp(body: string): string | null;
+}
+
+/**
+ * Channel an OTP reaches a health account through. Only `"email"` today; the
+ * union widens (for example `"sms" | "authenticator"`) as receipt kinds land.
+ */
+export type OtpMedium = "email";
+
+/** How the OTP code is read out of a received message. */
+export type OtpCodeRule = {
+	kind: "regex";
+	pattern: SafeRegex;
+	/** Index of the regex capture group that holds the code. */
+	capture: number;
+};
+
+/** Fields every OTP receipt declares, whatever the medium. */
+export interface OtpReceiptBase {
+	/** Receipt id; the APIFuse registry prefixes it with `<providerId>/`. */
+	id: string;
+	code: OtpCodeRule;
+	/** Oldest message age still accepted as this OTP. At most `PT15M`. */
+	maxAge: Iso8601Duration;
+}
+
+/** An OTP delivered by email. */
+export interface EmailOtpReceipt extends OtpReceiptBase {
+	medium: "email";
+	sender: { domains: readonly [string, ...string[]] };
+	subject?: { includesAny: readonly string[] };
+}
+
+/** Every OTP receipt kind, discriminated by `medium`. */
+export type OtpReceipt = EmailOtpReceipt;
+
+/**
+ * A health-monitor account persona and the OTPs it receives while signing in.
+ * The APIFuse registry converts this declaration into health projection entries.
+ */
+export interface HealthAccountDeclaration {
+	persona: string;
+	/** OTP medium → seed field name that holds this account's address for that medium. */
+	destinations: Partial<Record<OtpMedium, string>>;
+	wait: {
+		timeout: Iso8601Duration;
+		rationale: { measuredOtpValidity: Iso8601Duration; source: string };
+	};
+	otp: readonly [OtpReceipt, ...OtpReceipt[]];
 }
 
 export interface ProviderOcrConfig {
@@ -2647,4 +2695,6 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	/** Transitional alias for `healthMonitor`; `defineProvider` mirrors both. */
 	healthProbe?: ProviderHealthProbeConfig;
 	healthJourneys?: readonly HealthJourneyDefinition[];
+	/** Health-monitor accounts and the OTPs they receive; passed through from `defineProvider`. */
+	healthAccounts?: readonly HealthAccountDeclaration[];
 }

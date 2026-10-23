@@ -1185,6 +1185,9 @@ export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema exten
     };
 }
 
+// @public
+export function defineHealthAccount(declaration: HealthAccountDeclaration): HealthAccountDeclaration;
+
 // @public (undocumented)
 export function defineHealthJourney(config: HealthJourneyDefinition): HealthJourneyDefinition;
 
@@ -1234,6 +1237,20 @@ export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema exte
 
 // @public (undocumented)
 type E164PhoneNumber = `+${string}`;
+
+// @public
+export interface EmailOtpReceipt extends OtpReceiptBase {
+    // (undocumented)
+    medium: "email";
+    // (undocumented)
+    sender: {
+        domains: readonly [string, ...string[]];
+    };
+    // (undocumented)
+    subject?: {
+        includesAny: readonly string[];
+    };
+}
 
 // @public
 export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
@@ -1677,6 +1694,23 @@ export type HandleTelemetryOutcome = "success" | "not_found" | "expired" | "inva
 export type HandleWordCount = 2 | 4 | 5;
 
 // @public
+export interface HealthAccountDeclaration {
+    destinations: Partial<Record<OtpMedium, string>>;
+    // (undocumented)
+    otp: readonly [OtpReceipt, ...OtpReceipt[]];
+    // (undocumented)
+    persona: string;
+    // (undocumented)
+    wait: {
+        timeout: Iso8601Duration;
+        rationale: {
+            measuredOtpValidity: Iso8601Duration;
+            source: string;
+        };
+    };
+}
+
+// @public
 export interface HealthCheckAssertionContext<TOutput = unknown> {
     readonly data: TOutput;
     readonly durationMs: number;
@@ -1788,8 +1822,6 @@ interface HealthJourneyDefinitionBase {
     //
     // (undocumented)
     steps: readonly [HealthJourneyStep, ...HealthJourneyStep[]];
-    // Warning: (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     timeout?: Iso8601Duration;
     // (undocumented)
@@ -3216,6 +3248,27 @@ interface OperationWebSocketTransport {
 }
 
 // @public
+export type OtpCodeRule = {
+    kind: "regex";
+    pattern: SafeRegex;
+    capture: number;
+};
+
+// @public
+export type OtpMedium = "email";
+
+// @public
+export type OtpReceipt = EmailOtpReceipt;
+
+// @public
+export interface OtpReceiptBase {
+    // (undocumented)
+    code: OtpCodeRule;
+    id: string;
+    maxAge: Iso8601Duration;
+}
+
+// @public
 export const OUTPUT_URL_DROP_REASONS: readonly ["not_url", "relative", "scheme", "insecure", "host", "credentials"];
 
 // @public
@@ -3762,6 +3815,7 @@ export interface ProviderDeclaration {
     env?: Record<string, never> | true;
     files?: Record<string, never> | true;
     handle?: readonly HandleKind[];
+    healthAccounts?: readonly HealthAccountDeclaration[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // Warning: (ae-forgotten-export) The symbol "ProviderHealthMonitorConfig" needs to be exported by the entry point provider.d.ts
@@ -3855,6 +3909,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     files?: Record<string, never> | true;
     // (undocumented)
     handle?: readonly HandleKind[];
+    healthAccounts?: readonly HealthAccountDeclaration[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // (undocumented)
@@ -6124,7 +6179,7 @@ export { z }
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:111:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:139:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:143:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
 // dist/errors.d.ts:9:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts
@@ -6137,23 +6192,24 @@ export { z }
 // dist/runtime/native-telemetry.d.ts:44:5 - (ae-forgotten-export) The symbol "NativeTelemetryVendorSkipReason" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-telemetry.d.ts:48:5 - (ae-forgotten-export) The symbol "NativeTelemetryLifecycleKind" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:129:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:357:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:359:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:704:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:947:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:952:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1397:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1397:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1704:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1710:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1711:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1715:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1722:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1757:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2035:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2043:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:198:9 - (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:406:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:408:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:732:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:753:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:996:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1001:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1446:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1446:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1753:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1759:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1760:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1764:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1771:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1806:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2084:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2090:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2092:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

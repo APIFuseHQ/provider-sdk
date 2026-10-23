@@ -732,6 +732,53 @@ Use the runtime capabilities narrowly:
 
 Do not import `apps/health-monitor`, generated health artifacts, database repositories, schedulers, or recorders from provider code. If a journey needs provider-specific helper code, place it under the provider package (for example `providers/<id>/health-journeys/*`) and keep the SDK boundary generic.
 
+### Health accounts and OTP receipts (`healthAccounts`)
+
+Use `defineHealthAccount()` to declare the health-monitor account a provider signs in with and the OTPs that account receives while signing in. The APIFuse registry converts each declaration into health projection entries. `defineHealthAccount()` only types the object; `defineProvider()` validates it when the provider is defined. The example uses placeholder values.
+
+```ts
+import { defineHealthAccount, defineProvider } from "@apifuse/provider-sdk";
+
+const buildProvider = defineProvider({
+	id: "weverse",
+	// ...metadata, auth, allowedHosts
+	healthAccounts: [
+		defineHealthAccount({
+			persona: "default",
+			destinations: { email: "email" },
+			wait: {
+				timeout: "PT3M",
+				rationale: { measuredOtpValidity: "PT5M", source: "task 1.3 측정" },
+			},
+			otp: [
+				{
+					medium: "email",
+					id: "account-otp",
+					sender: { domains: ["weverse.io"] },
+					subject: { includesAny: ["verification code", "인증번호"] },
+					code: {
+						kind: "regex",
+						pattern: { engine: "re2", pattern: "\\b([0-9]{6})\\b", flags: "" },
+						capture: 1,
+					},
+					maxAge: "PT10M",
+				},
+			],
+		}),
+	],
+});
+
+export default buildProvider({ operations });
+```
+
+- `persona` names the health-monitor account.
+- `destinations.<medium>` is the name of the seed field that holds the account's address for that medium. Above, the seed field `email` holds the address the OTP email is sent to.
+- `wait.timeout` is how long to wait for the OTP. `wait.rationale` records where that number comes from: `measuredOtpValidity` is the measured OTP validity, and `source` names the measurement.
+- `otp` lists one or more OTP receipts. `medium` is `"email"` today; the union widens as more media land. An email receipt names its `sender.domains` and, optionally, subject keywords in `subject.includesAny`.
+- `otp[].id` is the receipt id. The registry prefixes it with `<providerId>/` and uses the result as the matcher id (`weverse/account-otp` above).
+- `otp[].code.pattern` is an RE2 `SafeRegex` written as a string, not a `RegExp` literal: `engine: "re2"`, `flags` `""` or `"i"`, at most 256 characters, no backreferences, no `(?` groups, no nested quantifiers, and valid regular-expression syntax. `otp[].code.capture` is the index of the capture group that holds the code.
+- `otp[].maxAge` is the oldest message age still accepted as this OTP, at most `PT15M`. Durations are ISO 8601, as in the other health declarations.
+
 ### External bounty submission evidence
 
 External contributors are expected to submit standalone Provider source plus:
