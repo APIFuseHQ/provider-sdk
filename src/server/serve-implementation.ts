@@ -1901,6 +1901,14 @@ function providerObservabilityDetails(
 		return undefined;
 	}
 	const errorCode = providerErrorCode(error);
+	// A cancelled request is not an upstream failure. ctx.http and ctx.stealth
+	// reject with `transport_cancelled` when their signal aborts, and serve
+	// gives them the inbound request's signal, so the usual cause is the caller
+	// closing the connection mid-operation; the native client's equivalent is
+	// `native_connection_aborted`. Neither carries an upstream status, so
+	// without this branch both would fall through to `upstream_http`.
+	const isCancellationCode =
+		errorCode === "native_connection_aborted" || errorCode === "transport_cancelled";
 	const isProxyPoolCode =
 		errorCode === PROXY_POOL_EXHAUSTED_CODE ||
 		errorCode === PROXY_EDGE_AUTH_REJECTED_CODE ||
@@ -1921,7 +1929,7 @@ function providerObservabilityDetails(
 							errorCode === "native_connection_failed" ||
 							errorCode === "native_connection_closed"
 						? "network"
-						: errorCode === "native_connection_aborted"
+						: isCancellationCode
 							? "client_cancelled"
 							: error.upstreamStatus
 								? categoryForStatus(error.upstreamStatus)
