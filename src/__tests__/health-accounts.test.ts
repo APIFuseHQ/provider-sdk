@@ -269,17 +269,56 @@ describe("healthAccounts declaration", () => {
 		}
 	});
 
+	it("rejects zero-length ISO 8601 durations and keeps positive ones", () => {
+		for (const value of ["PT0S", "P0D", "PT0.0S", "P0DT0H0M0S"]) {
+			expectRejected(
+				[accountWith({ otp: [receiptWith({ maxAge: value })] })],
+				'Provider "health-accounts-proof" healthAccounts[0].otp[0].maxAge must be a positive duration.',
+			);
+			expectRejected(
+				[accountWith({ wait: { timeout: value, rationale: weverseAccount.wait.rationale } })],
+				'Provider "health-accounts-proof" healthAccounts[0].wait.timeout must be a positive duration.',
+			);
+			expectRejected(
+				[
+					accountWith({
+						wait: {
+							timeout: "PT3M",
+							rationale: { measuredOtpValidity: value, source: "measured" },
+						},
+					}),
+				],
+				'Provider "health-accounts-proof" healthAccounts[0].wait.rationale.measuredOtpValidity must be a positive duration.',
+			);
+		}
+
+		for (const value of ["PT0.5S", "PT0.0001S", "PT1S", "PT15M"]) {
+			const account = defineHealthAccount({
+				...weverseAccount,
+				wait: { timeout: value, rationale: { measuredOtpValidity: value, source: "measured" } },
+				otp: [{ ...weverseReceipt, maxAge: value }],
+			});
+			const provider = buildWeverseProvider([account]);
+
+			expect(provider.healthAccounts?.[0]?.wait).toEqual({
+				timeout: value,
+				rationale: { measuredOtpValidity: value, source: "measured" },
+			});
+			expect(provider.healthAccounts?.[0]?.otp[0].maxAge).toBe(value);
+		}
+	});
+
 	it("accepts complete ISO 8601 durations through defineProvider and finalizeProvider", () => {
 		const account = defineHealthAccount({
 			...weverseAccount,
-			wait: { timeout: "P1DT2H", rationale: { measuredOtpValidity: "PT0S", source: "measured" } },
+			wait: { timeout: "P1DT2H", rationale: { measuredOtpValidity: "PT0.5S", source: "measured" } },
 			otp: [{ ...weverseReceipt, maxAge: "PT15M" }],
 		});
 		const provider = buildWeverseProvider([account]);
 
 		expect(provider.healthAccounts?.[0]?.wait).toEqual({
 			timeout: "P1DT2H",
-			rationale: { measuredOtpValidity: "PT0S", source: "measured" },
+			rationale: { measuredOtpValidity: "PT0.5S", source: "measured" },
 		});
 		expect(provider.healthAccounts?.[0]?.otp[0].maxAge).toBe("PT15M");
 	});

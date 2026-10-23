@@ -67,6 +67,10 @@ describe("health journey authoring", () => {
 			["1d", "P1D"],
 			["PT20M", "PT20M"],
 			["P1DT2H", "P1DT2H"],
+			["PT0.5S", "PT0.5S"],
+			["PT0.0001S", "PT0.0001S"],
+			["PT1S", "PT1S"],
+			["PT15M", "PT15M"],
 		];
 
 		for (const [interval, normalized] of accepted) {
@@ -86,6 +90,10 @@ describe("health journey authoring", () => {
 			["P0DT", /ISO 8601 duration/],
 			["P1DT", /ISO 8601 duration/],
 			["PT", /ISO 8601 duration/],
+			["PT0S", /journey schedule interval must be a positive duration/],
+			["P0D", /journey schedule interval must be a positive duration/],
+			["PT0.0S", /journey schedule interval must be a positive duration/],
+			["P0DT0H0M0S", /journey schedule interval must be a positive duration/],
 		];
 		for (const [interval, message] of rejected) {
 			expect(() => every(interval)).toThrow(message);
@@ -172,7 +180,7 @@ describe("health journey authoring", () => {
 					}),
 				],
 			}),
-		).toThrow(/duration must be positive/);
+		).toThrow(/randomize\.maxDelay must be a positive duration/);
 
 		expect(() =>
 			defineProvider({
@@ -645,7 +653,7 @@ describe("health journey authoring", () => {
 			code: { pattern: /([0-9]{4})/ },
 			maxAge: "PT15M",
 			waitTimeout: "P1DT2H",
-			clockSkew: "PT0S",
+			clockSkew: "PT0.5S",
 		});
 		const buildProvider = (
 			schedule: ReturnType<typeof every>,
@@ -680,7 +688,7 @@ describe("health journey authoring", () => {
 		expect(provider.healthJourneys?.[0]?.smsMatchers?.[0]).toMatchObject({
 			maxAge: "PT15M",
 			waitTimeout: "P1DT2H",
-			clockSkew: "PT0S",
+			clockSkew: "PT0.5S",
 		});
 
 		for (const value of ["P0DT", "P1DT", "PT"]) {
@@ -701,6 +709,92 @@ describe("health journey authoring", () => {
 				}),
 			).toThrow(
 				"smsOtpMatcher.waitTimeout must be an ISO 8601 duration for example PT8H or PT2M30S.",
+			);
+		}
+	});
+
+	it("rejects zero-length ISO 8601 durations in shared duration fields through defineProvider", () => {
+		const matcherConfig: Parameters<typeof defineSmsOtpMatcher>[0] = {
+			id: "phone-otp",
+			country: "KR",
+			origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
+			code: { pattern: /([0-9]{4})/ },
+			maxAge: "PT5M",
+			waitTimeout: "PT2M30S",
+			clockSkew: "PT10S",
+		};
+		const matcher = defineSmsOtpMatcher(matcherConfig);
+		const buildProvider = (overrides: {
+			schedule?: ReturnType<typeof every>;
+			timeout?: string;
+			cooldown?: string;
+			smsMatchers?: ReturnType<typeof defineSmsOtpMatcher>[];
+		}) =>
+			defineProvider({
+				id: "zero-duration-provider",
+				version: "1.0.0",
+				runtime: "shared",
+				meta: {
+					displayName: "Journey",
+					descriptionKey: "meta.description",
+					category: "test",
+				},
+				operations: {
+					"send-otp": dummyOperation(),
+				},
+				healthJourneys: [
+					defineHealthJourney({
+						id: "phone-auth",
+						schedule: every("PT8H"),
+						coversOperations: ["send-otp"],
+						smsMatchers: [matcher],
+						steps: [{ id: "send", operationId: "send-otp", kind: "operation" }],
+						run: async () => ({ status: "ok" }),
+						...overrides,
+					}),
+				],
+			});
+
+		const provider = buildProvider({
+			schedule: { kind: "interval", interval: "PT15M", jitter: "PT0.5S" },
+			timeout: "PT1S",
+			cooldown: "PT0.0001S",
+			smsMatchers: [{ ...matcher, maxAge: "PT15M", waitTimeout: "PT1S", clockSkew: "PT0.5S" }],
+		});
+		expect(provider.healthJourneys?.[0]).toMatchObject({
+			schedule: { kind: "interval", interval: "PT15M", jitter: "PT0.5S" },
+			timeout: "PT1S",
+			cooldown: "PT0.0001S",
+			smsMatchers: [{ maxAge: "PT15M", waitTimeout: "PT1S", clockSkew: "PT0.5S" }],
+		});
+
+		const journeyPath = 'Provider "zero-duration-provider" healthJourneys.phone-auth';
+		for (const value of ["PT0S", "P0D", "PT0.0S", "P0DT0H0M0S"]) {
+			expect(() => buildProvider({ schedule: { kind: "interval", interval: value } })).toThrow(
+				`${journeyPath}.schedule.interval must be a positive duration.`,
+			);
+			expect(() =>
+				buildProvider({ schedule: { kind: "interval", interval: "PT8H", jitter: value } }),
+			).toThrow(`${journeyPath}.schedule.jitter must be a positive duration.`);
+			expect(() => buildProvider({ timeout: value })).toThrow(
+				`${journeyPath}.timeout must be a positive duration.`,
+			);
+			expect(() => buildProvider({ cooldown: value })).toThrow(
+				`${journeyPath}.cooldown must be a positive duration.`,
+			);
+			for (const field of ["maxAge", "waitTimeout", "clockSkew"] as const) {
+				expect(() => buildProvider({ smsMatchers: [{ ...matcher, [field]: value }] })).toThrow(
+					`healthJourneys.phone-auth.smsMatchers[0].${field} must be a positive duration.`,
+				);
+				expect(() => defineSmsOtpMatcher({ ...matcherConfig, [field]: value })).toThrow(
+					`smsOtpMatcher.${field} must be a positive duration.`,
+				);
+			}
+			expect(() => every("PT8H", { jitter: value })).toThrow(
+				"journey schedule interval must be a positive duration.",
+			);
+			expect(() => every("PT8H", { randomize: centered(value) })).toThrow(
+				"journey schedule interval must be a positive duration.",
 			);
 		}
 	});
