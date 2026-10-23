@@ -1724,6 +1724,9 @@ export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema exten
     };
 }
 
+// @public
+export function defineHealthAccount(declaration: HealthAccountDeclaration): HealthAccountDeclaration;
+
 // @public (undocumented)
 export function defineHealthJourney(config: HealthJourneyDefinition): HealthJourneyDefinition;
 
@@ -1804,6 +1807,20 @@ export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema exte
 
 // @public (undocumented)
 export type E164PhoneNumber = `+${string}`;
+
+// @public
+export interface EmailOtpReceipt extends OtpReceiptBase {
+    // (undocumented)
+    medium: "email";
+    // (undocumented)
+    sender: {
+        domains: readonly [string, ...string[]];
+    };
+    // (undocumented)
+    subject?: {
+        includesAny: readonly string[];
+    };
+}
 
 // @public (undocumented)
 export function encodeSseEvent(input: SseEvent): string;
@@ -2298,6 +2315,23 @@ export type HandleWordCount = 2 | 4 | 5;
 
 // @public (undocumented)
 export function hasHandleErrorBrand(value: unknown): boolean;
+
+// @public
+export interface HealthAccountDeclaration {
+    destinations: Partial<Record<OtpMedium, string>>;
+    // (undocumented)
+    otp: readonly [OtpReceipt, ...OtpReceipt[]];
+    // (undocumented)
+    persona: string;
+    // (undocumented)
+    wait: {
+        timeout: Iso8601Duration;
+        rationale: {
+            measuredOtpValidity: Iso8601Duration;
+            source: string;
+        };
+    };
+}
 
 // @public
 export interface HealthCheckAssertionContext<TOutput = unknown> {
@@ -4373,6 +4407,27 @@ interface OTLPExportOptions {
 }
 
 // @public
+export type OtpCodeRule = {
+    kind: "regex";
+    pattern: SafeRegex;
+    capture: number;
+};
+
+// @public
+export type OtpMedium = "email";
+
+// @public
+export type OtpReceipt = EmailOtpReceipt;
+
+// @public
+export interface OtpReceiptBase {
+    // (undocumented)
+    code: OtpCodeRule;
+    id: string;
+    maxAge: Iso8601Duration;
+}
+
+// @public
 export const OUTPUT_URL_DROP_REASONS: readonly ["not_url", "relative", "scheme", "insecure", "host", "credentials"];
 
 // @public
@@ -5108,6 +5163,7 @@ export interface ProviderDeclaration {
     env?: Record<string, never> | true;
     files?: Record<string, never> | true;
     handle?: readonly HandleKind[];
+    healthAccounts?: readonly HealthAccountDeclaration[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // (undocumented)
@@ -5189,6 +5245,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     files?: Record<string, never> | true;
     // (undocumented)
     handle?: readonly HandleKind[];
+    healthAccounts?: readonly HealthAccountDeclaration[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // (undocumented)
@@ -8832,7 +8889,7 @@ export { z }
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:111:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:139:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:143:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:5:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:30:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:58:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
@@ -8847,12 +8904,12 @@ export { z }
 // dist/server/serve-implementation.d.ts:199:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:272:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:683:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1757:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1845:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1853:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1854:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:732:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1806:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1894:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1902:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1903:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2090:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

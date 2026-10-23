@@ -28,6 +28,7 @@ export type {
 } from "./define.js";
 export {
 	centered,
+	defineHealthAccount,
 	defineHealthJourney,
 	defineOperation,
 	defineProvider,
@@ -264,7 +265,9 @@ export type {
 	AuthMode,
 	AuthSafeData,
 	AuthSafeJson,
+	EmailOtpReceipt,
 	FlowContext,
+	HealthAccountDeclaration,
 	HealthCheckAssertionContext,
 	HealthCheckCase,
 	HealthCheckSuite,
@@ -315,6 +318,10 @@ export type {
 	OperationRiskClass,
 	OperationSensitivePath,
 	OperationTransport,
+	OtpCodeRule,
+	OtpMedium,
+	OtpReceipt,
+	OtpReceiptBase,
 	ProviderAccessVisibility,
 	ProviderContext,
 	ProviderContextFor,

@@ -13,7 +13,7 @@ import {
 	isEngineOwnedRuntimeEnvName,
 	isEngineOwnedTelemetryEnvName,
 } from "./engine.js";
-import { HealthScenarioSchema } from "./health-scenario.js";
+import { HealthScenarioSchema, SafeRegexSchema } from "./health-scenario.js";
 import { UpstreamMaintenanceWindowsSchema } from "./upstream-maintenance.js";
 import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
 import {
@@ -28,6 +28,7 @@ import type {
 	BrowserEngine,
 	ContextDeclaration,
 	CredentialDeclaration,
+	HealthAccountDeclaration,
 	HealthCheckCase,
 	HealthCheckSuite,
 	HealthCheckUnsupported,
@@ -42,6 +43,7 @@ import type {
 	OperationSseTransport,
 	OperationTransport,
 	OperationWebSocketTransport,
+	OtpMedium,
 	ProviderAccessConfig,
 	ProviderChallengeKind,
 	ProviderContext,
@@ -653,6 +655,8 @@ export interface ProviderDeclaration {
 	/** New name for `healthMonitor` (transitional alias); declaring both is a ValidationError. */
 	healthProbe?: ProviderHealthMonitorConfig;
 	healthJourneys?: readonly HealthJourneyDefinition[];
+	/** Health-monitor accounts and the OTPs they receive. Build entries with `defineHealthAccount()`. */
+	healthAccounts?: readonly HealthAccountDeclaration[];
 }
 
 interface ProviderConfig<
@@ -2676,6 +2680,201 @@ export function defineHealthJourney(config: HealthJourneyDefinition): HealthJour
 	return config;
 }
 
+/** Declare a health-monitor account and the OTPs it receives; `defineProvider` validates it. */
+export function defineHealthAccount(
+	declaration: HealthAccountDeclaration,
+): HealthAccountDeclaration {
+	return declaration;
+}
+
+const HEALTH_ACCOUNT_FIELDS = new Set(["persona", "destinations", "wait", "otp"]);
+const HEALTH_ACCOUNT_WAIT_FIELDS = new Set(["timeout", "rationale"]);
+const HEALTH_ACCOUNT_WAIT_RATIONALE_FIELDS = new Set(["measuredOtpValidity", "source"]);
+const OTP_CODE_RULE_FIELDS = new Set(["kind", "pattern", "capture"]);
+const EMAIL_OTP_RECEIPT_FIELDS = new Set(["medium", "id", "code", "maxAge", "sender", "subject"]);
+const EMAIL_OTP_SENDER_FIELDS = new Set(["domains"]);
+const EMAIL_OTP_SUBJECT_FIELDS = new Set(["includesAny"]);
+const OTP_RECEIPT_MAX_AGE_LIMIT = "PT15M";
+
+type OtpReceiptValidator = (receipt: object, fieldPath: string, providerId: string) => void;
+
+/** One validator per OtpMedium member; widening OtpMedium fails type-check until it is added. */
+const OTP_RECEIPT_VALIDATORS: Record<OtpMedium, OtpReceiptValidator> = {
+	email: validateEmailOtpReceipt,
+};
+
+function isOtpMedium(value: unknown): value is OtpMedium {
+	return typeof value === "string" && Object.hasOwn(OTP_RECEIPT_VALIDATORS, value);
+}
+
+function assertHealthAccountObject(
+	value: unknown,
+	fieldPath: string,
+	providerId: string,
+): asserts value is object {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be an object.`);
+	}
+}
+
+function assertHealthAccountString(value: unknown, fieldPath: string, providerId: string): void {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be a non-empty string.`);
+	}
+}
+
+function assertHealthAccountStringList(
+	value: unknown,
+	fieldPath: string,
+	providerId: string,
+	requireEntry: boolean,
+): void {
+	if (!Array.isArray(value) || (requireEntry && value.length === 0)) {
+		throw new ValidationError(
+			`Provider "${providerId}" ${fieldPath} must be ${requireEntry ? "a non-empty array" : "an array"} of non-empty strings.`,
+		);
+	}
+	for (const [index, entry] of value.entries()) {
+		assertHealthAccountString(entry, `${fieldPath}[${index}]`, providerId);
+	}
+}
+
+function validateOtpCodeRule(code: unknown, fieldPath: string, providerId: string): void {
+	assertHealthAccountObject(code, fieldPath, providerId);
+	rejectUnknownFields(code, OTP_CODE_RULE_FIELDS, fieldPath, providerId);
+	if (Reflect.get(code, "kind") !== "regex") {
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath}.kind must be "regex".`);
+	}
+	const parsedPattern = SafeRegexSchema.safeParse(Reflect.get(code, "pattern"));
+	if (!parsedPattern.success) {
+		const issue = parsedPattern.error.issues[0];
+		const issuePath = (issue?.path ?? []).map((segment) => `.${String(segment)}`).join("");
+		throw new ValidationError(
+			`Provider "${providerId}" has invalid ${fieldPath}.pattern${issuePath}: ${issue?.message ?? "invalid SafeRegex"}.`,
+			{
+				fix: `Declare ${fieldPath}.pattern as { engine: "re2", pattern: "<RE2 source>", flags: "" | "i" }.`,
+			},
+		);
+	}
+	if (typeof Reflect.get(code, "capture") !== "number") {
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath}.capture must be a number.`);
+	}
+}
+
+function validateEmailOtpReceipt(receipt: object, fieldPath: string, providerId: string): void {
+	rejectUnknownFields(receipt, EMAIL_OTP_RECEIPT_FIELDS, fieldPath, providerId);
+	const sender = Reflect.get(receipt, "sender");
+	assertHealthAccountObject(sender, `${fieldPath}.sender`, providerId);
+	rejectUnknownFields(sender, EMAIL_OTP_SENDER_FIELDS, `${fieldPath}.sender`, providerId);
+	assertHealthAccountStringList(
+		Reflect.get(sender, "domains"),
+		`${fieldPath}.sender.domains`,
+		providerId,
+		true,
+	);
+	const subject = Reflect.get(receipt, "subject");
+	if (subject !== undefined) {
+		assertHealthAccountObject(subject, `${fieldPath}.subject`, providerId);
+		rejectUnknownFields(subject, EMAIL_OTP_SUBJECT_FIELDS, `${fieldPath}.subject`, providerId);
+		assertHealthAccountStringList(
+			Reflect.get(subject, "includesAny"),
+			`${fieldPath}.subject.includesAny`,
+			providerId,
+			false,
+		);
+	}
+}
+
+function validateOtpReceipt(receipt: unknown, fieldPath: string, providerId: string): void {
+	assertHealthAccountObject(receipt, fieldPath, providerId);
+	const medium = Reflect.get(receipt, "medium");
+	if (!isOtpMedium(medium)) {
+		throw new ValidationError(
+			`Provider "${providerId}" ${fieldPath}.medium must be one of: ${Object.keys(OTP_RECEIPT_VALIDATORS).join(", ")}.`,
+		);
+	}
+	OTP_RECEIPT_VALIDATORS[medium](receipt, fieldPath, providerId);
+	assertHealthAccountString(Reflect.get(receipt, "id"), `${fieldPath}.id`, providerId);
+	validateOtpCodeRule(Reflect.get(receipt, "code"), `${fieldPath}.code`, providerId);
+	const maxAge = Reflect.get(receipt, "maxAge");
+	assertIsoDuration(maxAge, `Provider "${providerId}" ${fieldPath}.maxAge`);
+	if (isoDurationMs(maxAge) > isoDurationMs(OTP_RECEIPT_MAX_AGE_LIMIT)) {
+		throw new ValidationError(
+			`Provider "${providerId}" ${fieldPath}.maxAge must be at most ${OTP_RECEIPT_MAX_AGE_LIMIT}.`,
+		);
+	}
+}
+
+function validateHealthAccountWait(wait: unknown, fieldPath: string, providerId: string): void {
+	assertHealthAccountObject(wait, fieldPath, providerId);
+	rejectUnknownFields(wait, HEALTH_ACCOUNT_WAIT_FIELDS, fieldPath, providerId);
+	assertIsoDuration(Reflect.get(wait, "timeout"), `Provider "${providerId}" ${fieldPath}.timeout`);
+	const rationale = Reflect.get(wait, "rationale");
+	assertHealthAccountObject(rationale, `${fieldPath}.rationale`, providerId);
+	rejectUnknownFields(
+		rationale,
+		HEALTH_ACCOUNT_WAIT_RATIONALE_FIELDS,
+		`${fieldPath}.rationale`,
+		providerId,
+	);
+	assertIsoDuration(
+		Reflect.get(rationale, "measuredOtpValidity"),
+		`Provider "${providerId}" ${fieldPath}.rationale.measuredOtpValidity`,
+	);
+	assertHealthAccountString(
+		Reflect.get(rationale, "source"),
+		`${fieldPath}.rationale.source`,
+		providerId,
+	);
+}
+
+function validateHealthAccountDestinations(
+	destinations: unknown,
+	fieldPath: string,
+	providerId: string,
+): void {
+	assertHealthAccountObject(destinations, fieldPath, providerId);
+	for (const [medium, seedField] of Object.entries(destinations)) {
+		if (!isOtpMedium(medium)) {
+			throw new ValidationError(
+				`Provider "${providerId}" ${fieldPath} has unknown OTP medium "${medium}". Expected one of: ${Object.keys(OTP_RECEIPT_VALIDATORS).join(", ")}.`,
+			);
+		}
+		assertHealthAccountString(seedField, `${fieldPath}.${medium}`, providerId);
+	}
+}
+
+function validateHealthAccounts(
+	providerId: string,
+	healthAccounts: readonly HealthAccountDeclaration[] | undefined,
+): void {
+	if (healthAccounts === undefined) return;
+	if (!Array.isArray(healthAccounts)) {
+		throw new ValidationError(`Provider "${providerId}" healthAccounts must be an array.`);
+	}
+	for (const [index, account] of healthAccounts.entries()) {
+		const fieldPath = `healthAccounts[${index}]`;
+		assertHealthAccountObject(account, fieldPath, providerId);
+		rejectUnknownFields(account, HEALTH_ACCOUNT_FIELDS, fieldPath, providerId);
+		assertHealthAccountString(Reflect.get(account, "persona"), `${fieldPath}.persona`, providerId);
+		validateHealthAccountDestinations(
+			Reflect.get(account, "destinations"),
+			`${fieldPath}.destinations`,
+			providerId,
+		);
+		validateHealthAccountWait(Reflect.get(account, "wait"), `${fieldPath}.wait`, providerId);
+		const otp = Reflect.get(account, "otp");
+		if (!Array.isArray(otp) || otp.length === 0) {
+			throw new ValidationError(
+				`Provider "${providerId}" ${fieldPath}.otp must be a non-empty array.`,
+			);
+		}
+		for (const [receiptIndex, receipt] of otp.entries()) {
+			validateOtpReceipt(receipt, `${fieldPath}.otp[${receiptIndex}]`, providerId);
+		}
+	}
+}
+
 function validateHealthJourneySchedule(
 	providerId: string,
 	journeyId: string,
@@ -3060,6 +3259,7 @@ function validateProviderDeclaration(config: ProviderDeclaration): void {
 		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
 	);
 	validateProviderDeployment(config.id, config.deployment);
+	validateHealthAccounts(config.id, config.healthAccounts);
 	try {
 		validateNativeProviderConfig(config.native);
 	} catch (error) {
@@ -3158,6 +3358,7 @@ function finalizeProvider<
 		healthMonitor: config.healthMonitor ?? config.healthProbe,
 		healthProbe: config.healthProbe ?? config.healthMonitor,
 		healthJourneys: config.healthJourneys,
+		healthAccounts: config.healthAccounts,
 	};
 	// Declaration validation never invokes handlers, so their declaration-bound
 	// context parameter is irrelevant to the runtime ProviderDefinition shape.
