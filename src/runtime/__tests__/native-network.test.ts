@@ -614,6 +614,60 @@ describe("native network runtime", () => {
 		await expect(attempt).rejects.toMatchObject({ code: "native_connection_aborted" });
 	});
 
+	it("keeps the provider signal's reason as the abort's cause", async () => {
+		const proxy = await startSocks5Server({ stall: true });
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+		});
+		const rejection = async (attempt: Promise<unknown>): Promise<Error> => {
+			try {
+				await attempt;
+			} catch (error) {
+				if (error instanceof Error) return error;
+				throw error;
+			}
+			throw new Error("expected the native connect to reject");
+		};
+		const abortWith = async (reason?: unknown): Promise<Error> => {
+			const controller = new AbortController();
+			const attempt = client.connectTcp({
+				host: "127.0.0.1",
+				port: 9,
+				timeoutMs: 5_000,
+				signal: controller.signal,
+			});
+			controller.abort(reason);
+			return await rejection(attempt);
+		};
+
+		const timedOut = new DOMException("The operation timed out.", "TimeoutError");
+		const inFlight = await abortWith(timedOut);
+		expect(inFlight).toMatchObject({ code: "native_connection_aborted" });
+		expect(inFlight.cause).toBe(timedOut);
+
+		const defaulted = await abortWith();
+		expect(defaulted).toMatchObject({ code: "native_connection_aborted" });
+		expect(defaulted.cause).toMatchObject({ name: "AbortError" });
+
+		const wrapped = await abortWith("provider gave up");
+		expect(wrapped.cause).toBeInstanceOf(Error);
+		expect(wrapped.cause).toMatchObject({ message: "provider gave up" });
+
+		// No usable reason still rejects instead of leaving the connect pending.
+		const unprintable = await abortWith(Object.create(null));
+		expect(unprintable).toMatchObject({ code: "native_connection_aborted" });
+		expect(unprintable.cause).toBeUndefined();
+
+		const expired = AbortSignal.timeout(1);
+		await new Promise<void>((resolve) => expired.addEventListener("abort", () => resolve()));
+		const beforeStart = await rejection(
+			client.connectTcp({ host: "127.0.0.1", port: 9, signal: expired }),
+		);
+		expect(beforeStart).toMatchObject({ code: "native_connection_aborted" });
+		expect(beforeStart.cause).toMatchObject({ name: "TimeoutError" });
+	});
+
 	it("applies timeoutMs to the SOCKS negotiation phase", async () => {
 		const proxy = await startSocks5Server({ stall: true });
 		const client = createNativeNetworkClient({

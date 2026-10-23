@@ -3,7 +3,6 @@
 // on its upstream. Prints what serve answered and logged for each scenario.
 // serve-client-cancelled-classification.test.ts spawns this file so the
 // wreq-js module mock in other test files cannot replace the stealth transport.
-import { createServer } from "node:net";
 import { z } from "zod";
 import { defineProvider } from "../../define.js";
 import {
@@ -39,13 +38,6 @@ const upstream = Bun.serve({
 });
 const upstreamOrigin = `http://127.0.0.1:${upstream.port}`;
 
-// A TCP listener the native client is allowed to reach.
-const tcp = createServer((socket) => socket.end());
-await new Promise<void>((resolve) => tcp.listen(0, "127.0.0.1", resolve));
-const tcpAddress = tcp.address();
-if (tcpAddress === null || typeof tcpAddress === "string") throw new Error("no tcp port");
-const tcpPort = tcpAddress.port;
-
 const operation = {
 	riskClass: "read" as const,
 	input: z.object({}),
@@ -65,7 +57,6 @@ const provider = defineProvider({
 	},
 	http: {},
 	stealth: { browser: "chrome", os: "macos" },
-	native: { network: { tcp: [{ host: "127.0.0.1", ports: [tcpPort], tls: "disabled" }] } },
 })({
 	operations: {
 		// Two sequential upstream reads, like provider-catchtable's shop: the
@@ -83,21 +74,6 @@ const provider = defineProvider({
 			async handler(ctx) {
 				await ctx.stealth.fetch("/first");
 				await ctx.stealth.fetch("/second");
-				return { ok: true };
-			},
-		},
-		// The existing client_cancelled branch, reached through the real native
-		// client with an aborted signal.
-		"native-aborted": {
-			...operation,
-			async handler(ctx) {
-				const controller = new AbortController();
-				controller.abort();
-				await ctx.native.network.connectTcp({
-					host: "127.0.0.1",
-					port: tcpPort,
-					signal: controller.signal,
-				});
 				return { ok: true };
 			},
 		},
@@ -175,12 +151,10 @@ async function call(operationId: string, closeDuringSecondRead: boolean) {
 const results = {
 	"http-sequential": await call("http-sequential", true),
 	"stealth-sequential": await call("stealth-sequential", true),
-	"native-aborted": await call("native-aborted", false),
 	"http-provider-abort": await call("http-provider-abort", false),
 	"http-upstream-503": await call("http-upstream-503", false),
 };
 
 inbound.stop(true);
 upstream.stop(true);
-tcp.close();
 console.log(JSON.stringify(results));
