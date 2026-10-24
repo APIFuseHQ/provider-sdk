@@ -217,6 +217,7 @@ import type {
 	ProviderDefinition,
 	ProviderErrorStatus,
 	ProviderFilesContext,
+	ProviderProxyConfig,
 	ProviderRuntimeState,
 	ProviderRuntimeTarget,
 	ProviderStreamEvent,
@@ -820,8 +821,42 @@ export function resolveProviderProxyAffinityKey(
 	return connectionKey ?? provider.id;
 }
 
+/**
+ * The proxy declaration in force for one operation context. A policy without
+ * `operations` applies everywhere (the behavior before scoping existed); a
+ * scoped policy applies only to the listed ids, and every other operation
+ * resolves no proxy at all, exactly as a provider that declares none.
+ * `createProviderContext` hands this one value to `ctx.http`, `ctx.stealth`,
+ * `ctx.native.network`, the resolver chain and the resolver identity scope.
+ */
+export function resolveOperationProxyConfig(
+	provider: Pick<ProviderDefinition, "proxy">,
+	operationId: string,
+): ProviderProxyConfig | undefined {
+	const proxy = provider.proxy;
+	if (typeof proxy !== "object" || proxy === null || proxy.operations === undefined) {
+		return proxy;
+	}
+	return proxy.operations.includes(operationId) ? proxy : undefined;
+}
+
+/**
+ * The proxy declaration in force for an auth-flow context. Auth flows are not
+ * operations, so a policy scoped with `operations` never reaches them; an
+ * unscoped policy applies as before.
+ */
+export function resolveAuthFlowProxyConfig(
+	provider: Pick<ProviderDefinition, "proxy">,
+): ProviderProxyConfig | undefined {
+	const proxy = provider.proxy;
+	if (typeof proxy === "object" && proxy !== null && proxy.operations !== undefined) {
+		return undefined;
+	}
+	return proxy;
+}
+
 export function resolveProviderResolverIdentityScope(
-	provider: ProviderDefinition,
+	provider: Pick<ProviderDefinition, "proxy">,
 	affinityKey: string,
 	contextId: string,
 ): string {
@@ -887,16 +922,19 @@ function createProviderContext(
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
-	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	// One proxy declaration per operation context: the provider policy, or
+	// nothing when `proxy.operations` leaves this operation out.
+	const operationProxy = { proxy: resolveOperationProxyConfig(provider, operationId) };
+	const proxyPolicy = resolveNativeProxyPolicy(operationProxy);
 	const engineProxyCredentials = readEngineProxyCredentials();
 	const proxyClientOptions = {
-		upstream: { proxy: provider.proxy },
+		upstream: operationProxy,
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
-		provider,
+		operationProxy,
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
@@ -1008,7 +1046,7 @@ function createProviderContext(
 							telemetry: scope.telemetry.proxy,
 							nativeTelemetry: scope.nativeTelemetry,
 							egress: provider.native.network,
-							proxyPolicy: resolveNativeProxyPolicy(provider),
+							proxyPolicy,
 							affinityKey: proxyClientOptions.affinityKey,
 							credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
 								createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),
@@ -1174,7 +1212,8 @@ function createAuthFlowContext(
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
-	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	const flowProxy = { proxy: resolveAuthFlowProxyConfig(provider) };
+	const proxyPolicy = resolveNativeProxyPolicy(flowProxy);
 	const engineProxyCredentials = readEngineProxyCredentials();
 	const contextData = request.context ?? {};
 	const flowContextStore = createFlowContextStore(
@@ -1182,7 +1221,7 @@ function createAuthFlowContext(
 		contextData,
 	);
 	const proxyClientOptions = {
-		upstream: { proxy: provider.proxy },
+		upstream: flowProxy,
 		affinityKey: resolveAuthFlowProxyAffinityKey(provider, request),
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
@@ -1213,7 +1252,7 @@ function createAuthFlowContext(
 		);
 	}
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
-		provider,
+		flowProxy,
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
@@ -1318,7 +1357,7 @@ function createAuthFlowContext(
 							telemetry: scope.telemetry.proxy,
 							nativeTelemetry: scope.nativeTelemetry,
 							egress: provider.native.network,
-							proxyPolicy: resolveNativeProxyPolicy(provider),
+							proxyPolicy,
 							affinityKey: proxyClientOptions.affinityKey,
 							credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
 								createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),

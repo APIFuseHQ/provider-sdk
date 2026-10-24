@@ -561,6 +561,8 @@ export type {
 	ProviderOcrConfig,
 	ProviderProxyConfig,
 	ProviderProxyMode,
+	NodemavenConnectionType,
+	ProviderProxyNodemavenOptions,
 	ProviderProxyPolicy,
 	ProxiedOAuthConfig,
 	ProviderProxyProvider,

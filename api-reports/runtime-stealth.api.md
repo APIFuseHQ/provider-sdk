@@ -181,6 +181,9 @@ type HttpRetryUnsafeMethodPolicy = (typeof HttpRetryUnsafeMethodPolicy)[keyof ty
 // @public (undocumented)
 type Iso3166Alpha2CountryCode = Uppercase<string>;
 
+// @public
+type NodemavenConnectionType = "residential" | "mobile";
+
 // Warning: (ae-forgotten-export) The symbol "StealthTransportResponse" needs to be exported by the entry point stealth.d.ts
 // Warning: (ae-forgotten-export) The symbol "StealthResponse" needs to be exported by the entry point stealth.d.ts
 //
@@ -241,6 +244,14 @@ type ProviderChallenge = {
 // @public (undocumented)
 type ProviderProxyMode = "disabled" | "optional" | "required";
 
+// @public
+interface ProviderProxyNodemavenOptions {
+    isp?: readonly string[];
+    ttlSeconds?: number;
+    // Warning: (ae-forgotten-export) The symbol "NodemavenConnectionType" needs to be exported by the entry point stealth.d.ts
+    type?: NodemavenConnectionType;
+}
+
 // @public (undocumented)
 interface ProviderProxyPolicy {
     // (undocumented)
@@ -251,6 +262,9 @@ interface ProviderProxyPolicy {
     };
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyMode" needs to be exported by the entry point stealth.d.ts
     mode: ProviderProxyMode;
+    // Warning: (ae-forgotten-export) The symbol "ProviderProxyNodemavenOptions" needs to be exported by the entry point stealth.d.ts
+    nodemaven?: ProviderProxyNodemavenOptions;
+    operations?: readonly string[];
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point stealth.d.ts
     //
     // @deprecated (undocumented)
@@ -672,11 +686,11 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:49:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:51:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:996:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1001:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1396:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1446:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1446:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1040:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1448:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1498:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1498:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 
