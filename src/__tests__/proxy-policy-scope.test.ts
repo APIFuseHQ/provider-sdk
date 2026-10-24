@@ -9,6 +9,7 @@ import {
 	NODEMAVEN_ISP_SLUG_PATTERN,
 	NODEMAVEN_TTL_SECONDS_MAX,
 	NODEMAVEN_TTL_SECONDS_MIN,
+	nodemavenSessionWindow,
 	synthesizeNodemavenProxy,
 } from "../runtime/proxy-nodemaven.js";
 import {
@@ -203,6 +204,63 @@ function sha256Hex(value: string): string {
 }
 
 describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
+	it("caps the sticky lifetime, expiry and session window at the gateway ttl", () => {
+		const now = Date.parse("2026-10-24T00:00:00.000Z");
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			providers: ["nodemaven"],
+			session: { affinity: "connection", lifetimeMinutes: 120 },
+			nodemaven: { type: "mobile", ttlSeconds: 500 },
+		};
+		const synthesized = synthesizeNodemavenProxy({
+			policy,
+			credentials: CREDENTIALS,
+			affinityKey: "af_con_1",
+			protocol: "http",
+			poolIndex: 0,
+			refreshEpoch: 0,
+			now,
+		});
+		expect(proxyUsername(synthesized.url)).toContain("-ttl-8m20s");
+		// 500 s rounds down to 8 whole minutes, inside the gateway's 8m20s.
+		expect(synthesized.diagnostics.lifetimeMinutes).toBe(8);
+		expect(synthesized.expiresAt).toBe(new Date(now + 8 * 60_000).toISOString());
+		const window = nodemavenSessionWindow(policy, now);
+		expect(window.refreshEpoch).toBe(Math.floor(now / (8 * 60_000)));
+		expect(Date.parse(window.expiresAt) - now).toBeLessThanOrEqual(8 * 60_000);
+
+		// Without a ttl, or with a ttl longer than the session, the session lifetime stands.
+		const { nodemaven: _ttl, ...withoutTtl } = policy;
+		expect(nodemavenSessionWindow(withoutTtl, now).refreshEpoch).toBe(
+			Math.floor(now / (120 * 60_000)),
+		);
+		const longTtl = synthesizeNodemavenProxy({
+			policy: { ...policy, nodemaven: { ttlSeconds: 86_400 } },
+			credentials: CREDENTIALS,
+			affinityKey: "af_con_1",
+			protocol: "http",
+			poolIndex: 0,
+			refreshEpoch: 0,
+			now,
+		});
+		expect(longTtl.diagnostics.lifetimeMinutes).toBe(120);
+	});
+
+	it("rejects a drain lead that does not fit inside the ttl-capped lifetime", () => {
+		const withDrain = (drainLeadSeconds: number) =>
+			defineProvider({
+				...baseConfig,
+				proxy: {
+					mode: "required",
+					providers: ["nodemaven"],
+					session: { affinity: "connection", lifetimeMinutes: 120, drainLeadSeconds },
+					nodemaven: { ttlSeconds: 500 },
+				},
+			});
+		expect(() => withDrain(480)).toThrow(/drainLeadSeconds \(480s\).*ttlSeconds allows \(8m\)/);
+		expect(() => withDrain(120)).not.toThrow();
+	});
+
 	it("encodes the measured KR mobile shape for { type: mobile, isp: [sk_telecom] } with no filter token", () => {
 		const synthesized = synthesizeNodemavenProxy({
 			policy: {

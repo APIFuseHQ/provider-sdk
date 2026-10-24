@@ -1161,7 +1161,10 @@ export interface ProviderProxyNodemavenOptions {
 	isp?: readonly string[];
 	/**
 	 * Sticky-session TTL in whole seconds, 60..86400, encoded as `-ttl-XmYs`
-	 * (500 → `8m20s`). Only meaningful with a sticky `session.affinity`.
+	 * (500 → `8m20s`). Only meaningful with a sticky `session.affinity`. The
+	 * SDK's sticky lifetime becomes the smaller of `session.lifetimeMinutes`
+	 * and this TTL rounded down to whole minutes, so session rotation, the
+	 * reported expiry and drain timers stay inside the gateway TTL.
 	 */
 	ttlSeconds?: number;
 }
