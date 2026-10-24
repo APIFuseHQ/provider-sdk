@@ -1238,6 +1238,21 @@ function validateProviderProxy(config: {
 				},
 			);
 		}
+		// The NodeMaven TTL shortens the sticky lifetime to its whole minutes, so
+		// the same contradiction applies against it.
+		const ttlSeconds = proxy.nodemaven?.ttlSeconds;
+		if (
+			drainLeadSeconds !== undefined &&
+			ttlSeconds !== undefined &&
+			drainLeadSeconds >= Math.max(1, Math.floor(ttlSeconds / 60)) * 60
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" has proxy.session.drainLeadSeconds (${drainLeadSeconds}s) greater than or equal to the sticky lifetime proxy.nodemaven.ttlSeconds allows (${Math.max(1, Math.floor(ttlSeconds / 60))}m).`,
+				{
+					fix: `Lower drainLeadSeconds or raise proxy.nodemaven.ttlSeconds so the drain event leaves a usable session window.`,
+				},
+			);
+		}
 	}
 	const vendorChain =
 		proxy.providers && proxy.providers.length > 0

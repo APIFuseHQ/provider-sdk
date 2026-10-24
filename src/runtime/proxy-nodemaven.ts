@@ -111,12 +111,22 @@ export function nodemavenPoolSize(policy: ProviderProxyPolicy): number {
 	);
 }
 
+/**
+ * Sticky lifetime in whole minutes: `session.lifetimeMinutes` (default and cap
+ * 24h), shortened to the gateway TTL when `nodemaven.ttlSeconds` is set. The
+ * TTL rounds down to whole minutes so the SDK's session window, reported
+ * expiry, ceremony lease and native drain timers never outlive the sticky IP
+ * the gateway keeps for the `-ttl-` token.
+ */
 export function nodemavenLifetimeMinutes(policy: ProviderProxyPolicy): number {
 	const configured = policy.session?.lifetimeMinutes;
-	if (typeof configured !== "number" || !Number.isFinite(configured) || configured <= 0) {
-		return NODEMAVEN_MAX_LIFETIME_MINUTES;
-	}
-	return Math.min(NODEMAVEN_MAX_LIFETIME_MINUTES, Math.max(1, Math.floor(configured)));
+	const sessionMinutes =
+		typeof configured !== "number" || !Number.isFinite(configured) || configured <= 0
+			? NODEMAVEN_MAX_LIFETIME_MINUTES
+			: Math.min(NODEMAVEN_MAX_LIFETIME_MINUTES, Math.max(1, Math.floor(configured)));
+	const ttlSeconds = policy.nodemaven?.ttlSeconds;
+	if (typeof ttlSeconds !== "number" || !Number.isFinite(ttlSeconds)) return sessionMinutes;
+	return Math.min(sessionMinutes, Math.max(1, Math.floor(ttlSeconds / 60)));
 }
 
 export type NodemavenSessionWindow = {
