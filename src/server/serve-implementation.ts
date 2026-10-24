@@ -182,6 +182,12 @@ import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import {
+	deadlineSignalWithReason,
+	errorCauseChainCarriesDeadline,
+	statefulDeadlineAbortReason,
+	statefulRoutingDeadlineErrorCausedBy,
+} from "../stateful/deadline-expiry.js";
+import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
@@ -3691,6 +3697,39 @@ function verifyStatefulForwardingRequest(input: {
 	}
 }
 
+/**
+ * The forwarded operation runs under one signal that merges the inbound
+ * request's signal with the forwarded deadline, so a deadline that expires
+ * mid-operation reaches ctx.http and ctx.stealth as the same
+ * `transport_cancelled` a departing caller produces, which the transport
+ * mapping would count as an upstream failure. The merged signal keeps the
+ * reason of whichever source aborted first, and those clients carry that
+ * reason as the cancellation's cause. A failure whose cause chain holds the
+ * deadline's own abort reason was therefore stopped by the deadline before
+ * anything else cancelled it: it becomes the StatefulRoutingDeadlineError the
+ * route already throws for a deadline that expires before execution, with the
+ * original failure as its cause. The deadline's reason names this request, so
+ * it is still recognized after ctx.http or ctx.stealth redacted the failure
+ * for a request with sensitive values, which replaces each cause with a copy.
+ * A caller that disconnected first, or a provider's own per-request signal,
+ * leaves a different reason, so that failure keeps its own classification.
+ */
+function statefulDeadlineExpiryOrSelf(
+	error: unknown,
+	deadlineSignal: AbortSignal | undefined,
+	envelope: Pick<ProviderServerStatefulForwardEnvelope, "requestId" | "deadlineAt">,
+): unknown {
+	if (
+		deadlineSignal?.aborted !== true ||
+		envelope.deadlineAt === undefined ||
+		error instanceof StatefulRoutingDeadlineError ||
+		!errorCauseChainCarriesDeadline(error, deadlineSignal.reason, envelope.requestId)
+	) {
+		return error;
+	}
+	return statefulRoutingDeadlineErrorCausedBy(envelope.requestId, envelope.deadlineAt, error);
+}
+
 function operationRequestFromForwardingEnvelope(
 	envelope: ProviderServerStatefulForwardEnvelope,
 ): OperationRequest & { readonly deadlineAt?: string } {
@@ -4012,7 +4051,12 @@ function createServerAppWithCapabilityModules(
 			const remainingDeadlineMs =
 				deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
 			const deadlineSignal =
-				remainingDeadlineMs === undefined ? undefined : AbortSignal.timeout(remainingDeadlineMs);
+				remainingDeadlineMs === undefined
+					? undefined
+					: deadlineSignalWithReason(
+							remainingDeadlineMs,
+							statefulDeadlineAbortReason(envelope.requestId, "TimeoutError"),
+						);
 			const signal = deadlineSignal
 				? AbortSignal.any([c.req.raw.signal, deadlineSignal])
 				: c.req.raw.signal;
@@ -4087,14 +4131,19 @@ function createServerAppWithCapabilityModules(
 				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 				}
-				const output = await options.internalOperationExecutor!({
-					provider,
-					operationId: operationId as string,
-					ctx,
-					request,
-					internalStatefulForward: envelope,
-					signal,
-				});
+				let output: unknown;
+				try {
+					output = await options.internalOperationExecutor!({
+						provider,
+						operationId: operationId as string,
+						ctx,
+						request,
+						internalStatefulForward: envelope,
+						signal,
+					});
+				} catch (error) {
+					throw statefulDeadlineExpiryOrSelf(error, deadlineSignal, envelope);
+				}
 				return c.json({ data: output });
 			});
 			return finalizeRequestResponse(requestScope, response, {
