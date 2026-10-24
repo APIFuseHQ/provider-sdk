@@ -31,6 +31,7 @@ import {
 	InMemorySessionOwnerRegistry,
 	type SessionOwnerRecord,
 	type StatefulOperationExecutor,
+	type StatefulProviderMetricEmitter,
 	StatefulOwnerForwardingError,
 	StatefulProviderRuntimeExecutor,
 	statefulForwardingContextFromProviderRequest,
@@ -48,12 +49,27 @@ function waiter(): Waiter {
 }
 
 const PROVIDER_ID = "stateful-deadline-wire";
+// The forwarded deadline in the deadline scenarios. Generous, so forwarding,
+// the owner fence and the first upstream read always finish before it even on
+// a loaded machine: the scenarios wait for the deadline itself, so a larger
+// value only makes them longer. Each scenario also records whether the held
+// read had started (`holdReached`), so a deadline that came too early fails
+// as that, not as a misleading cause chain.
+const DEADLINE_MS = 1_500;
+// How far the skewed source's clock runs behind. Far beyond any delivery
+// time of the owner's 504, so the owner's answer always arrives first; the
+// source's timer is cleared once the answer arrives, so this costs no time.
+const SOURCE_CLOCK_BEHIND_MS = 10_000;
+const SENSITIVE_TOKEN = "stateful-deadline-wire-secret-token";
 const FORWARDING_SECRET = "stateful-deadline-wire-secret";
 
 // The upstream: /first answers at once, /hold never answers, so a read of it
 // stays in flight until its signal aborts. /status-503 is an ordinary
 // upstream failure.
 let holdStarted = waiter();
+let holdReached = false;
+// The `token` query parameter the held read carried on the wire, if any.
+let holdToken: string | null = null;
 const upstream = Bun.serve({
 	hostname: "127.0.0.1",
 	port: 0,
@@ -61,6 +77,8 @@ const upstream = Bun.serve({
 		const path = new URL(request.url).pathname;
 		if (path === "/first") return Response.json({ ok: true });
 		if (path === "/status-503") return new Response("unavailable", { status: 503 });
+		holdReached = true;
+		holdToken = new URL(request.url).searchParams.get("token");
 		holdStarted.resolve();
 		return new Promise<Response>(() => {});
 	},
@@ -100,6 +118,25 @@ const provider = defineProvider({
 			async handler(ctx) {
 				await ctx.http.get("/first");
 				await ctx.http.get("/hold");
+				return { ok: true };
+			},
+		},
+		// The same reads with a query credential declared as sensitive, as the
+		// README recommends: ctx.http and ctx.stealth then redact the failure,
+		// which replaces each cause with a copy.
+		"http-hold-sensitive": {
+			...operation,
+			async handler(ctx) {
+				await ctx.http.get("/first");
+				await ctx.http.get("/hold", { sensitiveParams: { token: SENSITIVE_TOKEN } });
+				return { ok: true };
+			},
+		},
+		"stealth-hold-sensitive": {
+			...operation,
+			async handler(ctx) {
+				await ctx.stealth.fetch("/first");
+				await ctx.stealth.fetch("/hold", { sensitiveParams: { token: SENSITIVE_TOKEN } });
 				return { ok: true };
 			},
 		},
@@ -264,6 +301,8 @@ async function forward(input: {
 	readonly sourceLeaves?: "when-hold-starts" | "after-read-cancelled";
 }) {
 	holdStarted = waiter();
+	holdReached = false;
+	holdToken = null;
 	readCancelled = waiter();
 	ownerInboundAborted = waiter();
 	const done = waiter();
@@ -305,6 +344,8 @@ async function forward(input: {
 		source: saw,
 		served: served.get(input.requestId),
 		log: failureLog(input.requestId),
+		holdReached,
+		holdToken,
 	};
 }
 
@@ -331,8 +372,9 @@ async function callDirectly(operationId: string, requestId: string) {
 // The source pod. Each route is its own router (runtime executor) over its own
 // registry, all holding the session for an owner pod other than the source:
 // - live: the owner pod above
-// - skewed: the owner pod above, from a source whose clock runs 300 ms behind,
-//   so the source's deadline timer fires 300 ms after the owner's
+// - skewed: the owner pod above, from a source whose clock runs
+//   SOURCE_CLOCK_BEHIND_MS behind, so the source's deadline timer fires that
+//   much after the owner's
 // - down: an owner endpoint nothing listens on
 // - reset: an owner endpoint that accepts and immediately destroys the socket
 const closedPortServer = createServer();
@@ -354,6 +396,17 @@ const sourceNeverOwns: StatefulOperationExecutor = {
 	async executeLocal() {
 		throw new Error("The source pod never owns the session in this fixture.");
 	},
+};
+
+// Every router's counters, as the source pod's metrics backend would see them.
+type RecordedMetric = { name: string; labels: unknown };
+const routerMetrics: RecordedMetric[] = [];
+const recordingMetrics: StatefulProviderMetricEmitter = {
+	increment(name, labels) {
+		routerMetrics.push({ name, labels });
+	},
+	gauge() {},
+	observe() {},
 };
 
 async function sourceRouter(
@@ -378,13 +431,21 @@ async function sourceRouter(
 		}),
 		executor: sourceNeverOwns,
 		leaseDurationMs: 60_000,
+		metricEmitter: recordingMetrics,
 		...(clock ? { clock } : {}),
 	});
 }
 
 const sourceRoutes = new Map<string, StatefulProviderRuntimeExecutor>([
 	["live", await sourceRouter(registry, ownerEndpoint)],
-	["skewed", await sourceRouter(registry, ownerEndpoint, () => new Date(Date.now() - 300))],
+	[
+		"skewed",
+		await sourceRouter(
+			registry,
+			ownerEndpoint,
+			() => new Date(Date.now() - SOURCE_CLOCK_BEHIND_MS),
+		),
+	],
 	[
 		"down",
 		await sourceRouter(new InMemorySessionOwnerRegistry(), `http://127.0.0.1:${closedPort}`),
@@ -474,6 +535,14 @@ async function callSourcePod(input: {
 	if (input.ownerAnswers) await ownerDone.promise;
 	return {
 		caller: callerSaw,
+		deadlineMetrics: routerMetrics.filter(
+			(metric) =>
+				metric.name === "apifuse_stateful_provider_routing_deadline_expired_total" &&
+				typeof metric.labels === "object" &&
+				metric.labels !== null &&
+				"requestId" in metric.labels &&
+				metric.labels.requestId === input.requestId,
+		),
 		thrown: sourceThrown.get(input.requestId),
 		log: sourceEvents.find(
 			(event) => event.event === "provider_request_failed" && event.requestId === input.requestId,
@@ -483,20 +552,30 @@ async function callSourcePod(input: {
 }
 
 const results = {
+	"deadline-http-sensitive": await forward({
+		operationId: "http-hold-sensitive",
+		requestId: "deadline-http-sensitive",
+		deadlineInMs: DEADLINE_MS,
+	}),
+	"deadline-stealth-sensitive": await forward({
+		operationId: "stealth-hold-sensitive",
+		requestId: "deadline-stealth-sensitive",
+		deadlineInMs: DEADLINE_MS,
+	}),
 	"deadline-http": await forward({
 		operationId: "http-hold",
 		requestId: "deadline-http",
-		deadlineInMs: 400,
+		deadlineInMs: DEADLINE_MS,
 	}),
 	"deadline-stealth": await forward({
 		operationId: "stealth-hold",
 		requestId: "deadline-stealth",
-		deadlineInMs: 400,
+		deadlineInMs: DEADLINE_MS,
 	}),
 	"deadline-then-source-leaves": await forward({
 		operationId: "http-hold-then-cleanup",
 		requestId: "deadline-then-source-leaves",
-		deadlineInMs: 400,
+		deadlineInMs: DEADLINE_MS,
 		sourceLeaves: "after-read-cancelled",
 	}),
 	"source-leaves-before-deadline": await forward({
@@ -520,15 +599,22 @@ const results = {
 		operationId: "owner-silent",
 		requestId: "source-deadline-aborts-forward",
 		route: "live",
-		deadlineInMs: 400,
+		deadlineInMs: DEADLINE_MS,
 		ownerAnswers: true,
 	}),
 	"source-receives-owner-deadline": await callSourcePod({
 		operationId: "http-hold",
 		requestId: "source-receives-owner-deadline",
 		route: "skewed",
-		deadlineInMs: 400,
+		deadlineInMs: DEADLINE_MS,
 		ownerAnswers: true,
+	}),
+	"source-deadline-before-routing": await callSourcePod({
+		operationId: "http-hold",
+		requestId: "source-deadline-before-routing",
+		route: "live",
+		deadlineInMs: -1_000,
+		ownerAnswers: false,
 	}),
 	"source-owner-down": await callSourcePod({
 		operationId: "http-hold",
@@ -550,4 +636,4 @@ sourcePod.server.stop(true);
 owner.stop(true);
 upstream.stop(true);
 resetServer.close();
-console.log(JSON.stringify(results));
+console.log(JSON.stringify({ ...results, sensitiveToken: SENSITIVE_TOKEN }));

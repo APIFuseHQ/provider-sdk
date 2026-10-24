@@ -3,29 +3,83 @@ import { StatefulRoutingDeadlineError } from "./errors.js";
 
 const DEADLINE_EXPIRED_CODE = "STATEFUL_FORWARDING_DEADLINE_EXPIRED";
 
-/**
- * The reason a stateful request's deadline timer aborts its signal with. It is
- * a fresh object per request so a failure can be traced back to that exact
- * timer by identity (`errorCauseChainIncludes`), and it keeps the `AbortError`
- * name of a reason-less `abort()` so code that inspects the name of an abort
- * reason treats it exactly as before.
- */
-export function statefulDeadlineAbortReason(requestId: string): DOMException {
-	return new DOMException(
-		`Stateful operation request ${requestId} deadline has expired.`,
-		"AbortError",
-	);
+type DeadlineAbortReasonName = "AbortError" | "TimeoutError";
+
+function statefulDeadlineAbortMessage(requestId: string): string {
+	return `Stateful operation request ${requestId} deadline has expired.`;
 }
 
-/** Whether `target` is `error` or one of its first `cause` links, by identity. */
-export function errorCauseChainIncludes(error: unknown, target: unknown): boolean {
-	if (target === null || typeof target !== "object") return false;
+/**
+ * The reason a stateful request's deadline aborts its signal with. It is a
+ * fresh object per request, and its message names the request, so a failure
+ * can be traced back to that exact deadline (`errorCauseChainCarriesDeadline`).
+ * The name is the one the replaced signal used to carry: `AbortError` for the
+ * router's reason-less `abort()`, `TimeoutError` for the owner route's
+ * `AbortSignal.timeout`, so code that inspects the name of an abort reason
+ * treats it exactly as before.
+ */
+export function statefulDeadlineAbortReason(
+	requestId: string,
+	name: DeadlineAbortReasonName,
+): DOMException {
+	return new DOMException(statefulDeadlineAbortMessage(requestId), name);
+}
+
+/**
+ * A signal that aborts with `reason` after `delayMs`, on the same timer
+ * `AbortSignal.timeout` uses, so nothing needs to be cleared when the request
+ * finishes first.
+ */
+export function deadlineSignalWithReason(delayMs: number, reason: DOMException): AbortSignal {
+	const controller = new AbortController();
+	AbortSignal.timeout(delayMs).addEventListener("abort", () => controller.abort(reason), {
+		once: true,
+	});
+	return controller.signal;
+}
+
+function readStringProperty(value: object, key: "name" | "message"): string | undefined {
+	try {
+		const property: unknown = Reflect.get(value, key);
+		return typeof property === "string" ? property : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether `error` or one of its first `cause` links is this request's
+ * deadline abort reason. The reason object itself matches by identity. A
+ * redacted copy of it matches too: ctx.http and ctx.stealth redact a failure
+ * when the request declared sensitive values, and the redaction replaces each
+ * cause with a clone (a `DOMException` is rebuilt from its message and name).
+ * The copy is recognized by the reason's own name and by the message that
+ * names this request, so another request's deadline or a provider's own abort
+ * never matches.
+ */
+export function errorCauseChainCarriesDeadline(
+	error: unknown,
+	reason: unknown,
+	requestId: string,
+): boolean {
+	if (reason === null || typeof reason !== "object") return false;
+	const reasonName = readStringProperty(reason, "name");
+	const reasonMessage = readStringProperty(reason, "message");
+	const recognizable =
+		reasonName !== undefined && reasonMessage === statefulDeadlineAbortMessage(requestId);
 	const seen = new Set<object>();
 	let current = error;
 	for (let depth = 0; depth < 5; depth++) {
-		if (current === target) return true;
+		if (current === reason) return true;
 		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
 			return false;
+		}
+		if (
+			recognizable &&
+			readStringProperty(current, "name") === reasonName &&
+			readStringProperty(current, "message") === reasonMessage
+		) {
+			return true;
 		}
 		if (seen.has(current)) return false;
 		seen.add(current);
@@ -93,7 +147,8 @@ export function forwardingDeadlineExpiryOrSelf(
 		return error;
 	}
 	const abortedByDeadline =
-		deadlineSignal.aborted && errorCauseChainIncludes(error, deadlineSignal.reason);
+		deadlineSignal.aborted &&
+		errorCauseChainCarriesDeadline(error, deadlineSignal.reason, request.requestId);
 	const ownerReportedDeadline = ownErrorCode(error) === DEADLINE_EXPIRED_CODE;
 	if (!abortedByDeadline && !ownerReportedDeadline) return error;
 	return statefulRoutingDeadlineErrorCausedBy(request.requestId, request.deadlineAt, error);

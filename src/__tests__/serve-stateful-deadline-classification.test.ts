@@ -31,10 +31,14 @@ type Scenario = {
 	source?: SourceSaw;
 	served?: { status: number; observability: Observability | null; body: ErrorBody };
 	log?: FailureLog;
+	holdReached?: boolean;
+	holdToken?: string | null;
 };
 type ThrownSummary = { errorClass: string; code?: unknown; causes: ThrownSummary[] };
+type RecordedMetric = { name: string; labels: Record<string, unknown> };
 type SourcePodScenario = {
 	caller: { status: number; observability: Observability | null; body: ErrorBody };
+	deadlineMetrics: RecordedMetric[];
 	thrown?: ThrownSummary;
 	log?: FailureLog;
 	owner?: { status: number; observability: Observability | null; body: ErrorBody };
@@ -42,6 +46,8 @@ type SourcePodScenario = {
 type Wire = Record<
 	| "deadline-http"
 	| "deadline-stealth"
+	| "deadline-http-sensitive"
+	| "deadline-stealth-sensitive"
 	| "deadline-then-source-leaves"
 	| "source-leaves-before-deadline"
 	| "direct-caller-leaves"
@@ -52,10 +58,11 @@ type Wire = Record<
 	Record<
 		| "source-deadline-aborts-forward"
 		| "source-receives-owner-deadline"
+		| "source-deadline-before-routing"
 		| "source-owner-down"
 		| "source-owner-resets",
 		SourcePodScenario
-	>;
+	> & { sensitiveToken: string };
 
 // A real owner pod (the provider app behind a real local listener) receiving
 // signed envelopes from the SDK's real HTTP forwarder, its operations reading
@@ -110,9 +117,16 @@ const DEADLINE_EXPIRED_OUTCOME = {
 };
 
 describe("stateful forwarding deadline expiring mid-operation", () => {
-	for (const scenario of ["deadline-http", "deadline-stealth"] as const) {
+	for (const scenario of [
+		"deadline-http",
+		"deadline-stealth",
+		"deadline-http-sensitive",
+		"deadline-stealth-sensitive",
+	] as const) {
 		it(`serves ${scenario} as the forwarded deadline, not an upstream failure`, () => {
 			const result = wire[scenario];
+			// The deadline expired while the held read was in flight.
+			expect(result.holdReached).toBe(true);
 			expect(outcome(result)).toEqual(DEADLINE_EXPIRED_OUTCOME);
 			expect(result.served?.observability).toEqual({
 				category: "timeout",
@@ -142,6 +156,17 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 				status: 504,
 			});
+		});
+	}
+
+	for (const scenario of ["deadline-http-sensitive", "deadline-stealth-sensitive"] as const) {
+		it(`still redacts the sensitive query value in ${scenario}`, () => {
+			const result = wire[scenario];
+			// The credential really went out on the held read...
+			expect(result.holdToken).toBe(wire.sensitiveToken);
+			// ...and appears in neither what the owner served nor what it logged.
+			expect(JSON.stringify(result.served)).not.toContain(wire.sensitiveToken);
+			expect(JSON.stringify(result.log)).not.toContain(wire.sensitiveToken);
 		});
 	}
 
@@ -310,8 +335,8 @@ describe("stateful forwarding deadline as the source pod's caller sees it", () =
 
 	it("serves the deadline when the owner's deadline response reaches the source first", () => {
 		const result = wire["source-receives-owner-deadline"];
-		// The source's clock runs 300 ms behind, so the owner's 504 arrives
-		// before the source's timer fires and the forwarder relays its code.
+		// The source's clock runs far behind, so the owner's 504 arrives before
+		// the source's timer fires and the forwarder relays its code.
 		expect(result.owner?.status).toBe(504);
 		expect(result.owner?.body.error?.code).toBe("STATEFUL_FORWARDING_DEADLINE_EXPIRED");
 		expect(callerOutcome(result)).toEqual(CALLER_DEADLINE_EXPIRED);
@@ -342,6 +367,30 @@ describe("stateful forwarding deadline as the source pod's caller sees it", () =
 			// Unchanged by this fix: the source's serve mapper has no branch for
 			// a forwarding failure.
 			expect(callerOutcome(result)).toEqual(CALLER_UNCLASSIFIED_FORWARDING_FAILURE);
+			expect(result.deadlineMetrics).toEqual([]);
 		});
 	}
+
+	it("counts a deadline that expires while forwarding like one that expired before routing", () => {
+		const beforeRouting = wire["source-deadline-before-routing"];
+		expect(callerOutcome(beforeRouting)).toEqual(CALLER_DEADLINE_EXPIRED);
+		expect(beforeRouting.deadlineMetrics).toHaveLength(1);
+		const reference = beforeRouting.deadlineMetrics[0]?.labels ?? {};
+		for (const scenario of [
+			"source-deadline-aborts-forward",
+			"source-receives-owner-deadline",
+		] as const) {
+			const result = wire[scenario];
+			const operationId =
+				scenario === "source-deadline-aborts-forward" ? "owner-silent" : "http-hold";
+			// One count of the same metric, with the same labels apart from the
+			// request's own id and operation.
+			expect(result.deadlineMetrics).toEqual([
+				{
+					name: "apifuse_stateful_provider_routing_deadline_expired_total",
+					labels: { ...reference, requestId: scenario, operationId },
+				},
+			]);
+		}
+	});
 });

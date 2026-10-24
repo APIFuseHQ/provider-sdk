@@ -182,7 +182,9 @@ import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import {
-	errorCauseChainIncludes,
+	deadlineSignalWithReason,
+	errorCauseChainCarriesDeadline,
+	statefulDeadlineAbortReason,
 	statefulRoutingDeadlineErrorCausedBy,
 } from "../stateful/deadline-expiry.js";
 import {
@@ -3706,9 +3708,11 @@ function verifyStatefulForwardingRequest(input: {
  * deadline's own abort reason was therefore stopped by the deadline before
  * anything else cancelled it: it becomes the StatefulRoutingDeadlineError the
  * route already throws for a deadline that expires before execution, with the
- * original failure as its cause. A caller that disconnected first, or a
- * provider's own per-request signal, leaves a different reason, so that
- * failure keeps its own classification.
+ * original failure as its cause. The deadline's reason names this request, so
+ * it is still recognized after ctx.http or ctx.stealth redacted the failure
+ * for a request with sensitive values, which replaces each cause with a copy.
+ * A caller that disconnected first, or a provider's own per-request signal,
+ * leaves a different reason, so that failure keeps its own classification.
  */
 function statefulDeadlineExpiryOrSelf(
 	error: unknown,
@@ -3719,7 +3723,7 @@ function statefulDeadlineExpiryOrSelf(
 		deadlineSignal?.aborted !== true ||
 		envelope.deadlineAt === undefined ||
 		error instanceof StatefulRoutingDeadlineError ||
-		!errorCauseChainIncludes(error, deadlineSignal.reason)
+		!errorCauseChainCarriesDeadline(error, deadlineSignal.reason, envelope.requestId)
 	) {
 		return error;
 	}
@@ -4047,7 +4051,12 @@ function createServerAppWithCapabilityModules(
 			const remainingDeadlineMs =
 				deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
 			const deadlineSignal =
-				remainingDeadlineMs === undefined ? undefined : AbortSignal.timeout(remainingDeadlineMs);
+				remainingDeadlineMs === undefined
+					? undefined
+					: deadlineSignalWithReason(
+							remainingDeadlineMs,
+							statefulDeadlineAbortReason(envelope.requestId, "TimeoutError"),
+						);
 			const signal = deadlineSignal
 				? AbortSignal.any([c.req.raw.signal, deadlineSignal])
 				: c.req.raw.signal;
