@@ -1,6 +1,9 @@
 import type { SessionKey } from "./session-key.js";
-import { forwardingDeadlineExpiryOrSelf, statefulDeadlineAbortReason } from "./deadline-expiry.js";
-import { StatefulRoutingDeadlineError } from "./errors.js";
+import {
+	forwardingDeadlineExpiryOrSelf,
+	issueStatefulRoutingDeadlineError,
+	statefulDeadlineAbortReason,
+} from "./deadline-expiry.js";
 import {
 	NOOP_STATEFUL_PROVIDER_METRIC_EMITTER,
 	type StatefulProviderMetricEmitter,
@@ -149,7 +152,7 @@ export class StatefulSessionRouter {
 		const now = this.#clock();
 		if (isExpiredDeadline(request, now)) {
 			this.recordDeadlineExpired(request);
-			throw new StatefulRoutingDeadlineError(request.requestId, request.deadlineAt);
+			throw issueStatefulRoutingDeadlineError(request.requestId, request.deadlineAt);
 		}
 		const deadlineSignal = makeDeadlineSignal(request, now);
 

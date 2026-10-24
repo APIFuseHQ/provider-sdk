@@ -1,9 +1,36 @@
 // Internal to the SDK: not re-exported from the stateful entry point.
+import { isSdkIssuedError, issueSdkError } from "../sdk-issued-errors.js";
 import { StatefulRoutingDeadlineError } from "./errors.js";
 
 const DEADLINE_EXPIRED_CODE = "STATEFUL_FORWARDING_DEADLINE_EXPIRED";
 
 type DeadlineAbortReasonName = "AbortError" | "TimeoutError";
+
+/**
+ * The StatefulRoutingDeadlineError the SDK raises when a stateful request's
+ * deadline expires, before routing, while forwarding or on the owner route.
+ * The class is exported from the stateful entry point, so a provider can
+ * construct one too; serve answers with the forwarding deadline's outcome
+ * (504, STATEFUL_FORWARDING_DEADLINE_EXPIRED, source apifuse) only for an
+ * error made here (`isIssuedStatefulRoutingDeadlineError`).
+ */
+export function issueStatefulRoutingDeadlineError(
+	requestId: string,
+	deadlineAt: string,
+): StatefulRoutingDeadlineError {
+	return issueSdkError(new StatefulRoutingDeadlineError(requestId, deadlineAt));
+}
+
+/**
+ * Whether `error` is a StatefulRoutingDeadlineError the SDK raised. One a
+ * provider constructed from the public class is not, so it is served like any
+ * other error the provider threw.
+ */
+export function isIssuedStatefulRoutingDeadlineError(
+	error: unknown,
+): error is StatefulRoutingDeadlineError {
+	return isSdkIssuedError(error) && error instanceof StatefulRoutingDeadlineError;
+}
 
 function statefulDeadlineAbortMessage(requestId: string): string {
 	return `Stateful operation request ${requestId} deadline has expired.`;
@@ -105,7 +132,7 @@ export function statefulRoutingDeadlineErrorCausedBy(
 	deadlineAt: string,
 	cause: unknown,
 ): StatefulRoutingDeadlineError {
-	const expiry = new StatefulRoutingDeadlineError(requestId, deadlineAt);
+	const expiry = issueStatefulRoutingDeadlineError(requestId, deadlineAt);
 	Object.defineProperty(expiry, "cause", {
 		value: cause,
 		writable: true,
@@ -143,7 +170,7 @@ export function forwardingDeadlineExpiryOrSelf(
 	request: { readonly requestId: string; readonly deadlineAt?: string },
 	deadlineSignal: AbortSignal,
 ): unknown {
-	if (request.deadlineAt === undefined || error instanceof StatefulRoutingDeadlineError) {
+	if (request.deadlineAt === undefined || isIssuedStatefulRoutingDeadlineError(error)) {
 		return error;
 	}
 	const abortedByDeadline =

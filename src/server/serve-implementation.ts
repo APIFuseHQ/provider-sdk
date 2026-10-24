@@ -180,10 +180,11 @@ import {
 } from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
-import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import {
 	deadlineSignalWithReason,
 	errorCauseChainCarriesDeadline,
+	isIssuedStatefulRoutingDeadlineError,
+	issueStatefulRoutingDeadlineError,
 	statefulDeadlineAbortReason,
 	statefulRoutingDeadlineErrorCausedBy,
 } from "../stateful/deadline-expiry.js";
@@ -1625,7 +1626,7 @@ function zodDetails(
 // needs no override: a registered upstream code already carries its category
 // (SDK_UPSTREAM_ERROR_CODE_REGISTRY), and the source follows from it.
 function publicErrorSource(error: unknown, category: ProviderErrorCategory): ProviderErrorSource {
-	if (error instanceof StatefulRoutingDeadlineError) return "apifuse";
+	if (isIssuedStatefulRoutingDeadlineError(error)) return "apifuse";
 	if (isProviderError(error)) {
 		const code = providerErrorCode(error);
 		if (code === MISSING_SECRET_CODE) return "apifuse";
@@ -1750,7 +1751,7 @@ function toErrorResponse(
 ): OperationErrorResponse {
 	const observability = observabilityDetails;
 	const source = publicErrorSource(error, observability.category);
-	if (error instanceof StatefulRoutingDeadlineError) {
+	if (isIssuedStatefulRoutingDeadlineError(error)) {
 		return {
 			error: {
 				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
@@ -2059,7 +2060,7 @@ function classifiedErrorObservabilityDetails(
 		};
 	}
 
-	if (error instanceof StatefulRoutingDeadlineError) {
+	if (isIssuedStatefulRoutingDeadlineError(error)) {
 		return {
 			category: "timeout",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
@@ -2181,7 +2182,7 @@ function toStatusCode(
 	if (error instanceof z.ZodError) {
 		return 400;
 	}
-	if (error instanceof StatefulRoutingDeadlineError) {
+	if (isIssuedStatefulRoutingDeadlineError(error)) {
 		return 504;
 	}
 	if (isProviderError(error)) {
@@ -2215,7 +2216,7 @@ function sdkOwnsErrorResolution(error: unknown): boolean {
 	if (isSessionExpiredError(error)) return true;
 	if (isTransportError(error)) return true;
 	if (error instanceof z.ZodError) return true;
-	if (error instanceof StatefulRoutingDeadlineError) return true;
+	if (isIssuedStatefulRoutingDeadlineError(error)) return true;
 	if (!isProviderError(error)) return false;
 	const code = providerErrorCode(error);
 	return typeof code === "string" && SDK_RUNTIME_OWNED_ERROR_CODES.has(code);
@@ -2325,7 +2326,7 @@ function logProviderError(
 		? (providerCode ?? "provider_error")
 		: error instanceof z.ZodError
 			? "invalid_request"
-			: error instanceof StatefulRoutingDeadlineError
+			: isIssuedStatefulRoutingDeadlineError(error)
 				? "STATEFUL_FORWARDING_DEADLINE_EXPIRED"
 				: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
@@ -3744,7 +3745,7 @@ function statefulDeadlineExpiryOrSelf(
 	if (
 		deadlineSignal?.aborted !== true ||
 		envelope.deadlineAt === undefined ||
-		error instanceof StatefulRoutingDeadlineError ||
+		isIssuedStatefulRoutingDeadlineError(error) ||
 		!errorCauseChainCarriesDeadline(error, deadlineSignal.reason, envelope.requestId)
 	) {
 		return error;
@@ -4068,7 +4069,7 @@ function createServerAppWithCapabilityModules(
 			}
 			const deadlineAtMs = envelope.deadlineAt ? Date.parse(envelope.deadlineAt) : undefined;
 			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
-				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+				throw issueStatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 			}
 			const remainingDeadlineMs =
 				deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
@@ -4107,7 +4108,7 @@ function createServerAppWithCapabilityModules(
 									"abort",
 									() =>
 										reject(
-											new StatefulRoutingDeadlineError(
+											issueStatefulRoutingDeadlineError(
 												envelope.requestId,
 												envelope.deadlineAt as string,
 											),
@@ -4119,7 +4120,10 @@ function createServerAppWithCapabilityModules(
 					: await ownerFenceValidation;
 			} catch (error) {
 				if (deadlineSignal?.aborted) {
-					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+					throw issueStatefulRoutingDeadlineError(
+						envelope.requestId,
+						envelope.deadlineAt as string,
+					);
 				}
 				throw error;
 			}
@@ -4151,7 +4155,10 @@ function createServerAppWithCapabilityModules(
 					signal,
 				);
 				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
-					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+					throw issueStatefulRoutingDeadlineError(
+						envelope.requestId,
+						envelope.deadlineAt as string,
+					);
 				}
 				let output: unknown;
 				try {
