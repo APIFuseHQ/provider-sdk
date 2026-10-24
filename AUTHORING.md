@@ -927,6 +927,29 @@ Throw the domain `ProviderError` directly. Subclassing or wrapping it as a
 domain code's `status` instead. Genuine `TransportError` values remain
 SDK-owned and keep their 502/504 mapping.
 
+#### Cancelled `ctx.http` requests
+
+A `ctx.http` request whose signal aborts rejects with the `TransportError` code
+`transport_cancelled`. That signal merges the served request's own signal with
+any `signal` you pass in `RequestOptions`, so the server classifies the
+cancellation by what aborted it. The response body keeps the code
+`transport_cancelled` in every row:
+
+| What aborted the request | Category | HTTP status | `source` | `retryable` |
+| --- | --- | ---: | --- | --- |
+| The caller closed the connection before the server answered | `client_cancelled` | 400 | `client` | `false` |
+| Your own `signal` with a `TimeoutError` reason, such as `AbortSignal.timeout(ms)` | `timeout` | 504 | `upstream_failure` | `true` |
+| Your own `signal` with any other reason, such as `abort()` or `abort(reason)` | `upstream_http` | 502 | `upstream_failure` | `false` |
+
+A `TimeoutError` abort is reported like the `timeout` request option's
+`transport_timeout`, including the public message `Request timed out`, whether
+it fires during a request, a retry backoff, or the consumption of a streamed
+body. A caller that disconnects before the server answers takes the first row
+even when your own signal fired first. On the stateful owner route, a forwarded
+deadline that expires mid-request is served as
+`STATEFUL_FORWARDING_DEADLINE_EXPIRED` (category `timeout`, 504, `source`
+`apifuse`, `retryable: false`) instead.
+
 #### Three fleet-consensus codes are registered
 
 `UPSTREAM_AUTH_ERROR` (400), `UPSTREAM_SCHEMA_ERROR` (502), and

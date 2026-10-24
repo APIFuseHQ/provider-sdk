@@ -209,24 +209,32 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 		});
 	});
 
-	it("keeps a provider's own per-request abort off the deadline", () => {
+	it("classifies a provider's own AbortSignal.timeout abort as timeout, not the deadline", () => {
 		const result = wire["provider-abort"];
 		expect(result.log?.code).toBe("transport_cancelled");
 		expect(result.log?.causeChain?.[0]?.errorClass).toBe("TimeoutError");
+		expect(result.served?.body.error?.code).toBe("transport_cancelled");
+		expect(result.served?.body.error?.message).toBe("Request timed out");
 		expect(result.served?.observability).toEqual({
-			category: "upstream_http",
+			category: "timeout",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: false,
+			retryable: true,
 		});
 		expect(outcome(result)).toEqual({
-			status: 502,
-			category: "upstream_http",
-			retryable: false,
+			status: 504,
+			category: "timeout",
+			retryable: true,
 			source: "upstream_failure",
-			bodyRetryable: false,
-			logStatus: 502,
-			logCategory: "upstream_http",
-			logRetryable: false,
+			bodyRetryable: true,
+			logStatus: 504,
+			logCategory: "timeout",
+			logRetryable: true,
+		});
+		expect(outcome(result)).not.toEqual(DEADLINE_EXPIRED_OUTCOME);
+		expect(result.source).toEqual({
+			errorClass: "StatefulOwnerForwardingError",
+			code: "transport_cancelled",
+			status: 504,
 		});
 	});
 
