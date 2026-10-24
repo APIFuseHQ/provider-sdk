@@ -4818,7 +4818,7 @@ export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 export const PROVIDER_ERROR_CATALOG_NAMESPACE = "errors";
 
 // @public (undocumented)
-export const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+export const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
 
 // @public
 export const PROVIDER_ERROR_LOCALES: readonly ["en", "ko", "ja"];
@@ -4827,7 +4827,7 @@ export const PROVIDER_ERROR_LOCALES: readonly ["en", "ko", "ja"];
 export const PROVIDER_ERROR_SOURCES: readonly ["client", "upstream_rule", "upstream_failure", "apifuse"];
 
 // @public (undocumented)
-export const PROVIDER_OBSERVABILITY_TAXONOMY_VERSION = "2026-08-07";
+export const PROVIDER_OBSERVABILITY_TAXONOMY_VERSION = "2026-10-23";
 
 // @public (undocumented)
 export interface ProviderAccessConfig {

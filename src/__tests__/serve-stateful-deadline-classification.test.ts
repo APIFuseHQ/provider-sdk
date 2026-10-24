@@ -104,15 +104,15 @@ function outcome(scenario: Scenario) {
 
 // What the route already serves for a forwarded deadline that expired before
 // execution (serve-stateful-forwarding.test.ts): the deadline's own code, 504,
-// timeout, APIFuse-owned, not retryable.
+// stateful_forwarding_deadline, APIFuse-owned, not retryable.
 const DEADLINE_EXPIRED_OUTCOME = {
 	status: 504,
-	category: "timeout",
+	category: "stateful_forwarding_deadline",
 	retryable: false,
 	source: "apifuse",
 	bodyRetryable: false,
 	logStatus: 504,
-	logCategory: "timeout",
+	logCategory: "stateful_forwarding_deadline",
 	logRetryable: false,
 };
 
@@ -129,7 +129,7 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 			expect(result.holdReached).toBe(true);
 			expect(outcome(result)).toEqual(DEADLINE_EXPIRED_OUTCOME);
 			expect(result.served?.observability).toEqual({
-				category: "timeout",
+				category: "stateful_forwarding_deadline",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: false,
 			});
@@ -276,14 +276,14 @@ function callerOutcome(scenario: SourcePodScenario) {
 // expires: the same 504 the owner serves for it.
 const CALLER_DEADLINE_EXPIRED = {
 	status: 504,
-	category: "timeout",
+	category: "stateful_forwarding_deadline",
 	retryable: false,
 	code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 	source: "apifuse",
 	bodyRetryable: false,
 	logStatus: 504,
 	logCode: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
-	logCategory: "timeout",
+	logCategory: "stateful_forwarding_deadline",
 	logErrorClass: "StatefulRoutingDeadlineError",
 };
 
