@@ -1,7 +1,7 @@
 import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { createHash, randomBytes } from "node:crypto";
 
-import type { ProviderProxyPolicy } from "../types.js";
+import type { NodemavenConnectionType, ProviderProxyPolicy } from "../types.js";
 
 export const NODEMAVEN_USERNAME_ENV = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
 export const NODEMAVEN_PASSWORD_ENV = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
@@ -71,13 +71,37 @@ function readNodemavenPassword(): string | undefined {
 	return readDiagnosticEnv(NODEMAVEN_PASSWORD_ENV)?.trim() || undefined;
 }
 
-function resolveNodemavenFilter(value: string | undefined): string {
+/**
+ * The `-filter-` tier. Residential usernames always carry one (`medium` unless
+ * `APIFUSE__PROXY__NODEMAVEN_FILTER` says otherwise). Mobile usernames carry
+ * one only when that variable is set: the measured passing mobile shape had
+ * no filter token, and mobile with a filter tier is unverified.
+ */
+function resolveNodemavenFilter(
+	value: string | undefined,
+	connectionType: NodemavenConnectionType,
+): string | undefined {
 	const raw = value?.trim().toLowerCase();
-	if (!raw) return DEFAULT_NODEMAVEN_FILTER;
+	if (!raw) return connectionType === "mobile" ? undefined : DEFAULT_NODEMAVEN_FILTER;
 	if (!NODEMAVEN_FILTERS.has(raw)) {
 		throw new Error(`${NODEMAVEN_FILTER_ENV} must be "medium" or "high"`);
 	}
 	return raw;
+}
+
+/**
+ * One carrier per attempt: `isp[poolIndex % isp.length]`. The first attempt
+ * (pool index 0) takes the first slug and a caller-managed retry with
+ * `proxyAttemptOffset: 1` takes the next, so a blocked carrier is not retried
+ * back to back.
+ */
+function selectNodemavenIsp(
+	isp: readonly string[] | undefined,
+	poolIndex: number,
+): string | undefined {
+	if (!isp || isp.length === 0) return undefined;
+	const index = Number.isFinite(poolIndex) ? Math.max(0, Math.floor(poolIndex)) : 0;
+	return isp[index % isp.length];
 }
 
 export function nodemavenPoolSize(policy: ProviderProxyPolicy): number {
@@ -194,23 +218,21 @@ export type NodemavenSynthesis = {
  *
  * - `-isp-`, `-type-mobile` and `-ttl-` come from `policy.nodemaven` (type,
  *   isp[poolIndex % isp.length], ttlSeconds via `formatNodemavenTtl`).
- * - Residential policies keep the same token set and values as today
+ * - Residential policies keep the token set and values of earlier releases
  *   (`country`, `region`, `city`, `ipv4-true`, `sid`, `filter`); only the
- *   position of `-ipv4-true` moves ahead of `-sid-` to match the documented
- *   order. The sid derivation is unchanged, so sticky sessions keep their
- *   egress. Both orders were accepted by the gateway in the 2026-10-22
- *   measurements (lane A: 59 exits with today's order; lane D: 5 exits with
- *   the documented order).
+ *   position of `-ipv4-true` moved ahead of `-sid-` to match the documented
+ *   order. The sid derivation and the port choice are unchanged, so sticky
+ *   sessions keep their egress. The gateway assigned exits for both orders
+ *   in the 2026-10-22 measurements (59 with the earlier order, 5 with the
+ *   documented one).
  * - Mobile policies emit `-filter-` only when `APIFUSE__PROXY__NODEMAVEN_FILTER`
  *   is set explicitly; the measured passing shape
  *   (`<user>-country-kr-type-mobile-ipv4-true-sid-<sid>`, 12/15 on
  *   nol.yanolja.com) carries no filter token and the mobile+filter
  *   combination is unverified.
- * - `diagnostics` gains `type` and, when encoded, `isp` so telemetry can tell
- *   a mobile attempt from a residential one without exposing the username.
- *
- * Token emission for the new fields lands with the implementation lane; this
- * revision only fixes the grammar and the validated policy shape.
+ * - `diagnostics` carries `type` and, when encoded, `isp` so telemetry can
+ *   tell a mobile attempt from a residential one without exposing the
+ *   username.
  */
 export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): NodemavenSynthesis {
 	const username = input.credentials.username.trim();
@@ -221,7 +243,12 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 		);
 	}
 
-	const filter = resolveNodemavenFilter(input.credentials.filter);
+	const options = input.policy.nodemaven;
+	const connectionType: NodemavenConnectionType = options?.type ?? "residential";
+	const filter = resolveNodemavenFilter(input.credentials.filter, connectionType);
+	const isp = selectNodemavenIsp(options?.isp, input.poolIndex);
+	const ttl =
+		options?.ttlSeconds === undefined ? undefined : formatNodemavenTtl(options.ttlSeconds);
 	const sid = deriveSid(input.policy, input.affinityKey, input.poolIndex, input.refreshEpoch);
 	const port = selectPort(input.protocol, sid, input.poolIndex);
 	const lifetimeMinutes = nodemavenLifetimeMinutes(input.policy);
@@ -231,16 +258,21 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 	const region = slugifyGeo(input.policy.geo?.subdivision);
 	const city = slugifyGeo(input.policy.geo?.city);
 
+	// Documented order: country, region, city, isp, type, ipv4, sid, ttl, filter.
 	const tokens = [username];
 	if (country) tokens.push("country", country);
 	if (region) tokens.push("region", region);
 	if (city) tokens.push("city", city);
-	tokens.push("sid", sid);
-	tokens.push("filter", filter);
+	if (isp) tokens.push("isp", isp);
+	if (connectionType === "mobile") tokens.push("type", "mobile");
 	tokens.push("ipv4", "true");
+	tokens.push("sid", sid);
+	if (ttl) tokens.push("ttl", ttl);
+	if (filter) tokens.push("filter", filter);
 	const proxyUsername = tokens.join("-");
 
-	// Username tokens are [a-z0-9-] only, which survive URL encoding unchanged.
+	// Username tokens are [a-z0-9_-] only (carrier slugs add `_`), which survive
+	// URL encoding unchanged.
 	const url = `${input.protocol}://${proxyUsername}:${encodeURIComponent(password)}@${NODEMAVEN_GATEWAY_HOST}:${port}`;
 
 	return {
@@ -259,7 +291,9 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 			vendor: "nodemaven",
 			protocol: input.protocol,
 			sticky,
-			filter,
+			type: connectionType,
+			...(filter ? { filter } : {}),
+			...(isp ? { isp } : {}),
 			lifetimeMinutes,
 			...(country ? { country } : {}),
 		},

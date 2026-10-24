@@ -3,9 +3,13 @@ import type { ResolverRuntimeOptions } from "./resolver.js";
 import type { ResolverTelemetrySink } from "./resolver-telemetry.js";
 import type { BrowserTelemetrySink } from "./browser-telemetry.js";
 
-/** Normalize the `proxy` declaration shorthand (`true`/`false`) into the policy object the resolver chain consumes. */
+/**
+ * Normalize the `proxy` declaration shorthand (`true`/`false`) into the policy object the resolver chain consumes.
+ * Operation contexts pass the declaration in force for that operation (`resolveOperationProxyConfig`), so a policy
+ * scoped with `proxy.operations` normalizes to `undefined` outside its scope.
+ */
 export function resolveNativeProxyPolicy(
-	provider: ProviderDefinition,
+	provider: Pick<ProviderDefinition, "proxy">,
 ): ProviderProxyPolicy | undefined {
 	if (typeof provider.proxy === "object") return provider.proxy;
 	if (provider.proxy === true) return { mode: "optional" };

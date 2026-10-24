@@ -132,6 +132,29 @@ not list `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
 `APIFUSE__PROXY__NODEMAVEN_PASSWORD` in provider `secrets`; `proxy` contains
 policy intent only.
 
+When only some operations need proxy egress, scope the provider-level policy
+with `proxy.operations`. Listed operations get the policy on `ctx.http`,
+`ctx.stealth`, `ctx.native.network` and the resolver chain; every other
+operation and every auth flow egresses directly, as if `proxy` were not
+declared. Keep the policy on the provider rather than on an operation: the
+deployment projects the vendor credentials from the provider-level
+declaration. NodeMaven-only username tokens go in `proxy.nodemaven`:
+
+```ts
+proxy: {
+  mode: "required",
+  providers: ["nodemaven"],
+  geo: { country: "KR" },
+  nodemaven: { type: "mobile", isp: ["sk_telecom", "lg_uplus"] },
+  operations: ["get-stay-detail", "list-room-rate-plans"],
+},
+```
+
+Each attempt encodes one carrier, `isp[poolIndex % isp.length]`. When an
+upstream answers with a block page rather than a transport error, retry once
+with `ctx.stealth.fetch(url, { ...options, proxyAttemptOffset: 1 })`: the retry
+uses the next carrier and a new sid.
+
 Hosted runtime settings are engine-owned as well: every `APIFUSE__CDP_POOL__*`
 variable, the Cloudflare OCR/STT tokens and account identifier,
 `APIFUSE__OCR__API_KEY`, and `APIFUSE__CACHE__KEY_PEPPER`. `defineProvider`

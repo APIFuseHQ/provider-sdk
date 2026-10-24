@@ -1150,7 +1150,7 @@ export type NodemavenConnectionType = "residential" | "mobile";
  * by the gateway with HTTP 406 before any exit is assigned.
  */
 export interface ProviderProxyNodemavenOptions {
-	/** Omitted means residential: no `-type-` token, byte-compatible with today. */
+	/** Omitted means residential: no `-type-` token, the token set residential policies always had. */
 	type?: NodemavenConnectionType;
 	/**
 	 * Carrier slugs in NodeMaven's `-isp-` grammar (`[a-z0-9_]+`, multi-word
@@ -1205,9 +1205,9 @@ export interface ProviderProxyPolicy {
 	 * Operation ids this policy applies to. Omitted: the policy applies to
 	 * every operation context and every auth-flow context, as before. Present:
 	 * only the listed operations receive the policy on `ctx.http`,
-	 * `ctx.stealth` and the resolver chain; every other operation and every
-	 * auth flow egresses directly, exactly as a provider with no `proxy`
-	 * declaration does. The deployment side keeps projecting the vendor
+	 * `ctx.stealth`, `ctx.native.network` and the resolver chain; every other
+	 * operation and every auth flow egresses directly, exactly as a provider
+	 * with no `proxy` declaration does. The deployment side keeps projecting the vendor
 	 * credentials from this one declaration. `defineProvider` rejects an id
 	 * that is not a declared operation.
 	 */
