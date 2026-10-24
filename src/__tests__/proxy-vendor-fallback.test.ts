@@ -164,7 +164,7 @@ describe("proxy vendor fallback", () => {
 			expect(first.source).toBe("nodemaven-gateway");
 			expect(first.protocol).toBe("http");
 			expect(first.url).toMatch(
-				/^http:\/\/acct123-country-us-sid-[a-z0-9]{4,10}-filter-medium-ipv4-true:s3cret@gate\.nodemaven\.com:\d{4}$/,
+				/^http:\/\/acct123-country-us-ipv4-true-sid-[a-z0-9]{4,10}-filter-medium:s3cret@gate\.nodemaven\.com:\d{4}$/,
 			);
 			const httpPort = Number(new URL(first.url as string).port);
 			expect(httpPort).toBeGreaterThanOrEqual(8080);
@@ -197,7 +197,7 @@ describe("proxy vendor fallback", () => {
 				},
 			});
 			expect(resolved.url).toContain("-country-kr-region-seoul-city-gangnamgu-");
-			expect(resolved.url).toContain("-filter-high-");
+			expect(resolved.url).toContain("-filter-high:");
 		});
 
 		it("defaults nodemaven to the http protocol", async () => {
