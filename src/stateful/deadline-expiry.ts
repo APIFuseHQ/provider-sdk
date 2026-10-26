@@ -125,6 +125,24 @@ function ownErrorCode(error: unknown): unknown {
 	}
 }
 
+type DeadlineRequest = { readonly requestId: string; readonly deadlineAt?: string };
+
+/**
+ * Whether the router's deadline timer, armed from `request.deadlineAt`,
+ * stopped the operation that failed with `error`: the timer has fired and the
+ * failure's cause chain carries the timer's own abort reason.
+ */
+function abortedByDeadline(
+	error: unknown,
+	request: DeadlineRequest,
+	deadlineSignal: AbortSignal,
+): boolean {
+	return (
+		deadlineSignal.aborted &&
+		errorCauseChainCarriesDeadline(error, deadlineSignal.reason, request.requestId)
+	);
+}
+
 /**
  * The source pod's deadline timer aborts the forwarding request at
  * `deadlineAt`, the same instant the owner pod's own deadline starts producing
@@ -140,16 +158,39 @@ function ownErrorCode(error: unknown): unknown {
  */
 export function forwardingDeadlineExpiryOrSelf(
 	error: unknown,
-	request: { readonly requestId: string; readonly deadlineAt?: string },
+	request: DeadlineRequest,
 	deadlineSignal: AbortSignal,
 ): unknown {
 	if (request.deadlineAt === undefined || error instanceof StatefulRoutingDeadlineError) {
 		return error;
 	}
-	const abortedByDeadline =
-		deadlineSignal.aborted &&
-		errorCauseChainCarriesDeadline(error, deadlineSignal.reason, request.requestId);
 	const ownerReportedDeadline = ownErrorCode(error) === DEADLINE_EXPIRED_CODE;
-	if (!abortedByDeadline && !ownerReportedDeadline) return error;
+	if (!abortedByDeadline(error, request, deadlineSignal) && !ownerReportedDeadline) return error;
+	return statefulRoutingDeadlineErrorCausedBy(request.requestId, request.deadlineAt, error);
+}
+
+/**
+ * The router hands its deadline timer's signal to the local executor, and on
+ * an owner pod that is the signal the session layer gives the provider, not
+ * the owner route's own deadline signal: the route arms a separate timer for
+ * the same `deadlineAt`, whose reason is a different object. A local failure
+ * whose cause chain carries the router timer's reason was stopped by the
+ * deadline, so it becomes the StatefulRoutingDeadlineError the router throws
+ * for a forwarding request its timer aborted, with the failure as its cause.
+ * A failure that does not carry that reason keeps its own error, even when it
+ * happened after the timer fired.
+ */
+export function localDeadlineExpiryOrSelf(
+	error: unknown,
+	request: DeadlineRequest,
+	deadlineSignal: AbortSignal,
+): unknown {
+	if (
+		request.deadlineAt === undefined ||
+		error instanceof StatefulRoutingDeadlineError ||
+		!abortedByDeadline(error, request, deadlineSignal)
+	) {
+		return error;
+	}
 	return statefulRoutingDeadlineErrorCausedBy(request.requestId, request.deadlineAt, error);
 }

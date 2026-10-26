@@ -948,7 +948,9 @@ body. A caller that disconnects before the server answers takes the first row
 even when your own signal fired first. On the stateful owner route, a forwarded
 deadline that expires mid-request is served as
 `STATEFUL_FORWARDING_DEADLINE_EXPIRED` (category `timeout`, 504, `source`
-`apifuse`, `retryable: false`) instead.
+`apifuse`, `retryable: false`) instead. The same holds when the owner pod runs
+the forwarded operation through its own `StatefulSessionRouter` and the
+router's deadline timer cancels the read.
 
 #### Three fleet-consensus codes are registered
 
