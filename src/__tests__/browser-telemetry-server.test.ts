@@ -335,7 +335,7 @@ describe("browser construction matrix", () => {
 								pages: 1,
 								navigations: 1,
 							});
-							expect(decoded).toMatchObject({ v: 1, taxonomy: "2026-08-07" });
+							expect(decoded).toMatchObject({ v: 1, taxonomy: "2026-10-23" });
 							expect(decoded.browser).toEqual(
 								new BrowserTelemetryCollector().toHeaderPayload(event.browser!),
 							);

@@ -348,7 +348,7 @@ const DEADLINE_EXPIRED_BODY = (requestId: string) => ({
 	},
 });
 const DEADLINE_EXPIRED_OBSERVABILITY = {
-	category: "timeout",
+	category: "stateful_forwarding_deadline",
 	taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	retryable: false,
 };
@@ -368,7 +368,7 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			expect(result.ownerLog?.status).toBe(504);
 			expect(result.ownerLog?.code).toBe("STATEFUL_FORWARDING_DEADLINE_EXPIRED");
 			expect(result.ownerLog?.errorClass).toBe("StatefulRoutingDeadlineError");
-			expect(result.ownerLog?.errorCategory).toBe("timeout");
+			expect(result.ownerLog?.errorCategory).toBe("stateful_forwarding_deadline");
 			// The cancelled read stays visible as the cause: the transport's
 			// transport_cancelled, caused by the router timer's own reason, whose
 			// name stays AbortError.

@@ -231,13 +231,13 @@ describe("serve classification of a provider's own per-request signal abort", ()
 		expectCallerStayed(result);
 		expect(outcome(result)).toEqual({
 			status: 504,
-			category: "timeout",
+			category: "stateful_forwarding_deadline",
 			retryable: false,
 			source: "apifuse",
 			bodyRetryable: false,
 			message: "Stateful forwarding deadline expired.",
 			logStatus: 504,
-			logCategory: "timeout",
+			logCategory: "stateful_forwarding_deadline",
 			logRetryable: false,
 		});
 		expect(result.served?.body.error?.code).toBe("STATEFUL_FORWARDING_DEADLINE_EXPIRED");

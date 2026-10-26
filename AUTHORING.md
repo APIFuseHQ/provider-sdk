@@ -833,7 +833,7 @@ SDK observability is emitted separately in the
 `X-ApiFuse-Error-Observability` response header as compact, single-line JSON:
 
 ```json
-{"category":"upstream_http","taxonomyVersion":"2026-05-26","retryable":true,"upstreamStatus":502}
+{"category":"upstream_http","taxonomyVersion":"2026-10-23","retryable":true,"upstreamStatus":502}
 ```
 
 Treat this header as telemetry, not as provider-controlled public error detail.
@@ -947,8 +947,9 @@ it fires during a request, a retry backoff, or the consumption of a streamed
 body. A caller that disconnects before the server answers takes the first row
 even when your own signal fired first. On the stateful owner route, a forwarded
 deadline that expires mid-request is served as
-`STATEFUL_FORWARDING_DEADLINE_EXPIRED` (category `timeout`, 504, `source`
-`apifuse`, `retryable: false`) instead. The same holds when the owner pod runs
+`STATEFUL_FORWARDING_DEADLINE_EXPIRED` (category
+`stateful_forwarding_deadline`, 504, `source` `apifuse`, `retryable: false`)
+instead. The same holds when the owner pod runs
 the forwarded operation through its own `StatefulSessionRouter` and the
 router's deadline timer cancels the read.
 

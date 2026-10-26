@@ -3599,7 +3599,7 @@ export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 
 // @public (undocumented)
-const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
 
 // @public (undocumented)
 interface ProviderAccessConfig {
