@@ -1,0 +1,5 @@
+---
+"@apifuse/provider-sdk": patch
+---
+
+`HttpStatefulOwnerForwarder` now reports a forwarding request whose signal aborted after the owner's response headers arrived, but before the response body was read, as the aborted request it is: `STATEFUL_FORWARDING_REQUEST_FAILED`, with the signal's reason as the cause and the owner's status kept on the error. Before, the cancelled body read was swallowed and the forwarder threw `STATEFUL_FORWARDING_BAD_RESPONSE` without a cause. When the owner pod answered a stateful forwarding deadline at the same instant the source pod's `StatefulSessionRouter` deadline timer fired, the source pod's caller therefore received `500 internal_error` instead of `504 STATEFUL_FORWARDING_DEADLINE_EXPIRED`; the router now recognises its timer's reason in the cause and serves the deadline, as it already does for a forwarding request its timer aborted before the response. A response body that cannot be read or parsed while the signal is still live stays `STATEFUL_FORWARDING_BAD_RESPONSE`. No public API changes.
