@@ -145,7 +145,7 @@ export class HttpStatefulOwnerForwarder implements StatefulOwnerForwarder {
 				cause,
 			});
 		}
-		return parseForwardedResponse(response);
+		return parseForwardedResponse(response, signal);
 	}
 }
 
@@ -317,8 +317,11 @@ function sanitizeForwardedHeaders(
 	return forwarded;
 }
 
-async function parseForwardedResponse(response: Response): Promise<StatefulOperationResult> {
-	const body = await response.json().catch(() => undefined);
+async function parseForwardedResponse(
+	response: Response,
+	signal: AbortSignal,
+): Promise<StatefulOperationResult> {
+	const body = await readForwardedResponseBody(response, signal);
 	const success = OperationSuccessResponseSchema.safeParse(body);
 	if (response.ok && success.success) {
 		return { output: success.data.data };
@@ -338,6 +341,34 @@ async function parseForwardedResponse(response: Response): Promise<StatefulOpera
 		message: `Stateful owner returned an invalid response with status ${response.status}.`,
 		status: response.status,
 	});
+}
+
+/**
+ * The forwarding signal can abort after the owner's response headers arrived
+ * and before its body was read, for example when the owner answers at the
+ * same instant the source's deadline timer fires. The body read then fails
+ * and the response cannot be parsed, but the owner did not answer badly: the
+ * forwarding request was cancelled. It fails like a request the signal
+ * aborted before the response, `STATEFUL_FORWARDING_REQUEST_FAILED` with the
+ * signal's reason as its cause, so a deadline that cancelled it is still
+ * recognized as the deadline. A body that cannot be read or parsed while the
+ * signal is live stays a bad response.
+ */
+async function readForwardedResponseBody(
+	response: Response,
+	signal: AbortSignal,
+): Promise<unknown> {
+	try {
+		return await response.json();
+	} catch {
+		if (!signal.aborted) return undefined;
+		throw new StatefulOwnerForwardingError({
+			code: "STATEFUL_FORWARDING_REQUEST_FAILED",
+			message: "Stateful owner forwarding request was cancelled before the response was read.",
+			status: response.status,
+			cause: signal.reason,
+		});
+	}
 }
 
 const OperationConnectionSchema = z.object({

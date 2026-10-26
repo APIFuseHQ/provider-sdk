@@ -135,6 +135,92 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 		expect(error.cause).toBeInstanceOf(TypeError);
 	});
 
+	// A real loopback owner that sends its response headers and the start of
+	// an error body, then holds the rest of the body until the test ends.
+	function ownerHoldingResponseBody(status: number) {
+		const encoder = new TextEncoder();
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						async start(controller) {
+							controller.enqueue(encoder.encode('{"error":{"code":"STATEFUL_FORWARDING_'));
+							await held;
+							controller.close();
+						},
+					}),
+					{ status, headers: { "content-type": "application/json" } },
+				),
+		});
+		return {
+			endpoint: `http://127.0.0.1:${server.port}`,
+			/** Ends the body where it is, before it is valid JSON. */
+			endBody: release,
+			stop: () => {
+				release();
+				server.stop(true);
+			},
+		};
+	}
+
+	it("fails a response whose body the forwarding signal cancelled like an aborted request, with the signal's reason", async () => {
+		const ownerPod = ownerHoldingResponseBody(504);
+		const controller = new AbortController();
+		const reason = new DOMException(
+			"Stateful operation request request-a deadline has expired.",
+			"AbortError",
+		);
+		const forwarder = new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: "secret",
+			// The real fetch; the signal aborts once the owner's headers arrived,
+			// while the body is still being read.
+			fetch: async (input, init) => {
+				const response = await fetch(input, init);
+				controller.abort(reason);
+				return response;
+			},
+		});
+		try {
+			const error = await capturedForwardingError(
+				forwarder.forward(owner(ownerPod.endpoint), request, controller.signal),
+			);
+			expect(error).toMatchObject({ code: "STATEFUL_FORWARDING_REQUEST_FAILED", status: 504 });
+			expect(error.cause).toBe(reason);
+		} finally {
+			ownerPod.stop();
+		}
+	});
+
+	it("keeps a response body that cannot be parsed while the signal is live a bad response", async () => {
+		const ownerPod = ownerHoldingResponseBody(504);
+		const forwarder = new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: "secret",
+			// Nothing aborts; the owner ends the body before it is valid JSON.
+			fetch: async (input, init) => {
+				const response = await fetch(input, init);
+				ownerPod.endBody();
+				return response;
+			},
+		});
+		try {
+			const error = await capturedForwardingError(
+				forwarder.forward(owner(ownerPod.endpoint), request, new AbortController().signal),
+			);
+			expect(error).toMatchObject({ code: "STATEFUL_FORWARDING_BAD_RESPONSE", status: 504 });
+			expect(error.cause).toBeUndefined();
+		} finally {
+			ownerPod.stop();
+		}
+	});
+
 	it("propagates the operation deadline into the signed forwarding envelope", async () => {
 		let envelope: Record<string, unknown> | undefined;
 		const deadlineAt = "2026-08-01T00:00:15.000Z";

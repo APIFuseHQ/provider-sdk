@@ -1,5 +1,9 @@
 import type { SessionKey } from "./session-key.js";
-import { forwardingDeadlineExpiryOrSelf, statefulDeadlineAbortReason } from "./deadline-expiry.js";
+import {
+	forwardingDeadlineExpiryOrSelf,
+	localDeadlineExpiryOrSelf,
+	statefulDeadlineAbortReason,
+} from "./deadline-expiry.js";
 import { StatefulRoutingDeadlineError } from "./errors.js";
 import {
 	NOOP_STATEFUL_PROVIDER_METRIC_EMITTER,
@@ -280,7 +284,9 @@ export class StatefulSessionRouter {
 				if (isStatefulSessionEstablishmentFailure(error)) {
 					await this.releaseFailedEstablishment(request.sessionKey, owner, localAttempt);
 				}
-				throw error;
+				const classified = localDeadlineExpiryOrSelf(error, request, deadlineSignal.signal);
+				if (classified !== error) this.recordDeadlineExpired(request);
+				throw classified;
 			}
 		}
 		try {
@@ -292,7 +298,10 @@ export class StatefulSessionRouter {
 		}
 	}
 
-	/** Counts a request whose deadline expired, before routing or while forwarding. */
+	/**
+	 * Counts a request whose deadline expired before routing, while forwarding,
+	 * or while executing locally.
+	 */
 	private recordDeadlineExpired(request: StatefulOperationRequest): void {
 		this.#metricEmitter.increment("apifuse_stateful_provider_routing_deadline_expired_total", {
 			requestId: request.requestId,
@@ -550,8 +559,8 @@ function makeDeadlineSignal<TInput>(
 	}
 
 	const delayMs = Date.parse(request.deadlineAt) - now.getTime();
-	// An identifiable reason, so a forwarding request this timer aborted can be
-	// told apart from any other forwarding failure.
+	// An identifiable reason, so an operation this timer aborted, forwarded or
+	// executed locally, can be told apart from any other failure.
 	const timer = setTimeout(
 		() => controller.abort(statefulDeadlineAbortReason(request.requestId, "AbortError")),
 		delayMs,
