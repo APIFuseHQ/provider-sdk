@@ -15,6 +15,7 @@
  * acquisition already in flight for the state they were assigned to.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { Cookie } from "tough-cookie";
 
 import { SDKError } from "../errors.js";
 import type {
@@ -47,6 +48,8 @@ export const SESSION_STATE_PINNED_EGRESS = Symbol("apifuse.sessionState.pinnedEg
 export const SESSION_STATE_RESPONSE_EGRESS = Symbol("apifuse.sessionState.responseEgress");
 /** Non-enumerable http response key: every `Set-Cookie` header, unjoined. */
 export const SESSION_STATE_SET_COOKIES = Symbol("apifuse.sessionState.setCookies");
+/** Non-enumerable http response key: the URL of the final response after redirects. */
+export const SESSION_STATE_RESPONSE_URL = Symbol("apifuse.sessionState.responseUrl");
 
 /** Telemetry events, counted per request on the stealth or http payload. */
 export type SessionStateTelemetryEvent =
@@ -276,6 +279,23 @@ function resolveExpiry(
 	return expiryFromValue(sources.credential?.get(expiry.credential), expiry.unit, now);
 }
 
+/**
+ * Pins a cookie's lifetime to the moment it was captured: `Max-Age` becomes an
+ * absolute `Expires`, so carrying the stored string later never restarts it.
+ */
+export function pinCookieExpiry(
+	setCookie: string,
+	now: number,
+): { text: string; expiresAt?: number } {
+	const cookie = Cookie.parse(setCookie);
+	if (!cookie) return { text: setCookie };
+	const expiresAt = cookie.expiryTime(new Date(now));
+	if (expiresAt === undefined || !Number.isFinite(expiresAt)) return { text: setCookie };
+	cookie.maxAge = null;
+	cookie.expires = new Date(expiresAt);
+	return { text: cookie.toString(), expiresAt };
+}
+
 function registerValues(values: Iterable<string>): void {
 	for (const value of values) registerDiagnosticValue(value);
 }
@@ -291,6 +311,7 @@ function captureFromExchange(
 	if (when && !matchesResponse(when, view)) return undefined;
 	const values: Record<string, string> = {};
 	let cookies: SessionStateCookieStore | undefined;
+	let cookiesExpireAt: number | undefined;
 	if (capture.cookies && capture.cookies.length > 0) {
 		const wanted = new Set(capture.cookies);
 		const found = new Set<string>();
@@ -301,7 +322,10 @@ function captureFromExchange(
 			const value = cookieValuesFromHeaders(setCookie)[0];
 			if (!value) continue;
 			found.add(name);
-			setCookies.push(setCookie);
+			const pinned = pinCookieExpiry(setCookie, now);
+			setCookies.push(pinned.text);
+			if (pinned.expiresAt !== undefined)
+				cookiesExpireAt = Math.min(cookiesExpireAt ?? pinned.expiresAt, pinned.expiresAt);
 		}
 		if (found.size !== wanted.size) return undefined;
 		cookies = { setCookies, url: view.url };
@@ -324,7 +348,14 @@ function captureFromExchange(
 	}
 	if (!cookies && Object.keys(values).length === 0) return undefined;
 	registerValues(Object.values(values));
-	const expiresAt = resolveExpiry(capture.expiresAt, values, { view }, now);
+	const declaredExpiry = resolveExpiry(capture.expiresAt, values, { view }, now);
+	// The state ends when its first captured cookie does, if that is sooner.
+	const expiresAt =
+		declaredExpiry === undefined
+			? cookiesExpireAt
+			: cookiesExpireAt === undefined
+				? declaredExpiry
+				: Math.min(declaredExpiry, cookiesExpireAt);
 	return {
 		values,
 		...(cookies ? { cookies } : {}),
@@ -417,7 +448,13 @@ async function exchangeFromHandlerResult(
 			: typeof record.text === "function"
 				? String(await (record.text as () => Promise<unknown>)())
 				: "";
-	const url = typeof record.url === "string" ? record.url : fallbackUrl;
+	const hiddenUrl = record[SESSION_STATE_RESPONSE_URL];
+	const url =
+		typeof record.url === "string"
+			? record.url
+			: typeof hiddenUrl === "string"
+				? hiddenUrl
+				: fallbackUrl;
 	const rawHeaders = Array.isArray(record.rawHeaders)
 		? (record.rawHeaders as [string, string][])
 		: undefined;
@@ -945,12 +982,16 @@ export class SessionStateBinding {
 			throw error;
 		}
 		if (acquire.from !== "request") return;
-		const captured = captureFromExchange(
-			acquire.capture,
-			acquire.when,
-			exchange,
-			this.#registry.now(),
-		);
+		let captured: Captured | undefined;
+		try {
+			captured = captureFromExchange(acquire.capture, acquire.when, exchange, this.#registry.now());
+		} catch (error) {
+			// A provider expiry function that throws fails this acquisition and its waiters.
+			entry.fail(error);
+			pool.retire(entry);
+			pool.release(entry);
+			throw error;
+		}
 		if (!captured) {
 			pool.retire(entry);
 			pool.release(entry);

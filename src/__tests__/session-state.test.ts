@@ -6,12 +6,14 @@ import { ValidationError } from "../errors.js";
 import {
 	createSessionStateResponseView,
 	matchesResponse,
+	pinCookieExpiry,
 	splitJoinedSetCookie,
 } from "../runtime/session-state.js";
 import { SESSION_STATE_DEFAULTS } from "../runtime/session-state-defaults.js";
 import { parseSessionStateDurationMs } from "../runtime/session-state-duration.js";
 import { CLOUDFLARE_BLOCK_PAGE, sessionStatePresets } from "../runtime/session-state-presets.js";
-import type { OperationRiskClass, ProviderSessionState } from "../types.js";
+import { createServerApp } from "../server/serve.js";
+import type { HttpClient, OperationRiskClass, ProviderSessionState } from "../types.js";
 import { defineTestProvider as defineProvider } from "./test-utils.js";
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
@@ -342,4 +344,82 @@ describe("session state: contract snapshot", () => {
 		});
 		expect("sessionState" in extractProviderContract(defineProvider(baseConfig))).toBe(false);
 	});
+});
+
+describe("session state: cookie lifetime", () => {
+	it("pins Max-Age to the capture time so a stored cookie never outlives it", () => {
+		const capturedAt = Date.parse("2026-10-27T05:00:00Z");
+		const pinned = pinCookieExpiry("__cf_bm=abc; Max-Age=60; Path=/; HttpOnly", capturedAt);
+		expect(pinned.expiresAt).toBe(capturedAt + 60_000);
+		expect(pinned.text).toContain("Expires=Tue, 27 Oct 2026 05:01:00 GMT");
+		expect(pinned.text).not.toContain("Max-Age");
+		expect(pinCookieExpiry("__cf_bm=abc; Path=/", capturedAt)).toEqual({
+			text: "__cf_bm=abc; Path=/",
+		});
+	});
+});
+
+describe("session state: acquisition failures settle the pool", () => {
+	it("a throwing expiry function fails the acquisition and the next call acquires again", async () => {
+		let tokenRequests = 0;
+		const origin = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				if (new URL(request.url).pathname === "/token") {
+					tokenRequests += 1;
+					return Response.json({ token: `token-${tokenRequests}-value` });
+				}
+				return Response.json({ ok: true });
+			},
+		});
+		try {
+			const provider = defineProvider({
+				...baseConfig,
+				allowedHosts: ["127.0.0.1"],
+				http: {},
+				sessionState: {
+					guest: {
+						acquire: {
+							from: "request",
+							request: { url: `http://127.0.0.1:${origin.port}/token`, method: "POST" },
+							capture: {
+								json: { token: "token" },
+								expiresAt: () => {
+									throw new Error("expiry parser failed");
+								},
+							},
+						},
+						carry: { as: "header", name: "x-token", value: "token" },
+						validity: { ttl: "5m" },
+						distribute: { hosts: ["127.0.0.1"] },
+					},
+				},
+				operations: {
+					"get-stay-detail": {
+						...operation(),
+						handler: async (ctx: { http: HttpClient }, input: unknown) => {
+							await ctx.http.get(`http://127.0.0.1:${origin.port}/items`);
+							return Schema.parse(input);
+						},
+					},
+					"search-stays": operation(),
+				},
+			});
+			const app = createServerApp(provider, { logger: () => {} });
+			const call = () =>
+				app.request("/v1/get-stay-detail", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "r", input: { id: "a" } }),
+				});
+			const first = await call();
+			const second = await call();
+			expect(first.status).toBe(500);
+			expect(second.status).toBe(500);
+			expect(tokenRequests).toBe(2);
+		} finally {
+			origin.stop(true);
+		}
+	}, 5_000);
 });

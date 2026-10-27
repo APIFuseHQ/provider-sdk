@@ -56,6 +56,7 @@ import { scopedHttpTelemetry } from "./http-telemetry-binding.js";
 import {
 	createSessionStateResponseView,
 	SESSION_STATE_BINDING,
+	SESSION_STATE_RESPONSE_URL,
 	SESSION_STATE_SET_COOKIES,
 	type SessionStateBinding,
 	type SessionStateCarryPlan,
@@ -428,6 +429,13 @@ function withSetCookies(response: Response, result: HttpResponse): HttpResponse 
 		enumerable: false,
 		configurable: true,
 	});
+	if (response.url) {
+		Object.defineProperty(result, SESSION_STATE_RESPONSE_URL, {
+			value: response.url,
+			enumerable: false,
+			configurable: true,
+		});
+	}
 	return result;
 }
 
@@ -1036,7 +1044,8 @@ export function createHttpClient(
 		if (sessionStateBinding) {
 			let requestUrl: URL | undefined;
 			try {
-				requestUrl = baseUrl || isAbsoluteUrl(url) ? new URL(resolveHttpUrl(baseUrl, url)) : undefined;
+				requestUrl =
+					baseUrl || isAbsoluteUrl(url) ? new URL(resolveHttpUrl(baseUrl, url)) : undefined;
 			} catch {
 				requestUrl = undefined;
 			}
@@ -1075,11 +1084,14 @@ export function createHttpClient(
 			...Object.keys(options.sensitiveParams ?? {}),
 		]);
 		const signal = options.signal ?? clientOptions.signal;
-		const exchange = async (response: HttpResponse, responseUrl: string) => {
-			const hidden = (response as unknown as Record<symbol, unknown>)[SESSION_STATE_SET_COOKIES];
+		const exchange = async (response: HttpResponse, requestedUrl: string) => {
+			const hiddenFields = response as unknown as Record<symbol, unknown>;
+			const hidden = hiddenFields[SESSION_STATE_SET_COOKIES];
+			// Cookies belong to the URL that set them: the final hop after redirects.
+			const finalUrl = hiddenFields[SESSION_STATE_RESPONSE_URL];
 			return {
 				view: createSessionStateResponseView({
-					url: responseUrl,
+					url: typeof finalUrl === "string" ? finalUrl : requestedUrl,
 					status: response.status,
 					headers: response.headers,
 					body: await response.text(),
