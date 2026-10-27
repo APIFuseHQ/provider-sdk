@@ -101,6 +101,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderStealthConfig StealthChallengeClassification
 					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
+			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 		`,
 	),
 	"index.api.md": forgottenExports(
@@ -190,6 +191,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthProfileDescriptor StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession
 			StealthSessionCookies StealthTransportBody StealthTransportHeaders StealthTransportResponse
 			ProviderChallenge StealthChallengeClassification
+			SessionStateClassification
 		`,
 	),
 	"server.api.md": forgottenExports(
@@ -232,6 +234,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderStealthConfig StealthChallengeClassification NativeNetworkErrorCode
 								CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleOperation HandleRecord HandleStatus HandleStrength HandleTelemetryEvent HandleTelemetryOutcome HandleWordCount ResultOf
 					InputOf
+			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 		`,
 	),
 	"stateful.api.md": forgottenExports(
@@ -279,6 +282,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderStealthConfig StealthChallengeClassification
 					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
+			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 		`,
 	),
 };

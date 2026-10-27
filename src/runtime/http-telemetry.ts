@@ -88,6 +88,15 @@ export type HttpTelemetryLogPayload = {
 	ms: number;
 	/** Most recent successful retried call; also the source of tenant meta.retry. */
 	retry?: HttpTelemetryRetryPayload;
+	/** Session-state layer events of this request (`defineProvider({ sessionState })`); counts only. */
+	sessionState?: {
+		acquired: number;
+		reused: number;
+		expired: number;
+		invalidated: number;
+		reacquired: number;
+		waited: number;
+	};
 };
 
 export type HttpTelemetryHeaderPayload = {
@@ -108,6 +117,15 @@ export type HttpTelemetryHeaderPayload = {
 	dropped: number;
 	ms: number;
 	retry?: HttpTelemetryRetryPayload;
+	/** Session-state layer events of this request (`defineProvider({ sessionState })`); counts only. */
+	sessionState?: {
+		acquired: number;
+		reused: number;
+		expired: number;
+		invalidated: number;
+		reacquired: number;
+		waited: number;
+	};
 };
 
 const MAX_ATTEMPT_SAMPLES = 24;
@@ -156,6 +174,7 @@ export class HttpTelemetryCollector
 	#dropped = 0;
 	#ms = 0;
 	#retry: HttpTelemetryRetryPayload | undefined;
+	#sessionState: NonNullable<HttpTelemetryLogPayload["sessionState"]> | undefined;
 
 	constructor(options: { redact?: (text: string) => string } = {}) {
 		this.#redact = options.redact;
@@ -163,6 +182,19 @@ export class HttpTelemetryCollector
 
 	markTelemetryFailed(): void {
 		this.#telemetryFailed = true;
+	}
+
+	/** Counts one session-state layer event for this request. */
+	recordSessionState(event: keyof NonNullable<HttpTelemetryLogPayload["sessionState"]>): void {
+		this.#sessionState ??= {
+			acquired: 0,
+			reused: 0,
+			expired: 0,
+			invalidated: 0,
+			reacquired: 0,
+			waited: 0,
+		};
+		this.#sessionState[event] = saturatingAdd(this.#sessionState[event], 1);
 	}
 
 	startRequest(options: { retryPreset?: HttpRetrySummary["preset"] }): HttpTelemetryRequestSink {
@@ -240,7 +272,7 @@ export class HttpTelemetryCollector
 	}
 
 	toLogPayload(): HttpTelemetryLogPayload | undefined {
-		if (this.#attempts === 0 && !this.#telemetryFailed) return undefined;
+		if (this.#attempts === 0 && !this.#telemetryFailed && !this.#sessionState) return undefined;
 		return {
 			...(this.#telemetryFailed ? { telemetryFailed: true as const } : {}),
 			attempts: this.#attempts,
@@ -265,6 +297,7 @@ export class HttpTelemetryCollector
 			dropped: this.#dropped,
 			ms: this.#ms,
 			...(this.#retry ? { retry: { ...this.#retry } } : {}),
+			...(this.#sessionState ? { sessionState: { ...this.#sessionState } } : {}),
 		};
 	}
 
@@ -287,6 +320,7 @@ export class HttpTelemetryCollector
 			dropped: log.dropped,
 			ms: log.ms,
 			...(log.retry ? { retry: { ...log.retry } } : {}),
+			...(log.sessionState ? { sessionState: { ...log.sessionState } } : {}),
 		};
 	}
 }

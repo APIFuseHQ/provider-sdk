@@ -1148,8 +1148,27 @@ export function closedEnum<T extends string>(value: T): ClosedEnum<T>;
 // @public (undocumented)
 export const CLOUDFLARE_ACCOUNT_ID_ENV = "APIFUSE__CLOUDFLARE__ACCOUNT_ID";
 
+// @public
+export const CLOUDFLARE_BLOCK_PAGE: ResponseMatcher;
+
 // @public (undocumented)
 export const CLOUDFLARE_WORKERS_AI_OCR_BACKEND = "cloudflare-workers-ai";
+
+// @public
+export interface CloudflareBlockPageOptions {
+    readonly hosts: readonly string[];
+    // (undocumented)
+    readonly idleTtl?: SessionStateDuration;
+    // (undocumented)
+    readonly maxConcurrent?: number;
+    // (undocumented)
+    readonly maxUses?: number;
+    readonly operations?: readonly string[];
+    readonly qps?: number;
+    readonly reacquire?: number;
+    // (undocumented)
+    readonly ttl?: SessionStateDuration;
+}
 
 // @public (undocumented)
 type CloudflareWorkersAiOcrClientOptions = {
@@ -1605,6 +1624,7 @@ interface DeclarativeStealthResponse {
     rawHeaders: [string, string][];
     // (undocumented)
     redirected?: boolean;
+    sessionState?: SessionStateClassification;
     // (undocumented)
     status: number;
     // (undocumented)
@@ -2845,6 +2865,7 @@ export interface HttpResponse<T = unknown> {
     json<U = T>(): Promise<U>;
     // (undocumented)
     ok: boolean;
+    sessionState?: SessionStateClassification;
     // (undocumented)
     status: number;
     // (undocumented)
@@ -2975,6 +2996,7 @@ export class HttpTelemetryCollector implements HttpTelemetrySink, TelemetryContr
     readonly key: "http";
     // (undocumented)
     markTelemetryFailed(): void;
+    recordSessionState(event: keyof NonNullable<HttpTelemetryLogPayload["sessionState"]>): void;
     // (undocumented)
     startRequest(options: {
         retryPreset?: HttpRetrySummary["preset"];
@@ -3009,6 +3031,14 @@ export type HttpTelemetryHeaderPayload = {
     dropped: number;
     ms: number;
     retry?: HttpTelemetryRetryPayload;
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)
@@ -3026,6 +3056,14 @@ export type HttpTelemetryLogPayload = {
     dropped: number;
     ms: number;
     retry?: HttpTelemetryRetryPayload;
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)
@@ -5143,6 +5181,8 @@ export interface ProviderContractSnapshot {
     // (undocumented)
     readonly secrets?: JsonValue;
     // (undocumented)
+    readonly sessionState?: JsonValue;
+    // (undocumented)
     readonly stealth?: JsonValue;
     // (undocumented)
     readonly stt?: JsonValue;
@@ -5214,6 +5254,7 @@ export interface ProviderDeclaration {
     runtime: "standard" | "shared" | "browser";
     runtimeTarget?: ProviderRuntimeTarget;
     secrets?: ProviderSecretDeclaration[];
+    sessionState?: Readonly<Record<string, ProviderSessionState>>;
     state?: Record<string, never> | true;
     // (undocumented)
     stealth?: ProviderStealthConfig;
@@ -5277,6 +5318,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     runtimeTarget?: ProviderRuntimeTarget;
     // (undocumented)
     secrets?: ProviderSecretDeclaration[];
+    sessionState?: Readonly<Record<string, ProviderSessionState>>;
     // (undocumented)
     state?: Record<string, never> | true;
     // (undocumented)
@@ -6110,6 +6152,18 @@ type ProviderServerStatefulOwnerFence = Readonly<Pick<ProviderServerStatefulForw
 type ProviderServerStatefulOwnerFenceValidator = (fence: ProviderServerStatefulOwnerFence, signal: AbortSignal) => boolean | Promise<boolean>;
 
 // @public
+export interface ProviderSessionState {
+    // (undocumented)
+    readonly acquire: SessionStateAcquire;
+    // (undocumented)
+    readonly carry: SessionStateCarry | readonly SessionStateCarry[];
+    // (undocumented)
+    readonly distribute: SessionStateDistribute;
+    // (undocumented)
+    readonly validity: SessionStateValidity;
+}
+
+// @public
 type ProviderStateBackendLogEvent = {
     readonly level: "info" | "warn";
     readonly event: "provider_state_backend";
@@ -6529,6 +6583,7 @@ export interface RequestOptions {
     // (undocumented)
     retry?: boolean | HttpRetryPreset | HttpRetryOptions;
     sensitiveParams?: Record<string, string>;
+    sessionState?: string | readonly string[] | false;
     signal?: AbortSignal;
     throwOnHttpError?: boolean;
     timeout?: number;
@@ -6836,6 +6891,22 @@ export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_p
 
 // @public (undocumented)
 export function resolveSttPrompt(request: SttTranscribeRequest): string | undefined;
+
+// @public
+export interface ResponseMatcher {
+    readonly bodyIncludes?: readonly string[];
+    readonly bodyPattern?: string;
+    readonly headers?: Readonly<Record<string, string | {
+        readonly pattern: string;
+    } | true>>;
+    readonly json?: Readonly<Record<string, string | number | boolean | null | {
+        readonly pattern: string;
+    }>>;
+    readonly status?: number | readonly number[] | {
+        readonly min: number;
+        readonly max: number;
+    };
+}
 
 // @public (undocumented)
 export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R> ? (R extends ZodType ? z.output<R> : unknown) : never;
@@ -7739,6 +7810,145 @@ export class SessionExpiredError extends AuthError {
     constructor(message?: string, options?: ProviderErrorOptions);
 }
 
+// @public
+export type SessionStateAcquire = {
+    readonly from: "response";
+    readonly capture: SessionStateCapture;
+    readonly when?: ResponseMatcher;
+} | {
+    readonly from: "request";
+    readonly request: SessionStateAcquireRequest | SessionStateAcquireHandler;
+    readonly capture: SessionStateCapture;
+    readonly when?: ResponseMatcher;
+} | {
+    readonly from: "credential";
+    readonly capture: Pick<SessionStateCapture, "credential" | "expiresAt">;
+};
+
+// @public
+export interface SessionStateAcquireContext {
+    // (undocumented)
+    readonly credential?: CredentialContext;
+    // (undocumented)
+    readonly env: EnvContext;
+    // (undocumented)
+    readonly http: HttpClient;
+    // (undocumented)
+    readonly signal?: AbortSignal;
+    // (undocumented)
+    readonly stealth: StealthClient;
+}
+
+// @public (undocumented)
+export type SessionStateAcquireHandler = (ctx: SessionStateAcquireContext) => Promise<SessionStateResponseView>;
+
+// @public
+export interface SessionStateAcquireRequest {
+    // (undocumented)
+    readonly body?: string;
+    readonly client?: "stealth" | "http";
+    // (undocumented)
+    readonly headers?: Readonly<Record<string, string>>;
+    // (undocumented)
+    readonly method?: HttpMethod;
+    readonly url: string;
+}
+
+// @public
+export interface SessionStateCapture {
+    readonly cookies?: readonly string[];
+    readonly credential?: Readonly<Record<string, string>>;
+    readonly expiresAt?: SessionStateExpiry;
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly json?: Readonly<Record<string, string>>;
+}
+
+// @public
+export type SessionStateCarry = {
+    readonly as: "cookies";
+} | {
+    readonly as: "cookie";
+    readonly name: string;
+    readonly value: string;
+} | {
+    readonly as: "cookie-header";
+    readonly value: string;
+} | {
+    readonly as: "header";
+    readonly name: string;
+    readonly value: string;
+    readonly format?: string;
+} | {
+    readonly as: "query";
+    readonly name: string;
+    readonly value: string;
+};
+
+// @public
+export interface SessionStateClassification {
+    readonly attempts: number;
+    readonly carried: boolean;
+    readonly name: string;
+    readonly outcome: "reacquire_exhausted" | "acquire_failed" | "replay_required" | "credential_invalid";
+}
+
+// @public
+export interface SessionStateDistribute {
+    readonly egress?: "independent" | "pinned";
+    readonly hosts: readonly string[];
+    readonly maxConcurrent?: number;
+    readonly operations?: readonly string[];
+    readonly qps?: number;
+    readonly scope?: SessionStateScope;
+}
+
+// @public
+export type SessionStateDuration = ProviderStateDurationString;
+
+// @public
+export type SessionStateExpiry = {
+    readonly json: string;
+    readonly unit: "epoch-seconds" | "seconds-from-now" | "iso";
+} | {
+    readonly header: string;
+    readonly unit: "epoch-seconds" | "seconds-from-now" | "iso";
+} | {
+    readonly credential: string;
+    readonly unit: "epoch-seconds" | "iso";
+} | ((values: Readonly<Record<string, string>>) => number | undefined);
+
+// @public
+export type SessionStateJudge = ResponseMatcher | readonly ResponseMatcher[] | ((response: SessionStateResponseView) => boolean);
+
+// @public
+export const sessionStatePresets: {
+    readonly cloudflareBlockPage: (options: CloudflareBlockPageOptions) => ProviderSessionState;
+};
+
+// @public
+export interface SessionStateResponseView {
+    readonly body: string;
+    readonly headers: Readonly<Record<string, string>>;
+    json(): unknown;
+    // (undocumented)
+    readonly status: number;
+    // (undocumented)
+    readonly url: string;
+}
+
+// @public (undocumented)
+export type SessionStateScope = "provider" | "connection";
+
+// @public
+export interface SessionStateValidity {
+    readonly idleTtl?: SessionStateDuration;
+    readonly invalidWhen?: SessionStateJudge;
+    readonly maxUses?: number;
+    readonly reacquire?: number;
+    readonly replayMethods?: readonly HttpMethod[];
+    readonly ttl?: SessionStateDuration;
+}
+
 // @public (undocumented)
 export type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
 
@@ -8263,6 +8473,7 @@ export class StealthTelemetryCollector implements StealthTelemetrySink, Telemetr
     recordSafeRefetch(): void;
     // (undocumented)
     recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
+    recordSessionState(event: keyof NonNullable<StealthTelemetryLogPayload["sessionState"]>): void;
     // (undocumented)
     toHeaderPayload(log: StealthTelemetryLogPayload): StealthTelemetryHeaderPayload;
     // (undocumented)
@@ -8302,6 +8513,14 @@ export type StealthTelemetryHeaderPayload = {
         e?: ClosedEnum<StealthTelemetryErrorCode>;
         kind?: ClosedEnum<StealthTelemetryAttemptKind>;
     }[];
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)
@@ -8319,6 +8538,14 @@ export type StealthTelemetryLogPayload = {
     ms: number;
     attemptSamples?: StealthTelemetryAttemptSample[];
     attemptSamplesDropped?: number;
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)
@@ -8900,8 +9127,8 @@ export { z }
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:111:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:143:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:117:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:149:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:5:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:30:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:58:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
@@ -8917,11 +9144,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:287:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:732:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1858:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1946:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1954:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1955:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2142:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2076:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2164:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2172:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2173:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2360:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

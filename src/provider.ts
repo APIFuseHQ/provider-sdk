@@ -234,6 +234,11 @@ export {
 	NativeProxyExpiredError,
 } from "./runtime/native-network-errors.js";
 export {
+	CLOUDFLARE_BLOCK_PAGE,
+	type CloudflareBlockPageOptions,
+	sessionStatePresets,
+} from "./runtime/session-state-presets.js";
+export {
 	createMemoryProviderRuntimeState,
 	createUnsupportedProviderRuntimeState,
 } from "./runtime/state.js";
@@ -357,6 +362,22 @@ export type {
 	StateValue,
 	StateWriteOptions,
 	StealthChallengeClassification,
+	ProviderSessionState,
+	ResponseMatcher,
+	SessionStateAcquire,
+	SessionStateAcquireContext,
+	SessionStateAcquireHandler,
+	SessionStateAcquireRequest,
+	SessionStateCapture,
+	SessionStateCarry,
+	SessionStateClassification,
+	SessionStateDistribute,
+	SessionStateDuration,
+	SessionStateExpiry,
+	SessionStateJudge,
+	SessionStateResponseView,
+	SessionStateScope,
+	SessionStateValidity,
 } from "./types.js";
 export {
 	HttpRetryAfterPolicy,

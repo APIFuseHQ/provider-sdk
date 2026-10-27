@@ -118,9 +118,9 @@ configuration use a bare object, for example `http: {}`, `state: {}`, or
 `cache: {}`. `handle` is the exception: it takes an array of kinds
 (`handle: [WaitingDraft]`) and requires `state: {}` alongside it. `trace` is
 ambient and must not be declared: every operation
-context receives it. `allowedHosts`, `proxy`, `secrets`, and `context` declare
-policy or metadata only; they do not create context members and are not
-capability bindings.
+context receives it. `allowedHosts`, `proxy`, `sessionState`, `secrets`, and
+`context` declare policy or metadata only; they do not create context members
+and are not capability bindings.
 
 Declare `runtimeTarget: "vanilla"` for portable provider business logic. Use
 `runtimeTarget: "engine"` only for an approved session-bearing provider that
@@ -151,9 +151,87 @@ proxy: {
 ```
 
 Each attempt encodes one carrier, `isp[poolIndex % isp.length]`. When an
-upstream answers with a block page rather than a transport error, retry once
-with `ctx.stealth.fetch(url, { ...options, proxyAttemptOffset: 1 })`: the retry
-uses the next carrier and a new sid.
+upstream's edge answers with a block page that issues a session cookie, do not
+retry by hand: declare the cookie as session state (below). The SDK re-sends
+the blocked request once carrying the cookie, on the next pool slot (next
+carrier, new sid), exactly as a caller retry with `proxyAttemptOffset: 1`
+would, and later calls carry the pooled cookie from the start.
+
+### Session state (`sessionState`)
+
+Values an upstream hands a client and expects back on later requests
+(an edge's bot-management cookie, a login session cookie, a token header) are
+declared, not hand-managed. `defineProvider({ sessionState: { <name>: ... } })`
+takes named `ProviderSessionState` declarations in four parts:
+
+- `acquire`: where the state comes from. `from: "response"` captures it from
+  the responses of in-scope requests themselves (a block page or any served
+  response); `from: "request"` issues a declared request (or a provider
+  function) first; `from: "credential"` reads it from the connection
+  credential the auth flow completed with. `capture` names what must be
+  present: `Set-Cookie` names (attributes kept), response headers, JSON dot
+  paths, credential keys, and optionally an upstream expiry.
+- `carry`: where the state goes: `{ as: "cookies" }` (the captured cookies),
+  `{ as: "cookie", name, value }`, `{ as: "cookie-header", value }`,
+  `{ as: "header", name, value, format: "Bearer {value}" }` or
+  `{ as: "query", name, value }`. `value` names a captured value. A header,
+  query parameter or `cookie` header the caller sets itself wins, and the
+  declaration stays out of that request.
+- `validity`: `ttl` from the first acquisition, `idleTtl` since the last use,
+  `maxUses`, and `invalidWhen`: a declarative `ResponseMatcher` (status,
+  headers, body substrings or pattern, JSON paths), an array of them, or a
+  provider function. A response judged invalid retires the state; up to
+  `reacquire` times per request the SDK acquires a fresh one and re-sends
+  the request when its method is in `replayMethods` (default GET, HEAD,
+  OPTIONS, the SDK safe set). `defineProvider` rejects a declaration with no
+  bound at all. A captured cookie's own `Expires` and `Max-Age` never retire
+  it: edges state expiries they do not enforce, so `validity` alone decides
+  how long a stored value is carried.
+- `distribute`: `hosts` (each in `allowedHosts`), `operations` (omitted:
+  every operation; auth flows are never in scope), `scope` (`provider`: one
+  pool for every caller, `connection`: a pool per connection), `qps`,
+  `maxConcurrent` and `egress` (`independent`, or `pinned` to re-use the
+  stealth exit the state was acquired on).
+
+`qps` is the throughput assigned to one state, not a rate limit: a request
+goes to the oldest state with room left in its share, and when every state
+has used its share the SDK acquires another state instead of making the
+request wait. The pool therefore grows to about `request rate / qps` states
+and has no declared size; states that go unused retire on their own
+lifetime. With `qps` omitted, one state carries every request and concurrent
+callers wait only for an acquisition already in flight.
+
+The SDK knows one edge by name: `sessionStatePresets.cloudflareBlockPage(...)`
+returns a plain `ProviderSessionState` (passive acquisition of `__cf_bm`,
+judged by the exported `CLOUDFLARE_BLOCK_PAGE` matcher, one re-acquisition).
+Spread it to override any part; a declaration written by hand with the same
+values behaves identically.
+
+```ts
+sessionState: {
+  stayEdge: sessionStatePresets.cloudflareBlockPage({
+    hosts: ["stays.example"],
+    operations: ["get-stay-detail", "list-room-rate-plans"],
+    ttl: "20m",
+  }),
+},
+```
+
+When the layer cannot absorb an invalid response it returns it with
+`response.sessionState` (`name`, `outcome`, `attempts`, `carried`) whatever
+`throwOnHttpError` says: `reacquire_exhausted`, `acquire_failed`,
+`replay_required` (a fresh state was acquired but the method is not
+re-sent automatically) or `credential_invalid`. Error codes stay the
+provider's: map the classification to `BLOCKED` or `SessionExpiredError`
+and report `attempts` in `details` if the operation contract carries a
+count. A state from the credential is carried and judged only; renewing a
+credential stays with the gateway's `auth.flow.refresh`. Captured values are
+registered as diagnostic values and never reach logs, telemetry or errors;
+the stealth and http telemetry of a request count `acquired`, `reused`,
+`expired`, `invalidated`, `reacquired` and `waited`. On `ctx.http` the layer
+judges the final response, so a request in scope is sent with
+`throwOnHttpError: false` internally and explicit status-code retries do not
+apply to it; transport retries do. `stream` and `sse` are not in scope.
 
 Hosted runtime settings are engine-owned as well: every `APIFUSE__CDP_POOL__*`
 variable, the Cloudflare OCR/STT tokens and account identifier,

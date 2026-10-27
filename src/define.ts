@@ -26,6 +26,10 @@ import {
 	validateNativeProviderConfig,
 } from "./native-egress-policy.js";
 import { safeParseSchemaSync } from "./schema.js";
+import {
+	validateProviderSessionState,
+	validateSessionStateOperationScope,
+} from "./session-state-declaration.js";
 import { resolveHealthCheckInputDateTokens } from "./server/self-test-input-tokens.js";
 import type { HandleKind } from "./handle.js";
 import type {
@@ -57,6 +61,7 @@ import type {
 	ProviderHealthMonitorConfig,
 	ProviderOcrConfig,
 	ProviderProxyConfig,
+	ProviderSessionState,
 	ProviderPublicProfile,
 	ProviderResolverConfig,
 	ProviderResolverVendor,
@@ -609,6 +614,12 @@ export interface ProviderDeclaration {
 	stealth?: ProviderStealthConfig;
 	/** Declares proxy policy; this is provider intent and does not add a `ctx.proxy` member. */
 	proxy?: ProviderProxyConfig;
+	/**
+	 * Declares named session state the SDK acquires, keeps, carries and renews on
+	 * `ctx.stealth` and `ctx.http` (see `ProviderSessionState`); policy only, it
+	 * does not add a context member.
+	 */
+	sessionState?: Readonly<Record<string, ProviderSessionState>>;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
 	resolver?: ProviderResolverConfig;
@@ -3412,6 +3423,7 @@ function validateProviderDeclaration(config: ProviderDeclaration): void {
 		throw error;
 	}
 	validateProviderProxy(config);
+	validateProviderSessionState(config);
 	validateProviderOcr(config);
 	validateProviderStt(config);
 	validateProviderResolver(config);
@@ -3465,6 +3477,7 @@ function finalizeProvider<
 	);
 	validateOperationNoMedia(config.id, config.operations);
 	validateProxyOperationScope(config.id, config.proxy, config.operations);
+	validateSessionStateOperationScope(config.id, config.sessionState, config.operations);
 	validateOperationFixtures(config.id, operations);
 	const provider: Omit<ProviderDefinition, "operations"> & {
 		operations: OperationMapConfig<TOperations, TContext>;
@@ -3481,6 +3494,7 @@ function finalizeProvider<
 		native: config.native,
 		stealth: config.stealth,
 		proxy: config.proxy,
+		...(config.sessionState === undefined ? {} : { sessionState: config.sessionState }),
 		ocr: config.ocr,
 		stt: config.stt,
 		resolver: config.resolver,

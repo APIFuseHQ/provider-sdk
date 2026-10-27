@@ -95,6 +95,15 @@ import {
 	detectAkamaiSbsdChallenge,
 	type StealthChallengeRuntime,
 } from "./stealth-akamai-sbsd.js";
+import {
+	createSessionStateResponseView,
+	SESSION_STATE_BINDING,
+	SESSION_STATE_PINNED_EGRESS,
+	SESSION_STATE_RESPONSE_EGRESS,
+	type SessionStateBinding,
+	type SessionStateClientAdapter,
+	type SessionStateExchange,
+} from "./session-state.js";
 import { StealthCookieJar } from "./stealth-cookies.js";
 
 export type {
@@ -198,6 +207,13 @@ type StealthSessionClientOptions = StealthClientOptions & {
 		readonly challengeRuntime?: StealthChallengeRuntime;
 	};
 	readonly [ENGINE_CEREMONY_EGRESS_LEASE]?: CeremonyEgressLeaseRuntime;
+	/** The operation's session-state binding; present only when a declaration is in scope. */
+	readonly [SESSION_STATE_BINDING]?: SessionStateBinding;
+};
+
+/** A send of the session-state layer carrying a state pinned to the egress it was acquired on. */
+type SessionStatePinnedFetchOptions = StealthFetchOptions & {
+	[SESSION_STATE_PINNED_EGRESS]?: unknown;
 };
 
 type ChallengedReplayRecord = {
@@ -1612,6 +1628,7 @@ function createSessionFetcher(
 	const akamaiSbsdState: AkamaiSbsdSessionState = { transactions: new Map() };
 	const challengedReplays = new WeakMap<StealthResponse, ChallengedReplayRecord>();
 	const ceremonyEgressLease = clientOptions[ENGINE_CEREMONY_EGRESS_LEASE];
+	const sessionStateBinding = clientOptions[SESSION_STATE_BINDING];
 	// The lease is shared by every session of this client; this is the lease generation this
 	// session's challenge state and replay records were built against.
 	let observedEgressGeneration = ceremonyEgressLease?.generation ?? 0;
@@ -1783,6 +1800,10 @@ function createSessionFetcher(
 		proxyAttempt?: number,
 		refreshEpoch?: number,
 	): Promise<ResolvedAttemptProxy> {
+		const pinned = (options as SessionStatePinnedFetchOptions | undefined)?.[
+			SESSION_STATE_PINNED_EGRESS
+		];
+		if (pinned) return pinned as ResolvedAttemptProxy;
 		const bound = ceremonyEgressLease?.binding;
 		if (bound) {
 			if (options?.proxy !== undefined || options?.proxyAttemptOffset !== undefined) {
@@ -2030,6 +2051,14 @@ function createSessionFetcher(
 							);
 						}
 						recordProxyAttempt("ok", undefined, attemptResponse.status);
+						if (sessionStateBinding && attemptProxy?.url) {
+							// Where a state was acquired, for `distribute.egress: "pinned"`.
+							Object.defineProperty(attemptNormalized, SESSION_STATE_RESPONSE_EGRESS, {
+								value: attemptProxy,
+								enumerable: false,
+								configurable: true,
+							});
+						}
 						return attemptNormalized;
 					};
 					const redactAttemptError = <T>(error: T): T =>
@@ -2901,7 +2930,129 @@ function createSessionFetcher(
 			clients.clear();
 		},
 	};
+	if (sessionStateBinding) {
+		const fetchOnce: StealthSession["fetch"] = session.fetch.bind(session);
+		session.fetch = (url, callerOptions = {}) => {
+			if ((callerOptions as StealthHopFetchOptions)[REDIRECTED_HOP] === true)
+				return fetchOnce(url, callerOptions);
+			let requestUrl: URL;
+			try {
+				requestUrl = new URL(resolveUrl(baseUrl, url));
+			} catch {
+				return fetchOnce(url, callerOptions);
+			}
+			const declarations = sessionStateBinding.select(requestUrl, callerOptions.sessionState);
+			if (declarations.length === 0) return fetchOnce(url, callerOptions);
+			return sessionStateBinding.run(
+				createSessionStateAdapter(fetchOnce, url, callerOptions, requestUrl),
+				declarations,
+			);
+		};
+	}
 	return session;
+
+	/**
+	 * The stealth half of a session-state request. Carried cookies go through the
+	 * session jar, so redirect hops and the jar's own cookies behave as for any
+	 * other request; a caller `cookie` header keeps the jar, and the layer, out.
+	 */
+	function createSessionStateAdapter(
+		fetchOnce: StealthSession["fetch"],
+		url: string,
+		callerOptions: StealthFetchOptions,
+		requestUrl: URL,
+	): SessionStateClientAdapter<StealthResponse> {
+		const callerHeaders = callerOptions.headers ?? {};
+		const callerHeaderNames = new Set(Object.keys(callerHeaders).map((name) => name.toLowerCase()));
+		const callerQueryNames = new Set([
+			...requestUrl.searchParams.keys(),
+			...Object.keys(callerOptions.params ?? {}),
+			...Object.keys(callerOptions.sensitiveParams ?? {}),
+		]);
+		const profile = resolveStealthProfileSelection(callerOptions.stealth, defaultProfile);
+		const exchange = (response: StealthResponse, fallbackUrl: string): SessionStateExchange => {
+			const egress = (response as unknown as Record<symbol, unknown>)[SESSION_STATE_RESPONSE_EGRESS];
+			return {
+				view: createSessionStateResponseView({
+					url: response.url ?? fallbackUrl,
+					status: response.status,
+					headers: response.headers,
+					body: response.body,
+				}),
+				setCookies: response.rawHeaders
+					.filter(([name]) => name.toLowerCase() === "set-cookie")
+					.map(([, value]) => value),
+				...(egress === undefined ? {} : { egress }),
+			};
+		};
+		return {
+			client: "stealth",
+			profile: `${profile.browser}/${profile.os}`,
+			url: requestUrl,
+			method: String(callerOptions.method ?? "GET").toUpperCase(),
+			...(clientOptions.signal ? { signal: clientOptions.signal } : {}),
+			callerHasCookie: () => callerHeaderNames.has("cookie"),
+			callerHasHeader: (name) => callerHeaderNames.has(name.toLowerCase()),
+			callerHasQuery: (name) => callerQueryNames.has(name),
+			send(plan, replay) {
+				for (const store of plan.cookieStores)
+					cookieJar.setFromCookieStrings(store.setCookies, store.url);
+				if (plan.cookies.length > 0) {
+					cookieJar.setFromCookieStrings(
+						plan.cookies.map(([name, value]) => `${name}=${value}; Path=/`),
+						requestUrl.href,
+					);
+				}
+				const headers =
+					plan.headers.length === 0
+						? callerOptions.headers
+						: { ...callerHeaders, ...Object.fromEntries(plan.headers) };
+				const sensitiveParams =
+					plan.query.length === 0
+						? callerOptions.sensitiveParams
+						: { ...(callerOptions.sensitiveParams ?? {}), ...Object.fromEntries(plan.query) };
+				const options: SessionStatePinnedFetchOptions = {
+					...callerOptions,
+					...(headers ? { headers } : {}),
+					...(sensitiveParams ? { sensitiveParams } : {}),
+					throwOnHttpError: false,
+					// A re-sent request moves to the next pool slot, as a caller retry would.
+					...(replay > 0
+						? { proxyAttemptOffset: (callerOptions.proxyAttemptOffset ?? 0) + replay }
+						: {}),
+					...(plan.egress === undefined ? {} : { [SESSION_STATE_PINNED_EGRESS]: plan.egress }),
+				};
+				return fetchOnce(url, options);
+			},
+			exchange: async (response) => exchange(response, requestUrl.href),
+			async acquire(request) {
+				const response = await fetchOnce(request.url, {
+					...(request.method ? { method: request.method } : {}),
+					...(request.headers ? { headers: { ...request.headers } } : {}),
+					...(request.body === undefined ? {} : { body: request.body }),
+					throwOnHttpError: false,
+				});
+				return exchange(response, resolveUrl(baseUrl, request.url));
+			},
+			finish(response, classification) {
+				if (classification) {
+					response.sessionState = classification;
+					return response;
+				}
+				if (
+					!response.challenge &&
+					response.status >= 400 &&
+					callerOptions.throwOnHttpError !== false
+				) {
+					throw new TransportError(`Upstream request failed with status ${response.status}`, {
+						code: "upstream_http_error",
+						status: response.status,
+					});
+				}
+				return response;
+			},
+		};
+	}
 
 	async function classifyProxyAuthDiagnostic(
 		profile: StealthProfileDescriptor,

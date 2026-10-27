@@ -564,6 +564,8 @@ interface DeclarativeStealthResponse {
     rawHeaders: [string, string][];
     // (undocumented)
     redirected?: boolean;
+    // Warning: (ae-forgotten-export) The symbol "SessionStateClassification" needs to be exported by the entry point index.d.ts
+    sessionState?: SessionStateClassification;
     // (undocumented)
     status: number;
     // (undocumented)
@@ -1255,6 +1257,7 @@ interface HttpResponse<T = unknown> {
     json<U = T>(): Promise<U>;
     // (undocumented)
     ok: boolean;
+    sessionState?: SessionStateClassification;
     // (undocumented)
     status: number;
     // (undocumented)
@@ -2539,6 +2542,8 @@ interface ProviderDefinition<TContext = ProviderContext> {
     //
     // (undocumented)
     secrets?: ProviderSecretDeclaration[];
+    // Warning: (ae-forgotten-export) The symbol "ProviderSessionState" needs to be exported by the entry point index.d.ts
+    sessionState?: Readonly<Record<string, ProviderSessionState>>;
     // (undocumented)
     state?: Record<string, never> | true;
     // Warning: (ae-forgotten-export) The symbol "ProviderStealthConfig" needs to be exported by the entry point index.d.ts
@@ -2857,6 +2862,26 @@ interface ProviderSecretDeclaration {
 // @public
 type ProviderSecretIssuer = "apifuse" | "contributor";
 
+// @public
+interface ProviderSessionState {
+    // Warning: (ae-forgotten-export) The symbol "SessionStateAcquire" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly acquire: SessionStateAcquire;
+    // Warning: (ae-forgotten-export) The symbol "SessionStateCarry" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly carry: SessionStateCarry | readonly SessionStateCarry[];
+    // Warning: (ae-forgotten-export) The symbol "SessionStateDistribute" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly distribute: SessionStateDistribute;
+    // Warning: (ae-forgotten-export) The symbol "SessionStateValidity" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly validity: SessionStateValidity;
+}
+
 // @public (undocumented)
 type ProviderStateDurationString = `${number}${"ms" | "s" | "m" | "h" | "d"}` | `PT${string}`;
 
@@ -3002,6 +3027,7 @@ interface RequestOptions {
     // (undocumented)
     retry?: boolean | HttpRetryPreset | HttpRetryOptions;
     sensitiveParams?: Record<string, string>;
+    sessionState?: string | readonly string[] | false;
     signal?: AbortSignal;
     throwOnHttpError?: boolean;
     timeout?: number;
@@ -3035,6 +3061,22 @@ interface ResolverContext {
     //
     // (undocumented)
     solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
+}
+
+// @public
+interface ResponseMatcher {
+    readonly bodyIncludes?: readonly string[];
+    readonly bodyPattern?: string;
+    readonly headers?: Readonly<Record<string, string | {
+        readonly pattern: string;
+    } | true>>;
+    readonly json?: Readonly<Record<string, string | number | boolean | null | {
+        readonly pattern: string;
+    }>>;
+    readonly status?: number | readonly number[] | {
+        readonly min: number;
+        readonly max: number;
+    };
 }
 
 // @public (undocumented)
@@ -3428,6 +3470,147 @@ const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
         array: "array";
     }>;
 }, z.core.$strict>]>;
+
+// @public
+type SessionStateAcquire = {
+    readonly from: "response";
+    readonly capture: SessionStateCapture;
+    readonly when?: ResponseMatcher;
+} | {
+    readonly from: "request";
+    readonly request: SessionStateAcquireRequest | SessionStateAcquireHandler;
+    readonly capture: SessionStateCapture;
+    readonly when?: ResponseMatcher;
+} | {
+    readonly from: "credential";
+    readonly capture: Pick<SessionStateCapture, "credential" | "expiresAt">;
+};
+
+// @public
+interface SessionStateAcquireContext {
+    // (undocumented)
+    readonly credential?: CredentialContext;
+    // (undocumented)
+    readonly env: EnvContext;
+    // (undocumented)
+    readonly http: HttpClient;
+    // (undocumented)
+    readonly signal?: AbortSignal;
+    // (undocumented)
+    readonly stealth: StealthClient;
+}
+
+// Warning: (ae-forgotten-export) The symbol "SessionStateAcquireContext" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "SessionStateResponseView" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type SessionStateAcquireHandler = (ctx: SessionStateAcquireContext) => Promise<SessionStateResponseView>;
+
+// @public
+interface SessionStateAcquireRequest {
+    // (undocumented)
+    readonly body?: string;
+    readonly client?: "stealth" | "http";
+    // (undocumented)
+    readonly headers?: Readonly<Record<string, string>>;
+    // (undocumented)
+    readonly method?: HttpMethod;
+    readonly url: string;
+}
+
+// @public
+interface SessionStateCapture {
+    readonly cookies?: readonly string[];
+    readonly credential?: Readonly<Record<string, string>>;
+    // Warning: (ae-forgotten-export) The symbol "SessionStateExpiry" needs to be exported by the entry point index.d.ts
+    readonly expiresAt?: SessionStateExpiry;
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly json?: Readonly<Record<string, string>>;
+}
+
+// @public
+type SessionStateCarry = {
+    readonly as: "cookies";
+} | {
+    readonly as: "cookie";
+    readonly name: string;
+    readonly value: string;
+} | {
+    readonly as: "cookie-header";
+    readonly value: string;
+} | {
+    readonly as: "header";
+    readonly name: string;
+    readonly value: string;
+    readonly format?: string;
+} | {
+    readonly as: "query";
+    readonly name: string;
+    readonly value: string;
+};
+
+// @public
+interface SessionStateClassification {
+    readonly attempts: number;
+    readonly carried: boolean;
+    readonly name: string;
+    readonly outcome: "reacquire_exhausted" | "acquire_failed" | "replay_required" | "credential_invalid";
+}
+
+// @public
+interface SessionStateDistribute {
+    readonly egress?: "independent" | "pinned";
+    readonly hosts: readonly string[];
+    readonly maxConcurrent?: number;
+    readonly operations?: readonly string[];
+    readonly qps?: number;
+    // Warning: (ae-forgotten-export) The symbol "SessionStateScope" needs to be exported by the entry point index.d.ts
+    readonly scope?: SessionStateScope;
+}
+
+// @public
+type SessionStateDuration = ProviderStateDurationString;
+
+// @public
+type SessionStateExpiry = {
+    readonly json: string;
+    readonly unit: "epoch-seconds" | "seconds-from-now" | "iso";
+} | {
+    readonly header: string;
+    readonly unit: "epoch-seconds" | "seconds-from-now" | "iso";
+} | {
+    readonly credential: string;
+    readonly unit: "epoch-seconds" | "iso";
+} | ((values: Readonly<Record<string, string>>) => number | undefined);
+
+// @public
+type SessionStateJudge = ResponseMatcher | readonly ResponseMatcher[] | ((response: SessionStateResponseView) => boolean);
+
+// @public
+interface SessionStateResponseView {
+    readonly body: string;
+    readonly headers: Readonly<Record<string, string>>;
+    json(): unknown;
+    // (undocumented)
+    readonly status: number;
+    // (undocumented)
+    readonly url: string;
+}
+
+// @public (undocumented)
+type SessionStateScope = "provider" | "connection";
+
+// @public
+interface SessionStateValidity {
+    readonly idleTtl?: SessionStateDuration;
+    // Warning: (ae-forgotten-export) The symbol "SessionStateJudge" needs to be exported by the entry point index.d.ts
+    readonly invalidWhen?: SessionStateJudge;
+    readonly maxUses?: number;
+    readonly reacquire?: number;
+    readonly replayMethods?: readonly HttpMethod[];
+    // Warning: (ae-forgotten-export) The symbol "SessionStateDuration" needs to be exported by the entry point index.d.ts
+    readonly ttl?: SessionStateDuration;
+}
 
 // Warning: (ae-forgotten-export) The symbol "ShapeValue" needs to be exported by the entry point index.d.ts
 //
@@ -4090,28 +4273,32 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:770:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1040:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1112:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1498:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1498:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1699:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1700:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1805:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1811:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1812:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1816:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1823:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1858:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1946:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1954:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1955:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1964:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2115:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2130:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2136:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2142:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2144:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2152:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2246:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1157:5 - (ae-forgotten-export) The symbol "SessionStateCapture" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1159:5 - (ae-forgotten-export) The symbol "ResponseMatcher" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1163:5 - (ae-forgotten-export) The symbol "SessionStateAcquireRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1163:5 - (ae-forgotten-export) The symbol "SessionStateAcquireHandler" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1311:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1917:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1918:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2023:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2029:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2030:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2034:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2041:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2076:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2164:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2172:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2173:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2182:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2333:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2348:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2354:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2360:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2362:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2370:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2464:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
