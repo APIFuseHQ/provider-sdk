@@ -35,6 +35,7 @@ export function extractProviderContract(provider: ProviderDefinition): ProviderC
 	const auth = extractAuth(provider.auth);
 	const stealth = toJsonValue(provider.stealth);
 	const proxy = toJsonValue(provider.proxy);
+	const sessionState = extractSessionState(provider.sessionState);
 	const ocr = toJsonValue(provider.ocr);
 	const stt = toJsonValue(provider.stt);
 	const browser = toJsonValue(provider.browser);
@@ -60,6 +61,7 @@ export function extractProviderContract(provider: ProviderDefinition): ProviderC
 		...(provider.allowedHosts ? { allowedHosts: [...provider.allowedHosts].sort() } : {}),
 		...(stealth === undefined ? {} : { stealth }),
 		...(proxy === undefined ? {} : { proxy }),
+		...(sessionState === undefined ? {} : { sessionState }),
 		...(ocr === undefined ? {} : { ocr }),
 		...(stt === undefined ? {} : { stt }),
 		...(browser === undefined ? {} : { browser }),
@@ -152,6 +154,32 @@ function extractAuth(value: ProviderDefinition["auth"]): JsonValue | undefined {
 				})
 			: undefined,
 	});
+}
+
+/**
+ * Session-state declarations are values, except the provider functions a
+ * declaration may hold (`validity.invalidWhen`, `acquire.request`,
+ * `capture.expiresAt`); those are recorded as `true`, the way `auth.flow`
+ * handlers are.
+ */
+function extractSessionState(value: ProviderDefinition["sessionState"]): JsonValue | undefined {
+	if (!value) return undefined;
+	return toJsonValue(
+		Object.fromEntries(
+			Object.entries(value)
+				.sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+				.map(([name, declaration]) => [name, functionsAsTrue(declaration)]),
+		),
+	);
+}
+
+function functionsAsTrue(value: unknown): unknown {
+	if (typeof value === "function") return true;
+	if (Array.isArray(value)) return value.map(functionsAsTrue);
+	if (value === null || typeof value !== "object") return value;
+	return Object.fromEntries(
+		Object.entries(value).map(([key, item]) => [key, functionsAsTrue(item)]),
+	);
 }
 
 function extractTransport(value: OperationTransport | undefined): JsonValue | undefined {

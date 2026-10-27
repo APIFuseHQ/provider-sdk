@@ -57,6 +57,7 @@ import type {
 	ProviderHealthMonitorConfig,
 	ProviderOcrConfig,
 	ProviderProxyConfig,
+	ProviderSessionState,
 	ProviderPublicProfile,
 	ProviderResolverConfig,
 	ProviderResolverVendor,
@@ -609,6 +610,12 @@ export interface ProviderDeclaration {
 	stealth?: ProviderStealthConfig;
 	/** Declares proxy policy; this is provider intent and does not add a `ctx.proxy` member. */
 	proxy?: ProviderProxyConfig;
+	/**
+	 * Declares named session state the SDK acquires, keeps, carries and renews on
+	 * `ctx.stealth` and `ctx.http` (see `ProviderSessionState`); policy only, it
+	 * does not add a context member.
+	 */
+	sessionState?: Readonly<Record<string, ProviderSessionState>>;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
 	resolver?: ProviderResolverConfig;
@@ -3481,6 +3488,7 @@ function finalizeProvider<
 		native: config.native,
 		stealth: config.stealth,
 		proxy: config.proxy,
+		...(config.sessionState === undefined ? {} : { sessionState: config.sessionState }),
 		ocr: config.ocr,
 		stt: config.stt,
 		resolver: config.resolver,

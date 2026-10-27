@@ -1221,6 +1221,215 @@ export interface ProviderProxyPolicy {
 
 export type ProviderProxyConfig = boolean | ProviderProxyPolicy;
 
+/**
+ * Declarative predicate over an upstream response. Every field present in one
+ * matcher must hold (AND); an array of matchers holds when any element holds (OR).
+ */
+export interface ResponseMatcher {
+	/** One status, any of a list, or an inclusive range. */
+	readonly status?: number | readonly number[] | { readonly min: number; readonly max: number };
+	/**
+	 * Response header name (case-insensitive) → exact value (case-insensitive),
+	 * `{ pattern }` regular-expression source tested against the value, or `true`
+	 * for presence.
+	 */
+	readonly headers?: Readonly<Record<string, string | { readonly pattern: string } | true>>;
+	/** Holds when the decoded body contains any of these substrings. */
+	readonly bodyIncludes?: readonly string[];
+	/** Regular-expression source tested against the decoded body. */
+	readonly bodyPattern?: string;
+	/**
+	 * JSON body dot path → exact primitive or `{ pattern }` tested against the
+	 * value's string form. A body that is not JSON never holds.
+	 */
+	readonly json?: Readonly<
+		Record<string, string | number | boolean | null | { readonly pattern: string }>
+	>;
+}
+
+/** The upstream response as a session-state judge, capture or acquisition handler sees it. */
+export interface SessionStateResponseView {
+	readonly url: string;
+	readonly status: number;
+	/** Lower-cased header names. Repeated `set-cookie` headers are joined with `", "`. */
+	readonly headers: Readonly<Record<string, string>>;
+	/** The decoded body. */
+	readonly body: string;
+	/** Parses `body` as JSON; throws when it is not JSON. */
+	json(): unknown;
+}
+
+/** Decides whether a response means the session state it carried is no longer valid. */
+export type SessionStateJudge =
+	| ResponseMatcher
+	| readonly ResponseMatcher[]
+	| ((response: SessionStateResponseView) => boolean);
+
+/** Same grammar as `ProviderStateDurationString`, for example `"20m"` or `"PT20M"`. */
+export type SessionStateDuration = ProviderStateDurationString;
+
+/** Where an upstream-declared expiry for the captured state is read from. */
+export type SessionStateExpiry =
+	| { readonly json: string; readonly unit: "epoch-seconds" | "seconds-from-now" | "iso" }
+	| { readonly header: string; readonly unit: "epoch-seconds" | "seconds-from-now" | "iso" }
+	| { readonly credential: string; readonly unit: "epoch-seconds" | "iso" }
+	| ((values: Readonly<Record<string, string>>) => number | undefined);
+
+/** What an acquiring response (or the connection credential) must yield for the state to exist. */
+export interface SessionStateCapture {
+	/** `Set-Cookie` names kept with their attributes; carried with `{ as: "cookies" }`. */
+	readonly cookies?: readonly string[];
+	/** Named values read from response headers: value name → header name. */
+	readonly headers?: Readonly<Record<string, string>>;
+	/** Named values read from the JSON body: value name → dot path. */
+	readonly json?: Readonly<Record<string, string>>;
+	/** Named values read from the connection credential: value name → credential key. */
+	readonly credential?: Readonly<Record<string, string>>;
+	/** Upstream-declared expiry, when the state carries one. */
+	readonly expiresAt?: SessionStateExpiry;
+}
+
+/** A declared acquisition request the SDK issues itself. */
+export interface SessionStateAcquireRequest {
+	/** Absolute URL, or a path resolved against the issuing client's base URL. */
+	readonly url: string;
+	readonly method?: HttpMethod;
+	readonly headers?: Readonly<Record<string, string>>;
+	readonly body?: string;
+	/** Which client issues it. Omitted: the client of the in-scope request. */
+	readonly client?: "stealth" | "http";
+}
+
+/** What a provider acquisition handler receives. */
+export interface SessionStateAcquireContext {
+	readonly http: HttpClient;
+	readonly stealth: StealthClient;
+	readonly credential?: CredentialContext;
+	readonly env: EnvContext;
+	readonly signal?: AbortSignal;
+}
+
+export type SessionStateAcquireHandler = (
+	ctx: SessionStateAcquireContext,
+) => Promise<SessionStateResponseView>;
+
+/** Acquisition: where the state comes from. */
+export type SessionStateAcquire =
+	| {
+			/** The state arrives on the responses of in-scope requests themselves; no extra request. */
+			readonly from: "response";
+			readonly capture: SessionStateCapture;
+			/** Only responses matching this yield state. Omitted: any response that yields every captured name. */
+			readonly when?: ResponseMatcher;
+	  }
+	| {
+			/** The SDK issues this request before the first in-scope request and on every re-acquisition. */
+			readonly from: "request";
+			readonly request: SessionStateAcquireRequest | SessionStateAcquireHandler;
+			readonly capture: SessionStateCapture;
+			readonly when?: ResponseMatcher;
+	  }
+	| {
+			/** The state is the connection credential the auth flow completed with. Never re-acquired in-process. */
+			readonly from: "credential";
+			readonly capture: Pick<SessionStateCapture, "credential" | "expiresAt">;
+	  };
+
+/** Carrying: where the state goes on an outgoing request. `value` names a captured value. */
+export type SessionStateCarry =
+	| { readonly as: "cookies" }
+	| { readonly as: "cookie"; readonly name: string; readonly value: string }
+	| { readonly as: "cookie-header"; readonly value: string }
+	| {
+			readonly as: "header";
+			readonly name: string;
+			readonly value: string;
+			/** Template with one `{value}` placeholder, for example `"Bearer {value}"`. */
+			readonly format?: string;
+	  }
+	| { readonly as: "query"; readonly name: string; readonly value: string };
+
+/** Lifetime and invalidity. */
+export interface SessionStateValidity {
+	/** Hard lifetime from the first acquisition. */
+	readonly ttl?: SessionStateDuration;
+	/** Retire the state when unused for this long. */
+	readonly idleTtl?: SessionStateDuration;
+	/** Requests one state may carry before it is retired. */
+	readonly maxUses?: number;
+	/** This response means the carried state is invalid. */
+	readonly invalidWhen?: SessionStateJudge;
+	/** Re-acquisitions one request may absorb before the response is returned classified. */
+	readonly reacquire?: number;
+	/** Methods the SDK may re-send after a re-acquisition. Default: the SDK safe set (GET, HEAD, OPTIONS). */
+	readonly replayMethods?: readonly HttpMethod[];
+}
+
+export type SessionStateScope = "provider" | "connection";
+
+/**
+ * Distribution: which requests carry the state and how requests are spread
+ * over states. The pool has no declared size: it grows to
+ * `ceil(request rate / qps)` states and drops states that go unused.
+ */
+export interface SessionStateDistribute {
+	/** Hosts the state is carried to. Each must be in `allowedHosts`. */
+	readonly hosts: readonly string[];
+	/** Operation ids in scope. Omitted: every operation. Auth flows are never in scope. */
+	readonly operations?: readonly string[];
+	/** `provider`: one pool shared by every caller. `connection`: a pool per connection. */
+	readonly scope?: SessionStateScope;
+	/**
+	 * Requests per second assigned to one state. A request goes to a state with
+	 * room left in its share; when every state is full the SDK acquires another
+	 * state instead of making the request wait. Omitted: one state carries every
+	 * request.
+	 */
+	readonly qps?: number;
+	/** In-flight requests one state may carry; past it the SDK acquires another state. */
+	readonly maxConcurrent?: number;
+	/**
+	 * `independent`: state and proxy egress rotate separately. `pinned`: requests
+	 * carrying a state reuse the stealth egress it was acquired on.
+	 */
+	readonly egress?: "independent" | "pinned";
+}
+
+/**
+ * Session state the SDK acquires, keeps, carries and renews for a provider:
+ * values an upstream hands a client and expects back on later requests
+ * (cookies, header tokens, query tokens). Declared on `defineProvider` under
+ * `sessionState`, keyed by a name requests can select.
+ */
+export interface ProviderSessionState {
+	readonly acquire: SessionStateAcquire;
+	readonly carry: SessionStateCarry | readonly SessionStateCarry[];
+	readonly validity: SessionStateValidity;
+	readonly distribute: SessionStateDistribute;
+}
+
+/** Why a response judged invalid was returned to the caller instead of being absorbed by a re-acquisition. */
+export interface SessionStateClassification {
+	/** The `sessionState` declaration name. */
+	readonly name: string;
+	/**
+	 * `reacquire_exhausted`: the response was still judged invalid after the
+	 * declared re-acquisitions. `acquire_failed`: no state could be captured.
+	 * `replay_required`: a fresh state was acquired but the method is not in
+	 * `replayMethods`, so the request was not re-sent. `credential_invalid`: the
+	 * connection credential carried was judged invalid (never re-acquired in-process).
+	 */
+	readonly outcome:
+		| "reacquire_exhausted"
+		| "acquire_failed"
+		| "replay_required"
+		| "credential_invalid";
+	/** Requests sent for this call, re-acquisitions and replays included. */
+	readonly attempts: number;
+	/** Whether the last request carried a state. */
+	readonly carried: boolean;
+}
+
 export interface ProviderAccessConfig {
 	/**
 	 * Provider-level rollout visibility.
@@ -1470,6 +1679,13 @@ export interface RequestOptions {
 	 * this policy retain the native fetch redirect behavior.
 	 */
 	redirectPolicy?: HttpRedirectPolicy;
+	/**
+	 * Which provider `sessionState` declarations apply to this request.
+	 * Omitted: every declaration whose `distribute.hosts` and
+	 * `distribute.operations` cover it. A name or list of names: only those.
+	 * `false`: none, the request goes out exactly as without the layer.
+	 */
+	sessionState?: string | readonly string[] | false;
 }
 
 export type RedirectRunReason =
@@ -1659,6 +1875,12 @@ export interface DeclarativeStealthResponse {
 	body: string;
 	/** Present only when an opted-in SDK detector returned an unresolved challenge response. */
 	challenge?: StealthChallengeClassification;
+	/**
+	 * Present only when a `sessionState` declaration judged the response invalid
+	 * and returned it instead of absorbing it. Returned whatever
+	 * `throwOnHttpError` says, like `challenge`.
+	 */
+	sessionState?: SessionStateClassification;
 	httpVersion?: string;
 	tlsInfo?: { protocol?: string; cipher?: string; [key: string]: unknown };
 	cookies: CookieJar;
@@ -1751,6 +1973,12 @@ export interface HttpResponse<T = unknown> {
 	ok: boolean;
 	headers: Record<string, string>;
 	data: T;
+	/**
+	 * Present only when a `sessionState` declaration judged the response invalid
+	 * and returned it instead of absorbing it. Returned whatever
+	 * `throwOnHttpError` says.
+	 */
+	sessionState?: SessionStateClassification;
 	json<U = T>(): Promise<U>;
 	text(): Promise<string>;
 	arrayBuffer(): Promise<ArrayBuffer>;
@@ -2726,6 +2954,8 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	native?: NativeProviderConfig;
 	stealth?: ProviderStealthConfig;
 	proxy?: ProviderProxyConfig;
+	/** Named session-state declarations; see `ProviderSessionState`. */
+	sessionState?: Readonly<Record<string, ProviderSessionState>>;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
 	resolver?: ProviderResolverConfig;
