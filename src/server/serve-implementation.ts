@@ -161,6 +161,11 @@ import {
 } from "../runtime/state-telemetry.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
+import {
+	createSessionStateRegistry,
+	SESSION_STATE_BINDING,
+	type SessionStateRegistry,
+} from "../runtime/session-state.js";
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { StealthTelemetryCollector } from "../runtime/stealth-telemetry.js";
 import { BrowserTelemetryCollector } from "../runtime/browser-telemetry.js";
@@ -207,6 +212,7 @@ import type {
 	BrowserClient,
 	FlowContext,
 	FlowContextStore,
+	HttpClient,
 	OcrContext,
 	OperationDefinition,
 	OperationErrorCode,
@@ -407,6 +413,8 @@ type ProviderCapabilityModules = {
 type ProviderServerRuntimeOptions = ProviderServerOptions & {
 	readonly capabilityModules: ProviderCapabilityModules;
 	readonly engine: ProviderEngine;
+	/** The app's session-state pools; absent for a provider without `sessionState`. */
+	readonly sessionStateRegistry?: SessionStateRegistry;
 };
 
 const require = createRequire(import.meta.url);
@@ -1010,6 +1018,27 @@ function createProviderContext(
 		scope.stateTelemetry,
 		scope.redact,
 	).forConnection(requestContext.connectionId);
+	// Session state declared for this operation rides on both clients; an operation
+	// outside every declaration gets clients built exactly as before.
+	const sessionStateBinding = options.sessionStateRegistry?.bind(operationId, {
+		...(requestContext.connectionId === undefined
+			? {}
+			: { connectionId: requestContext.connectionId }),
+		credential,
+		env,
+		...(signal ? { signal } : {}),
+		clients: () => ({
+			http: bindings.http as HttpClient,
+			stealth: bindings.stealth as StealthClient,
+		}),
+		record: (client, event) =>
+			client === "stealth"
+				? scope.stealthTelemetry.recordSessionState(event)
+				: scope.httpTelemetry.recordSessionState(event),
+	});
+	const sessionStateClientOptions = sessionStateBinding
+		? { [SESSION_STATE_BINDING]: sessionStateBinding }
+		: {};
 	const bindings: ProviderEngineBindingCandidates = {
 		env,
 		credential,
@@ -1019,13 +1048,20 @@ function createProviderContext(
 			...proxyClientOptions,
 			...(signal ? { signal } : {}),
 			httpTelemetry: scope.httpTelemetry,
+			...sessionStateClientOptions,
 		}),
 		cache,
 		state: requestState,
 		stealth: stealthBaseUrl
 			? capabilityModules.stealth
-				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
-				: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
+				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, {
+						...stealthClientOptions,
+						...sessionStateClientOptions,
+					})
+				: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, {
+						...stealthClientOptions,
+						...sessionStateClientOptions,
+					})
 			: createStealthStub(),
 		browser:
 			provider.runtime === "browser"
@@ -3919,11 +3955,13 @@ function createServerAppWithCapabilityModules(
 		serverOptions,
 		serverOptions.logger ?? defaultProviderServerLogger,
 	);
+	const sessionStateRegistry = createSessionStateRegistry(provider);
 	const options: ProviderServerRuntimeOptions = {
 		...serverOptions,
 		...(localeCatalogs ? { localeCatalogs } : {}),
 		capabilityModules,
 		engine: engineSelection.engine,
+		...(sessionStateRegistry ? { sessionStateRegistry } : {}),
 	};
 	const engineAttached = !isUnavailableProviderEngine(options.engine);
 	const app = new Hono();

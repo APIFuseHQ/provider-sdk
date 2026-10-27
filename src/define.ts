@@ -26,6 +26,10 @@ import {
 	validateNativeProviderConfig,
 } from "./native-egress-policy.js";
 import { safeParseSchemaSync } from "./schema.js";
+import {
+	validateProviderSessionState,
+	validateSessionStateOperationScope,
+} from "./session-state-declaration.js";
 import { resolveHealthCheckInputDateTokens } from "./server/self-test-input-tokens.js";
 import type { HandleKind } from "./handle.js";
 import type {
@@ -3419,6 +3423,7 @@ function validateProviderDeclaration(config: ProviderDeclaration): void {
 		throw error;
 	}
 	validateProviderProxy(config);
+	validateProviderSessionState(config);
 	validateProviderOcr(config);
 	validateProviderStt(config);
 	validateProviderResolver(config);
@@ -3472,6 +3477,7 @@ function finalizeProvider<
 	);
 	validateOperationNoMedia(config.id, config.operations);
 	validateProxyOperationScope(config.id, config.proxy, config.operations);
+	validateSessionStateOperationScope(config.id, config.sessionState, config.operations);
 	validateOperationFixtures(config.id, operations);
 	const provider: Omit<ProviderDefinition, "operations"> & {
 		operations: OperationMapConfig<TOperations, TContext>;

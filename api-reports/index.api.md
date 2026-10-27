@@ -2996,6 +2996,7 @@ export class HttpTelemetryCollector implements HttpTelemetrySink, TelemetryContr
     readonly key: "http";
     // (undocumented)
     markTelemetryFailed(): void;
+    recordSessionState(event: keyof NonNullable<HttpTelemetryLogPayload["sessionState"]>): void;
     // (undocumented)
     startRequest(options: {
         retryPreset?: HttpRetrySummary["preset"];
@@ -3030,6 +3031,14 @@ export type HttpTelemetryHeaderPayload = {
     dropped: number;
     ms: number;
     retry?: HttpTelemetryRetryPayload;
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)
@@ -3047,6 +3056,14 @@ export type HttpTelemetryLogPayload = {
     dropped: number;
     ms: number;
     retry?: HttpTelemetryRetryPayload;
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)
@@ -8456,6 +8473,7 @@ export class StealthTelemetryCollector implements StealthTelemetrySink, Telemetr
     recordSafeRefetch(): void;
     // (undocumented)
     recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
+    recordSessionState(event: keyof NonNullable<StealthTelemetryLogPayload["sessionState"]>): void;
     // (undocumented)
     toHeaderPayload(log: StealthTelemetryLogPayload): StealthTelemetryHeaderPayload;
     // (undocumented)
@@ -8495,6 +8513,14 @@ export type StealthTelemetryHeaderPayload = {
         e?: ClosedEnum<StealthTelemetryErrorCode>;
         kind?: ClosedEnum<StealthTelemetryAttemptKind>;
     }[];
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)
@@ -8512,6 +8538,14 @@ export type StealthTelemetryLogPayload = {
     ms: number;
     attemptSamples?: StealthTelemetryAttemptSample[];
     attemptSamplesDropped?: number;
+    sessionState?: {
+        acquired: number;
+        reused: number;
+        expired: number;
+        invalidated: number;
+        reacquired: number;
+        waited: number;
+    };
 };
 
 // @public (undocumented)

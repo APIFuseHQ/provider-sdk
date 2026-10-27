@@ -89,6 +89,15 @@ export type StealthTelemetryLogPayload = {
 	ms: number;
 	attemptSamples?: StealthTelemetryAttemptSample[];
 	attemptSamplesDropped?: number;
+	/** Session-state layer events of this request (`defineProvider({ sessionState })`); counts only. */
+	sessionState?: {
+		acquired: number;
+		reused: number;
+		expired: number;
+		invalidated: number;
+		reacquired: number;
+		waited: number;
+	};
 };
 
 export type StealthTelemetryHeaderPayload = {
@@ -113,6 +122,15 @@ export type StealthTelemetryHeaderPayload = {
 		e?: ClosedEnum<StealthTelemetryErrorCode>;
 		kind?: ClosedEnum<StealthTelemetryAttemptKind>;
 	}[];
+	/** Session-state layer events of this request (`defineProvider({ sessionState })`); counts only. */
+	sessionState?: {
+		acquired: number;
+		reused: number;
+		expired: number;
+		invalidated: number;
+		reacquired: number;
+		waited: number;
+	};
 };
 
 const MAX_ATTEMPT_SAMPLES = 24;
@@ -182,6 +200,7 @@ export class StealthTelemetryCollector
 	#ms = 0;
 	#attemptSamples: StealthTelemetryAttemptSample[] = [];
 	#attemptSamplesDropped = 0;
+	#sessionState: NonNullable<StealthTelemetryLogPayload["sessionState"]> | undefined;
 
 	constructor(options: { redact?: (text: string) => string } = {}) {
 		this.#redact = options.redact;
@@ -236,13 +255,27 @@ export class StealthTelemetryCollector
 		this.#safeRefetch = saturatingAdd(this.#safeRefetch, 1);
 	}
 
+	/** Counts one session-state layer event for this request. */
+	recordSessionState(event: keyof NonNullable<StealthTelemetryLogPayload["sessionState"]>): void {
+		this.#sessionState ??= {
+			acquired: 0,
+			reused: 0,
+			expired: 0,
+			invalidated: 0,
+			reacquired: 0,
+			waited: 0,
+		};
+		this.#sessionState[event] = saturatingAdd(this.#sessionState[event], 1);
+	}
+
 	toLogPayload(): StealthTelemetryLogPayload | undefined {
 		if (
 			this.#attempts === 0 &&
 			this.#poolRefreshes === 0 &&
 			this.#redirectHops === 0 &&
 			this.#safeRefetch === 0 &&
-			this.#sbsdDetected === undefined
+			this.#sbsdDetected === undefined &&
+			this.#sessionState === undefined
 		) {
 			return undefined;
 		}
@@ -273,6 +306,7 @@ export class StealthTelemetryCollector
 			...(this.#attemptSamplesDropped > 0
 				? { attemptSamplesDropped: this.#attemptSamplesDropped }
 				: {}),
+			...(this.#sessionState ? { sessionState: { ...this.#sessionState } } : {}),
 		};
 	}
 
@@ -304,6 +338,7 @@ export class StealthTelemetryCollector
 			...(log.lastStatus === undefined ? {} : { lastStatus: log.lastStatus }),
 			ms: log.ms,
 			...(attemptSamples && attemptSamples.length > 0 ? { attemptSamples } : {}),
+			...(log.sessionState ? { sessionState: { ...log.sessionState } } : {}),
 		};
 	}
 }

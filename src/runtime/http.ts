@@ -53,6 +53,16 @@ import {
 
 import { startHttpTelemetry } from "./http-telemetry-guard.js";
 import { scopedHttpTelemetry } from "./http-telemetry-binding.js";
+import {
+	createSessionStateResponseView,
+	SESSION_STATE_BINDING,
+	SESSION_STATE_SET_COOKIES,
+	type SessionStateBinding,
+	type SessionStateCarryPlan,
+	type SessionStateClientAdapter,
+	splitJoinedSetCookie,
+} from "./session-state.js";
+import { StealthCookieJar } from "./stealth-cookies.js";
 
 const DEFAULT_HTTP_BASE_URL = "http://localhost";
 
@@ -385,7 +395,7 @@ async function toNativeHttpResponse(response: Response): Promise<HttpResponse> {
 	const rawText = new TextDecoder().decode(bodyBytes);
 	const data = parseHttpData(rawText, headers);
 
-	return {
+	return withSetCookies(response, {
 		data,
 		headers,
 		json: async <T = unknown>() => {
@@ -399,7 +409,53 @@ async function toNativeHttpResponse(response: Response): Promise<HttpResponse> {
 		arrayBuffer: async () =>
 			bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
 		bytes: async () => bodyBytes.slice(0),
-	};
+	});
+}
+
+/**
+ * `headers` keeps one `set-cookie` value; the session-state layer reads every
+ * one from this non-enumerable key, which leaves the response's shape unchanged.
+ */
+function withSetCookies(response: Response, result: HttpResponse): HttpResponse {
+	const getSetCookie = (response.headers as Headers & { getSetCookie?: () => string[] })
+		.getSetCookie;
+	const setCookies =
+		typeof getSetCookie === "function"
+			? getSetCookie.call(response.headers)
+			: splitJoinedSetCookie(response.headers.get("set-cookie") ?? "");
+	Object.defineProperty(result, SESSION_STATE_SET_COOKIES, {
+		value: setCookies,
+		enumerable: false,
+		configurable: true,
+	});
+	return result;
+}
+
+/** Client options the server adds for an operation with a session-state declaration in scope. */
+type SessionStateHttpClientOptions = HttpClientOptions & {
+	readonly [SESSION_STATE_BINDING]?: SessionStateBinding;
+};
+
+function cookieHeaderFromPlan(plan: SessionStateCarryPlan, requestUrl: string): string | undefined {
+	const parts = [
+		...plan.cookieStores.map((store) =>
+			new StealthCookieJar(store.setCookies, store.url).toHeader(requestUrl),
+		),
+		...plan.cookies.map(([name, value]) => `${name}=${value}`),
+	].filter((part) => part.length > 0);
+	return parts.length === 0 ? undefined : parts.join("; ");
+}
+
+/** Adds carried headers the caller has not set, matching names case-insensitively. */
+function withCarriedHeaders(
+	headers: Record<string, string>,
+	carried: readonly (readonly [string, string])[],
+): Record<string, string> {
+	const merged = { ...headers };
+	for (const [name, value] of carried) {
+		if (!hasHeader(merged, name)) merged[name] = value;
+	}
+	return merged;
 }
 
 async function drainNativeResponseBody(response: Response): Promise<void> {
@@ -968,7 +1024,130 @@ export function createHttpClient(
 		warn(message);
 	};
 
+	const sessionStateBinding = (clientOptions as SessionStateHttpClientOptions)[
+		SESSION_STATE_BINDING
+	];
+
 	async function request(
+		url: string,
+		method: string,
+		options: RequestOptions & { body?: unknown } = {},
+	): Promise<HttpResponse> {
+		if (sessionStateBinding) {
+			let requestUrl: URL | undefined;
+			try {
+				requestUrl = baseUrl || isAbsoluteUrl(url) ? new URL(resolveHttpUrl(baseUrl, url)) : undefined;
+			} catch {
+				requestUrl = undefined;
+			}
+			const declarations = requestUrl
+				? sessionStateBinding.select(requestUrl, options.sessionState)
+				: [];
+			if (requestUrl && declarations.length > 0) {
+				return sessionStateBinding.run(
+					createSessionStateAdapter(url, method, options, requestUrl),
+					declarations,
+				);
+			}
+		}
+		return requestOnce(url, method, options);
+	}
+
+	/**
+	 * The http half of a session-state request. The layer judges the final
+	 * response, so a request in scope of a declaration is sent with
+	 * `throwOnHttpError: false` and status-code retries do not apply to it;
+	 * transport retries do.
+	 */
+	function createSessionStateAdapter(
+		url: string,
+		method: string,
+		options: RequestOptions & { body?: unknown },
+		requestUrl: URL,
+	): SessionStateClientAdapter<HttpResponse> {
+		const callerHeaders = typeof options.headers === "function" ? undefined : options.headers;
+		const callerHeaderNames = new Set(
+			Object.keys(callerHeaders ?? {}).map((name) => name.toLowerCase()),
+		);
+		const callerQueryNames = new Set([
+			...requestUrl.searchParams.keys(),
+			...Object.keys(options.params ?? {}),
+			...Object.keys(options.sensitiveParams ?? {}),
+		]);
+		const signal = options.signal ?? clientOptions.signal;
+		const exchange = async (response: HttpResponse, responseUrl: string) => {
+			const hidden = (response as unknown as Record<symbol, unknown>)[SESSION_STATE_SET_COOKIES];
+			return {
+				view: createSessionStateResponseView({
+					url: responseUrl,
+					status: response.status,
+					headers: response.headers,
+					body: await response.text(),
+				}),
+				setCookies: Array.isArray(hidden)
+					? (hidden as string[])
+					: splitJoinedSetCookie(response.headers["set-cookie"] ?? ""),
+			};
+		};
+		return {
+			client: "http",
+			profile: "native",
+			url: requestUrl,
+			method: method.toUpperCase(),
+			...(signal ? { signal } : {}),
+			callerHasCookie: () => callerHeaderNames.has("cookie"),
+			callerHasHeader: (name) => callerHeaderNames.has(name.toLowerCase()),
+			callerHasQuery: (name) => callerQueryNames.has(name),
+			send(plan) {
+				const cookie = cookieHeaderFromPlan(plan, requestUrl.href);
+				const carried: (readonly [string, string])[] = [
+					...plan.headers,
+					...(cookie === undefined ? [] : [["cookie", cookie] as const]),
+				];
+				const callerHeadersOption = options.headers;
+				const headers: RequestOptions["headers"] =
+					carried.length === 0
+						? callerHeadersOption
+						: typeof callerHeadersOption === "function"
+							? async (attempt) => {
+									const minted = await callerHeadersOption(attempt);
+									return isHeaderRecord(minted) ? withCarriedHeaders(minted, carried) : minted;
+								}
+							: withCarriedHeaders(callerHeadersOption ?? {}, carried);
+				const sensitiveParams =
+					plan.query.length === 0
+						? options.sensitiveParams
+						: { ...(options.sensitiveParams ?? {}), ...Object.fromEntries(plan.query) };
+				return requestOnce(url, method, {
+					...options,
+					...(headers === undefined ? {} : { headers }),
+					...(sensitiveParams ? { sensitiveParams } : {}),
+					throwOnHttpError: false,
+				});
+			},
+			exchange: (response) => exchange(response, requestUrl.href),
+			async acquire(acquisition) {
+				const response = await requestOnce(acquisition.url, acquisition.method ?? "GET", {
+					...(acquisition.headers ? { headers: { ...acquisition.headers } } : {}),
+					...(acquisition.body === undefined ? {} : { body: acquisition.body }),
+					throwOnHttpError: false,
+				});
+				return exchange(response, resolveHttpUrl(baseUrl, acquisition.url));
+			},
+			finish(response, classification) {
+				if (classification) {
+					response.sessionState = classification;
+					return response;
+				}
+				if (response.status >= 400 && options.throwOnHttpError !== false) {
+					throw toUpstreamHttpError(response.status);
+				}
+				return response;
+			},
+		};
+	}
+
+	async function requestOnce(
 		url: string,
 		method: string,
 		options: RequestOptions & { body?: unknown } = {},
