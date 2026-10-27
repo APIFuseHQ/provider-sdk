@@ -1,7 +1,9 @@
 import {
-	type StatefulProviderMetricEmitter,
-	type StatefulProviderMetricName,
+	isStatefulProviderMetricName,
 	STATEFUL_PROVIDER_METRIC_NAMES,
+	type StatefulProviderMetricEmitter,
+	type StatefulProviderMetricLabelInput,
+	type StatefulProviderMetricName,
 } from "./stateful-provider-observability.js";
 
 /**
@@ -140,29 +142,175 @@ export const STATEFUL_PROVIDER_METRIC_MS_BUCKETS = [
 	5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 15_000, 60_000,
 ] as const;
 
+type ScalarSeries = { value: number };
+
+type HistogramSeries = {
+	/** Cumulative count per bucket of `STATEFUL_PROVIDER_METRIC_MS_BUCKETS`, in its order. */
+	readonly buckets: number[];
+	sum: number;
+	count: number;
+};
+
+/**
+ * Whether `name` is in the closed set, of `kind`, and `value` a finite
+ * number. A metric call that fails this is dropped, never thrown: the
+ * emitters call the registry on the request path.
+ */
+function accepts(
+	name: unknown,
+	kind: StatefulProviderMetricKind,
+	value: unknown,
+): name is StatefulProviderMetricName {
+	return (
+		isStatefulProviderMetricName(name) &&
+		STATEFUL_PROVIDER_METRIC_KINDS[name] === kind &&
+		typeof value === "number" &&
+		Number.isFinite(value)
+	);
+}
+
+function escapeLabelValue(value: string): string {
+	return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n");
+}
+
+/**
+ * The series' label set rendered in the exposition format without braces:
+ * the exported labels the input carries, in the allowlist's order, every
+ * other input dropped. An absent or empty label is omitted, never rendered
+ * as an empty value. The rendering identifies the series.
+ */
+function renderLabels(labels: StatefulProviderMetricLabelInput | undefined): string {
+	if (!labels) return "";
+	const pairs: string[] = [];
+	for (const label of STATEFUL_PROVIDER_METRIC_EXPORTED_LABELS) {
+		const value = labels[label];
+		if (value === undefined || value === "") continue;
+		pairs.push(`${label}="${escapeLabelValue(String(value))}"`);
+	}
+	return pairs.join(",");
+}
+
+function braced(labels: string): string {
+	return labels === "" ? "" : `{${labels}}`;
+}
+
+/** A name's series ordered by their rendered label set. */
+function sortedSeries<T>(series: ReadonlyMap<string, T> | undefined): [string, T][] {
+	if (!series) return [];
+	return [...series].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
 export class StatefulProviderMetricRegistry implements StatefulProviderMetricEmitter {
-	increment(): void {}
+	readonly #scalars = new Map<StatefulProviderMetricName, Map<string, ScalarSeries>>();
+	readonly #histograms = new Map<StatefulProviderMetricName, Map<string, HistogramSeries>>();
 
-	gauge(): void {}
+	/** Adds `value` to a counter. Dropped unless `name` is a counter and `value` finite and not negative. */
+	increment(
+		name: StatefulProviderMetricName,
+		labels?: StatefulProviderMetricLabelInput,
+		value = 1,
+	): void {
+		if (!accepts(name, "counter", value) || value < 0) return;
+		this.#scalar(name, labels).value += value;
+	}
 
-	observe(): void {}
+	/** Sets a gauge to `value`. Dropped unless `name` is a gauge and `value` finite. */
+	gauge(
+		name: StatefulProviderMetricName,
+		labels: StatefulProviderMetricLabelInput,
+		value: number,
+	): void {
+		if (!accepts(name, "gauge", value)) return;
+		this.#scalar(name, labels).value = value;
+	}
+
+	/** Observes `value` in a histogram. Dropped unless `name` is a histogram and `value` finite and not negative. */
+	observe(
+		name: StatefulProviderMetricName,
+		labels: StatefulProviderMetricLabelInput,
+		value: number,
+	): void {
+		if (!accepts(name, "histogram", value) || value < 0) return;
+		const series = this.#histogram(name, labels);
+		STATEFUL_PROVIDER_METRIC_MS_BUCKETS.forEach((bound, index) => {
+			if (value <= bound) series.buckets[index] += 1;
+		});
+		series.sum += value;
+		series.count += 1;
+	}
 
 	/**
 	 * The registry in the Prometheus text exposition format (version 0.0.4):
-	 * a `# HELP` and `# TYPE` line for every name in the closed metric set,
-	 * in the set's order, then the series that were touched.
+	 * for every name in the closed metric set, in the set's order, a `# HELP`
+	 * and `# TYPE` line, then the name's series in the order of their
+	 * rendered label sets. A histogram series renders its buckets (`le` last,
+	 * ending at `+Inf`), `_sum` and `_count`.
 	 */
 	render(): string {
 		const lines: string[] = [];
 		for (const name of STATEFUL_PROVIDER_METRIC_NAMES) {
 			lines.push(`# HELP ${name} ${STATEFUL_PROVIDER_METRIC_HELP[name]}`);
 			lines.push(`# TYPE ${name} ${STATEFUL_PROVIDER_METRIC_KINDS[name]}`);
+			if (STATEFUL_PROVIDER_METRIC_KINDS[name] === "histogram") {
+				for (const [labels, series] of sortedSeries(this.#histograms.get(name))) {
+					const prefix = labels === "" ? "" : `${labels},`;
+					STATEFUL_PROVIDER_METRIC_MS_BUCKETS.forEach((bound, index) => {
+						lines.push(`${name}_bucket{${prefix}le="${bound}"} ${series.buckets[index]}`);
+					});
+					lines.push(`${name}_bucket{${prefix}le="+Inf"} ${series.count}`);
+					lines.push(`${name}_sum${braced(labels)} ${series.sum}`);
+					lines.push(`${name}_count${braced(labels)} ${series.count}`);
+				}
+				continue;
+			}
+			for (const [labels, series] of sortedSeries(this.#scalars.get(name))) {
+				lines.push(`${name}${braced(labels)} ${series.value}`);
+			}
 		}
 		return `${lines.join("\n")}\n`;
 	}
 
 	/** Forgets every series. For tests that assert counts across pods in one process. */
-	reset(): void {}
+	reset(): void {
+		this.#scalars.clear();
+		this.#histograms.clear();
+	}
+
+	#scalar(
+		name: StatefulProviderMetricName,
+		labels: StatefulProviderMetricLabelInput | undefined,
+	): ScalarSeries {
+		const key = renderLabels(labels);
+		let byLabels = this.#scalars.get(name);
+		if (!byLabels) {
+			byLabels = new Map();
+			this.#scalars.set(name, byLabels);
+		}
+		let series = byLabels.get(key);
+		if (!series) {
+			series = { value: 0 };
+			byLabels.set(key, series);
+		}
+		return series;
+	}
+
+	#histogram(
+		name: StatefulProviderMetricName,
+		labels: StatefulProviderMetricLabelInput | undefined,
+	): HistogramSeries {
+		const key = renderLabels(labels);
+		let byLabels = this.#histograms.get(name);
+		if (!byLabels) {
+			byLabels = new Map();
+			this.#histograms.set(name, byLabels);
+		}
+		let series = byLabels.get(key);
+		if (!series) {
+			series = { buckets: STATEFUL_PROVIDER_METRIC_MS_BUCKETS.map(() => 0), sum: 0, count: 0 };
+			byLabels.set(key, series);
+		}
+		return series;
+	}
 }
 
 /**
