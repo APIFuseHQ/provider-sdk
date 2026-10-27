@@ -406,7 +406,7 @@ describe("serving an explicit category or an unregistered code", () => {
 			// UPSTREAM_ERROR and BLOCKED keep their code-level upstream
 			// attribution under any explicit category, as before this table.
 			{ code: "UPSTREAM_ERROR", category: "provider_error", source: "upstream_failure" },
-			{ code: "BLOCKED", category: "internal_error", source: "upstream_failure" },
+			{ code: "BLOCKED", category: "input_validation", source: "upstream_failure" },
 		] as const;
 		for (const testCase of cases) {
 			const served = await serveThrown(throwing(testCase.code, { category: testCase.category }));

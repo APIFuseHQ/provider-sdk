@@ -1,5 +1,5 @@
 import type { ProviderErrorMessageParams } from "./i18n/error-messages.js";
-import type { ProviderErrorCategory } from "./observability.js";
+import type { ProviderFailureCategory } from "./observability.js";
 import type { HttpRedirectFailureReason, ProviderLocaleKeyInput } from "./types.js";
 
 // Versioned, cross-realm brands. `Symbol.for` resolves to the same symbol in
@@ -47,12 +47,17 @@ export type ProviderErrorOptions = {
 	details?: unknown;
 	cause?: Error;
 	/**
+	 * How the upstream call failed, one of the provider-failure categories. A
+	 * platform fault (`internal_error`, `client_cancelled`, `proxy_pool`,
+	 * `output_validation`, ...) is reported by the SDK for an event it observed
+	 * itself and is not set here.
+	 *
 	 * @deprecated Declare the code once with `defineErrors({ CODE: { status, category, description } })`
 	 * and throw `errors.CODE({ details, cause })`; the category then comes from the
 	 * declaration. A per-throw category is honored for one more release and the
 	 * server logs one warning per code.
 	 */
-	category?: ProviderErrorCategory;
+	category?: ProviderFailureCategory;
 	/**
 	 * @deprecated Declare the code once with `defineErrors({ CODE: { status, category, retryable, description } })`
 	 * and throw `errors.CODE({ details, cause })`; retryability then comes from the

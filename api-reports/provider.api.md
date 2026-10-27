@@ -3558,6 +3558,14 @@ export interface PickOptions<T> {
 }
 
 // @public (undocumented)
+const PLATFORM_FAULT_CATEGORIES: readonly ["ok", "stateful_forwarding_deadline", "proxy_pool", "credential_unavailable", "output_validation", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+
+// Warning: (ae-forgotten-export) The symbol "PLATFORM_FAULT_CATEGORIES" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type PlatformFaultCategory = (typeof PLATFORM_FAULT_CATEGORIES)[number];
+
+// @public (undocumented)
 const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
     kind: z.ZodLiteral<"predicate">;
     operator: z.ZodEnum<{
@@ -3854,9 +3862,6 @@ export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 
 // @public (undocumented)
-const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
-
-// @public (undocumented)
 const PROVIDER_ERROR_CATEGORY_SOURCES: {
     readonly ok: "apifuse";
     readonly timeout: "upstream_failure";
@@ -3883,6 +3888,9 @@ const PROVIDER_ERROR_CATEGORY_SOURCES: {
 
 // @public (undocumented)
 const PROVIDER_ERROR_SOURCES: readonly ["client", "upstream_rule", "upstream_failure", "apifuse"];
+
+// @public (undocumented)
+const PROVIDER_FAILURE_CATEGORIES: readonly ["timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "provider_error"];
 
 // @public (undocumented)
 interface ProviderAccessConfig {
@@ -4431,10 +4439,11 @@ export class ProviderError<TCode extends string = string> extends Error {
     readonly options?: ProviderErrorOptions | undefined;
 }
 
-// Warning: (ae-forgotten-export) The symbol "PROVIDER_ERROR_CATEGORIES" needs to be exported by the entry point provider.d.ts
+// Warning: (ae-forgotten-export) The symbol "PlatformFaultCategory" needs to be exported by the entry point provider.d.ts
+// Warning: (ae-forgotten-export) The symbol "ProviderFailureCategory" needs to be exported by the entry point provider.d.ts
 //
 // @public (undocumented)
-type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
+type ProviderErrorCategory = PlatformFaultCategory | ProviderFailureCategory;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderErrorSource" needs to be exported by the entry point provider.d.ts
 // Warning: (ae-forgotten-export) The symbol "PROVIDER_ERROR_CATEGORY_SOURCES" needs to be exported by the entry point provider.d.ts
@@ -4500,7 +4509,7 @@ type ProviderErrorOptions = {
     code?: string;
     details?: unknown;
     cause?: Error;
-    category?: ProviderErrorCategory;
+    category?: ProviderFailureCategory;
     retryable?: boolean;
     observability?: ProviderErrorObservability;
     messageKey?: ProviderLocaleKeyInput;
@@ -4517,6 +4526,11 @@ type ProviderErrorSource = (typeof PROVIDER_ERROR_SOURCES)[number];
 //
 // @public (undocumented)
 export type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number];
+
+// Warning: (ae-forgotten-export) The symbol "PROVIDER_FAILURE_CATEGORIES" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type ProviderFailureCategory = (typeof PROVIDER_FAILURE_CATEGORIES)[number];
 
 // @public
 export interface ProviderFileRef {

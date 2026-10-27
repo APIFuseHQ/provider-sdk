@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { platformFaultOf } from "../sdk-issued-errors.js";
 import { z } from "zod";
 import { ProviderError } from "../errors.js";
 import {
@@ -478,7 +479,7 @@ describe("ctx.handle create/read", () => {
 			ctx.create(BoundPage, invalidData as DataOf<typeof BoundPage>),
 			"HANDLE_INVALID_DATA",
 		);
-		expect(error.options?.category).toBe("internal_error");
+		expect(platformFaultOf(error)?.category).toBe("internal_error");
 		expect(error.options?.retryable).toBe(false);
 		expect(error.message).toContain("provider bug");
 	});
@@ -533,7 +534,7 @@ describe("ctx.handle create/read", () => {
 			ctx.create(BoundPage, { query: "q", page: 1 }),
 			"HANDLE_CONNECTION_REQUIRED",
 		);
-		expect(error.options?.category).toBe("internal_error");
+		expect(platformFaultOf(error)?.category).toBe("internal_error");
 		expect(error.message).toContain("request.connectionId is missing");
 		await expectHandleError(ctx.create(WaitingDraft, waitingData()), "HANDLE_CONNECTION_REQUIRED");
 		await expectHandleError(
@@ -553,7 +554,7 @@ describe("ctx.handle create/read", () => {
 			noState.create(BoundPage, { query: "q", page: 1 }),
 			"HANDLE_STORAGE_UNAVAILABLE",
 		);
-		expect(noStateError.options?.category).toBe("internal_error");
+		expect(platformFaultOf(noStateError)?.category).toBe("internal_error");
 
 		const unsupported = createTestHandleContext({ state: createUnsupportedProviderRuntimeState() });
 		await expectHandleError(
@@ -588,7 +589,7 @@ describe("ctx.handle create/read", () => {
 			ctx.create(Small, { blob: "x".repeat(300) }),
 			"HANDLE_TOO_LARGE",
 		);
-		expect(error.options?.category).toBe("internal_error");
+		expect(platformFaultOf(error)?.category).toBe("internal_error");
 		expect(error.options?.details).toMatchObject({ maxValueBytes: 200 });
 		const SmallDraft = defineDraft({
 			name: "sdraft",
@@ -859,7 +860,7 @@ describe("drafts: update, commit, discard", () => {
 			ctx.update(WaitingDraft, handle, () => invalid as DataOf<typeof WaitingDraft>),
 			"HANDLE_INVALID_DATA",
 		);
-		expect(error.options?.category).toBe("internal_error");
+		expect(platformFaultOf(error)?.category).toBe("internal_error");
 		expect((await ctx.read(WaitingDraft, handle)).data.shop).toBe("shop-2");
 	});
 
@@ -956,7 +957,7 @@ describe("drafts: update, commit, discard", () => {
 			"HANDLE_BUSY",
 		);
 		expect(busy.options?.retryable).toBe(true);
-		expect(busy.options?.category).toBe("internal_error");
+		expect(platformFaultOf(busy)?.category).toBe("internal_error");
 		await expectHandleError(
 			ctx.update(WaitingDraft, handle, (data) => data),
 			"HANDLE_BUSY",
@@ -1055,7 +1056,8 @@ describe("HandleError", () => {
 		expect(error.name).toBe("HandleError");
 		expect(error.code).toBe("HANDLE_BUSY");
 		expect(error.kind).toBe("waiting");
-		expect(error.options?.category).toBe("internal_error");
+		expect(error.options?.category).toBeUndefined();
+		expect(platformFaultOf(error)).toBeUndefined();
 		expect(error.options?.retryable).toBe(true);
 		const overridden = new HandleError("HANDLE_INVALID", "x", { retryable: true });
 		expect(overridden.options?.retryable).toBe(true);
@@ -1990,7 +1992,7 @@ describe("createRecord", () => {
 			ctx.createRecord(BoundPage, { query: "q", page: 1.5 }),
 			"HANDLE_INVALID_DATA",
 		);
-		expect(invalid.options?.category).toBe("internal_error");
+		expect(platformFaultOf(invalid)?.category).toBe("internal_error");
 	});
 });
 

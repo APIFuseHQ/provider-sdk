@@ -69,10 +69,20 @@ import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
 	isRetryableCategory,
+	type LegacyErrorObservabilityDetails,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	type ProviderErrorCategory,
+	type ProviderErrorCategoryOrigin,
 	type ProviderErrorSource,
 	sourceForCategory,
+} from "../observability.js";
+import { issueSdkError, platformFaultOf } from "../sdk-issued-errors.js";
+
+export type {
+	ErrorObservabilityDetails,
+	LegacyErrorObservabilityDetails,
+	PlatformFaultObservabilityDetails,
+	ProviderFailureObservabilityDetails,
 } from "../observability.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
@@ -279,13 +289,6 @@ const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
 /** Compact SDK-owned error classification emitted separately from the public response body. */
 export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
-export type ErrorObservabilityDetails = {
-	category: ProviderErrorCategory;
-	taxonomyVersion: string;
-	retryable: boolean;
-	upstreamStatus?: number;
-	providerObservability?: ProviderErrorObservability;
-};
 
 // Provider errors normally expose `options` through an own data property, but
 // providers can replace that property with a throwing accessor. Provider-controlled
@@ -1518,12 +1521,13 @@ export type ProviderServerLogEvent =
 			message: string;
 			upstreamStatus?: number;
 			errorCategory?: ProviderErrorCategory;
+			errorOrigin?: ProviderErrorCategoryOrigin;
 			taxonomyVersion?: string;
 			retryable?: boolean;
 			providerObservability?: ProviderErrorObservability;
 			causeChain?: ProviderErrorCauseFrame[];
 			stack?: string[];
-			signal?: "unregistered_provider_error_code";
+			signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
 			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
 	  })
@@ -1902,7 +1906,7 @@ function errorEnvelopeLocalization(options: {
 function toErrorResponse(
 	error: unknown,
 	requestId: string | undefined,
-	observabilityDetails: ErrorObservabilityDetails,
+	observabilityDetails: LegacyErrorObservabilityDetails,
 	redact?: DiagnosticRedactor,
 	localization?: ErrorEnvelopeLocalization,
 	inboundSignal?: AbortSignal,
@@ -2092,7 +2096,7 @@ function providerObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
-): ErrorObservabilityDetails | undefined {
+): LegacyErrorObservabilityDetails | undefined {
 	const contract = providerErrorContract(error, declaredErrorCode);
 	// Session-expiry surfaces the credential_expired category so Gateway and
 	// Credential Service can distinguish an expired credential from other 401s.
@@ -2176,7 +2180,17 @@ function classifiedErrorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
-): ErrorObservabilityDetails {
+): LegacyErrorObservabilityDetails {
+	// An error the SDK issued as a platform fault is classified from its
+	// record, never from options a provider could have set.
+	const fault = platformFaultOf(error);
+	if (fault) {
+		return {
+			category: fault.category,
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: fault.retryable,
+		};
+	}
 	const providerDetails = providerObservabilityDetails(error, declaredErrorCode, inboundSignal);
 	if (providerDetails) return providerDetails;
 	const contract = providerErrorContract(error, declaredErrorCode);
@@ -2226,7 +2240,7 @@ function errorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
-): ErrorObservabilityDetails {
+): LegacyErrorObservabilityDetails {
 	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode, inboundSignal);
 	const providerObservability = safeProviderErrorObservability(error);
 	return {
@@ -2237,7 +2251,7 @@ function errorObservabilityDetails(
 
 function responseWithErrorObservability(
 	response: Response,
-	observabilityDetails: ErrorObservabilityDetails,
+	observabilityDetails: LegacyErrorObservabilityDetails,
 ): Response {
 	const headers = new Headers(response.headers);
 	headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(observabilityDetails));
@@ -2323,7 +2337,7 @@ function toStatusCode(
 			return isServedAsTransportTimeout(error, inboundSignal) ? 504 : 502;
 		}
 		if (isValidationError(error)) {
-			return contract.category === "output_validation" ? 500 : 400;
+			return platformFaultOf(error)?.category === "output_validation" ? 500 : 400;
 		}
 
 		return 500;
@@ -2543,7 +2557,7 @@ function logProviderError(
 	cost: ProviderRequestCost,
 	declaredErrorCode: DeclaredErrorCode | undefined,
 	telemetry: RequestTelemetry | undefined,
-	observabilityDetails: ErrorObservabilityDetails,
+	observabilityDetails: LegacyErrorObservabilityDetails,
 	correlation: RequestCorrelationIds = {},
 	redact?: DiagnosticRedactor,
 ): void {
@@ -2696,7 +2710,7 @@ function logProviderSuccess(
 
 type RequestScopeFinishResult = {
 	providerTelemetryHeader?: string;
-	errorObservability?: ErrorObservabilityDetails;
+	errorObservability?: LegacyErrorObservabilityDetails;
 };
 
 type RequestScope = RequestScopeContext & {
@@ -2736,7 +2750,12 @@ const serverErrors = defineErrors({
 });
 
 function clientCancelledError(): ProviderError {
-	return serverErrors.client_cancelled();
+	return issueSdkError(serverErrors.client_cancelled(), {
+		category: "client_cancelled",
+		code: "client_cancelled",
+		status: CLIENT_CANCELLED_STATUS,
+		retryable: false,
+	});
 }
 
 async function runBestEffortWithTimeout(cleanup: () => void | Promise<void>): Promise<void> {
@@ -3136,7 +3155,7 @@ function createRequestScope(input: {
 							cost,
 							declaredErrorCode,
 							telemetry,
-							finishedResult.errorObservability as ErrorObservabilityDetails,
+							finishedResult.errorObservability as LegacyErrorObservabilityDetails,
 							details.correlation,
 							redact,
 						);
@@ -3180,7 +3199,7 @@ function createRequestScope(input: {
 // from the status. Only timeouts, rate limits, and 5xx are retryable;
 // `isRetryableCategory` would otherwise mark every other 4xx (`upstream_http`)
 // as retryable.
-function rawResponseErrorObservability(status: number): ErrorObservabilityDetails {
+function rawResponseErrorObservability(status: number): LegacyErrorObservabilityDetails {
 	return {
 		category: categoryForStatus(status),
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
@@ -3358,13 +3377,20 @@ async function validateSseEvent(
 		if (event.event === APIFUSE_STREAM_ERROR_EVENT || event.event === APIFUSE_STREAM_DONE_EVENT) {
 			return event;
 		}
-		throw new ProviderError(
-			`SSE event "${event.event}" is not declared in operation transport.events.`,
+		throw issueSdkError(
+			new ProviderError(
+				`SSE event "${event.event}" is not declared in operation transport.events.`,
+				{
+					code: "SSE_EVENT_UNDECLARED",
+					retryable: false,
+					fix: `Add "${event.event}" to transport.events or stop emitting that event.`,
+				},
+			),
 			{
-				code: "SSE_EVENT_UNDECLARED",
 				category: "output_validation",
+				code: "SSE_EVENT_UNDECLARED",
+				status: 500,
 				retryable: false,
-				fix: `Add "${event.event}" to transport.events or stop emitting that event.`,
 			},
 		);
 	}
@@ -3515,13 +3541,20 @@ function toStreamingResponse(
 ): Response {
 	const transport = operation.transport?.kind ?? "json";
 	if (transport === "sse" && (result instanceof Response || result instanceof ReadableStream)) {
-		throw new ProviderError(
-			"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
+		throw issueSdkError(
+			new ProviderError(
+				"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
+				{
+					code: "SSE_RESULT_UNSUPPORTED",
+					retryable: false,
+					fix: "Return an async generator that yields stream.event(name, data) so APIFuse can validate event schemas and enforce event byte limits.",
+				},
+			),
 			{
-				code: "SSE_RESULT_UNSUPPORTED",
 				category: "output_validation",
+				code: "SSE_RESULT_UNSUPPORTED",
+				status: 500,
 				retryable: false,
-				fix: "Return an async generator that yields stream.event(name, data) so APIFuse can validate event schemas and enforce event byte limits.",
 			},
 		);
 	}

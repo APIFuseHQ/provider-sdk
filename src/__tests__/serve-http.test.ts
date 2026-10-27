@@ -20,11 +20,12 @@ import * as diagnosticRedactor from "../runtime/diagnostic-redactor.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { defineCursor } from "../handle.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { issueSdkError } from "../sdk-issued-errors.js";
 import { OperationRequestSchema } from "../server/index.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
-	type ErrorObservabilityDetails,
+	type LegacyErrorObservabilityDetails,
 	type ProviderServerLogEvent,
 	resolveAuthFlowProxyAffinityKey,
 	resolveProviderProxyAffinityKey,
@@ -60,7 +61,7 @@ function clearSmartproxyEnv(): () => void {
 const READ_RISK_CLASS: OperationRiskClass = "read";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
-function errorObservability(response: Response): ErrorObservabilityDetails {
+function errorObservability(response: Response): LegacyErrorObservabilityDetails {
 	const value = response.headers.get(ERROR_OBSERVABILITY_HEADER);
 	expect(value).toBeTruthy();
 	expect(value).not.toMatch(/[\r\n]/);
@@ -4315,12 +4316,21 @@ describe("operation-declared error resolution", () => {
 					status: 400,
 					description: "Conflicts with SDK output validation",
 				},
+				// Raised the way the SDK's output validation raises it: issued as
+				// a platform fault, not a provider-thrown look-alike.
 				createError: () =>
-					new ValidationError("Operation handler output failed schema validation.", {
-						code: "OUTPUT_VALIDATION_FAILED",
-						category: "output_validation",
-						retryable: false,
-					}),
+					issueSdkError(
+						new ValidationError("Operation handler output failed schema validation.", {
+							code: "OUTPUT_VALIDATION_FAILED",
+							retryable: false,
+						}),
+						{
+							category: "output_validation",
+							code: "OUTPUT_VALIDATION_FAILED",
+							status: 500,
+							retryable: false,
+						},
+					),
 				status: 500,
 				category: "output_validation",
 				code: "OUTPUT_VALIDATION_FAILED",
@@ -4386,10 +4396,10 @@ describe("operation-declared error resolution", () => {
 				createError: () =>
 					new ValidationError("Output was invalid", {
 						code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
-						category: "output_validation",
+						category: "upstream_schema_drift",
 					}),
 				status: 502,
-				category: "output_validation",
+				category: "upstream_schema_drift",
 			},
 			{
 				name: "undeclared input failure",

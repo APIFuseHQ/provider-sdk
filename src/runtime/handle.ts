@@ -10,6 +10,7 @@
  */
 import { randomInt, randomUUID } from "node:crypto";
 import { isProviderError } from "../errors.js";
+import { issueSdkError } from "../sdk-issued-errors.js";
 import {
 	type DataOf,
 	type InputOf,
@@ -343,10 +344,13 @@ function expiredError(kind: HandleKind, deadline: ExpiredDeadline = "ttl"): Hand
 }
 
 function busyError(kind: HandleKind): HandleError {
-	return new HandleError(
-		"HANDLE_BUSY",
-		`\`${kind.fieldName}\` is being committed by another request. Retry shortly with the same \`${kind.fieldName}\`.`,
-		{ kind: kind.name, details: { field: kind.fieldName } },
+	return issueSdkError(
+		new HandleError(
+			"HANDLE_BUSY",
+			`\`${kind.fieldName}\` is being committed by another request. Retry shortly with the same \`${kind.fieldName}\`.`,
+			{ kind: kind.name, details: { field: kind.fieldName } },
+		),
+		{ category: "internal_error", code: "HANDLE_BUSY", status: 409, retryable: true },
 	);
 }
 
@@ -359,26 +363,46 @@ function committedError(kind: HandleKind): HandleError {
 }
 
 function connectionRequiredError(kind: HandleKind, operation: HandleOperation): HandleError {
-	return new HandleError(
-		"HANDLE_CONNECTION_REQUIRED",
-		`Handle kind "${kind.name}" is bound to a connection, but request.connectionId is missing for ${operation}. Bound handles require a connection-scoped request; use access: "public" for connection-less kinds.`,
-		{ kind: kind.name },
+	return issueSdkError(
+		new HandleError(
+			"HANDLE_CONNECTION_REQUIRED",
+			`Handle kind "${kind.name}" is bound to a connection, but request.connectionId is missing for ${operation}. Bound handles require a connection-scoped request; use access: "public" for connection-less kinds.`,
+			{ kind: kind.name },
+		),
+		{
+			category: "internal_error",
+			code: "HANDLE_CONNECTION_REQUIRED",
+			status: 500,
+			retryable: false,
+		},
 	);
 }
 
 function storageUnavailableError(kind: HandleKind, reason: string, cause?: Error): HandleError {
-	return new HandleError(
-		"HANDLE_STORAGE_UNAVAILABLE",
-		`Handle storage for kind "${kind.name}" is not available: ${reason}.`,
-		{ kind: kind.name, cause, details: { reason } },
+	return issueSdkError(
+		new HandleError(
+			"HANDLE_STORAGE_UNAVAILABLE",
+			`Handle storage for kind "${kind.name}" is not available: ${reason}.`,
+			{ kind: kind.name, cause, details: { reason } },
+		),
+		{
+			category: "internal_error",
+			code: "HANDLE_STORAGE_UNAVAILABLE",
+			status: 500,
+			retryable: false,
+			cause,
+		},
 	);
 }
 
 function tooLargeError(kind: HandleKind, bytes: number): HandleError {
-	return new HandleError(
-		"HANDLE_TOO_LARGE",
-		`Handle record for kind "${kind.name}" is ${bytes} bytes, above maxValueBytes ${kind.maxValueBytes}. Store less in the handle or raise maxValueBytes on the kind.`,
-		{ kind: kind.name, details: { bytes, maxValueBytes: kind.maxValueBytes } },
+	return issueSdkError(
+		new HandleError(
+			"HANDLE_TOO_LARGE",
+			`Handle record for kind "${kind.name}" is ${bytes} bytes, above maxValueBytes ${kind.maxValueBytes}. Store less in the handle or raise maxValueBytes on the kind.`,
+			{ kind: kind.name, details: { bytes, maxValueBytes: kind.maxValueBytes } },
+		),
+		{ category: "internal_error", code: "HANDLE_TOO_LARGE", status: 500, retryable: false },
 	);
 }
 
@@ -391,13 +415,22 @@ function invalidDataError(
 		cause !== null && typeof cause === "object" && "message" in cause
 			? String((cause as { message: unknown }).message).split("\n")[0]
 			: "schema validation failed";
-	return new HandleError(
-		"HANDLE_INVALID_DATA",
-		`Handle kind "${kind.name}" ${operation} received data that does not satisfy its schema (${summary}). This is a provider bug: validate or shape the data before storing it.`,
+	return issueSdkError(
+		new HandleError(
+			"HANDLE_INVALID_DATA",
+			`Handle kind "${kind.name}" ${operation} received data that does not satisfy its schema (${summary}). This is a provider bug: validate or shape the data before storing it.`,
+			{
+				kind: kind.name,
+				cause: cause instanceof Error ? cause : undefined,
+				details: { operation, issues: extractIssues(cause) },
+			},
+		),
 		{
-			kind: kind.name,
-			cause: cause instanceof Error ? cause : undefined,
-			details: { operation, issues: extractIssues(cause) },
+			category: "internal_error",
+			code: "HANDLE_INVALID_DATA",
+			status: 500,
+			retryable: false,
+			cause,
 		},
 	);
 }
