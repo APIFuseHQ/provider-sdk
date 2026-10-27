@@ -1128,6 +1128,47 @@ export type ProviderProxySessionAffinity =
 	| "auth-flow"
 	| "connection";
 
+/**
+ * NodeMaven connection type. `"mobile"` adds the `-type-mobile` username token
+ * (a cellular-carrier egress IP); `"residential"` adds no token, which is what
+ * every existing policy synthesizes today.
+ */
+export type NodemavenConnectionType = "residential" | "mobile";
+
+/**
+ * NodeMaven-only username tokens. They ride on the provider proxy policy so the
+ * deployment side still sees one `proxy` declaration (vendor chain, geo, scope)
+ * and projects the engine-owned NodeMaven credentials from it. Ignored by every
+ * other vendor in the chain; `defineProvider` rejects the block when the chain
+ * does not include `nodemaven`.
+ *
+ * Username grammar (docs.nodemaven.com/residential-mobile/proxy-string, in
+ * this order): `<user>-country-<cc>-region-<r>-city-<c>-isp-<slug>-type-mobile
+ * -ipv4-true-sid-<sid>-ttl-<XmYs>-filter-<tier>`. Measured 2026-10-23 against
+ * an IP echo service: `-isp-sk_telecom`, `-isp-lg_uplus`, `-isp-kt` each
+ * returned the matching KR carrier (`mobile: true`); an unknown slug is refused
+ * by the gateway with HTTP 406 before any exit is assigned.
+ */
+export interface ProviderProxyNodemavenOptions {
+	/** Omitted means residential: no `-type-` token, the token set residential policies always had. */
+	type?: NodemavenConnectionType;
+	/**
+	 * Carrier slugs in NodeMaven's `-isp-` grammar (`[a-z0-9_]+`, multi-word
+	 * names use `_`). One slug is encoded per attempt, chosen by pool index
+	 * (`isp[poolIndex % isp.length]`), so a caller-managed retry with
+	 * `proxyAttemptOffset: 1` moves to the next carrier.
+	 */
+	isp?: readonly string[];
+	/**
+	 * Sticky-session TTL in whole seconds, 60..86400, encoded as `-ttl-XmYs`
+	 * (500 → `8m20s`). Only meaningful with a sticky `session.affinity`. The
+	 * SDK's sticky lifetime becomes the smaller of `session.lifetimeMinutes`
+	 * and this TTL rounded down to whole minutes, so session rotation, the
+	 * reported expiry and drain timers stay inside the gateway TTL.
+	 */
+	ttlSeconds?: number;
+}
+
 export interface ProviderProxyPolicy {
 	/**
 	 * Provider intent only. Transport details such as raw CONNECT, origin
@@ -1163,6 +1204,19 @@ export interface ProviderProxyPolicy {
 		 */
 		drainLeadSeconds?: number;
 	};
+	/**
+	 * Operation ids this policy applies to. Omitted: the policy applies to
+	 * every operation context and every auth-flow context, as before. Present:
+	 * only the listed operations receive the policy on `ctx.http`,
+	 * `ctx.stealth`, `ctx.native.network` and the resolver chain; every other
+	 * operation and every auth flow egresses directly, exactly as a provider
+	 * with no `proxy` declaration does. The deployment side keeps projecting the vendor
+	 * credentials from this one declaration. `defineProvider` rejects an id
+	 * that is not a declared operation.
+	 */
+	operations?: readonly string[];
+	/** NodeMaven-only username tokens (connection type, carrier, sticky TTL). */
+	nodemaven?: ProviderProxyNodemavenOptions;
 }
 
 export type ProviderProxyConfig = boolean | ProviderProxyPolicy;

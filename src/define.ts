@@ -17,6 +17,11 @@ import { HealthScenarioSchema, SafeRegexSchema } from "./health-scenario.js";
 import { UpstreamMaintenanceWindowsSchema } from "./upstream-maintenance.js";
 import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
 import {
+	NODEMAVEN_ISP_SLUG_PATTERN,
+	NODEMAVEN_TTL_SECONDS_MAX,
+	NODEMAVEN_TTL_SECONDS_MIN,
+} from "./runtime/proxy-nodemaven.js";
+import {
 	NativeEgressPolicyValidationError,
 	validateNativeProviderConfig,
 } from "./native-egress-policy.js";
@@ -140,6 +145,7 @@ const CUSTOM_SCHEME_REGEX = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+$/;
 const VALID_PROVIDER_ACCESS_VISIBILITIES = ["public", "early_access"] as const;
 const VALID_PROVIDER_PROXY_MODES = ["disabled", "optional", "required"] as const;
 const VALID_PROVIDER_PROXY_PROVIDERS = ["smartproxy", "nodemaven", "decodo", "custom"] as const;
+const VALID_NODEMAVEN_CONNECTION_TYPES = ["residential", "mobile"] as const;
 const VALID_PROVIDER_PROXY_AFFINITIES = [
 	"request",
 	"operation",
@@ -951,6 +957,31 @@ function validateProviderImplementationShape(config: { id: string }): void {
 	assertRequiredField(configRecord, "operations", String(config.id));
 }
 
+/**
+ * `proxy.operations` names operations that exist only once `buildProvider`
+ * receives the operation map, so the id check runs at build time rather than
+ * in `validateProviderProxy`.
+ */
+function validateProxyOperationScope(
+	providerId: string,
+	proxy: ProviderProxyConfig | undefined,
+	operations: Record<string, unknown>,
+): void {
+	if (proxy === undefined || typeof proxy !== "object" || proxy.operations === undefined) return;
+	for (const operationId of proxy.operations) {
+		if (!Object.hasOwn(operations, operationId)) {
+			throw new ValidationError(
+				`Provider "${providerId}" has invalid proxy.operations: "${operationId}" is not a declared operation.`,
+				{
+					fix: `Use one of ${Object.keys(operations)
+						.map((id) => `"${id}"`)
+						.join(", ")} or remove "${operationId}" from proxy.operations.`,
+				},
+			);
+		}
+	}
+}
+
 function validateProviderProxy(config: {
 	id: string;
 	proxy?: ProviderProxyConfig;
@@ -1020,7 +1051,11 @@ function validateProviderProxy(config: {
 			},
 		);
 	}
-	rejectUnknownFields(proxy, new Set(["mode", "provider", "providers", "geo", "session"]), "proxy");
+	rejectUnknownFields(
+		proxy,
+		new Set(["mode", "provider", "providers", "geo", "session", "operations", "nodemaven"]),
+		"proxy",
+	);
 	assertLiteralField(proxy.mode, "proxy.mode", VALID_PROVIDER_PROXY_MODES, config.id);
 	if (proxy.provider !== undefined) {
 		assertLiteralField(proxy.provider, "proxy.provider", VALID_PROVIDER_PROXY_PROVIDERS, config.id);
@@ -1058,6 +1093,87 @@ function validateProviderProxy(config: {
 					`Provider "${config.id}" has invalid proxy.geo.${field}: must be a non-empty string.`,
 				);
 			}
+		}
+	}
+	if (proxy.operations !== undefined) {
+		if (!Array.isArray(proxy.operations) || proxy.operations.length === 0) {
+			throw new ValidationError(
+				`Provider "${config.id}" has invalid proxy.operations: must be a non-empty array of operation ids.`,
+				{
+					fix: `Use proxy.operations: ["get-stay-detail"] to scope the policy, or remove it to apply the policy everywhere.`,
+				},
+			);
+		}
+		const seen = new Set<string>();
+		for (const operationId of proxy.operations) {
+			if (typeof operationId !== "string" || operationId.trim().length === 0) {
+				throw new ValidationError(
+					`Provider "${config.id}" has invalid proxy.operations: every entry must be a non-empty operation id string.`,
+				);
+			}
+			if (seen.has(operationId)) {
+				throw new ValidationError(
+					`Provider "${config.id}" has invalid proxy.operations: duplicate operation id "${operationId}".`,
+				);
+			}
+			seen.add(operationId);
+		}
+	}
+	if (proxy.nodemaven !== undefined) {
+		const nodemaven = proxy.nodemaven;
+		if (!nodemaven || typeof nodemaven !== "object" || Array.isArray(nodemaven)) {
+			throw new ValidationError(
+				`Provider "${config.id}" has invalid proxy.nodemaven: must be an object.`,
+				{ fix: `Use proxy.nodemaven: { type: "mobile", isp: ["sk_telecom"] }.` },
+			);
+		}
+		const chain = [...(proxy.providers ?? []), ...(proxy.provider ? [proxy.provider] : [])];
+		if (!chain.includes("nodemaven")) {
+			throw new ValidationError(
+				`Provider "${config.id}" has proxy.nodemaven but the policy requires "nodemaven" in proxy.providers.`,
+				{ fix: `Add "nodemaven" to proxy.providers or remove proxy.nodemaven.` },
+			);
+		}
+		rejectUnknownFields(nodemaven, new Set(["type", "isp", "ttlSeconds"]), "proxy.nodemaven");
+		if (nodemaven.type !== undefined) {
+			assertLiteralField(
+				nodemaven.type,
+				"proxy.nodemaven.type",
+				VALID_NODEMAVEN_CONNECTION_TYPES,
+				config.id,
+			);
+		}
+		if (nodemaven.isp !== undefined) {
+			if (!Array.isArray(nodemaven.isp) || nodemaven.isp.length === 0) {
+				throw new ValidationError(
+					`Provider "${config.id}" has invalid proxy.nodemaven.isp: must be a non-empty array of carrier slugs.`,
+					{ fix: `Use proxy.nodemaven.isp: ["sk_telecom", "lg_uplus"].` },
+				);
+			}
+			const seenIsp = new Set<string>();
+			for (const slug of nodemaven.isp) {
+				if (typeof slug !== "string" || !NODEMAVEN_ISP_SLUG_PATTERN.test(slug)) {
+					throw new ValidationError(
+						`Provider "${config.id}" has invalid proxy.nodemaven.isp entry ${JSON.stringify(slug)}: carrier slugs are lowercase [a-z0-9_] in NodeMaven's -isp- grammar.`,
+						{ fix: `Write multi-word carriers with underscores, for example "sk_telecom".` },
+					);
+				}
+				if (seenIsp.has(slug)) {
+					throw new ValidationError(
+						`Provider "${config.id}" has invalid proxy.nodemaven.isp: duplicate carrier slug "${slug}".`,
+					);
+				}
+				seenIsp.add(slug);
+			}
+		}
+		const ttl = nodemaven.ttlSeconds;
+		if (
+			ttl !== undefined &&
+			(!Number.isInteger(ttl) || ttl < NODEMAVEN_TTL_SECONDS_MIN || ttl > NODEMAVEN_TTL_SECONDS_MAX)
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" has invalid proxy.nodemaven.ttlSeconds: must be an integer between ${NODEMAVEN_TTL_SECONDS_MIN} and ${NODEMAVEN_TTL_SECONDS_MAX} seconds.`,
+			);
 		}
 	}
 	if (proxy.session !== undefined) {
@@ -1119,6 +1235,21 @@ function validateProviderProxy(config: {
 				`Provider "${config.id}" has proxy.session.drainLeadSeconds (${drainLeadSeconds}s) greater than or equal to proxy.session.lifetimeMinutes (${lifetime}m).`,
 				{
 					fix: `Lower drainLeadSeconds below the sticky lifetime so the drain event leaves a usable session window.`,
+				},
+			);
+		}
+		// The NodeMaven TTL shortens the sticky lifetime to its whole minutes, so
+		// the same contradiction applies against it.
+		const ttlSeconds = proxy.nodemaven?.ttlSeconds;
+		if (
+			drainLeadSeconds !== undefined &&
+			ttlSeconds !== undefined &&
+			drainLeadSeconds >= Math.max(1, Math.floor(ttlSeconds / 60)) * 60
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" has proxy.session.drainLeadSeconds (${drainLeadSeconds}s) greater than or equal to the sticky lifetime proxy.nodemaven.ttlSeconds allows (${Math.max(1, Math.floor(ttlSeconds / 60))}m).`,
+				{
+					fix: `Lower drainLeadSeconds or raise proxy.nodemaven.ttlSeconds so the drain event leaves a usable session window.`,
 				},
 			);
 		}
@@ -3333,6 +3464,7 @@ function finalizeProvider<
 		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
 	);
 	validateOperationNoMedia(config.id, config.operations);
+	validateProxyOperationScope(config.id, config.proxy, config.operations);
 	validateOperationFixtures(config.id, operations);
 	const provider: Omit<ProviderDefinition, "operations"> & {
 		operations: OperationMapConfig<TOperations, TContext>;
