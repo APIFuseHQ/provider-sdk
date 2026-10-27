@@ -191,6 +191,7 @@ async function startPod(
 	const handle = await serve(provider, {
 		host: "127.0.0.1",
 		port: 0,
+		metricsPort: 0,
 		logger: () => {},
 		operationExecutor: execute,
 		internalOperationExecutor: execute,

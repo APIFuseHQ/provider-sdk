@@ -246,6 +246,7 @@ import {
 	RUNTIME_DIAGNOSTICS_WINDOW_QUERY,
 } from "./runtime-diagnostics.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
+import { providerMetricsFetch, resolveProviderMetricsPort } from "./provider-metrics.js";
 import {
 	collectStaticDiagnosticSensitiveValues,
 	createDiagnosticEnvObserver,
@@ -1563,6 +1564,13 @@ export type ProviderServerLogEvent =
 			 * `engine_env_ignored`. Absent when the selection was unambiguous.
 			 */
 			warnings?: readonly string[];
+	  }
+	| {
+			/** Emitted once at boot, after the metrics listener bound its port. */
+			level: "info";
+			event: "provider_metrics_listener";
+			providerId: string;
+			port: number;
 	  }
 	| ProviderStateBackendLogEvent
 	| SelfTestCancellationLogEvent;
@@ -4569,6 +4577,8 @@ export type ProviderServerCloseOptions = {
 
 export type ProviderServerHandle = {
 	readonly port: number;
+	/** The bound port of the metrics listener (`GET /metrics`). */
+	readonly metricsPort: number;
 	close(options?: ProviderServerCloseOptions): Promise<void>;
 };
 
@@ -4582,6 +4592,12 @@ export interface ServeOptions<TContext extends Partial<ProviderContext> = Provid
 	 * when APIFUSE__PROVIDER_RUNTIME__SELF_TEST_MASTER_SECRET is present.
 	 */
 	selfTestPort?: number;
+	/**
+	 * Port of the metrics listener (default 9090 or
+	 * APIFUSE__PROVIDER_RUNTIME__METRICS_PORT). Always on; `0` binds an
+	 * ephemeral port, read back from the handle's `metricsPort`.
+	 */
+	metricsPort?: number;
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -4662,6 +4678,7 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 	);
 
 	const servers: BunServerHandle[] = [];
+	let metricsServer: BunServerHandle | undefined;
 	try {
 		servers.push(
 			bunRuntime.serve({
@@ -4670,6 +4687,22 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 				fetch: app.fetch,
 			}),
 		);
+
+		// Metrics listener: a SEPARATE socket serving only GET /metrics from the
+		// process-wide stateful metric registry, always on. Prometheus is admitted
+		// on this port alone, so the primary port's boundary stays gateway-only.
+		metricsServer = bunRuntime.serve({
+			port: options.metricsPort ?? resolveProviderMetricsPort(),
+			hostname: options.host ?? DEFAULT_HOST,
+			fetch: providerMetricsFetch,
+		});
+		servers.push(metricsServer);
+		logger({
+			level: "info",
+			event: "provider_metrics_listener",
+			providerId: provider.id,
+			port: metricsServer.port,
+		});
 
 		// Internal self-test listener (health dependency inversion): a SEPARATE
 		// socket the tenant-facing gateway never dials. Off by default — it only
@@ -4699,6 +4732,7 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 
 	const server = servers[0];
 	if (!server) throw new Error("Provider server failed to create its primary listener.");
+	if (!metricsServer) throw new Error("Provider server failed to create its metrics listener.");
 	let closePromise: Promise<void> | undefined;
 	let unregisterSignals = () => {};
 
@@ -4725,7 +4759,7 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 		throw error;
 	}
 
-	return { port: server.port, close };
+	return { port: server.port, metricsPort: metricsServer.port, close };
 }
 
 function registerForProcessSignals(
