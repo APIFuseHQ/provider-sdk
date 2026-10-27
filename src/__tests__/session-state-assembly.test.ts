@@ -49,6 +49,7 @@ type Wire = Record<
 	| "usesSecond"
 	| "usesThird"
 	| "shareAfter"
+	| "presetPastCookieExpiry"
 	| "plainSearch"
 	| "headerFirst"
 	| "headerSecond"
@@ -247,6 +248,13 @@ describe("operational assembly: provider-declared session state on the real tran
 			{ method: "GET", path: "/stays/1/detail", status: 200, carried: true },
 		]);
 		expect(wire.shareAfter.stealthLog?.sessionState).toEqual(counts({ reused: 1 }));
+
+		// The cookie's own Expires is not a retirement rule: past it, inside the
+		// declared ttl, the stored value is still carried and served.
+		expect(wire.presetPastCookieExpiry.hits.map(shape)).toEqual([
+			{ method: "GET", path: "/stays/1/detail", status: 200, carried: true },
+		]);
+		expect(wire.presetPastCookieExpiry.stealthLog?.sessionState).toEqual(counts({ reused: 1 }));
 
 		// (f) header carry on ctx.http, acquired by the declared request first.
 		const [tokenRequest, firstRead] = wire.headerFirst.hits;

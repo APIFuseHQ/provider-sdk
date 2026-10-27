@@ -76,7 +76,9 @@ function mint(prefix: string): string {
 function edgeCookieHeader(): string {
 	const value = mint("edge");
 	issuedEdgeCookies.add(value);
-	return `__cf_bm=${value}; Path=/; HttpOnly`;
+	// Like the measured edge, the cookie states a short expiry (there Date + 30
+	// minutes, here one second) that the origin itself never enforces.
+	return `__cf_bm=${value}; Path=/; Expires=${new Date(Date.now() + 1_000).toUTCString()}; HttpOnly`;
 }
 
 const origin = Bun.serve({
@@ -488,6 +490,9 @@ const sharedBurst = await burst("shared");
 const shareBurst = await burst("share");
 await sleep(1_100);
 const shareAfter = await call("share", "get-stay-detail");
+// The preset pool's cookie was captured well over a second ago: past its own
+// Expires, inside the declared ttl, so it is still carried.
+const presetPastCookieExpiry = await call("preset", "get-stay-detail");
 // A provider without sessionState and an unlisted operation send the same request.
 const plainSearch = await call("plain", "search-stays");
 // (f) header carry with a declared acquisition request on ctx.http.
@@ -533,6 +538,7 @@ console.log(
 		sharedBurst,
 		shareBurst,
 		shareAfter,
+		presetPastCookieExpiry,
 		plainSearch,
 		headerFirst,
 		headerSecond,

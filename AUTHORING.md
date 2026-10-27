@@ -184,7 +184,9 @@ takes named `ProviderSessionState` declarations in four parts:
   `reacquire` times per request the SDK acquires a fresh one and re-sends
   the request when its method is in `replayMethods` (default GET, HEAD,
   OPTIONS, the SDK safe set). `defineProvider` rejects a declaration with no
-  bound at all.
+  bound at all. A captured cookie's own `Expires` and `Max-Age` never retire
+  it: edges state expiries they do not enforce, so `validity` alone decides
+  how long a stored value is carried.
 - `distribute`: `hosts` (each in `allowedHosts`), `operations` (omitted:
   every operation; auth flows are never in scope), `scope` (`provider`: one
   pool for every caller, `connection`: a pool per connection), `qps`,

@@ -6,8 +6,8 @@ import { ValidationError } from "../errors.js";
 import {
 	createSessionStateResponseView,
 	matchesResponse,
-	pinCookieExpiry,
 	splitJoinedSetCookie,
+	withoutCookieExpiry,
 } from "../runtime/session-state.js";
 import { SESSION_STATE_DEFAULTS } from "../runtime/session-state-defaults.js";
 import { parseSessionStateDurationMs } from "../runtime/session-state-duration.js";
@@ -347,15 +347,13 @@ describe("session state: contract snapshot", () => {
 });
 
 describe("session state: cookie lifetime", () => {
-	it("pins Max-Age to the capture time so a stored cookie never outlives it", () => {
-		const capturedAt = Date.parse("2026-10-27T05:00:00Z");
-		const pinned = pinCookieExpiry("__cf_bm=abc; Max-Age=60; Path=/; HttpOnly", capturedAt);
-		expect(pinned.expiresAt).toBe(capturedAt + 60_000);
-		expect(pinned.text).toContain("Expires=Tue, 27 Oct 2026 05:01:00 GMT");
-		expect(pinned.text).not.toContain("Max-Age");
-		expect(pinCookieExpiry("__cf_bm=abc; Path=/", capturedAt)).toEqual({
-			text: "__cf_bm=abc; Path=/",
-		});
+	it("stores a captured cookie without its own Expires and Max-Age; validity alone decides", () => {
+		expect(
+			withoutCookieExpiry(
+				"__cf_bm=abc; Path=/; Expires=Tue, 27 Oct 2026 05:30:00 GMT; Max-Age=1800; HttpOnly; Secure; SameSite=None",
+			),
+		).toBe("__cf_bm=abc; Path=/; HttpOnly; Secure; SameSite=None");
+		expect(withoutCookieExpiry("__cf_bm=abc; Path=/")).toBe("__cf_bm=abc; Path=/");
 	});
 });
 

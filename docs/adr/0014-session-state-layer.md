@@ -55,10 +55,18 @@ and, after a first design that was tied to one edge vendor:
 6. State from the credential is carried and judged only (`credential_invalid`).
    The SDK cannot hand a renewed credential back to the gateway from inside an
    operation, so renewal stays with `auth.flow.refresh`.
-7. Captured values are registered as diagnostic values. Telemetry carries
+7. A state's lifetime is the declaration's `validity` alone. A captured
+   cookie is stored without its own `Expires` and `Max-Age`: the measured
+   edge stamps every cookie with Expires = Date + 30 minutes but served
+   values 30 to 60 minutes old (9 of 9 past 30 minutes, 15 of 15 within 60),
+   so honouring the stated expiry would cut a declared `ttl: "60m"` to 30.
+   The same measurement carried the value as a plain `cookie` header on a
+   new client per request (56 of 62 passed, 4 of 5 concurrent), so carrying
+   needs the value only, not client or connection state.
+8. Captured values are registered as diagnostic values. Telemetry carries
    counts only (`acquired`, `reused`, `expired`, `invalidated`,
    `reacquired`, `waited`) inside the stealth and http payloads.
-8. SDK defaults that await owner values (the preset's re-acquisition count,
+9. SDK defaults that await owner values (the preset's re-acquisition count,
    the direct declaration's, the connection-pool cap) live in
    `src/runtime/session-state-defaults.ts` only.
 
@@ -71,6 +79,6 @@ and, after a first design that was tied to one edge vendor:
   and is out of scope.
 - On `ctx.http` the layer judges the final response, so explicit status-code
   retries do not apply to a request in scope; transport retries do.
-- Not yet measured: how long one edge cookie stays valid, how many requests it
-  carries, and why about one in six requests carrying it was still refused.
-  Provider values for `ttl` and `qps` follow those measurements.
+- Not yet known: whether an edge cookie's lifetime is hard or sliding past
+  60 minutes, and why about one in six requests carrying a valid cookie is
+  still refused. `invalidWhen` with one re-acquisition absorbs both.

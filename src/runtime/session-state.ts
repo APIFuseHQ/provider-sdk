@@ -15,7 +15,6 @@
  * acquisition already in flight for the state they were assigned to.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Cookie } from "tough-cookie";
 
 import { SDKError } from "../errors.js";
 import type {
@@ -280,20 +279,19 @@ function resolveExpiry(
 }
 
 /**
- * Pins a cookie's lifetime to the moment it was captured: `Max-Age` becomes an
- * absolute `Expires`, so carrying the stored string later never restarts it.
+ * Drops a captured cookie's own `Expires` and `Max-Age`. A state's lifetime is
+ * the declaration's `validity` alone (ttl, idleTtl, maxUses, invalidWhen,
+ * capture.expiresAt): an edge may not enforce the expiry it states (the
+ * measured upstream stamps Expires = Date + 30 minutes and still serves the
+ * value an hour later), so a jar must never drop a stored value on its own.
  */
-export function pinCookieExpiry(
-	setCookie: string,
-	now: number,
-): { text: string; expiresAt?: number } {
-	const cookie = Cookie.parse(setCookie);
-	if (!cookie) return { text: setCookie };
-	const expiresAt = cookie.expiryTime(new Date(now));
-	if (expiresAt === undefined || !Number.isFinite(expiresAt)) return { text: setCookie };
-	cookie.maxAge = null;
-	cookie.expires = new Date(expiresAt);
-	return { text: cookie.toString(), expiresAt };
+export function withoutCookieExpiry(setCookie: string): string {
+	// Attribute values never contain ";" (an Expires date carries a comma), so
+	// splitting on it keeps every other attribute exactly as the upstream sent it.
+	return setCookie
+		.split(";")
+		.filter((part, index) => index === 0 || !/^\s*(?:expires|max-age)\s*=/i.test(part))
+		.join(";");
 }
 
 function registerValues(values: Iterable<string>): void {
@@ -311,7 +309,6 @@ function captureFromExchange(
 	if (when && !matchesResponse(when, view)) return undefined;
 	const values: Record<string, string> = {};
 	let cookies: SessionStateCookieStore | undefined;
-	let cookiesExpireAt: number | undefined;
 	if (capture.cookies && capture.cookies.length > 0) {
 		const wanted = new Set(capture.cookies);
 		const found = new Set<string>();
@@ -322,10 +319,7 @@ function captureFromExchange(
 			const value = cookieValuesFromHeaders(setCookie)[0];
 			if (!value) continue;
 			found.add(name);
-			const pinned = pinCookieExpiry(setCookie, now);
-			setCookies.push(pinned.text);
-			if (pinned.expiresAt !== undefined)
-				cookiesExpireAt = Math.min(cookiesExpireAt ?? pinned.expiresAt, pinned.expiresAt);
+			setCookies.push(withoutCookieExpiry(setCookie));
 		}
 		if (found.size !== wanted.size) return undefined;
 		cookies = { setCookies, url: view.url };
@@ -348,14 +342,7 @@ function captureFromExchange(
 	}
 	if (!cookies && Object.keys(values).length === 0) return undefined;
 	registerValues(Object.values(values));
-	const declaredExpiry = resolveExpiry(capture.expiresAt, values, { view }, now);
-	// The state ends when its first captured cookie does, if that is sooner.
-	const expiresAt =
-		declaredExpiry === undefined
-			? cookiesExpireAt
-			: cookiesExpireAt === undefined
-				? declaredExpiry
-				: Math.min(declaredExpiry, cookiesExpireAt);
+	const expiresAt = resolveExpiry(capture.expiresAt, values, { view }, now);
 	return {
 		values,
 		...(cookies ? { cookies } : {}),
