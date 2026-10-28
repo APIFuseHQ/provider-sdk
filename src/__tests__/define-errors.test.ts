@@ -434,6 +434,51 @@ describe("serving a factory-made error", () => {
 		expect(served.body.error).toMatchObject({ code: "RATE_LIMITED", retryable: true });
 	});
 
+	it("serves the declaration of an error thrown by an auth flow, which lists no operation", async () => {
+		const authErrors = defineErrors({
+			LOGIN_REFUSED: {
+				status: 401,
+				category: "upstream_auth",
+				description: "The shop refused the login.",
+			},
+		});
+		const definition: ProviderDefinition = {
+			...createProviderDefinitionDouble({ id: "define-errors-auth-test", operations: {} }),
+			auth: {
+				mode: "credentials",
+				flow: {
+					start: async () => {
+						throw authErrors.LOGIN_REFUSED({ details: { reason: "bad password" } });
+					},
+					continue: async (ctx) => ctx.auth.nextPoll(),
+				},
+			},
+		};
+		const app = createServerApp(definition, { logger: () => {} });
+		const response = await app.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_auth",
+				flowId: "flow_auth",
+				connectionId: "af_con_1234567890123456789012",
+				externalRef: "external-1",
+				tenantId: "tenant-1",
+				providerId: "define-errors-auth-test",
+			}),
+		});
+
+		expect(response.status).toBe(401);
+		expect(JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null")).toMatchObject({
+			category: "upstream_auth",
+			retryable: false,
+		});
+		expect(((await response.json()) as Served["body"]).error).toMatchObject({
+			code: "LOGIN_REFUSED",
+			retryable: false,
+		});
+	});
+
 	it("never logs the deprecated-options warning for a factory-made error", async () => {
 		const served = await serve(() => errors.SHOP_CLOSED());
 

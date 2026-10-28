@@ -4589,6 +4589,9 @@ function createServerAppWithCapabilityModules(
 				headers: Object.fromEntries(c.req.raw.headers.entries()),
 				logger,
 				setHeader: (name, value) => c.header(name, value),
+				// No operation table on an auth flow: the declaration is the one a
+				// factory-made error carries.
+				declaredErrorCode: providerErrorDeclaration,
 				inboundSignal: c.req.raw.signal,
 			});
 			try {
@@ -4638,17 +4641,25 @@ function createServerAppWithCapabilityModules(
 					status: response.status,
 				});
 			} catch (error) {
-				const status = toStatusCode(error, undefined, c.req.raw.signal);
+				// An auth flow has no operation table; the only declaration is the
+				// one a factory-made error carries, and it is served like an
+				// operation's.
+				const declaredErrorCode = providerErrorDeclaration(error);
+				const status = toStatusCode(error, declaredErrorCode, c.req.raw.signal);
 				const requestId = extractRequestId(rawBody);
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
-				const observabilityDetails = errorObservabilityDetails(error, undefined, c.req.raw.signal);
+				const observabilityDetails = errorObservabilityDetails(
+					error,
+					declaredErrorCode,
+					c.req.raw.signal,
+				);
 				const response = c.json(
 					toErrorResponse(
 						error,
 						requestId,
 						observabilityDetails,
 						requestScope.redact,
-						localization,
+						declaredErrorCode ? { ...localization, declaredErrorCode } : localization,
 						c.req.raw.signal,
 					),
 					status,
