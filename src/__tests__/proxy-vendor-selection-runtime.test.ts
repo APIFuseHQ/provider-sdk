@@ -328,6 +328,7 @@ describe("served process", () => {
 		const events: ProviderServerLogEvent[] = [];
 		const handle = await serve(provider(), {
 			port: 0,
+			metricsPort: 0,
 			host: "127.0.0.1",
 			logger: (event) => events.push(event),
 			shutdown: { signals: false },
@@ -408,6 +409,7 @@ describe("served process", () => {
 		const events: ProviderServerLogEvent[] = [];
 		const handle = await serve(provider(), {
 			port: 0,
+			metricsPort: 0,
 			host: "127.0.0.1",
 			logger: (event) => events.push(event),
 			shutdown: { signals: false },
