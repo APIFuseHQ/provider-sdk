@@ -11,10 +11,8 @@ import {
 	emitStatefulSessionInvalidatedMetric,
 	observeStatefulSessionOperationDuration,
 } from "./stateful-provider-adapter-metrics.js";
-import {
-	NOOP_STATEFUL_PROVIDER_METRIC_EMITTER,
-	type StatefulProviderMetricEmitter,
-} from "./stateful-provider-observability.js";
+import { statefulProviderMetricRegistry } from "./stateful-provider-metric-registry.js";
+import type { StatefulProviderMetricEmitter } from "./stateful-provider-observability.js";
 import type {
 	StatefulOperationExecutor,
 	StatefulOperationRequest,
@@ -186,7 +184,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		this.#checkpointStore = options.checkpointStore;
 		this.#eventPublisher = options.eventPublisher;
 		this.#clock = options.clock ?? (() => new Date());
-		this.#metricEmitter = options.metricEmitter ?? NOOP_STATEFUL_PROVIDER_METRIC_EMITTER;
+		this.#metricEmitter = options.metricEmitter ?? statefulProviderMetricRegistry;
 		this.#pool = new PodLocalSessionPool<TSession>(options.poolPolicy, (session, reason) =>
 			this.closeManagedSession(session, reason),
 		);
