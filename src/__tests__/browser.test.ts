@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
 type LaunchCall = {
 	args?: string[];
@@ -238,7 +240,6 @@ const browserState = {
 	localCdpAuthResponses: [] as Array<Record<string, unknown>>,
 	localCdpSessions: [] as MockPlaywrightCdpSession[],
 	localFetchEnableParams: [] as Array<Record<string, unknown>>,
-	requireError: noError(),
 };
 
 const stealthState = {
@@ -605,34 +606,27 @@ function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean
 }
 
 function registerBrowserMocks() {
+	// Both mocks export the launcher as `default` too. When another test file already
+	// imported the real playwright, mock.module overwrites the loaded module's exports
+	// in place, and the runtime reads `default` before the named export.
 	mock.module("playwright", () => {
-		if (browserState.requireError) {
-			throw browserState.requireError;
-		}
-
-		return {
-			chromium: createMockBrowserLauncher(),
-		};
+		const chromium = createMockBrowserLauncher();
+		return { chromium, default: { chromium } };
 	});
 
 	mock.module("playwright-extra", () => {
-		if (browserState.requireError) {
-			throw browserState.requireError;
-		}
-
 		const plugins: unknown[] = [];
-		return {
-			chromium: {
-				...createMockBrowserLauncher({
-					applyStealthOnPage: () => plugins.length > 0,
-				}),
-				use(plugin: unknown) {
-					plugins.push(plugin);
-					stealthState.useCalls += 1;
-					return this;
-				},
+		const chromium = {
+			...createMockBrowserLauncher({
+				applyStealthOnPage: () => plugins.length > 0,
+			}),
+			use(plugin: unknown) {
+				plugins.push(plugin);
+				stealthState.useCalls += 1;
+				return this;
 			},
 		};
+		return { chromium, default: { chromium } };
 	});
 
 	mock.module("puppeteer-extra-plugin-stealth", () => ({
@@ -659,6 +653,35 @@ function registerBrowserMocks() {
 
 		return {};
 	});
+}
+
+const missingDriverFixture = fileURLToPath(
+	new URL("./fixtures/browser-missing-driver.ts", import.meta.url),
+);
+
+// The install-hint cases need a process that has never imported playwright: after
+// another test file loaded it, mock.module cannot make its import fail again. Each
+// case runs alone in its own bun process.
+async function expectMissingDriverCasePasses(name: string): Promise<void> {
+	const child = Bun.spawn(
+		[process.execPath, "test", `./${relative(process.cwd(), missingDriverFixture)}`, "-t", name],
+		{
+			cwd: process.cwd(),
+			env: { ...process.env },
+			stderr: "pipe",
+			stdout: "pipe",
+		},
+	);
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+
+	const output = `${stdout}\n${stderr}`;
+	expect(exitCode, output).toBe(0);
+	expect(output).toContain(" 1 pass");
+	expect(output).toContain(" 0 fail");
 }
 
 function parseSelector(expression: string): string | null {
@@ -1088,7 +1111,6 @@ describe("createBrowserClient", () => {
 		browserState.localCdpAuthResponses.length = 0;
 		browserState.localCdpSessions.length = 0;
 		browserState.localFetchEnableParams.length = 0;
-		browserState.requireError = null;
 		stealthState.callCount = 0;
 		stealthState.pluginFactoryCalls = 0;
 		stealthState.pages.length = 0;
@@ -1149,43 +1171,16 @@ describe("createBrowserClient", () => {
 	});
 
 	it("throws ProviderError with install hint when the stealth browser launcher is unavailable", async () => {
-		browserState.requireError = Object.assign(new Error("Cannot find module 'playwright'"), {
-			code: "MODULE_NOT_FOUND",
-		});
-		registerBrowserMocks();
-
-		const { ProviderError } = await import("../errors.js");
-		const { createBrowserClient } = await import("../runtime/browser.js");
-		const client = createBrowserClient();
-		const pagePromise = client.newPage();
-
-		await expect(pagePromise).rejects.toBeInstanceOf(ProviderError);
-		await expect(pagePromise).rejects.toMatchObject({
-			fix: "Run: bun add playwright-extra puppeteer-extra-plugin-stealth",
-			message: "playwright-extra is not installed",
-		});
-	});
+		await expectMissingDriverCasePasses(
+			"throws ProviderError with install hint when the stealth browser launcher is unavailable",
+		);
+	}, 30_000);
 
 	it("throws ProviderError with install hint for ESM missing Playwright when stealth is disabled", async () => {
-		browserState.requireError = Object.assign(
-			new Error("Cannot find package 'playwright' imported from runtime/browser"),
-			{
-				code: "ERR_MODULE_NOT_FOUND",
-			},
+		await expectMissingDriverCasePasses(
+			"throws ProviderError with install hint for ESM missing Playwright when stealth is disabled",
 		);
-		registerBrowserMocks();
-
-		const { ProviderError } = await import("../errors.js");
-		const { createBrowserClient } = await import("../runtime/browser.js");
-		const client = createBrowserClient({ stealth: false });
-		const pagePromise = client.newPage();
-
-		await expect(pagePromise).rejects.toBeInstanceOf(ProviderError);
-		await expect(pagePromise).rejects.toMatchObject({
-			fix: "Run: bun add playwright",
-			message: "Playwright is not installed",
-		});
-	});
+	}, 30_000);
 
 	it("falls back to local Playwright and implements browser page methods", async () => {
 		const { createBrowserClient } = await import("../runtime/browser.js");
