@@ -1802,6 +1802,40 @@ Golden snapshot suites can set `requireSnapshot: true` so a missing committed sn
 of being created implicitly. Regenerate intentional changes with
 `bun test --update-snapshots`; review and commit the resulting `transform.snap.json` file.
 
+### Migrating after an SDK bump: `apifuse migrate`
+
+```bash
+apifuse migrate . --dry-run      # report what would change and what stays for you; writes nothing
+apifuse migrate .                # apply every codemod in dependency order
+apifuse migrate . --only handles # one codemod
+```
+
+One command runs every shipped codemod (`scripts/codemods/*.yml`, ast-grep) against the
+provider and prints one table: files changed per codemod, rewrites, and the residues the
+codemod leaves to you, each with `file:line` and the step it names. Under each codemod the rewrites
+whose rule carries a message are listed too: that is what the rewrite moved out of the file (the
+prose a `.describe()` held, a dropped option). Exit 0 when nothing is left; exit 1 when rewrites are
+pending (`--dry-run`) or residues remain, so `apifuse migrate --dry-run` is the CI gate; exit 2 on a
+usage error (unknown option or codemod, missing path, no ast-grep). Nothing is dry by default and
+nothing reads the environment: the command does what its flags say wherever it runs. It needs the
+ast-grep binary: `bun add -d @ast-grep/cli` in the provider (resolved from `node_modules/.bin`) or
+`ast-grep` on `PATH`.
+
+In order, old shape to new shape, and the one step each codemod cannot do:
+
+| codemod | old shape | new shape | by hand |
+|---|---|---|---|
+| `errors-factory` | `const T = [{ code: "X", status, description, retryable }] as const`; `errorCodes: [...T]`; `new ProviderError(msg, { code: "X", retryable, details })` | `const T = defineErrors({ X: sdkErrors.X \| { status, description, retryable, category? } })`; `errors: [...Object.values(T)]`; `errors.X({ message: msg, details })` (per-throw `category` / `retryable` dropped: the declaration owns them; a non-identifier code such as `"429"` is reached as `errors["429"]`) | add `import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider"` and import the map where `errors.X` is used; `tsc` names a provider row's missing `category`. A registered code whose row differs from the SDK registry is a residue (`errors-factory-sdk-row-conflict`): accept `sdkErrors.X` or declare a distinct code. An `errorCodes` row written inline with `status` or `description` is a residue (`errors-factory-inline-row-hoist`) and its list is left whole: hoist the row into a table, spread the table in the list, re-run. Tests that pinned the legacy instance shape (`error.options.category`, `error.options.retryable`) fail after the change: a factory error carries only `options.code`; assert the served contract (`status`, `retryable`, `category` on the envelope) instead. |
+| `health-refs` | `expectedErrors: [{ code: "X", status, attribute }]`; `ctx.cache.getOrSet(key, fn, { staleIfErrorMs })` | `expectedErrors: [{ error: errors.X, attribute }]`; `defineOperation({ cache: { staleIfErrorMs } })` | declare `errors` once in the scenario module; the per-call `staleIfErrorMs` is reported (`health-stale-window-per-call`), not removed: add the operation-level declaration first, then delete the option. |
+| `handles` | `defineCursor({ fieldName, issuedBy, ... })` / `defineDraft({ ... })` | the same call without the two options: the key and the issuer are read from the operation schemas where `kind.field()` is placed | refresh contract snapshots that pinned the old issuer wording; `legacy-handle-declaration` must be 0 in `apifuse check`. |
+| `runtime-boundary-allow-comments` | `// @apifuse-allow process-env-direct-read \| node-runtime-module-import \| direct-fetch-call: reason` | no comment: the build-time boundary has no escape hatch | fix what the comment acknowledged; `apifuse check` names the `file:line`. |
+| `schema` | `name: z.string().describe("prose")`; `fields.<preset>({ description: "prose" })` | `name: z.string().describeKey("schema.name")`; `fields.<preset>()` | add `"schema.<name>": "prose"` to `locales/en.json` (and the other catalogs); the report quotes the prose per rewrite. A `.describe()` that is not a property value (an input root, a union branch, a shared constant) is a residue (`schema-describe-prose-without-property`): wrap it as `describeKey(<schema>, "<key>")`. |
+| `declaration` | `const x: AuthConfig = { ... }` | `const x = { ... } satisfies AuthConfig` (the annotated form compiles one more release through a `@deprecated` `defineProvider` overload) | add a missing `allowedHosts` / `reviewed`; give `auth` the shape its `mode` requires; replace a reported `auth.exchange` or `reviewed: "staging"` |
+
+`errors-factory` runs first because `health-refs` rewrites scenarios to the `errors.<CODE>`
+references that the error table becomes; the rest touch disjoint syntax. Run `biome format`
+afterwards: ast-grep writes the rewritten node on one line.
+
 ### Running the pre-submission report
 
 ```bash

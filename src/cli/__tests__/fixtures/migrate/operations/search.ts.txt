@@ -1,0 +1,52 @@
+import { ProviderError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+
+export const SEARCH_ERRORS = [
+	{ code: "NOT_FOUND", status: 404, description: "No item matches.", retryable: false },
+	{ code: "UPSTREAM_ERROR", status: 502, description: "The shop answered 5xx.", retryable: false },
+	{ code: "SHOP_CLOSED", status: 409, description: "The shop is closed." },
+	{ code: "429", status: 429, description: "Too many searches.", retryable: true },
+] as const;
+
+export const AREAS = [
+	{ code: "010", name: "Sapporo" },
+	{ code: "130", name: "Tokyo" },
+] as const;
+
+export const searchOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.search.description",
+	errorCodes: [...SEARCH_ERRORS],
+	handler: async (input, ctx) => {
+		// @apifuse-allow direct-fetch-call: legacy site fetch
+		const page = await ctx.cache.getOrSet(
+			`search:${input.query}`,
+			async () => fetchPage(input.query),
+			{ ttlMs: 60_000, staleIfErrorMs: 300_000 },
+		);
+		if (page === "rate-limited") {
+			throw new ProviderError("Too many searches.", { code: "429" });
+		}
+		if (page === undefined) {
+			throw new ProviderError("No item matches.", {
+				code: "NOT_FOUND",
+				retryable: false,
+				details: {
+					query: input.query,
+				},
+			});
+		}
+		return page;
+	},
+	healthCheck: {
+		interval: "10m",
+		timeoutMs: 20_000,
+		cases: [
+			{
+				name: "missing item",
+				input: { query: "nope" },
+				expectedErrors: [{ code: "NOT_FOUND", status: 404, attribute: "query" }],
+			},
+		],
+	},
+});

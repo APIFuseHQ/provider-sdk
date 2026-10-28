@@ -1,0 +1,22 @@
+import { defineProvider, defineCursor } from "@apifuse/provider-sdk/provider";
+
+import { detailOperation } from "./operations/detail";
+import { searchOperation } from "./operations/search";
+
+export const PageCursor = defineCursor({
+	name: "page",
+	fieldName: "cursor",
+	issuedBy: "search",
+	schema: CursorSchema,
+	ttl: "10m",
+});
+
+const buildProvider = defineProvider({
+	id: "fixture",
+	version: "1.0.0",
+	runtime: "standard",
+	handle: [PageCursor],
+	state: true,
+});
+
+export default buildProvider({ operations: { search: searchOperation, detail: detailOperation } });

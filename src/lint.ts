@@ -1093,7 +1093,7 @@ function lintLegacyHandleDeclarations(provider: {
 			rule: "legacy-handle-declaration",
 			level: "warn",
 			field: `handle.${name}`,
-			message: `${providerLabel} handle kind "${name}" still declares ${declared.join(" and ")}; the property key and the issuing operation are read from the operation schemas where ${name}.field() is placed. Delete the option(s): bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml --update-all .`,
+			message: `${providerLabel} handle kind "${name}" still declares ${declared.join(" and ")}; the property key and the issuing operation are read from the operation schemas where ${name}.field() is placed. Delete the option(s): apifuse migrate --only handles`,
 		});
 	}
 	return diagnostics;
