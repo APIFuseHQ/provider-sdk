@@ -139,14 +139,23 @@ export {
 	lintOperation,
 	lintProvider,
 	type ProviderLintInformation,
+	type ProviderLintMode,
 	type ProviderLintResult,
 } from "./lint.js";
 export {
-	type LintRuntimeBoundarySourcesOptions,
-	lintRuntimeBoundarySources,
-	RUNTIME_BOUNDARY_RULES,
-	type RuntimeBoundaryRule,
-} from "./runtime-boundary-lint.js";
+	BOOTSTRAP_ENV_NAME_PREFIX,
+	type BoundaryViolation,
+	type BoundaryViolationKind,
+	BROWSER_DRIVER_PACKAGES,
+	BUN_MEMBER_ALLOWLIST,
+	type BundleProviderOptions,
+	bundleProvider,
+	formatBoundaryViolation,
+	PROCESS_MEMBER_ALLOWLIST,
+	type ProviderBundle,
+	RUNTIME_MODULE_ALLOWLIST,
+	SDK_BROWSER_RUNTIME_SUBPATH,
+} from "./cli/bundle.js";
 export {
 	TYPESCRIPT_COMPILER_MODULE_SPECIFIERS,
 	type TypeScriptCompilerModuleLike,

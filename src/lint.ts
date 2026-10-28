@@ -34,18 +34,9 @@ import {
 	isStealthOwnedHeaderName,
 	SDK_OWNED_CHROME_HEADER_PREFIX,
 } from "./runtime/stealth-owned-headers.js";
-import {
-	lintRuntimeBoundary,
-	// This module already has a narrower TEST_SOURCE_FILE_PATTERN of its own,
-	// used by the older source rules; it does not cover a plain `tests/`
-	// directory. Aliased rather than merged because consolidating the two would
-	// silently change what those rules scan.
-	TEST_SOURCE_FILE_PATTERN as SHARED_TEST_SOURCE_FILE_PATTERN,
-	scriptKindForSourceFile,
-} from "./runtime-boundary-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
-import { getTypeScript } from "./typescript-module.js";
+import { getTypeScript, scriptKindForSourceFile } from "./typescript-module.js";
 
 type AuthModeLike =
 	| "none"
@@ -202,11 +193,12 @@ export interface LintDiagnostic {
 	field?: string;
 }
 
+/**
+ * `official` for fleet providers, `standalone` for bounty submissions
+ * (`apifuse submit-check`). Drives the level of the browser-driver findings in
+ * `bundleProvider`.
+ */
 export type ProviderLintMode = "official" | "standalone";
-
-type ProviderLintOptions = {
-	mode?: ProviderLintMode;
-};
 
 /**
  * A non-blocking audit line: a finding the author acknowledged with
@@ -897,145 +889,6 @@ function lintCredentialWriteUsage(provider: {
 	});
 }
 
-function lintPlaywrightDirectImports(provider: {
-	authFlowSource?: string;
-	providerSourceFiles?: Record<string, string>;
-	operations?: Record<string, { handler?: unknown; source?: string }>;
-}): LintDiagnostic[] {
-	const diagnostics: LintDiagnostic[] = [];
-	const importPattern =
-		/(?:import\s+(?:type\s+)?[\s\S]*?\s+from\s+["'](?:playwright|playwright-core)["']|require\(\s*["'](?:playwright|playwright-core)["']\s*\)|import\(\s*["'](?:playwright|playwright-core)["']\s*\))/;
-
-	if (provider.authFlowSource && importPattern.test(provider.authFlowSource)) {
-		diagnostics.push({
-			rule: "playwright-direct-import",
-			level: "warn",
-			field: "auth.flow",
-			message:
-				"Provider auth flow imports playwright directly; use ctx.browser frame-aware methods so the SDK can enforce the CDP pool runtime.",
-		});
-	}
-
-	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
-		if (!importPattern.test(source)) {
-			continue;
-		}
-
-		diagnostics.push({
-			rule: "playwright-direct-import",
-			level: "warn",
-			field: `sourceFiles.${filePath}`,
-			message:
-				"Provider source imports playwright directly; use ctx.browser frame-aware methods so the SDK can enforce the CDP pool runtime.",
-		});
-	}
-
-	if (!provider.operations) {
-		return diagnostics;
-	}
-
-	for (const [operationKey, operation] of Object.entries(provider.operations)) {
-		const source = getOperationSource(operation);
-		if (!importPattern.test(source)) {
-			continue;
-		}
-
-		diagnostics.push({
-			rule: "playwright-direct-import",
-			level: "warn",
-			field: `operations.${operationKey}.handler`,
-			message:
-				"Operation source imports playwright directly; use ctx.browser frame-aware methods so the SDK can enforce the CDP pool runtime.",
-		});
-	}
-
-	return diagnostics;
-}
-
-type SelfHostedBrowserPattern = {
-	rule: string;
-	pattern: RegExp;
-	message: string;
-};
-
-const SELF_HOSTED_BROWSER_MESSAGE =
-	"Official browser providers must use ctx.browser backed by the managed CDP Pool; do not launch or connect to provider-local Chrome/CDP runtimes.";
-
-const SELF_HOSTED_BROWSER_PATTERNS: readonly SelfHostedBrowserPattern[] = [
-	{
-		rule: "browser-self-hosted-launch",
-		pattern: /\b(?:playwright|chromium|firefox|webkit|puppeteer)\.launch\s*\(/,
-		message: `${SELF_HOSTED_BROWSER_MESSAGE} Replace direct Playwright/Puppeteer launch calls with ctx.browser.newPage() or ctx.browser.withIsolatedContext().`,
-	},
-	{
-		rule: "browser-self-hosted-child-process",
-		pattern:
-			/(?:\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync)\s*\([\s\S]{0,240}\b(?:google-chrome|chrome|chromium|chromium-browser)\b|\b(?:Bun\.)?spawn(?:Sync)?\s*\([\s\S]{0,240}\b(?:google-chrome|chrome|chromium|chromium-browser)\b|\$`[\s\S]{0,240}\b(?:google-chrome|chrome|chromium|chromium-browser)\b)/,
-		message: `${SELF_HOSTED_BROWSER_MESSAGE} Provider pods must not start Chrome with child_process, Bun.spawn, or shell commands.`,
-	},
-	{
-		rule: "browser-self-hosted-remote-debugging-port",
-		pattern:
-			/(?:\b(?:google-chrome|chrome|chromium|chromium-browser)\b[\s\S]{0,240}--remote-debugging-port\b|--remote-debugging-port(?:=|\s+))/,
-		message: `${SELF_HOSTED_BROWSER_MESSAGE} Provider entrypoints, Dockerfiles, and scripts must not start Chrome with a remote debugging port; use the managed CDP Pool instead.`,
-	},
-	{
-		rule: "browser-direct-cdp-version-poll",
-		pattern: /\/json\/version\b/,
-		message: `${SELF_HOSTED_BROWSER_MESSAGE} Do not poll /json/version from provider code; the SDK manages CDP leases through APIFUSE__CDP_POOL__URL.`,
-	},
-	{
-		rule: "browser-provider-local-cdp-env",
-		pattern:
-			/\b(?!APIFUSE__CDP_POOL__URL\b)[A-Z][A-Z0-9_]*_CDP_URL\b|process\.env(?:\.(?!APIFUSE__CDP_POOL__URL\b)[A-Z0-9_]*_CDP_URL\b|\[\s*["'`](?!APIFUSE__CDP_POOL__URL\b)[A-Z0-9_]*_CDP_URL["'`]\s*\])/,
-		message: `${SELF_HOSTED_BROWSER_MESSAGE} Do not read provider-local CDP endpoint env vars including AMAZON_CDP_URL or custom *_CDP_URL names; production uses APIFUSE__CDP_POOL__URL through ctx.browser.`,
-	},
-];
-
-function lintSelfHostedBrowserPatterns(
-	provider: ProviderSourceLike,
-	options: ProviderLintOptions,
-): LintDiagnostic[] {
-	const diagnostics: LintDiagnostic[] = [];
-	const level = options.mode === "standalone" ? "warn" : "error";
-	const sources: Array<{ field: string; source: string }> = [];
-
-	if (provider.authFlowSource) {
-		sources.push({ field: "auth.flow", source: provider.authFlowSource });
-	}
-
-	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
-		sources.push({ field: `sourceFiles.${filePath}`, source });
-	}
-
-	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-		const source = getOperationSource(operation);
-		if (source) {
-			sources.push({
-				field: `operations.${operationKey}.handler`,
-				source,
-			});
-		}
-	}
-
-	for (const { field, source } of sources) {
-		for (const item of SELF_HOSTED_BROWSER_PATTERNS) {
-			item.pattern.lastIndex = 0;
-			if (!item.pattern.test(source)) {
-				continue;
-			}
-			diagnostics.push({
-				rule: item.rule,
-				level,
-				field,
-				message: item.message,
-			});
-		}
-	}
-
-	return diagnostics;
-}
-
 // Captures the constructor name so each rule can pick its own scope: the
 // undeclared-code rule keeps its historical ProviderError/ValidationError
 // surface, while the localization rules also cover AuthError.
@@ -1046,6 +899,11 @@ const UNDECLARED_CODE_ERROR_CLASSES: ReadonlySet<string> = new Set([
 ]);
 
 const TEST_SOURCE_FILE_PATTERN = /(?:^|\/)(?:__tests__|__mocks__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+// Broader than TEST_SOURCE_FILE_PATTERN: also covers a plain `tests/`
+// directory. Kept separate because merging the two would silently change what
+// the older source rules scan.
+const SHARED_TEST_SOURCE_FILE_PATTERN =
+	/(?:^|\/)(?:__tests__|__mocks__|tests)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const RECORDED_FIXTURE_SOURCE_FILE_PATTERN =
 	/(?:^|\/)__fixtures__(?:\/|$)|(?:^|\/)__tests__\/fixtures(?:\/|$)/;
 const JAVASCRIPT_SOURCE_FILE_PATTERN = /\.[cm]?[jt]sx?$/;
@@ -3249,7 +3107,7 @@ const SERVED_STALE_CACHE_OPERAND = "served_stale_cache";
 
 /**
  * Sources that describe behaviour rather than serve it. Mirrors the broadest
- * test-source predicate in the repository (`runtime-boundary-lint.ts:82`, which
+ * test-source predicate in this module (`SHARED_TEST_SOURCE_FILE_PATTERN`, which
  * covers a plain `tests/` directory and `__mocks__/` as well as `__tests__/`)
  * and adds recorded-fixture directories, so a mock that mentions
  * `staleIfErrorMs` cannot raise a warning about code the runtime never serves.
@@ -3258,8 +3116,7 @@ const NON_SERVING_SOURCE_FILE_PATTERN =
 	/(?:^|\/)(?:__tests__|__mocks__|__fixtures__|tests|fixtures)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
 /**
- * Operator tooling and bootstrap entrypoints, mirroring
- * `runtime-boundary-lint.ts`: a cache option used by a fixture recorder or a
+ * Operator tooling and bootstrap entrypoints: a cache option used by a fixture recorder or a
  * start script is not the request path a probe reads through.
  */
 const NON_SERVING_TOOLING_DIRECTORY_PATTERN = /^(?:scripts|tools|bin)\//;
@@ -4048,15 +3905,13 @@ export function lintProvider(
 		handle?: unknown;
 		state?: unknown;
 	},
-	options: ProviderLintOptions = {},
 ): LintDiagnostic[] {
-	return lintProviderWithInformation(provider, options).diagnostics;
+	return lintProviderWithInformation(provider).diagnostics;
 }
 
 /** Internal detailed result used by the CLI to render suppression audits. */
 export function lintProviderWithInformation(
 	provider: Parameters<typeof lintProvider>[0],
-	options: ProviderLintOptions = {},
 ): ProviderLintResult {
 	const diagnostics: LintDiagnostic[] = [
 		...lintAllowedHosts(provider.id, provider.allowedHosts),
@@ -4064,8 +3919,6 @@ export function lintProviderWithInformation(
 		...lintAuthModel(provider),
 		...lintStealthTransportUsage(provider),
 		...lintCredentialWriteUsage(provider),
-		...lintPlaywrightDirectImports(provider),
-		...lintSelfHostedBrowserPatterns(provider, options),
 		...lintBrowserVersionLiterals(provider),
 		...lintUndeclaredThrownErrorCodes(provider),
 		...lintThrownErrorRetryableConflicts(provider),
@@ -4077,11 +3930,6 @@ export function lintProviderWithInformation(
 		...lintHealthCheckMonitorability(provider),
 		...lintHealthCheckExpectedErrors(provider),
 	];
-	// Runtime boundary rules (process.env, node:fs/net/child_process, raw
-	// fetch) also yield information entries for `@apifuse-allow` acknowledgements.
-	const runtimeBoundary = lintRuntimeBoundary(getTypeScript(), provider, getOperationSource);
-	diagnostics.push(...runtimeBoundary.diagnostics);
-
 	if (provider.operations) {
 		const authMode = provider.auth?.mode;
 		for (const [operationKey, operation] of Object.entries(provider.operations)) {
@@ -4124,10 +3972,7 @@ export function lintProviderWithInformation(
 	}
 
 	if (!provider.operations) {
-		return withInformation(
-			applyPinnedWireFieldPaths(provider, diagnostics),
-			runtimeBoundary.information,
-		);
+		return applyPinnedWireFieldPaths(provider, diagnostics);
 	}
 
 	diagnostics.push(
@@ -4158,16 +4003,5 @@ export function lintProviderWithInformation(
 		),
 	);
 
-	return withInformation(
-		applyPinnedWireFieldPaths(provider, diagnostics),
-		runtimeBoundary.information,
-	);
-}
-
-function withInformation(
-	result: ProviderLintResult,
-	information: readonly ProviderLintInformation[],
-): ProviderLintResult {
-	if (information.length === 0) return result;
-	return { diagnostics: result.diagnostics, information: [...information, ...result.information] };
+	return applyPinnedWireFieldPaths(provider, diagnostics);
 }
