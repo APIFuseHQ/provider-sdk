@@ -27,7 +27,14 @@ import type { BrowserClient, ProviderContext } from "../src/types.js";
 
 const HELP_TEXT = `Usage: apifuse dev [path]
 Example: apifuse dev providers/korea-air-quality
-Default: apifuse dev .`;
+Default: apifuse dev .
+Options:
+  --metrics-port <n>  Port of the metrics listener (GET /metrics); default APIFUSE__PROVIDER_RUNTIME__METRICS_PORT, else 9090`;
+
+export type DevCliArgs = {
+	providerPath: string;
+	metricsPort?: number;
+};
 
 export async function main() {
 	const args = normalizeArgs(process.argv.slice(2));
@@ -37,7 +44,8 @@ export async function main() {
 		return;
 	}
 
-	const providerPath = resolveProviderPath(args[0] ?? ".");
+	const cliArgs = parseDevArgs(args);
+	const providerPath = resolveProviderPath(cliArgs.providerPath);
 	const providerModule = await import(resolve(providerPath, "index.ts"));
 	const provider = assertProviderDefinition(providerModule.default, providerPath);
 
@@ -47,7 +55,7 @@ export async function main() {
 	const { startDevServer } = await import("../src/dev.js");
 	const port = Number(process.env.APIFUSE__RUNTIME__PORT) || 3900;
 
-	startDevServer(provider, { port });
+	startDevServer(provider, { port, metricsPort: cliArgs.metricsPort });
 
 	console.log("\nEndpoints:");
 	console.log(`  GET  http://localhost:${port}/health`);
@@ -133,6 +141,55 @@ export function createProviderContext(provider: ProviderDefinition): {
 
 function normalizeArgs(argv: string[]): string[] {
 	return argv[0] === "dev" ? argv.slice(1) : argv;
+}
+
+/**
+ * Reads `--metrics-port <n>` / `--metrics-port=<n>` out of the arguments; the
+ * first remaining argument is the provider path, as before. Without the flag
+ * the metrics port is left to `serve` (env, else 9090).
+ */
+export function parseDevArgs(argv: string[]): DevCliArgs {
+	const positional: string[] = [];
+	let metricsPort: number | undefined;
+
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index];
+		if (arg === undefined) continue;
+
+		if (arg === "--metrics-port") {
+			metricsPort = parsePort(requireArgValue(argv, index, arg), arg);
+			index += 1;
+			continue;
+		}
+
+		if (arg.startsWith("--metrics-port=")) {
+			metricsPort = parsePort(arg.slice("--metrics-port=".length), "--metrics-port");
+			continue;
+		}
+
+		positional.push(arg);
+	}
+
+	return { providerPath: positional[0] ?? ".", metricsPort };
+}
+
+function requireArgValue(argv: string[], index: number, option: string): string {
+	const value = argv[index + 1];
+	if (!value) {
+		throw new Error(`Missing value for ${option}`);
+	}
+
+	return value;
+}
+
+/** 1 to 65535, the range `serve` accepts from APIFUSE__PROVIDER_RUNTIME__METRICS_PORT. */
+function parsePort(value: string, option: string): number {
+	const parsed = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+	if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) {
+		throw new Error(`Invalid value for ${option}: ${value}`);
+	}
+
+	return parsed;
 }
 
 function resolveProviderPath(inputPath: string): string {

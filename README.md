@@ -392,6 +392,8 @@ apifuse bounty-check [path]
 apifuse perf providers/korea-air-quality --operation realtime --params '{"stationName":"종로구"}'
 ```
 
+`apifuse dev` also starts the metrics listener (`GET /metrics`) on `APIFUSE__PROVIDER_RUNTIME__METRICS_PORT`, else `9090`; pass `--metrics-port <n>` to give a second dev server on the same host its own port.
+
 `apifuse record` is for real upstream-backed operations that call the upstream
 through `ctx.http` or `ctx.stealth`. Absolute request URLs need no declaration; a
 relative URL resolves the way `serve` resolves it — against the operation's

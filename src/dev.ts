@@ -4,6 +4,12 @@ import type { ProviderDefinition } from "./types.js";
 
 export interface DevServerOptions {
 	port?: number;
+	/**
+	 * Port of the metrics listener, passed to `serve` as `ServeOptions.metricsPort`.
+	 * Unset keeps `serve`'s default (APIFUSE__PROVIDER_RUNTIME__METRICS_PORT, else
+	 * 9090), so a second dev server on the same host needs its own port here.
+	 */
+	metricsPort?: number;
 	sessionDbPath?: string;
 	/** Override the default in-process engine attachment. */
 	engine?: ProviderEngine;
@@ -23,6 +29,7 @@ export function createDevServer(
 			// state backend, so fall back to memory state when none is configured.
 			void serve(provider, {
 				port,
+				metricsPort: options?.metricsPort,
 				engine: options?.engine,
 				engineMode: options?.engineMode,
 				allowMemoryStateFallback: true,
