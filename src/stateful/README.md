@@ -36,7 +36,12 @@ the following compatibility-sensitive behavior:
   the bound one. Expose it to Prometheus as a Service port named `metrics`, so the primary port can
   keep admitting the gateway only. The listener renders one process-wide registry, which a
   `StatefulSessionRouter` built without a `metricEmitter` counts into, so the routing counters
-  (`apifuse_stateful_provider_routing_*_total`) come out without wiring. Only the labels
+  (`apifuse_stateful_provider_routing_*_total`) come out without wiring. Provider code that counts
+  its own names from the closed set, such as a write ledger's
+  `apifuse_stateful_provider_write_ledger_*_total`, passes the same registry,
+  `statefulProviderMetricRegistry` from this entry point, as its components' `metricEmitter`. It is
+  typed as a `StatefulProviderMetricEmitter` and exposes only `increment`, `gauge` and `observe`;
+  it drops a call outside the closed set or the name's kind instead of throwing. Only the labels
   `providerId`, `operationId`, `redactedErrorCode`, `eventType`, `subjectKind`, `capacityClass`,
   `ledgerState` and `healthStatus` are exported; request, session, tenant, owner-pod and generation
   identifiers are dropped before storage, and Prometheus adds `pod` and `instance`. A process that

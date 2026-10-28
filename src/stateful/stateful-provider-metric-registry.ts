@@ -11,9 +11,10 @@ import {
  * keeps counters, gauges and histograms in memory and renders them in the
  * Prometheus text exposition format. It is the default emitter of a
  * `StatefulSessionRouter` built without one, and every `serve()` in the
- * process renders it on its metrics listener (`/metrics`). Not re-exported
- * from the package entry points: providers reach it only through the router
- * default and the listener.
+ * process renders it on its metrics listener (`/metrics`). The package
+ * exports only its emitter view, `statefulProviderMetricRegistryEmitter`
+ * (as `statefulProviderMetricRegistry`); the class, the tables, the
+ * class-typed singleton, `render()` and `reset()` stay inside the SDK.
  */
 
 export type StatefulProviderMetricKind = "counter" | "gauge" | "histogram";
@@ -318,3 +319,32 @@ export class StatefulProviderMetricRegistry implements StatefulProviderMetricEmi
  * into it, and every `serve()` metrics listener in the process renders it.
  */
 export const statefulProviderMetricRegistry = new StatefulProviderMetricRegistry();
+
+/**
+ * The process's stateful metric registry, as the `metricEmitter` a provider
+ * passes to its own components (for example a write ledger counting
+ * `apifuse_stateful_provider_write_ledger_*_total`). There is one per
+ * process: a `StatefulSessionRouter` built without a `metricEmitter` counts
+ * into the same registry, and the metrics listener every `serve()` starts
+ * renders it on `GET /metrics`, so what a provider emits here is scraped
+ * next to the routing counters. It stores only names in the closed
+ * `STATEFUL_PROVIDER_METRIC_NAMES` set, each through the method of its kind
+ * (`_total` counters through `increment`, `_ms` histograms through
+ * `observe`, the two gauges through `gauge`), and of the labels it is given
+ * keeps only `providerId`, `operationId`, `redactedErrorCode`, `eventType`,
+ * `subjectKind`, `capacityClass`, `ledgerState` and `healthStatus`. It never
+ * throws: an unknown name, a method that does not match the name's kind, a
+ * value that is not finite, or a negative count or observation is dropped.
+ * Only the three emitter methods are reachable, so provider code cannot
+ * render or reset the pod's metrics.
+ *
+ * The stateful entry point exports it as `statefulProviderMetricRegistry`;
+ * inside the SDK that name is the class-typed registry above.
+ */
+export const statefulProviderMetricRegistryEmitter: StatefulProviderMetricEmitter =
+	Object.freeze<StatefulProviderMetricEmitter>({
+		increment: (name, labels, value) =>
+			statefulProviderMetricRegistry.increment(name, labels, value),
+		gauge: (name, labels, value) => statefulProviderMetricRegistry.gauge(name, labels, value),
+		observe: (name, labels, value) => statefulProviderMetricRegistry.observe(name, labels, value),
+	});
