@@ -12,6 +12,7 @@ import {
 	type ProxyAttemptRecord,
 	type ProxyVendorSelector,
 } from "./proxy-vendor-selector.js";
+import { proxyAttemptHash } from "./proxy-telemetry.js";
 import { ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
@@ -824,13 +825,15 @@ async function resolveNativeProxyConfig(
 }
 
 /**
- * Hand one transport attempt's outcome to the selector that served the
- * request and append it to the request's history. An attempt whose response
- * reached the origin is `ok` for the vendor session whatever the status; only
- * a transport failure is `error`.
+ * Record one transport attempt of a policy-managed request: the proxy attempt
+ * sample (the same fields ctx.stealth records), the request's history, and the
+ * outcome reported to the selector that served the request. An attempt whose
+ * response reached the origin is `ok` for the vendor session whatever the
+ * status; only a transport failure is `error`.
  */
 function reportNativeProxyAttempt(
 	request: HttpProxyAttemptContext,
+	clientOptions: HttpClientOptions,
 	resolvedProxy: ResolvedProxyConfig | undefined,
 	attempt: number,
 	startedAt: number,
@@ -841,6 +844,20 @@ function reportNativeProxyAttempt(
 	const vendor = vendorFromResolvedSource(resolvedProxy?.source);
 	if (!vendor || !resolvedProxy?.url) return;
 	const now = Date.now();
+	const proxyHash = proxyAttemptHash(resolvedProxy.url, resolvedProxy.sessionId);
+	try {
+		clientOptions.telemetry?.recordProxyAttempt?.({
+			provider: vendor,
+			attempt: attempt + 1,
+			...(proxyHash ? { proxyHash } : {}),
+			outcome,
+			...(errorCode ? { errorCode } : {}),
+			...(status === undefined ? {} : { status }),
+			durationMs: Math.max(0, now - startedAt),
+		});
+	} catch {
+		// Telemetry cannot fail the request it observes.
+	}
 	request.history.push({ vendor, outcome, ...(errorCode ? { errorCode } : {}) });
 	try {
 		request.vendorSelector.report({
@@ -974,6 +991,7 @@ async function fetchNativeHttp(
 		observeProxy?.(Boolean(proxy), response.status);
 		reportNativeProxyAttempt(
 			proxyAttemptContext,
+			clientOptions,
 			resolvedProxy,
 			proxyAttemptOffset,
 			attemptStartedAt,
@@ -1029,6 +1047,7 @@ async function fetchNativeHttp(
 		transportError.proxyUsed = Boolean(proxy);
 		reportNativeProxyAttempt(
 			proxyAttemptContext,
+			clientOptions,
 			resolvedProxy,
 			proxyAttemptOffset,
 			attemptStartedAt,

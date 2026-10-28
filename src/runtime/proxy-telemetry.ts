@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
 	ProxyAttemptTelemetryEvent,
 	ProxyCacheStatus,
@@ -17,6 +19,31 @@ import {
 import { createTraceContext } from "./trace.js";
 
 export { PROVIDER_TELEMETRY_HEADER } from "./request-telemetry.js";
+
+/**
+ * `proxyHash` of one attempt: a bounded, non-reversible identifier of its
+ * egress. It covers the proxy scheme and host and, when the URL carries one,
+ * the vendor session id: a gateway vendor serves every session from one host
+ * (smartproxy on a fixed port), so the session is what tells two attempts
+ * apart. Credentials never enter the hash.
+ */
+export function proxyAttemptHash(
+	proxyUrl: string | undefined,
+	sessionId?: string,
+): string | undefined {
+	if (!proxyUrl) return undefined;
+	let endpoint: string;
+	try {
+		const parsed = new URL(proxyUrl);
+		endpoint = `${parsed.protocol}//${parsed.host}`;
+	} catch {
+		return createHash("sha256").update(proxyUrl).digest("hex").slice(0, 12);
+	}
+	return createHash("sha256")
+		.update(sessionId ? `${endpoint}#${sessionId}` : endpoint)
+		.digest("hex")
+		.slice(0, 12);
+}
 
 declare const PROXY_HASH: unique symbol;
 /** Bounded hexadecimal host hash used in proxy attempt samples. */

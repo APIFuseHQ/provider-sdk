@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Cookie } from "tough-cookie";
 import type {
 	BrowserProfile,
@@ -77,6 +77,7 @@ import {
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
+import { proxyAttemptHash } from "./proxy-telemetry.js";
 import { redirectHopHeaders } from "./redirect-hop-headers.js";
 import {
 	evaluateRedirectHop,
@@ -1135,19 +1136,6 @@ type ResolvedAttemptProxy = {
 	lifetimeMinutes?: number;
 };
 
-function proxyEndpointHash(proxyUrl: string | undefined): string | undefined {
-	if (!proxyUrl) return undefined;
-	try {
-		const parsed = new URL(proxyUrl);
-		return createHash("sha256")
-			.update(`${parsed.protocol}//${parsed.host}`)
-			.digest("hex")
-			.slice(0, 12);
-	} catch {
-		return createHash("sha256").update(proxyUrl).digest("hex").slice(0, 12);
-	}
-}
-
 function getProxyTunnelStatus(error: unknown): number | undefined {
 	if (isRecord(error)) {
 		const status = error.status;
@@ -1814,7 +1802,7 @@ function createSessionFetcher(
 			}
 			return {
 				url: bound.proxyUrl,
-				proxyHash: proxyEndpointHash(bound.proxyUrl),
+				proxyHash: proxyAttemptHash(bound.proxyUrl, bound.sessionId),
 				vendor: bound.vendor,
 				...(bound.sessionId ? { sessionId: bound.sessionId } : {}),
 				lifetimeMinutes: bound.lifetimeMinutes,
@@ -1850,7 +1838,7 @@ function createSessionFetcher(
 
 		return {
 			url: resolvedProxy.url,
-			proxyHash: proxyEndpointHash(resolvedProxy.url),
+			proxyHash: proxyAttemptHash(resolvedProxy.url, resolvedProxy.sessionId),
 			vendor: vendorFromResolvedSource(resolvedProxy.source),
 			...(resolvedProxy.sessionId ? { sessionId: resolvedProxy.sessionId } : {}),
 			...(resolvedProxy.lifetimeMinutes === undefined

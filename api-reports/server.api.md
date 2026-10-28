@@ -6437,8 +6437,8 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1948:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1949:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:83:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:92:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:91:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:100:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:18:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:191:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:214:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts

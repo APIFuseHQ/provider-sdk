@@ -29,7 +29,20 @@ type Wire = {
 			sessionId?: string;
 		}[];
 	};
-	httpRotating: { status: number; body: { path: string; viaGateway: boolean }; hits: GatewayHit[] };
+	httpRotating: {
+		status: number;
+		body: { path: string; viaGateway: boolean };
+		hits: GatewayHit[];
+		attempts: {
+			provider: string;
+			attempt: number;
+			proxyHash?: string;
+			outcome: string;
+			errorCode?: string;
+			status?: number;
+		}[];
+		attemptSamples: { a: number; h?: string; o: string; c?: string; s?: number }[];
+	};
 	sticky: {
 		epochBefore: number;
 		epochAfter: number;
@@ -141,6 +154,25 @@ describe("operational assembly: smartproxy gateway sessions on the real transpor
 		const [refused, passed] = httpRotating.hits.map((hit) => tokens(hit.username));
 		expect(refused?.session).not.toBe(passed?.session);
 		expect(httpRotating.hits.every((hit) => hit.password === "s3cret")).toBe(true);
+	});
+
+	it("ctx.http records each proxy attempt with a hash that tells the two sessions apart", () => {
+		const { attempts, attemptSamples } = wire.httpRotating;
+		expect(attempts.map(({ provider, attempt, outcome }) => [provider, attempt, outcome])).toEqual([
+			["smartproxy", 1, "error"],
+			["smartproxy", 2, "ok"],
+		]);
+		expect(attempts[0]?.errorCode).toBeString();
+		expect(attempts[1]?.status).toBe(200);
+		const [refused, passed] = attempts.map((attempt) => attempt.proxyHash);
+		expect(refused).toMatch(/^[0-9a-f]{12}$/);
+		expect(passed).toMatch(/^[0-9a-f]{12}$/);
+		// One gateway host and port for both: only the session id differs.
+		expect(refused).not.toBe(passed);
+		expect(attemptSamples.map(({ a, h, o }) => [a, h, o])).toEqual([
+			[1, refused, "error"],
+			[2, passed, "ok"],
+		]);
 	});
 
 	it("keeps one session per affinity key and lifetime window, and moves a retry to the next one", () => {

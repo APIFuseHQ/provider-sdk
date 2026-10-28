@@ -9277,8 +9277,8 @@ export { z }
 // dist/lint.d.ts:58:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:97:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:83:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:92:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:91:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:100:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:67:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:71:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:189:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts

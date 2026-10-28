@@ -869,7 +869,17 @@ describe("proxy integration", () => {
 				attempts: 1,
 			}),
 		);
-		expect(attempts).toEqual([]);
+		// ctx.http records the same per-attempt sample as ctx.stealth.
+		expect(attempts).toEqual([
+			{
+				provider: "smartproxy",
+				attempt: 1,
+				proxyHash: expect.stringMatching(/^[0-9a-f]{12}$/),
+				outcome: "ok",
+				status: 200,
+				durationMs: expect.any(Number),
+			},
+		]);
 	});
 
 	it("advances a ctx.http transport failure across the vendor chain into nodemaven", async () => {

@@ -185,6 +185,8 @@ mock.module("wreq-js", () => ({
 const { createStealthClient } = await import("../../runtime/stealth.js");
 const { createHttpClient } = await import("../../runtime/http.js");
 const { staticOrderProxyVendorSelector } = await import("../../runtime/proxy-vendor-selector.js");
+const { ProxyTelemetryCollector } = await import("../../runtime/proxy-telemetry.js");
+type ProxyAttemptTelemetryEvent = import("../../config/loader.js").ProxyAttemptTelemetryEvent;
 const { defineProvider } = await import("../../define.js");
 const { createServerApp } = await import("../../server/serve.js");
 type ProxyAttemptRequest = import("../../runtime/proxy-vendor-selector.js").ProxyAttemptRequest;
@@ -255,15 +257,39 @@ async function stealthRotatingRetry() {
 }
 
 async function httpRotatingRetry() {
+	const attempts: ProxyAttemptTelemetryEvent[] = [];
+	const collector = new ProxyTelemetryCollector();
 	const client = createHttpClient(originUrl, {
 		upstream: { proxy: rotatingPolicy },
 		gatewayOverrides,
 		warn: () => undefined,
+		telemetry: {
+			recordProxyResolution(event) {
+				collector.recordProxyResolution(event);
+			},
+			recordProxyAttempt(event) {
+				attempts.push(event);
+				collector.recordProxyAttempt(event);
+			},
+		},
 	});
 	const start = gatewayHits.length;
 	refuseNext = 1;
 	const response = await client.get("/http-rotating");
-	return { status: response.status, body: response.data, hits: hitsSince(start) };
+	return {
+		status: response.status,
+		body: response.data,
+		hits: hitsSince(start),
+		attempts: attempts.map(({ provider, attempt, proxyHash, outcome, errorCode, status }) => ({
+			provider,
+			attempt,
+			proxyHash,
+			outcome,
+			errorCode,
+			status,
+		})),
+		attemptSamples: collector.toLogPayload()?.attemptSamples ?? [],
+	};
 }
 
 const STICKY_LIFETIME_MINUTES = 120;
