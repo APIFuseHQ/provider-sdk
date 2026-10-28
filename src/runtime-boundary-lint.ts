@@ -3,21 +3,23 @@
  * boundary (`process-env-direct-read`, `node-runtime-module-import`,
  * `direct-fetch-call`). The boundary is now judged at build time by
  * `bundleProvider` (`src/cli/bundle.ts`); these entry points keep the old
- * signatures working for one release by materialising the given sources into a
- * temporary provider checkout, running `bundleProvider` on it, and mapping each
- * `BoundaryViolation` to the old diagnostic shape (`field:
- * "sourceFiles.<file>"`, the nearest old rule id, lines in the message).
+ * signatures and the old contract working for one release: the given sources
+ * are materialised into a temporary directory, every file the old scope
+ * filter kept is a graph root, the graph is judged with `bundleSourceSet`,
+ * and each `BoundaryViolation` is mapped to the old diagnostic shape (`field:
+ * "sourceFiles.<file>"`, the nearest old rule id, lines in the message), with
+ * `// @apifuse-allow <rule>` acknowledgements reported as `information`.
  *
  * Everything in this module is removed in the next major.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { BoundaryViolation, ProviderBundle } from "./cli/bundle.js";
-import type { LintDiagnostic, ProviderLintMode, ProviderLintResult } from "./lint.js";
+import type { LintDiagnostic, ProviderLintInformation, ProviderLintMode, ProviderLintResult } from "./lint.js";
 import type { TypeScriptCompilerModuleLike } from "./typescript-module.js";
 
 /** @deprecated The boundary is judged by `bundleProvider`; rule ids are gone with the next major. */
@@ -48,9 +50,22 @@ export type LintRuntimeBoundarySourcesOptions = {
 	typescript?: TypeScriptCompilerModuleLike;
 };
 
-const PROVIDER_ENTRY_FILE = "index.ts";
+/** Root-relative file that imports every root; written into the temporary directory. */
+const ROOTS_FILE = ".apifuse-runtime-boundary-roots.ts";
 const ENV_OBJECT_PATHS: ReadonlySet<string> = new Set(["process.env", "import.meta.env", "Bun.env"]);
 const GLOBAL_OBJECT_ALIAS_PATTERN = /^(?:globalThis|global|self)\./;
+
+// The scope the retired rules judged: runtime source minus tests, recorded
+// fixtures, declarations, the root bootstrap files and operator tooling.
+const BOOTSTRAP_ENTRYPOINT_FILE_PATTERN = /^(?:dev|start|deploy)\.[cm]?[jt]sx?$/;
+const TOOLING_DIRECTORY_PATTERN = /^(?:scripts|tools|bin)\//;
+const TEST_SOURCE_FILE_PATTERN = /(?:^|\/)(?:__tests__|__mocks__|tests)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const RECORDED_FIXTURE_SOURCE_FILE_PATTERN = /(?:^|\/)__fixtures__(?:\/|$)|(?:^|\/)__tests__\/fixtures(?:\/|$)/;
+const JAVASCRIPT_SOURCE_FILE_PATTERN = /\.[cm]?[jt]sx?$/;
+const DECLARATION_FILE_PATTERN = /\.d\.[cm]?ts$/;
+
+const COMMENT_ONLY_LINE_PATTERN = /^\s*(?:\/\/|\/\*|\*)/;
+const ALLOW_COMMENT_PATTERN = /@apifuse-allow\s+([a-z][a-z0-9-]*)\b(?:\s*:\s*(.*?))?\s*(?:\*\/)?\s*$/;
 
 let warnedLintRuntimeBoundarySources = false;
 
@@ -59,6 +74,18 @@ function warnOnce(): void {
 	warnedLintRuntimeBoundarySources = true;
 	console.warn(
 		"[@apifuse/provider-sdk] lintRuntimeBoundarySources is deprecated and is removed in the next major: call bundleProvider(providerRoot, { mode }) on the provider checkout instead.",
+	);
+}
+
+function isRuntimeBoundarySourceFile(relativePath: string): boolean {
+	const normalized = relativePath.replace(/^\.\//, "");
+	return (
+		JAVASCRIPT_SOURCE_FILE_PATTERN.test(normalized) &&
+		!DECLARATION_FILE_PATTERN.test(normalized) &&
+		!TEST_SOURCE_FILE_PATTERN.test(normalized) &&
+		!RECORDED_FIXTURE_SOURCE_FILE_PATTERN.test(normalized) &&
+		!BOOTSTRAP_ENTRYPOINT_FILE_PATTERN.test(normalized) &&
+		!TOOLING_DIRECTORY_PATTERN.test(normalized)
 	);
 }
 
@@ -76,24 +103,23 @@ function assertMaterialisablePath(path: string): void {
 
 function workerPath(): string {
 	const here = dirname(fileURLToPath(import.meta.url));
-	const source = join(here, "cli", "bundle-worker.ts");
-	return existsSync(source) ? source : join(here, "cli", "bundle-worker.js");
+	return join(here, "cli", import.meta.url.endsWith(".ts") ? "bundle-worker.ts" : "bundle-worker.js");
 }
 
-function bundleProviderSync(providerRoot: string, mode: ProviderLintMode): ProviderBundle {
+function bundleSourceSetSync(providerRoot: string, mode: ProviderLintMode): ProviderBundle {
 	if (typeof Bun === "undefined") {
 		throw new Error(
 			"lintRuntimeBoundarySources needs the Bun runtime: the boundary is judged by bundling the provider with Bun.build.",
 		);
 	}
 	const result = Bun.spawnSync({
-		cmd: [process.execPath, workerPath(), providerRoot, mode],
+		cmd: [process.execPath, workerPath(), providerRoot, mode, ROOTS_FILE],
 		stdout: "pipe",
 		stderr: "pipe",
 	});
 	if (result.exitCode !== 0) {
 		throw new Error(
-			`lintRuntimeBoundarySources: bundleProvider failed (exit ${result.exitCode}): ${result.stderr.toString().trim()}`,
+			`lintRuntimeBoundarySources: bundleSourceSet failed (exit ${result.exitCode}): ${result.stderr.toString().trim()}`,
 		);
 	}
 	return JSON.parse(result.stdout.toString()) as ProviderBundle;
@@ -112,10 +138,35 @@ function legacyRule(violation: BoundaryViolation): RuntimeBoundaryRule {
 	return NODE_RUNTIME_MODULE_IMPORT_RULE;
 }
 
-function legacyDiagnostics(violations: readonly BoundaryViolation[]): LintDiagnostic[] {
+/** A trailing `@apifuse-allow <rule>` on the finding line, or a comment-only line directly above it. */
+function readAllowComment(source: string | undefined, line: number, rule: RuntimeBoundaryRule): string | undefined {
+	if (source === undefined || line < 1) return undefined;
+	const lines = source.split(/\r?\n/);
+	const current = lines[line - 1];
+	const previous = lines[line - 2];
+	const candidates = [current, previous?.match(COMMENT_ONLY_LINE_PATTERN) ? previous : undefined];
+	for (const candidate of candidates) {
+		if (candidate === undefined) continue;
+		const match = ALLOW_COMMENT_PATTERN.exec(candidate);
+		if (match && match[1] === rule) return match[2]?.trim() || "(no reason given)";
+	}
+	return undefined;
+}
+
+function legacyResult(files: Record<string, string>, violations: readonly BoundaryViolation[]): ProviderLintResult {
 	const groups = new Map<string, { file: string; rule: RuntimeBoundaryRule; items: BoundaryViolation[] }>();
+	const information: ProviderLintInformation[] = [];
 	for (const violation of violations) {
 		const rule = legacyRule(violation);
+		const reason = readAllowComment(files[violation.file], violation.line, rule);
+		if (reason !== undefined) {
+			information.push({
+				rule,
+				field: `sourceFiles.${violation.file}`,
+				message: `Acknowledged ${violation.subject} at line ${violation.line}. Reason: ${reason}`,
+			});
+			continue;
+		}
 		const key = `${violation.file}\u0000${rule}`;
 		const group = groups.get(key) ?? { file: violation.file, rule, items: [] };
 		group.items.push(violation);
@@ -138,7 +189,7 @@ function legacyDiagnostics(violations: readonly BoundaryViolation[]): LintDiagno
 			message: `${subjects}: ${first.message}`,
 		});
 	}
-	return diagnostics;
+	return { diagnostics, information };
 }
 
 /**
@@ -148,12 +199,15 @@ function legacyDiagnostics(violations: readonly BoundaryViolation[]): LintDiagno
  * @deprecated The boundary is judged at build time. Call
  * `bundleProvider(providerRoot, { mode })` on the provider checkout and read
  * its `BoundaryViolation`s (file, line, column, subject). This shim writes
- * `files` to a temporary directory, runs `bundleProvider` on it (graph rooted
- * at `index.ts` and `start.ts`; with no `index.ts` nothing is judged) and maps
- * each violation to the old diagnostic shape (`field: "sourceFiles.<file>"`,
- * nearest old rule id, lines in the message). There is no `@apifuse-allow`
- * acknowledgement, so `information` is always empty. `options.typescript` is
- * ignored. Removed in the next major.
+ * `files` to a temporary directory, roots the module graph at every supplied
+ * file the retired rules judged (not tests, recorded fixtures, `.d.ts`, the
+ * root `dev.ts`/`start.ts`/`deploy.ts`, `scripts/`, `tools/`, `bin/`), loads
+ * a relative import the set lacks as an empty module, keeps an unused value
+ * import as a reach, and maps each violation to the old diagnostic shape
+ * (`field: "sourceFiles.<file>"`, nearest old rule id, lines in the message).
+ * `// @apifuse-allow <rule>: <reason>` on the finding line or the line above
+ * still moves a finding to `information` here; `apifuse check` has no such
+ * acknowledgement. `options.typescript` is ignored. Removed in the next major.
  */
 export function lintRuntimeBoundarySources(
 	files: Record<string, string>,
@@ -162,15 +216,28 @@ export function lintRuntimeBoundarySources(
 	void options;
 	warnOnce();
 	for (const path of Object.keys(files)) assertMaterialisablePath(path);
-	if (!Object.hasOwn(files, PROVIDER_ENTRY_FILE)) return { diagnostics: [], information: [] };
+	const roots = Object.keys(files).filter(isRuntimeBoundarySourceFile);
+	if (roots.length === 0) return { diagnostics: [], information: [] };
 	const root = mkdtempSync(join(tmpdir(), "apifuse-runtime-boundary-"));
 	try {
 		for (const [path, source] of Object.entries(files)) {
 			mkdirSync(dirname(join(root, path)), { recursive: true });
 			writeFileSync(join(root, path), source);
 		}
-		const bundle = bundleProviderSync(root, "official");
-		return { diagnostics: legacyDiagnostics(bundle.violations), information: [] };
+		// Namespace imports re-exported from the root keep every export of every
+		// root alive; a bare side-effect import would let the bundler drop an
+		// exported function nobody calls, and the reach inside it with it.
+		writeFileSync(
+			join(root, ROOTS_FILE),
+			roots
+				.map((path, index) => `import * as root${index} from "./${path}";\nexport { root${index} };\n`)
+				.join(""),
+		);
+		const bundle = bundleSourceSetSync(root, "official");
+		return legacyResult(
+			files,
+			bundle.violations.filter((violation) => violation.file !== ROOTS_FILE),
+		);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

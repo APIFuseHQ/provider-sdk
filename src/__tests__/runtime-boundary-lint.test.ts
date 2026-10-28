@@ -3,6 +3,8 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { lintProvider } from "../lint.js";
 import { lintRuntimeBoundarySources, RUNTIME_BOUNDARY_RULES } from "../runtime-boundary-lint.js";
 
+// Assembled at runtime so the SDK's own env-reference scanner does not take
+// the fixture's reads for the SDK's; the expectations below read `process.env`.
 const PROCESS_ENV = ["process", "env"].join(".");
 
 describe("lintRuntimeBoundarySources (deprecated shim)", () => {
@@ -48,13 +50,84 @@ describe("lintRuntimeBoundarySources (deprecated shim)", () => {
 		}
 	});
 
-	it("judges nothing without an index.ts root and refuses paths outside the provider root", () => {
+	it("roots the graph at every supplied in-scope file, so a file nothing imports is still judged", () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		try {
-			expect(lintRuntimeBoundarySources({ "upstream/x.ts": `export const token = ${PROCESS_ENV}.FOO;` })).toEqual({
+			const result = lintRuntimeBoundarySources({
+				"upstream/x.ts": `export const token = ${PROCESS_ENV}.FOO;`,
+				"upstream/fs.ts": `import { readFile } from "node:fs/promises";`,
+				"upstream/serving.ts": `export function forwarding(options: { env?: Record<string, string | undefined> }) {\n  return options.env ?? ${PROCESS_ENV};\n}`,
+				"start.ts": `export const port = ${PROCESS_ENV}.NOT_BOOTSTRAP;`,
+				"scripts/record.ts": `import { writeFile } from "node:fs/promises";\nexport { writeFile };`,
+				"bin/x.ts": 'await fetch("https://example.com");',
+				"__tests__/a.test.ts": `export const raw = ${PROCESS_ENV}.FIXTURE_TOKEN;`,
+				"types.d.ts": `declare const token: typeof ${PROCESS_ENV}.TOKEN;`,
+			});
+
+			expect(result.diagnostics.map((diagnostic) => [diagnostic.field, diagnostic.rule, diagnostic.message.split(": ")[0]])).toEqual([
+				["sourceFiles.upstream/fs.ts", "node-runtime-module-import", "node:fs/promises (line 1)"],
+				["sourceFiles.upstream/serving.ts", "process-env-direct-read", `${PROCESS_ENV} (line 2)`],
+				["sourceFiles.upstream/x.ts", "process-env-direct-read", `${PROCESS_ENV}.FOO (line 1)`],
+			]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("loads a relative import the file set lacks as an empty module instead of failing the build", () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const result = lintRuntimeBoundarySources({
+				"index.ts": [
+					'import fixture from "./__fixtures__/generated/fare.json";',
+					'import { fare } from "./data.json";',
+					'import pkg from "./package.json";',
+					'import blob from "./assets/x.asset";',
+					'import { helper } from "./not-supplied";',
+					`export const all = [fixture, fare, pkg.version, blob, helper, ${PROCESS_ENV}.FOO];`,
+				].join("\n"),
+			});
+
+			expect(result.diagnostics.map((diagnostic) => [diagnostic.field, diagnostic.rule, diagnostic.message.split(": ")[0]])).toEqual([
+				["sourceFiles.index.ts", "process-env-direct-read", `${PROCESS_ENV}.FOO (line 6)`],
+			]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("moves an acknowledged finding to information, as the retired rules did", () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const result = lintRuntimeBoundarySources({
+				"upstream/x.ts": [
+					"// @apifuse-allow process-env-direct-read: bootstrap mirror, removed in #1",
+					`export const token = ${PROCESS_ENV}.FOO;`,
+					`export const other = ${PROCESS_ENV}.BAR; // @apifuse-allow direct-fetch-call: wrong rule`,
+				].join("\n"),
+			});
+
+			expect(result.information).toEqual([
+				{
+					rule: "process-env-direct-read",
+					field: "sourceFiles.upstream/x.ts",
+					message: `Acknowledged ${PROCESS_ENV}.FOO at line 2. Reason: bootstrap mirror, removed in #1`,
+				},
+			]);
+			expect(result.diagnostics.map((diagnostic) => diagnostic.message.split(": ")[0])).toEqual([`${PROCESS_ENV}.BAR (line 3)`]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("judges nothing without an in-scope file and refuses paths outside the provider root", () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			expect(lintRuntimeBoundarySources({ "scripts/record.ts": `export const token = ${PROCESS_ENV}.FOO;` })).toEqual({
 				diagnostics: [],
 				information: [],
 			});
+			expect(lintRuntimeBoundarySources({})).toEqual({ diagnostics: [], information: [] });
 			expect(() => lintRuntimeBoundarySources({ "index.ts": "export {};", "../escape.ts": "export {};" })).toThrow(
 				"not a provider-root-relative file path",
 			);

@@ -51,10 +51,10 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isBuiltin } from "node:module";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import type { ProviderLintMode } from "../lint.js";
-import { getTypeScript, type TypeScriptModule } from "../typescript-module.js";
+import { getTypeScript, scriptKindForSourceFile, type TypeScriptModule } from "../typescript-module.js";
 
 export type BoundaryViolationKind = "module" | "global" | "dynamic-import" | "build";
 
@@ -563,15 +563,96 @@ export async function bundleProvider(
 	providerRoot: string,
 	options: BundleProviderOptions = {},
 ): Promise<ProviderBundle> {
-	const mode = options.mode ?? "official";
 	const root = resolve(providerRoot);
 	const entry = resolve(root, PROVIDER_ENTRY_FILE);
 	if (!existsSync(entry)) {
 		throw new Error(`Provider entry not found: ${entry}`);
 	}
 	const podEntry = resolve(root, POD_ENTRY_FILE);
-	const entrypoints = existsSync(podEntry) ? [entry, podEntry] : [entry];
+	return bundleGraph(root, {
+		mode: options.mode ?? "official",
+		entrypoints: existsSync(podEntry) ? [entry, podEntry] : [entry],
+		sourceSet: false,
+	});
+}
 
+/**
+ * Judge a file set rather than a checkout, for the deprecated
+ * `lintRuntimeBoundarySources` shim: `entry` is a root-relative file that
+ * imports every file to judge. A relative import the root lacks (a `.json`,
+ * an asset, a file the caller did not supply) loads as an empty module
+ * instead of failing the build, and a value import the TypeScript transpiler
+ * would drop as unused still counts as a reach, as it did for the source
+ * rules this replaces. Not part of the package entry points; removed with the
+ * shim in the next major.
+ */
+export async function bundleSourceSet(
+	providerRoot: string,
+	entry: string,
+	mode: ProviderLintMode,
+): Promise<ProviderBundle> {
+	const root = resolve(providerRoot);
+	return bundleGraph(root, { mode, entrypoints: [resolve(root, entry)], sourceSet: true });
+}
+
+const MISSING_MODULE_NAMESPACE = "apifuse-missing";
+const RESOLVABLE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
+const TYPESCRIPT_SOURCE_PATTERN = /\.[cm]?tsx?$/;
+
+/** True when a relative or absolute specifier resolves to something on disk. */
+function relativeImportExists(importer: string, specifier: string): boolean {
+	const base = isAbsolute(specifier) ? specifier : resolve(dirname(importer), specifier);
+	if (existsSync(base)) return true;
+	return (
+		RESOLVABLE_EXTENSIONS.some((extension) => existsSync(base + extension)) ||
+		RESOLVABLE_EXTENSIONS.some((extension) => existsSync(resolve(base, `index${extension}`)))
+	);
+}
+
+/**
+ * Append `import "<specifier>";` on the same line as every value import or
+ * re-export, so the bundler keeps the reach of a binding nobody uses. Lines
+ * are unchanged, so the source map still names the original line.
+ */
+function keepValueImports(ts: TypeScriptModule, fileName: string, source: string): string {
+	const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, false, scriptKindForSourceFile(ts, fileName));
+	const insertions: Array<{ offset: number; specifier: string }> = [];
+	for (const statement of sourceFile.statements) {
+		let specifier: string | undefined;
+		if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+			const clause = statement.importClause;
+			const typeOnly =
+				clause?.isTypeOnly === true ||
+				(clause?.namedBindings !== undefined &&
+					ts.isNamedImports(clause.namedBindings) &&
+					clause.name === undefined &&
+					clause.namedBindings.elements.length > 0 &&
+					clause.namedBindings.elements.every((element) => element.isTypeOnly));
+			if (!typeOnly) specifier = statement.moduleSpecifier.text;
+		} else if (
+			ts.isExportDeclaration(statement) &&
+			statement.moduleSpecifier &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			!statement.isTypeOnly
+		) {
+			specifier = statement.moduleSpecifier.text;
+		}
+		if (specifier !== undefined) insertions.push({ offset: statement.end, specifier });
+	}
+	let text = source;
+	for (const { offset, specifier } of insertions.reverse()) {
+		text = `${text.slice(0, offset)} import ${JSON.stringify(specifier)};${text.slice(offset)}`;
+	}
+	return text;
+}
+
+type GraphOptions = {
+	mode: ProviderLintMode;
+	entrypoints: string[];
+	sourceSet: boolean;
+};
+
+async function bundleGraph(root: string, { mode, entrypoints, sourceSet }: GraphOptions): Promise<ProviderBundle> {
 	const sentinel = `__apifuse_boundary_${randomBytes(8).toString("hex")}__`;
 	const reached = new Map<string, ReachedModule>();
 
@@ -596,7 +677,12 @@ export async function bundleProvider(
 						// Bun's own helper imports (`node:module` for the require shim).
 						if (args.importer === "runtime") return undefined;
 						const specifier = args.path;
-						if (specifier.startsWith(".") || isAbsolute(specifier)) return undefined;
+						if (specifier.startsWith(".") || isAbsolute(specifier)) {
+							if (sourceSet && !relativeImportExists(args.importer, specifier)) {
+								return { path: specifier, namespace: MISSING_MODULE_NAMESPACE };
+							}
+							return undefined;
+						}
 						const decision = decideModule(specifier, mode);
 						// An allowed package (or a tsconfig path alias) is left to Bun's own
 						// resolver; a built-in or a denied specifier is pinned external so the
@@ -611,6 +697,20 @@ export async function bundleProvider(
 							});
 						}
 						return { path: specifier, external: true };
+					});
+					if (!sourceSet) return;
+					// CommonJS, so a named import from the stand-in is not a build error.
+					build.onLoad({ filter: /.*/, namespace: MISSING_MODULE_NAMESPACE }, () => ({
+						contents: "module.exports = {};",
+						loader: "js",
+					}));
+					build.onLoad({ filter: TYPESCRIPT_SOURCE_PATTERN }, async (args) => {
+						if (!args.path.startsWith(root)) return undefined;
+						const source = await Bun.file(args.path).text();
+						return {
+							contents: keepValueImports(getTypeScript(), args.path, source),
+							loader: args.path.endsWith("x") ? "tsx" : "ts",
+						};
 					});
 				},
 			},
@@ -740,7 +840,13 @@ export async function bundleProvider(
 	const seen = new Set<string>();
 	const kept = violations.filter((violation) => {
 		if (BOOTSTRAP_FILE_PATTERN.test(violation.file)) return false;
-		const key = [violation.kind, violation.file, violation.line, violation.column, violation.subject].join("\u0000");
+		const key = [
+			violation.kind,
+			violation.file,
+			violation.line,
+			violation.kind === "module" ? "" : violation.column,
+			violation.subject,
+		].join("\u0000");
 		if (seen.has(key)) return false;
 		seen.add(key);
 		return true;

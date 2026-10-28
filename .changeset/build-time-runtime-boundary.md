@@ -37,10 +37,14 @@ reach outside the boundary.
 Deprecated for one release, removed in the next major:
 `lintRuntimeBoundarySources(files, options)`, `RUNTIME_BOUNDARY_RULES`,
 `RuntimeBoundaryRule` and `LintRuntimeBoundarySourcesOptions` keep their
-signatures; the function now writes `files` to a temporary directory, runs
-`bundleProvider` on it and maps each violation to the old diagnostic shape
-(`field: "sourceFiles.<file>"`, nearest old rule id, lines in the message),
-with `options.typescript` ignored and one runtime warning. `lintProvider` and
+signatures; the function now writes `files` to a temporary directory, roots
+the module graph at every supplied file the retired rules judged, loads a
+relative import the set lacks (a `.json`, an asset, a file not supplied) as an
+empty module, keeps an unused value import as a reach, and maps each
+violation to the old diagnostic shape (`field: "sourceFiles.<file>"`,
+nearest old rule id, lines in the message); `// @apifuse-allow` still moves a
+finding to `information` there, `options.typescript` is ignored, and one
+runtime warning is printed. `lintProvider` and
 `lintProviderWithInformation` keep accepting the `options` argument and ignore
 it with one runtime warning; `ProviderLintMode` is now the `bundleProvider`
 mode. Nothing public is removed in this release.
