@@ -1,8 +1,17 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 import {
+	type CheckResult,
 	DEPLOYMENT_INTENT_CHECK_MESSAGE,
 	LEGACY_DEPLOY_FILE_RULE,
 	OUTPUT_URL_COVERAGE_CHECK_MESSAGE,
@@ -10,6 +19,7 @@ import {
 	PROVIDER_JSON_CHECK_MESSAGE,
 	REDUNDANT_DEPLOYMENT_DEFAULT_RULE,
 	RUNTIME_BOUNDARY_CHECK_MESSAGE,
+	type RunChecksOptions,
 	runChecks,
 	SPREAD_EXPORT_DEPLOYMENT_RULE,
 } from "../../bin/apifuse-check.js";
@@ -86,6 +96,42 @@ function writeValidLocaleCatalogs(dir: string): void {
 	};
 	writeFileSync(join(dir, "locales", "en.json"), JSON.stringify(en));
 	writeFileSync(join(dir, "locales", "ko.json"), JSON.stringify(ko));
+}
+
+// runChecks in a child process. runChecks imports the provider's index.ts;
+// a provider that imports a real browser driver would otherwise load it into
+// this test process, where it stays in the module registry for the test
+// files that run after this one and defeats their mock.module doubles of it
+// (browser.test.ts replaces playwright).
+async function runChecksInChildProcess(
+	providerDir: string,
+	lintMode?: RunChecksOptions["lintMode"],
+): Promise<CheckResult[]> {
+	mkdirSync(tempRoot, { recursive: true });
+	const resultDir = mkdtempSync(join(tempRoot, "apifuse-check-results-"));
+	tempDirs.push(resultDir);
+	const resultPath = join(resultDir, "results.json");
+	const child = Bun.spawn({
+		cmd: [
+			process.execPath,
+			new URL("./fixtures/run-checks-runner.ts", import.meta.url).pathname,
+			providerDir,
+			resultPath,
+			...(lintMode ? [lintMode] : []),
+		],
+		cwd: process.cwd(),
+		stderr: "pipe",
+		stdout: "pipe",
+	});
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	if (exitCode !== 0) {
+		throw new Error(`run-checks-runner exited with ${exitCode}\n${stdout}\n${stderr}`);
+	}
+	return JSON.parse(readFileSync(resultPath, "utf8")) as CheckResult[];
 }
 
 afterEach(() => {
@@ -690,7 +736,7 @@ export default {
 			'import { chromium } from "playwright";\nexport async function localBrowser() { return chromium.launch(); }\n',
 		);
 
-		const official = await runChecks(providerDir);
+		const official = await runChecksInChildProcess(providerDir);
 		const boundary = official.find((result) => result.message === RUNTIME_BOUNDARY_CHECK_MESSAGE);
 
 		expect(boundary?.passed).toBe(false);
@@ -699,7 +745,7 @@ export default {
 		]);
 		expect(boundary?.details?.[0]).toContain("ctx.browser");
 
-		const standalone = await runChecks(providerDir, { lintMode: "standalone" });
+		const standalone = await runChecksInChildProcess(providerDir, "standalone");
 		const standaloneBoundary = standalone.find(
 			(result) => result.message === RUNTIME_BOUNDARY_CHECK_MESSAGE,
 		);
