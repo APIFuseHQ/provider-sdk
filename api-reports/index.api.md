@@ -1870,6 +1870,7 @@ export function describeKey<TSchema extends ZodType>(schema: TSchema, key: Provi
 export interface DevServerOptions {
     engine?: ProviderEngine;
     engineMode?: ProviderEngineMode;
+    metricsPort?: number;
     // (undocumented)
     port?: number;
     // (undocumented)
