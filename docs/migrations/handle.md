@@ -16,7 +16,7 @@ the bump outside the provider's peak window.
 
 | `ctx.choice` (≤ beta.59) | `ctx.handle` |
 |---|---|
-| `choice: true` in `defineProvider` | `handle: [WaitingDraft, PageCursor]` **and** `state: {}` (or `state: true`). `ctx.handle` exists only when `handle` is declared; lint `handle-requires-state` warns if `state` is missing. |
+| `choice: true` in `defineProvider` | `handle: [WaitingDraft, PageCursor]` **and** `state: {}` (or `state: true`). `ctx.handle` exists only when `handle` is declared and accepts only the listed kinds; `handle` without `state` is a compile error. |
 | `ctx.choice.issue({ prefix, purpose, payload, ttlMs, bind, storage, strength })` | `await ctx.handle.create(Kind, data)`. Everything that used to be a per-call option lives on the kind definition. |
 | `prefix` / `purpose` (e.g. `ct_wait_choice_v1`) | kind `name` — `/^[a-z]{2,12}$/`, letters only, **no version suffix**. The handle string is `${name}_word-word`. Schema changes are a new kind name, not `_v2`. |
 | `payload` | `data`, validated by the kind's zod `schema` on `create`/`update` |
@@ -94,55 +94,63 @@ export const WaitingResultSchema = z.object({
 
 export const WaitingDraft = defineDraft({
   name: "waiting",                 // handle looks like `waiting_visor-anagram`
-  fieldName: "waiting_token",      // the schema key on both output and input
   schema: WaitingDraftSchema,
   result: WaitingResultSchema,
   ttl: { idle: "30m", max: "2h" }, // survives the "how many people?" turn
   resultTtl: "24h",
-  issuedBy: "waiting-prepare",     // used in every error's recovery sentence
 });
 ```
 
-`issuedBy` may also be a list when several operations issue the same handle
-(one `location_token` from both `search-address` and `reverse-geocode`):
+The kind declares what it stores and for how long. **Where** it travels is
+written once, in the operation schemas: the property key you place
+`WaitingDraft.field()` under is the field name, and an operation issues the
+kind when its *output* contains the field and its *input* does not require it.
+`defineProvider` reads both from the schemas and binds them onto the kind, so
+the field description ("Opaque handle issued by `waiting-prepare`. Copy it
+exactly as returned; do not edit or shorten it."), every recovery sentence
+("Call `waiting-prepare` again and pass the new `waiting_token` exactly as
+returned."), and the `x-apifuse-handle` meta all name what the schemas say.
+Several issuing operations are listed in operation order ("issued by
+`search-address` or `reverse-geocode`").
 
-```ts
-export const LocationCursor = defineCursor({
-  name: "location",
-  fieldName: "location_token",
-  schema: LocationSchema,
-  ttl: "10m",
-  access: "public",
-  maxEntries: 10_000,
-  issuedBy: ["search-address", "reverse-geocode"],
-});
-// field description: "Opaque handle issued by `search-address` or `reverse-geocode`. Copy it exactly…"
-// recovery sentence: "Call `search-address` or `reverse-geocode` again and pass the new `location_token` exactly as returned."
-```
+An operation that *requires* the handle on input and returns it is a
+continuation of the same attempt (`reserve-answer` echoing `attempt_token`
+round by round, a commit replaying the draft), not an issuer: a recovery
+sentence never tells the LLM to call it for a fresh handle. "Requires" means
+the field is reachable through required object properties only; a field under
+`.optional()`, `.nullable()`, `.default()`, inside an array, or in only some
+branches of a union is not required, so a pagination operation with an
+optional `cursor` on input issues its own first page.
 
-Lint `handle-issued-by` checks that every listed operation exists and that at
-least one of them outputs the field.
+A kind must sit under one key per direction. Placing it under two different
+input keys (or two different output keys) makes `defineProvider` throw with both
+positions named: the LLM must see one name. Putting the *same* `field()`
+instance under two keys counts as two placements. A kind listed in
+`handle: [...]` that no operation output places (never issued) or no operation
+input places (never accepted) also throws at definition time, naming the kind
+and the side to add `kind.field()` to.
 
-> **Two keys, two fields.** `Kind.field()` returns a schema instance; putting the
-> *same instance* under two property keys (`{ waiting_token: f, token: f }`) is
-> two handle fields to lint, and the second key fails `handle-field-name`. Call
-> `Kind.field()` once per property (or accept that only `fieldName` is legal).
+> `fieldName` and `issuedBy` on `defineCursor` / `defineDraft` are deprecated
+> and removed in the next release; while present they win over the bound
+> contract, so an unmigrated provider sees byte-identical text. Delete them
+> with the codemod (`bunx ast-grep scan -r
+> node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml --update-all .`).
+> The lint rule `legacy-handle-declaration` warns while they remain.
 
 ### A different name coming in and going out
 
 Some contracts name the same handle differently per direction — the platform
-canon asks list operations to accept `cursor` and return `next_cursor`. Declare
-both keys and the kind claims one per side:
+canon asks list operations to accept `cursor` and return `next_cursor`. Nothing
+to declare: place the field under each side's key and the kind claims one per
+side.
 
 ```ts
 export const SearchPage = defineCursor({
   name: "page",
-  fieldName: { input: "cursor", output: "next_cursor" },
   schema: PageStateSchema,
   ttl: "10m",
   access: "public",
   maxEntries: 100_000,
-  issuedBy: "search",
 });
 
 input:  z.object({ cursor: SearchPage.field().optional() }),
@@ -150,22 +158,11 @@ output: z.object({ items: /* … */, next_cursor: SearchPage.field().nullable() 
 // recovery sentence: "Call `search` again and pass the new `next_cursor` back as `cursor`, exactly as returned."
 ```
 
-`field()` is the same helper on both sides; the meta carries both names and
-`handle-field-name` checks the property key against the side the field is on.
-The rule has not loosened — it is about the handle's **identity**, not about one
-spelling:
-
-- Only the two declared keys are legal; a third name still fails.
-- The keys are not interchangeable. `next_cursor` on an input, or `cursor` on an
-  output, still fails — the round trip keeps exactly one direction, so the value
-  a caller reads under `output` is the value it sends back under `input`, and
-  the handle's kind is still what makes it valid (`HANDLE_KIND_MISMATCH`
-  otherwise).
-- Both keys are required together. Declaring only one throws, because the other
-  would silently fall back to `${name}_token`.
-
-A plain string stays the one-name form and emits exactly the meta it always did,
-so nothing in the fleet churns by upgrading.
+The keys are not interchangeable: the round trip keeps exactly one direction,
+so the value a caller reads under `next_cursor` is the value it sends back under
+`cursor`, and the handle's kind is still what makes it valid
+(`HANDLE_KIND_MISMATCH` otherwise). A kind placed under one key on both sides
+emits exactly the single-name meta it always did.
 
 ## 3. The pattern: one handle per offer, plain picks
 
@@ -317,18 +314,16 @@ const page = await ctx.choice.parse({ token: input.cursor, prefix: "nol_search_v
 // after
 export const SearchPage = defineCursor({
   name: "page",                     // handle looks like `page_visor-abnormal-request-anagram`
-  fieldName: "cursor",
   schema: z.object({ query: z.string(), offset: z.number().int().min(0), filters: FiltersSchema }),
   ttl: "10m",
   access: "public",                 // anonymous operation: no connection to bind to
   maxEntries: 100_000,              // required for public kinds
   maxValueBytes: 2_000,
-  issuedBy: "search",
 });
 
 // schema: same helper on both sides; optional because the first page has none.
-// Use `fieldName: { input: "cursor", output: "next_cursor" }` (§2) when the
-// contract names the two directions differently.
+// The key (`cursor`) and the issuer (`search`) are read from here; use
+// `next_cursor` on the output when the contract names the directions differently (§2).
 input:  z.object({ query: z.string().describeKey("search.query"), cursor: SearchPage.field().optional() }),
 output: z.object({ items: /* … */, cursor: SearchPage.field().optional() }),
 
@@ -448,13 +443,11 @@ the draft public:
 ```ts
 export const PayDraft = defineDraft({
   name: "pay",
-  fieldName: "pay_token",
   schema: PaySchema,
   result: PaymentResult,
   ttl: { idle: "5m", max: "30m" },
   access: "public",                 // provider scope; 4 words (5 when ttl.max > 1h or strength: "high")
   maxEntries: 10_000,               // required, provider-wide live-entry quota
-  issuedBy: "parking-quote",
 });
 ```
 
@@ -586,9 +579,9 @@ asserted a synchronous `string` return from inline `issue` become `await`.
 5. Replace `consume: "explicit"` + replay-record code with `commit`. Delete the
    provider-owned dedup namespace once nothing reads it.
 6. Put `Kind.field()` on both the output and the input; make sure the property
-   key equals `fieldName` on each side (lint `handle-field-name`,
-   `handle-field-parity`). When the contract needs two names, declare
-   `fieldName: { input, output }` (§2) rather than reusing one.
+   key is the field name and is the same on every schema of one side; when
+   the contract needs two names, use one key per side (§2).
+   `defineProvider` refuses two different keys on the same side.
    Remove hand-written `.describeKey()` on those fields and the now-unused
    locale keys.
 7. Add `handle: [...]` and `state: {}` to `defineProvider`; delete `choice: true`.
@@ -598,8 +591,9 @@ asserted a synchronous `string` return from inline `issue` become `await`.
    `request.connectionId`.
 10. Remove `APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET` from every
     env file, compose file, and deployment manifest the repository owns.
-11. Run the provider lint. `legacy-choice-usage` must be 0; `handle-*` rules
-    must be clean; `handle-requires-state` must not warn.
+11. Run the provider lint. `legacy-choice-usage` must be 0 and
+    `legacy-handle-declaration` must not warn (no `fieldName` / `issuedBy`
+    left on a kind). `handle: [...]` without `state` does not compile.
 12. Update the consumer-facing contract docs for changed operations (field
     names, removed inputs) in the same PR, and note that in-flight tokens are
     invalidated at deploy.

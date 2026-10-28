@@ -1,0 +1,100 @@
+# Handle declaration codemod (provider-sdk ADR-0012, amended 2026-10-28).
+#
+# The property key a handle travels under and the operation that issues it are
+# read from the operation schemas where `kind.field()` is placed, so the
+# `fieldName` and `issuedBy` options of `defineCursor` / `defineDraft` are
+# deprecated and removed in the next release. Two rules delete them without
+# leaving a whitespace-only line: an option that comes after another option
+# goes with its leading comma, an option in first position goes with the `{`
+# it follows (written back) and its trailing comma. A comment directly above
+# the option is about the option and goes with it.
+#
+# Dry run (prints the diff, changes nothing):
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml .
+# Apply:
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml --update-all .
+#
+# After applying, run the provider lint: `legacy-handle-declaration` must be 0.
+# A kind that used to declare no `issuedBy` but is issued by an operation now
+# names that operation in its field description and recovery sentences; refresh
+# contract snapshots that pinned the old wording. An operation issues a kind when
+# its output places the field and its input does not require it; an operation
+# that requires the handle on input and returns it is a continuation and is not
+# named as an issuer.
+id: handle-declaration-drop-deprecated-options
+language: typescript
+severity: warning
+message: fieldName / issuedBy on defineCursor / defineDraft are deprecated; the key and the issuer are read from the operation schemas where kind.field() is placed.
+utils:
+  deprecated-handle-option:
+    kind: pair
+    has:
+      field: key
+      regex: ^(fieldName|issuedBy)$
+    inside:
+      kind: object
+      inside:
+        kind: arguments
+        inside:
+          kind: call_expression
+          has:
+            field: function
+            regex: ^(defineCursor|defineDraft)$
+rule:
+  matches: deprecated-handle-option
+  # Some earlier option is not deprecated, so the leading comma belongs here
+  # and is reached back over any comment written above the option.
+  follows:
+    kind: pair
+    not:
+      matches: deprecated-handle-option
+    stopBy: end
+fix:
+  template: ''
+  expandStart:
+    regex: ^,$
+    stopBy: end
+---
+id: handle-declaration-drop-deprecated-first-options
+language: typescript
+severity: warning
+message: fieldName / issuedBy on defineCursor / defineDraft are deprecated; the key and the issuer are read from the operation schemas where kind.field() is placed.
+utils:
+  deprecated-handle-option:
+    kind: pair
+    has:
+      field: key
+      regex: ^(fieldName|issuedBy)$
+    inside:
+      kind: object
+      inside:
+        kind: arguments
+        inside:
+          kind: call_expression
+          has:
+            field: function
+            regex: ^(defineCursor|defineDraft)$
+rule:
+  matches: deprecated-handle-option
+  # Last option of a leading run of deprecated options: the range reaches back
+  # to the `{` (written back) and covers the run and its trailing comma.
+  not:
+    any:
+      - follows:
+          kind: pair
+          not:
+            matches: deprecated-handle-option
+          stopBy: end
+      - precedes:
+          matches: deprecated-handle-option
+          stopBy:
+            kind: pair
+            not:
+              matches: deprecated-handle-option
+fix:
+  template: '{'
+  expandStart:
+    regex: ^\{$
+    stopBy: end
+  expandEnd:
+    regex: ^,$
