@@ -31,7 +31,7 @@ describe("serve lifecycle", () => {
 		const listen = spyOn(Bun, "serve");
 		try {
 			await expect(
-				serve({ ...provider(), proxy: true }, { port: 0, shutdown: { signals: false } }),
+				serve({ ...provider(), proxy: true }, { port: 0, metricsPort: 0, shutdown: { signals: false } }),
 			).rejects.toMatchObject({
 				code: DECLARATION_INVALID_CODE,
 				details: {
@@ -76,6 +76,7 @@ describe("serve lifecycle", () => {
 		let port = 0;
 		const handle = await serve(provider(), {
 			port: 0,
+			metricsPort: 0,
 			logger: (event) => logs.push(event),
 			shutdown: {
 				signals: false,
@@ -125,6 +126,7 @@ describe("serve lifecycle", () => {
 		const sigintBefore = process.listenerCount("SIGINT");
 		const handle = await serve(provider(), {
 			port: 0,
+			metricsPort: 0,
 			logger: () => {},
 			shutdown: { signals: true },
 		});
@@ -150,6 +152,7 @@ describe("serve lifecycle", () => {
 				serve(provider(), {
 					port,
 					selfTestPort: port,
+					metricsPort: 0,
 					logger: () => {},
 					shutdown: { signals: false },
 				}),
@@ -176,6 +179,7 @@ describe("serve lifecycle", () => {
 		});
 		const first = await serve(provider(), {
 			port: 0,
+			metricsPort: 0,
 			logger: () => {},
 			shutdown: {
 				signals: ["SIGTERM"],
@@ -187,6 +191,7 @@ describe("serve lifecycle", () => {
 		});
 		const second = await serve(provider(), {
 			port: 0,
+			metricsPort: 0,
 			logger: () => {},
 			shutdown: {
 				signals: ["SIGTERM"],

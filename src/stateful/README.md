@@ -29,6 +29,18 @@ the following compatibility-sensitive behavior:
   Close stops listeners, runs shutdown hooks in declaration order, and enforces the configured
   timeout. Signal-enabled handles share one process handler per signal; a signal closes every
   registered server before it is re-raised. Closing the last handle removes the shared handlers.
+- `serve()` also starts a metrics listener on a separate port, always on, serving only
+  `GET /metrics` in the Prometheus text exposition format (`text/plain; version=0.0.4`). The port
+  is `ServeOptions.metricsPort`, else `APIFUSE__PROVIDER_RUNTIME__METRICS_PORT`, else `9090`
+  (`DEFAULT_PROVIDER_METRICS_PORT`); `0` binds an ephemeral port, and the handle's `metricsPort` is
+  the bound one. Expose it to Prometheus as a Service port named `metrics`, so the primary port can
+  keep admitting the gateway only. The listener renders one process-wide registry, which a
+  `StatefulSessionRouter` built without a `metricEmitter` counts into, so the routing counters
+  (`apifuse_stateful_provider_routing_*_total`) come out without wiring. Only the labels
+  `providerId`, `operationId`, `redactedErrorCode`, `eventType`, `subjectKind`, `capacityClass`,
+  `ledgerState` and `healthStatus` are exported; request, session, tenant, owner-pod and generation
+  identifiers are dropped before storage, and Prometheus adds `pod` and `instance`. A process that
+  calls `serve()` more than once (a test) gives each call its own `metricsPort`, such as `0`.
 - `ProviderServerStatefulForwardEnvelope` is strict. Its owner fence is flattened into
   `sessionKey`, `ownerPodId`, and `generation`; a nested `owner` object is not accepted. The
   envelope also carries operation/session identity, `sourcePodId`, `forwardedAt`, optional

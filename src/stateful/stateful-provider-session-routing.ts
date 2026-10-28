@@ -5,10 +5,8 @@ import {
 	statefulDeadlineAbortReason,
 } from "./deadline-expiry.js";
 import { StatefulRoutingDeadlineError } from "./errors.js";
-import {
-	NOOP_STATEFUL_PROVIDER_METRIC_EMITTER,
-	type StatefulProviderMetricEmitter,
-} from "./stateful-provider-observability.js";
+import { statefulProviderMetricRegistry } from "./stateful-provider-metric-registry.js";
+import type { StatefulProviderMetricEmitter } from "./stateful-provider-observability.js";
 import type {
 	SessionOwnerRecord,
 	SessionOwnerRegistry,
@@ -144,7 +142,7 @@ export class StatefulSessionRouter {
 		this.#leaseDurationMs = options.leaseDurationMs;
 		this.#leaseRenewIntervalMs = Math.max(1, Math.floor(options.leaseDurationMs * renewalFraction));
 		this.#clock = options.clock ?? (() => new Date());
-		this.#metricEmitter = options.metricEmitter ?? NOOP_STATEFUL_PROVIDER_METRIC_EMITTER;
+		this.#metricEmitter = options.metricEmitter ?? statefulProviderMetricRegistry;
 	}
 
 	async route<TInput = unknown>(

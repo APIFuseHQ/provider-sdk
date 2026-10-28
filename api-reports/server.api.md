@@ -848,6 +848,9 @@ interface DeclarativeStealthResponse {
 export const DEFAULT_PROCFS_SELF_ROOT = "/proc/self";
 
 // @public (undocumented)
+export const DEFAULT_PROVIDER_METRICS_PORT = 9090;
+
+// @public (undocumented)
 export const DEFAULT_RUNTIME_DIAGNOSTICS_WINDOW_MS = 250;
 
 // @public (undocumented)
@@ -3190,6 +3193,15 @@ export const PROCFS_CLOCK_TICKS_PER_SECOND = 100;
 // @public (undocumented)
 const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
 
+// @public (undocumented)
+export const PROVIDER_METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
+
+// @public
+export const PROVIDER_METRICS_ROUTE = "/metrics";
+
+// @public (undocumented)
+export const PROVIDER_RUNTIME_METRICS_PORT_ENV = "APIFUSE__PROVIDER_RUNTIME__METRICS_PORT";
+
 // @public
 export const PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV = "APIFUSE__PROVIDER_RUNTIME__SELF_TEST_MASTER_SECRET";
 
@@ -3898,6 +3910,7 @@ export type ProviderServerCloseOptions = {
 // @public (undocumented)
 export type ProviderServerHandle = {
     readonly port: number;
+    readonly metricsPort: number;
     close(options?: ProviderServerCloseOptions): Promise<void>;
 };
 
@@ -3970,6 +3983,11 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     sdkVersion: string;
     runtimeTarget?: ProviderRuntimeTarget;
     warnings?: readonly string[];
+} | {
+    level: "info";
+    event: "provider_metrics_listener";
+    providerId: string;
+    port: number;
 } | ProviderStateBackendLogEvent | SelfTestCancellationLogEvent;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderRequestCost" needs to be exported by the entry point index.d.ts
@@ -4519,6 +4537,9 @@ type RequestWithMethodOptions = RequestOptions & {
 
 // @public (undocumented)
 export function resolveHealthCheckInputDateTokens(value: unknown, now?: Date, calendar?: InputDateTokenCalendar): unknown;
+
+// @public (undocumented)
+export function resolveProviderMetricsPort(env?: Readonly<Record<string, string | undefined>>): number;
 
 // @public (undocumented)
 export type ResolverAttemptSample = {
@@ -5455,6 +5476,7 @@ export function serve<TContext extends Partial<ProviderContext> = ProviderContex
 export interface ServeOptions<TContext extends Partial<ProviderContext> = ProviderContext> extends ProviderServerOptions<TContext> {
     // (undocumented)
     host?: string;
+    metricsPort?: number;
     // (undocumented)
     port?: number;
     selfTestPort?: number;
@@ -6488,8 +6510,8 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:18:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:191:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:214:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:197:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:220:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:129:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:165:5 - (ae-forgotten-export) The symbol "SafeRegex" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:198:9 - (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point index.d.ts
