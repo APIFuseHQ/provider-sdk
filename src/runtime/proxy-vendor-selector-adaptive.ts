@@ -3,6 +3,7 @@ import type { ProxyVendorName } from "../config/loader.js";
 import {
 	getProxyVendorSelector,
 	type ProxyAttemptOutcome,
+	type ProxyAttemptRecord,
 	type ProxyVendorSelector,
 	setProxyVendorSelector,
 	staticOrderProxyVendorSelector,
@@ -168,7 +169,12 @@ export type ProxyVendorSelectionReason =
 	/** The first directive is the single probe of a half-open vendor. */
 	| "half_open_probe"
 	/** Every vendor is open or probing; the chain order is used as is (fail open). */
-	| "all_open";
+	| "all_open"
+	/**
+	 * The request's previous attempt failed because of the vendor the baseline
+	 * names again, so this attempt moves to another closed vendor of the chain.
+	 */
+	| "retry_alternate";
 
 export type ProxyVendorHealthSnapshot = {
 	readonly vendor: ProxyVendorName;
@@ -264,6 +270,21 @@ type VendorRecord = {
 	/** Last instant the multiplier decayed while closed. */
 	decayedAt: number | undefined;
 };
+
+/** The vendor of the request's previous attempt when that attempt failed because of it. */
+function vendorFailedLastAttempt(
+	history: readonly ProxyAttemptRecord[] | undefined,
+): ProxyVendorName | undefined {
+	const last = history?.[history.length - 1];
+	if (!last) return undefined;
+	return classifyProxyVendorAttemptOutcome({
+		phase: "transport",
+		outcome: last.outcome,
+		...(last.errorCode === undefined ? {} : { errorCode: last.errorCode }),
+	}) === "vendor_failure"
+		? last.vendor
+		: undefined;
+}
 
 function positive(value: number | undefined, fallback: number): number {
 	return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
@@ -422,6 +443,31 @@ export function createAdaptiveProxyVendorSelector(
 				lastReason = "all_open";
 				publish("all_open", request.chain);
 				return baseline;
+			}
+			// Within one request, an attempt whose predecessor failed because of the
+			// vendor moves to another closed vendor instead of repeating that vendor
+			// below the breaker threshold (Envoy's retry host predicate shape). The
+			// session index starts past every static share, so the retry never
+			// re-uses a session (an exit IP) an earlier attempt of the request used.
+			const avoided = vendorFailedLastAttempt(request.history);
+			if (avoided !== undefined && head.vendor === avoided) {
+				const alternate = request.chain.find(
+					(vendor) => vendor !== avoided && record(vendor).state === "closed",
+				);
+				if (alternate !== undefined) {
+					lastReason = "retry_alternate";
+					publish(lastReason, request.chain);
+					return [
+						{
+							vendor: alternate,
+							vendorAttempt: request.attemptCap + request.attempt,
+							session: head.session,
+						},
+						...baseline.filter(
+							(directive) => directive.vendor !== alternate && available(directive.vendor),
+						),
+					];
+				}
 			}
 			const headEntry = record(head.vendor);
 			const headIndex = request.chain.indexOf(head.vendor);

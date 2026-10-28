@@ -4413,7 +4413,12 @@ export type ProxyVendorSelectionReason =
 /** The first directive is the single probe of a half-open vendor. */
 | "half_open_probe"
 /** Every vendor is open or probing; the chain order is used as is (fail open). */
-| "all_open";
+| "all_open"
+/**
+* The request's previous attempt failed because of the vendor the baseline
+* names again, so this attempt moves to another closed vendor of the chain.
+*/
+| "retry_alternate";
 
 // @public
 export type ProxyVendorSelectionVendorState = {

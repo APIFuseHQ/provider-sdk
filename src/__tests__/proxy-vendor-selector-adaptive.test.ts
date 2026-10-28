@@ -265,6 +265,73 @@ describe("adaptive proxy vendor selector", () => {
 	});
 });
 
+describe("adaptive selector within one request", () => {
+	const cap = chain.length * PROXY_ATTEMPTS_PER_VENDOR;
+	const withHistory = (
+		attempt: number,
+		history: ProxyAttemptRequest["history"],
+	): ProxyAttemptRequest => ({ ...request(attempt, T0), history });
+
+	it("moves the next attempt to another closed vendor after a failure of the vendor", () => {
+		const selector = createAdaptiveProxyVendorSelector();
+		const directives = selector.select(
+			withHistory(1, [
+				{ vendor: "smartproxy", outcome: "error", errorCode: "proxy_connect_failed" },
+			]),
+		);
+		expect(directives.map((directive) => directive.vendor)).toEqual(["nodemaven", "smartproxy"]);
+		// Past every static share index, so no session of the request is reused.
+		expect(directives[0]?.vendorAttempt).toBe(cap + 1);
+		expect(selector.lastSelectionReason()).toBe("retry_alternate");
+		for (let attempt = 0; attempt < cap; attempt += 1) {
+			for (const directive of staticOrderProxyVendorSelector.select(request(attempt, T0))) {
+				expect(directive.vendorAttempt).toBeLessThan(cap);
+			}
+		}
+	});
+
+	it("stays on the baseline after a success or a failure that is not the vendor's", () => {
+		const selector = createAdaptiveProxyVendorSelector();
+		for (const last of [
+			{ vendor: "smartproxy", outcome: "ok" },
+			{ vendor: "smartproxy", outcome: "error", errorCode: "transport_timeout" },
+			{ vendor: "smartproxy", outcome: "error", errorCode: "transport_cancelled" },
+			{ vendor: "smartproxy", outcome: "error" },
+		] as const) {
+			expect(selector.select(withHistory(1, [last]))[0]).toMatchObject({
+				vendor: "smartproxy",
+				vendorAttempt: 1,
+			});
+			expect(selector.lastSelectionReason()).toBe("chain_order");
+		}
+	});
+
+	it("keeps the failed vendor when no other vendor is closed", () => {
+		const selector = createAdaptiveProxyVendorSelector();
+		for (let i = 0; i < consecutiveFailureThreshold; i += 1)
+			selector.report(failure("nodemaven", T0));
+		const directives = selector.select(
+			withHistory(1, [
+				{ vendor: "smartproxy", outcome: "error", errorCode: "transport_network_error" },
+			]),
+		);
+		expect(directives.map((directive) => directive.vendor)).toEqual(["smartproxy"]);
+		expect(selector.lastSelectionReason()).toBe("chain_order");
+	});
+
+	it("leaves an alternate that is already the baseline head alone", () => {
+		const selector = createAdaptiveProxyVendorSelector();
+		// Attempt 3 is nodemaven's share; a smartproxy failure before it changes nothing.
+		const directives = selector.select(
+			withHistory(3, [
+				{ vendor: "smartproxy", outcome: "error", errorCode: "proxy_connect_failed" },
+			]),
+		);
+		expect(directives[0]).toMatchObject({ vendor: "nodemaven", vendorAttempt: 0 });
+		expect(selector.lastSelectionReason()).toBe("chain_order");
+	});
+});
+
 describe("proxy vendor attempt outcome classification", () => {
 	const transport = (errorCode?: string, outcome: "ok" | "error" = "error") =>
 		classifyProxyVendorAttemptOutcome({

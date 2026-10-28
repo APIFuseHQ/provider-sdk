@@ -39,7 +39,13 @@ observed incident shape.
    *probed* by exactly one attempt once its open period elapses, and is
    *closed* again when the probe succeeds or opened for longer when it
    fails. When every vendor is open the selector fails open and the declared
-   order is used as is. Latency-weighted choice among healthy vendors is not
+   order is used as is. Within one request, an attempt whose predecessor
+   failed because of its vendor moves to another closed vendor instead of
+   repeating that vendor below the threshold (the retry host predicate shape
+   of Envoy, which reattempts host selection when an already attempted host
+   is selected); its session index is `attemptCap + attempt`, past every
+   static share, so it never re-uses a session an earlier attempt of the
+   request used. Latency-weighted choice among healthy vendors is not
    adopted: the declared order carries anti-bot and cost meaning that a
    latency comparison would override, and the request rate is too low for a
    moving average to be meaningful. Hedged requests and active health
@@ -93,7 +99,7 @@ observed incident shape.
    opened it. Each selection is tied to the request that asked for it
    (`observeProxyVendorSelections`), and the request's proxy telemetry gains
    `selection` (`{ kind, reason }` with reason `chain_order`, `vendor_open`,
-   `half_open_probe` or `all_open`), `vendorStates` (`[{ v, s, e }]`: vendor,
+   `half_open_probe`, `all_open` or `retry_alternate`), `vendorStates` (`[{ v, s, e }]`: vendor,
    state, consecutive ejections) and the vendor `v` of every attempt sample,
    in the log and in the telemetry header, without changing the envelope
    version. The gateway ignores unknown keys; persisting any of them is a
@@ -118,12 +124,9 @@ Negative / accepted risks:
   when every vendor is open, so the worst case is the declared order, that
   is, today's behaviour.
 - Per-process state means replicas learn separately and a restart forgets.
-- Within one request the selector alternates to another closed vendor after
-  a vendor-attributable failure (the retry-host-predicate shape of Envoy,
-  which reattempts host selection when an already attempted host is
-  selected) only once the seam carries the request's attempt history; until
-  then it relies on the static split, so a failure below the threshold still
-  costs the primary's share of that one request.
+- A single vendor failure below the threshold still costs the request one
+  attempt before it moves to the next vendor, and the alternation reads only
+  the request's previous attempt.
 
 ## Rejected alternatives
 
