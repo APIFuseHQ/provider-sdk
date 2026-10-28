@@ -13,7 +13,12 @@ import {
 	isEngineOwnedRuntimeEnvName,
 	isEngineOwnedTelemetryEnvName,
 } from "./engine.js";
-import { HealthScenarioSchema, SafeRegexSchema } from "./health-scenario.js";
+import {
+	HealthScenarioSchema,
+	type HealthScenario,
+	SafeRegexSchema,
+	withFreshnessGuards,
+} from "./health-scenario.js";
 import { UpstreamMaintenanceWindowsSchema } from "./upstream-maintenance.js";
 import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
 import {
@@ -3233,6 +3238,113 @@ function validateOperationHealthChecks(
 	}
 }
 
+const OPERATION_CACHE_POLICY_FIELDS = new Set(["staleIfErrorMs"]);
+
+/**
+ * `operations.<name>.cache` is the stale-serve policy the runtime applies to
+ * the operation's cache writes and the trigger for the health freshness
+ * guard, so it needs the provider-level `cache` capability the context
+ * member comes from, and a window that is a real one.
+ */
+function validateOperationCachePolicies(
+	providerId: string,
+	providerCache: unknown,
+	operations: Record<string, ProviderOperation>,
+): void {
+	for (const [operationName, operation] of Object.entries(operations)) {
+		if (operation.cache === undefined) continue;
+		const fieldPath = `operations.${operationName}.cache`;
+		if (!operation.cache || typeof operation.cache !== "object" || Array.isArray(operation.cache))
+			throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be an object.`, {
+				fix: `Set ${fieldPath} to { staleIfErrorMs: <ms> } or remove it.`,
+			});
+		rejectUnknownFields(operation.cache, OPERATION_CACHE_POLICY_FIELDS, fieldPath, providerId);
+		const { staleIfErrorMs } = operation.cache;
+		if (!Number.isInteger(staleIfErrorMs) || staleIfErrorMs < 1)
+			throw new ValidationError(
+				`Provider "${providerId}" ${fieldPath}.staleIfErrorMs must be an integer of at least 1 ms.`,
+				{
+					fix: `Set ${fieldPath}.staleIfErrorMs to the stale window in ms, or remove ${fieldPath} to serve nothing stale.`,
+				},
+			);
+		if (providerCache === undefined)
+			throw new ValidationError(
+				`Provider "${providerId}" ${fieldPath} declares a stale window, but the provider does not declare the cache capability.`,
+				{
+					fix: `Add \`cache: true\` to defineProvider({ ... }) so operations.${operationName} can read ctx.cache.`,
+				},
+			);
+	}
+}
+
+/** The operations that declare a stale window (`cache.staleIfErrorMs`). */
+function staleServingOperations(operations: Record<string, ProviderOperation>): Set<string> {
+	return new Set(
+		Object.entries(operations)
+			.filter(([, operation]) => operation.cache !== undefined)
+			.map(([operationName]) => operationName),
+	);
+}
+
+/**
+ * `scenario` with the freshness guards attached when it parses; an invalid
+ * scenario is returned as is, so the health-check validation that follows
+ * reports it at its own field. The authored object is what the guards are
+ * attached around (steps are reused), so the by-code `expectedErrors` tags
+ * `defineHealthScenario` set survive.
+ */
+function attachFreshnessGuards(scenario: unknown, staleOperations: ReadonlySet<string>): unknown {
+	if (staleOperations.size === 0 || !HealthScenarioSchema.safeParse(scenario).success)
+		return scenario;
+	return withFreshnessGuards(scenario as HealthScenario, staleOperations);
+}
+
+/**
+ * The operations with the SDK freshness guard attached to every health-check
+ * case scenario of an operation that declares `cache.staleIfErrorMs`. The
+ * operation declares the stale window once; this is where the health side
+ * reads it.
+ */
+function withOperationFreshnessGuards<TOperations extends Record<string, ProviderOperation>>(
+	operations: TOperations,
+	staleOperations: ReadonlySet<string>,
+): TOperations {
+	if (staleOperations.size === 0) return operations;
+	return Object.fromEntries(
+		Object.entries(operations).map(([operationName, operation]) => {
+			const suite = operation.healthCheck;
+			if (!staleOperations.has(operationName) || !suite || !Array.isArray(suite.cases))
+				return [operationName, operation];
+			const cases = suite.cases.map((healthCase) =>
+				healthCase && typeof healthCase === "object" && healthCase.scenario !== undefined
+					? {
+							...healthCase,
+							scenario: attachFreshnessGuards(healthCase.scenario, staleOperations),
+						}
+					: healthCase,
+			);
+			return [operationName, { ...operation, healthCheck: { ...suite, cases } }];
+		}),
+	) as TOperations;
+}
+
+/** Health journeys with the freshness guard attached to each declarative scenario. */
+function withJourneyFreshnessGuards(
+	healthJourneys: readonly HealthJourneyDefinition[] | undefined,
+	staleOperations: ReadonlySet<string>,
+): readonly HealthJourneyDefinition[] | undefined {
+	if (healthJourneys === undefined || staleOperations.size === 0 || !Array.isArray(healthJourneys))
+		return healthJourneys;
+	return healthJourneys.map((journey) =>
+		journey && typeof journey === "object" && journey.scenario !== undefined
+			? {
+					...journey,
+					scenario: attachFreshnessGuards(journey.scenario, staleOperations) as HealthScenario,
+				}
+			: journey,
+	);
+}
+
 const NO_MEDIA_FIELDS = new Set(["reason"]);
 
 function validateOperationNoMedia(
@@ -3456,12 +3568,18 @@ function finalizeProvider<TOperations extends Record<string, ProviderOperation>,
 	operations: OperationMapConfig<TOperations, TContext>;
 } {
 	validateProviderImplementationShape(config);
-	const operations = resolveOperationFixtureRequests(config.operations);
 	if (Object.keys(config.operations).length === 0)
 		throw new ProviderError(`Provider "${config.id}" must define at least one operation`, {
 			fix: "Add at least one operation to the operations object",
 		});
 	validateOperationIds(config.id, config.operations);
+	validateOperationCachePolicies(config.id, config.cache, config.operations);
+	const staleOperations = staleServingOperations(config.operations);
+	const operations = withOperationFreshnessGuards(
+		resolveOperationFixtureRequests(config.operations),
+		staleOperations,
+	);
+	const healthJourneys = withJourneyFreshnessGuards(config.healthJourneys, staleOperations);
 	validateOperationTimeouts(config.id, config.operations);
 	validateOperationObservability(config.id, config.operations);
 	validateOperationErrorCodes(config.id, config.operations);
@@ -3469,12 +3587,10 @@ function finalizeProvider<TOperations extends Record<string, ProviderOperation>,
 	validateOperationContracts(config.id, config.operations);
 	bindHandleContracts(config.id, config.operations, config.handle);
 	validateOperationMetadata(config.id, config.operations);
-	const journeyCoveredOperations = validateHealthJourneys(
-		config.id,
-		config.operations,
-		config.healthJourneys,
-	);
-	validateOperationHealthChecks(config.id, config.operations, journeyCoveredOperations);
+	// Validated with the freshness guards attached: the 64-step budget and the
+	// id and binding uniqueness hold for what the monitor receives.
+	const journeyCoveredOperations = validateHealthJourneys(config.id, operations, healthJourneys);
+	validateOperationHealthChecks(config.id, operations, journeyCoveredOperations);
 	validateMaintenanceWindowOperations(
 		config.id,
 		config.operations,
@@ -3522,7 +3638,7 @@ function finalizeProvider<TOperations extends Record<string, ProviderOperation>,
 		// was declared onto both so old and new consumers keep working.
 		healthMonitor: config.healthMonitor ?? config.healthProbe,
 		healthProbe: config.healthProbe ?? config.healthMonitor,
-		healthJourneys: config.healthJourneys,
+		healthJourneys,
 		healthAccounts: config.healthAccounts,
 	};
 	// Declaration validation never invokes handlers, so their declaration-bound

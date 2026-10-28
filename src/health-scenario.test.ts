@@ -1,17 +1,55 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 import {
 	defineHealthJourney,
 	defineHealthScenario,
+	errorRefs,
 	every,
+	EXPECTED_ERROR_REFUSAL_CODES,
 	type ExpectedError,
+	FRESHNESS_GUARD_REASON_COPY,
+	FRESHNESS_GUARD_REASON_KEY,
 	type HealthJourneyDefinition,
 	type HealthCheckCase,
 	type HealthScenario,
+	type HealthStep,
+	isExpectedErrorByCode,
+	type OperationCachePolicy,
+	type OperationErrorCode,
 	type OperationResult,
 	type ProviderDefinition,
+	SDK_OWNED_HEALTH_REASON_COPY,
+	withFreshnessGuards,
 } from "./index.js";
 import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
+import { PROVIDER_ERROR_LOCALES } from "./i18n/error-messages.js";
+import {
+	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
+	SDK_UPSTREAM_ERROR_CODE_REGISTRY,
+} from "./error-resolution.js";
+
+const PING_FRESHNESS_GUARD: HealthStep = {
+	id: "ping.freshness",
+	result: "ping-result.freshness",
+	kind: "guard",
+	condition: {
+		kind: "predicate",
+		operator: "not_equals",
+		actual: { ref: { namespace: "steps", binding: "ping-result", path: ["served_stale_cache"] } },
+		expected: true,
+	},
+	onFail: {
+		attribute: [
+			{
+				operationId: "ping",
+				status: "degraded",
+				reasonCode: "served_stale_cache",
+				reasonKey: FRESHNESS_GUARD_REASON_KEY,
+			},
+		],
+		stop: "scenario",
+	},
+};
 
 function validScenario(): HealthScenario {
 	return {
@@ -103,6 +141,75 @@ function providerWithCase(caseValue: unknown): ProviderDefinition {
 			},
 		},
 	});
+}
+
+/** `defineHealthScenario` followed by the attachment `defineProvider` does for a stale-serving `ping`. */
+function guarded(input: unknown): HealthScenario {
+	return withFreshnessGuards(defineHealthScenario(input), new Set(["ping"]));
+}
+
+function providerWithStaleCase(
+	scenario: unknown,
+	cache: OperationCachePolicy = { staleIfErrorMs: 60_000 },
+	providerCache = true,
+): ProviderDefinition {
+	return defineProvider({
+		id: "stale-case-test",
+		version: "1.0.0",
+		runtime: "shared",
+		...(providerCache ? { cache: true as const } : {}),
+		meta: {
+			displayName: "Stale case test",
+			descriptionKey: "provider.description",
+			category: "test",
+		},
+		operations: {
+			ping: {
+				riskClass: "read",
+				description: "Ping",
+				input: z.object({}),
+				output: z.object({}),
+				handler: async () => ({}),
+				cache,
+				healthCheck: {
+					interval: "1m",
+					// test-invalid: the helper passes an unparsed scenario to runtime validation.
+					cases: [{ name: "ping probe", scenario }] as never,
+				},
+			},
+		},
+	});
+}
+
+function providerWithStaleJourney(journey: unknown): ProviderDefinition {
+	return defineProvider({
+		id: "stale-journey-test",
+		version: "1.0.0",
+		runtime: "shared",
+		cache: true,
+		meta: {
+			displayName: "Stale journey test",
+			descriptionKey: "provider.description",
+			category: "test",
+		},
+		operations: {
+			ping: {
+				riskClass: "read",
+				description: "Ping",
+				input: z.object({}),
+				output: z.object({}),
+				handler: async () => ({}),
+				cache: { staleIfErrorMs: 60_000 },
+			},
+		},
+		healthJourneys: [journey] as HealthJourneyDefinition[],
+	});
+}
+
+function caseScenario(provider: ProviderDefinition): HealthScenario {
+	const scenario = provider.operations.ping?.healthCheck?.cases[0]?.scenario;
+	if (scenario === undefined) throw new Error("expected a case scenario");
+	return scenario;
 }
 
 function journeyBase() {
@@ -453,6 +560,184 @@ describe("declarative health scenarios", () => {
 		expect(defineHealthScenario(scenario).steps.at(-1)).toEqual(scenario.steps.at(-1));
 	});
 
+	it("attaches a freshness guard right after every unguarded operation step of a stale-serving operation", () => {
+		const parsed = defineHealthScenario(validScenario());
+		expect(parsed.steps.map((step) => step.id)).toEqual(["ping", "assert-ping"]);
+		const guarded = withFreshnessGuards(parsed, new Set(["ping"]));
+		expect(guarded.steps.map((step) => step.id)).toEqual(["ping", "ping.freshness", "assert-ping"]);
+		expect(guarded.steps[1]).toEqual(PING_FRESHNESS_GUARD);
+		expect(withFreshnessGuards(guarded, new Set(["ping"]))).toEqual(guarded);
+		// Only an operation that declares the stale window is guarded.
+		expect(withFreshnessGuards(parsed, new Set(["pong"]))).toEqual(parsed);
+		expect(withFreshnessGuards(parsed, new Set())).toEqual(parsed);
+	});
+
+	it("leaves an authored freshness verdict alone and does not guard uncovered reads", () => {
+		const base = validScenario();
+		const authored: HealthStep = {
+			...PING_FRESHNESS_GUARD,
+			id: "guard-freshness",
+			result: "freshness-guarded",
+			onFail: {
+				attribute: [
+					{
+						operationId: "ping",
+						status: "degraded",
+						reasonCode: "served_stale_cache",
+						reasonKey: "health.ping.servedStaleCache",
+					},
+				],
+				stop: "scenario",
+			},
+		};
+		const prepare: HealthStep = {
+			id: "prepare",
+			result: "prepare-result",
+			kind: "operation",
+			operationId: "pong",
+			inputTemplate: {},
+		};
+		const parsed = guarded({
+			...base,
+			steps: [prepare, base.steps[0], authored, base.steps[1]],
+		});
+		expect(parsed.steps.map((step) => step.id)).toEqual([
+			"prepare",
+			"ping",
+			"guard-freshness",
+			"assert-ping",
+		]);
+	});
+
+	it("guards ahead of an authored freshness guard that attributes expected_absence or follows another guard", () => {
+		const base = validScenario();
+		const absence: HealthStep = {
+			...PING_FRESHNESS_GUARD,
+			id: "guard-freshness",
+			result: "freshness-guarded",
+			onFail: {
+				attribute: [
+					{
+						operationId: "ping",
+						status: "degraded",
+						reasonCode: "expected_absence",
+						reasonKey: "health.ping.calm",
+					},
+				],
+				stop: "scenario",
+			},
+		};
+		expect(
+			guarded({ ...base, steps: [base.steps[0], absence] }).steps.map((step) => step.id),
+		).toEqual(["ping", "ping.freshness", "guard-freshness"]);
+
+		const rows: HealthStep = {
+			id: "guard-rows",
+			result: "rows-guarded",
+			kind: "guard",
+			condition: {
+				kind: "predicate",
+				operator: "non_empty",
+				actual: { ref: { namespace: "steps", binding: "ping-result", path: ["data"] } },
+			},
+			onFail: {
+				attribute: [
+					{
+						operationId: "ping",
+						status: "degraded",
+						reasonCode: "expected_absence",
+						reasonKey: "health.ping.empty",
+					},
+				],
+				stop: "scenario",
+			},
+		};
+		const late: HealthStep = { ...PING_FRESHNESS_GUARD, id: "guard-late", result: "late-guarded" };
+		expect(
+			guarded({ ...base, steps: [base.steps[0], rows, late] }).steps.map((step) => step.id),
+		).toEqual(["ping", "ping.freshness", "guard-rows", "guard-late"]);
+	});
+
+	it("honours an authored assert that rejects the stale serve as the verdict", () => {
+		const base = validScenario();
+		const assertion = base.steps[1];
+		if (assertion?.kind !== "assert") throw new Error("expected assert step");
+		assertion.expression = {
+			kind: "all",
+			clauses: [
+				assertion.expression,
+				{
+					kind: "predicate",
+					operator: "equals",
+					actual: false,
+					expected: {
+						ref: { namespace: "steps", binding: "ping-result", path: ["served_stale_cache"] },
+					},
+				},
+			],
+		};
+		expect(guarded(base).steps.map((step) => step.id)).toEqual(["ping", "assert-ping"]);
+	});
+
+	it("places the guards for step_block members after the block", () => {
+		const parsed = guarded(scenarioWithCandidateBlock(2));
+		expect(parsed.steps.map((step) => step.id)).toEqual([
+			"ping",
+			"ping.freshness",
+			"candidate-0",
+			"candidate-1",
+			"candidate-1.freshness",
+			"candidate-0.freshness",
+		]);
+	});
+
+	it("holds the step budget for what the monitor receives, attached guards included", () => {
+		const steps = Array.from({ length: 33 }, (_, index) => ({
+			id: `ping-${index}`,
+			result: `result-${index}`,
+			kind: "operation" as const,
+			operationId: "ping",
+			inputTemplate: {},
+		}));
+		const scenario = (count: number) => ({ ...validScenario(), steps: steps.slice(0, count) });
+		expect(defineHealthScenario(scenario(33)).steps).toHaveLength(33);
+		expect(() => providerWithStaleCase(scenario(33))).toThrow(/invalid scenario/);
+		expect(caseScenario(providerWithStaleCase(scenario(32))).steps).toHaveLength(64);
+	});
+
+	it("attaches the guard in defineProvider only for an operation that declares cache.staleIfErrorMs", () => {
+		const scenario = defineHealthScenario(validScenario());
+		const stale = caseScenario(providerWithStaleCase(scenario));
+		expect(stale.steps.map((step) => step.id)).toEqual(["ping", "ping.freshness", "assert-ping"]);
+		expect(stale.steps[1]).toEqual(PING_FRESHNESS_GUARD);
+		expect(caseScenario(providerWithCase({ name: "ping probe", scenario }))).toEqual(scenario);
+		// The journey scenario of the same operation is guarded the same way.
+		const journeyProvider = providerWithStaleJourney(
+			defineHealthJourney({ ...journeyBase(), scenario }),
+		);
+		expect(journeyProvider.healthJourneys?.[0]?.scenario?.steps.map((step) => step.id)).toEqual([
+			"ping",
+			"ping.freshness",
+			"assert-ping",
+		]);
+	});
+
+	it("rejects a cache policy without the cache capability, a non-window, or an unknown field", () => {
+		const scenario = defineHealthScenario(validScenario());
+		expect(() => providerWithStaleCase(scenario, { staleIfErrorMs: 60_000 }, false)).toThrow(
+			/does not declare the cache capability/,
+		);
+		for (const staleIfErrorMs of [0, -1, 1.5, Number.NaN]) {
+			expect(() => providerWithStaleCase(scenario, { staleIfErrorMs })).toThrow(
+				/staleIfErrorMs must be an integer of at least 1 ms/,
+			);
+		}
+		expect(() =>
+			// test-invalid: runtime validation must reject an unknown cache policy field.
+			providerWithStaleCase(scenario, { staleIfErrorMs: 1, ttlMs: 1 } as never),
+		).toThrow(/Unknown field "ttlMs"/);
+	});
+
 	it("accepts every and any quantifiers", () => {
 		for (const quantifierKind of ["every", "any"] as const) {
 			const scenario = validScenario();
@@ -632,6 +917,153 @@ describe("declarative health scenarios", () => {
 		};
 		const parsed = defineHealthScenario(scenario);
 		expect(JSON.parse(JSON.stringify(parsed))).toEqual(parsed);
+	});
+
+	it("resolves a duplicate code to its last declaration before exposing a reference, as the server does", () => {
+		const refs = errorRefs([
+			{ code: "NO_DATA", status: 404 },
+			{ code: "NO_DATA", status: 422 },
+			{ code: "EMPTY", status: 422 },
+			{ code: "EMPTY", status: 404 },
+		] as const) as Record<string, { code: string; status: number } | undefined>;
+		expect(refs.NO_DATA).toBeUndefined();
+		expect(refs.EMPTY).toEqual({ code: "EMPTY", status: 404 });
+	});
+
+	it("references a declared absence code by value and serializes it as status and code", () => {
+		const errorCodes = [
+			{ code: "NO_DATA", status: 404, description: "No alert is issued today." },
+			{ code: "BAD_DISTRICT", status: 400, description: "Unknown district." },
+			{ code: "UPSTREAM_REJECTED", status: 409, description: "Refused upstream." },
+			{ code: "RATE_LIMITED", status: 404, description: "Mis-declared refusal." },
+			{ code: "UNMAPPED", description: "No status." },
+		] as const satisfies readonly OperationErrorCode[];
+		const errors = errorRefs(errorCodes);
+		expect(errors).toEqual({
+			NO_DATA: { code: "NO_DATA", status: 404 },
+			BAD_DISTRICT: { code: "BAD_DISTRICT", status: 400 },
+		});
+		// @ts-expect-error test-invalid: a 409 is an upstream refusal, not an absence
+		errors.UPSTREAM_REJECTED;
+		// @ts-expect-error test-invalid: a rate-limit code is never an absence, whatever its declared status
+		errors.RATE_LIMITED;
+		// @ts-expect-error test-invalid: a code without a declared absence status is not offered
+		errors.UNMAPPED;
+		// @ts-expect-error test-invalid: an undeclared code does not exist
+		errors.TYPO;
+		const widened: readonly OperationErrorCode[] = errorCodes;
+		// @ts-expect-error test-invalid: a widened declaration offers no reference at all
+		errorRefs(widened).NO_DATA;
+
+		const base = validScenario();
+		const [operation, ...rest] = base.steps;
+		if (operation.kind !== "operation") throw new Error("expected operation step");
+		const attribute = [
+			{
+				operationId: "ping",
+				status: "degraded",
+				reasonCode: "expected_absence",
+				reasonKey: "health.ping.calm",
+			},
+		] as const;
+		const parsed = defineHealthScenario({
+			...base,
+			steps: [{ ...operation, expectedErrors: [{ error: errors.NO_DATA, attribute }] }, ...rest],
+		});
+		const parsedOperation = parsed.steps[0];
+		expect(
+			parsedOperation.kind === "operation" ? parsedOperation.expectedErrors : undefined,
+		).toEqual([{ status: 404, code: "NO_DATA", attribute: [...attribute] }]);
+
+		for (const error of [
+			{ code: "RATE_LIMITED", status: 404 },
+			{ code: "NO_DATA", status: 409 },
+			{ code: "NO_DATA", status: 401 },
+			undefined,
+		]) {
+			expect(() =>
+				defineHealthScenario({
+					...base,
+					steps: [{ ...operation, expectedErrors: [{ error, attribute }] }, ...rest],
+				}),
+			).toThrow();
+		}
+	});
+
+	it("tags a by-code entry for the old path's lint without changing the wire shape", () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const base = validScenario();
+			const [operation, ...rest] = base.steps;
+			if (operation.kind !== "operation") throw new Error("expected operation step");
+			const attribute = [
+				{
+					operationId: "ping",
+					status: "degraded",
+					reasonCode: "expected_absence",
+					reasonKey: "health.ping.calm",
+				},
+			] as const;
+			const errors = errorRefs([{ code: "NO_ROUTE", status: 404 }] as const);
+			const parsed = defineHealthScenario({
+				...base,
+				steps: [
+					{
+						...operation,
+						expectedErrors: [
+							{ status: 404, code: "NO_DATA", attribute },
+							{ error: errors.NO_ROUTE, attribute },
+						],
+					},
+					...rest,
+				],
+			});
+			const step = parsed.steps[0];
+			const entries = step.kind === "operation" ? step.expectedErrors : undefined;
+			expect(entries?.map((entry) => isExpectedErrorByCode(entry))).toEqual([true, false]);
+			expect(entries?.[0]).toEqual({ status: 404, code: "NO_DATA", attribute: [...attribute] });
+			expect(JSON.stringify(entries?.[0])).toBe(
+				JSON.stringify(entries?.[1]).replace("NO_ROUTE", "NO_DATA"),
+			);
+			expect(Object.keys(entries?.[0] ?? {})).toEqual(["status", "code", "attribute"]);
+			// The tag survives the guard attachment defineProvider does.
+			const guardedStep = withFreshnessGuards(parsed, new Set(["ping"])).steps[0];
+			expect(
+				guardedStep.kind === "operation"
+					? isExpectedErrorByCode(guardedStep.expectedErrors?.[0])
+					: undefined,
+			).toBe(true);
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("ships the freshness guard copy in every locale the SDK negotiates", () => {
+		expect(Object.keys(FRESHNESS_GUARD_REASON_COPY).sort()).toEqual(
+			[...PROVIDER_ERROR_LOCALES].sort(),
+		);
+		expect(SDK_OWNED_HEALTH_REASON_COPY[FRESHNESS_GUARD_REASON_KEY]).toBe(
+			FRESHNESS_GUARD_REASON_COPY,
+		);
+		for (const sentence of Object.values(FRESHNESS_GUARD_REASON_COPY))
+			expect(sentence.length).toBeGreaterThan(0);
+	});
+
+	it("pins the refusal codes the reference type excludes to the SDK registries", () => {
+		const registered = [
+			...Array.from(SDK_UPSTREAM_ERROR_CODE_REGISTRY)
+				.filter(
+					([, registration]) =>
+						registration.category === "upstream_auth" ||
+						registration.category === "upstream_rate_limited",
+				)
+				.map(([code]) => code),
+			...Array.from(SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES)
+				.filter(([code, status]) => status === 401 || code === "MISSING_SECRET")
+				.map(([code]) => code),
+		];
+		expect(new Set<string>(EXPECTED_ERROR_REFUSAL_CODES)).toEqual(new Set(registered));
 	});
 
 	it("authors a declared non-2xx absence on the operation step", () => {

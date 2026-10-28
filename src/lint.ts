@@ -19,6 +19,7 @@ import {
 	isProviderLocaleKey,
 	type ProviderLocaleCatalog,
 } from "./i18n/keys.js";
+import { isExpectedErrorByCode } from "./health-scenario.js";
 import {
 	PROVIDER_ERROR_CATEGORIES,
 	type ProviderErrorCategory,
@@ -3160,79 +3161,38 @@ function freshnessGuardAttributesExpectedAbsence(scenario: unknown, operationId:
 const STALE_SERVE_MESSAGE_PROBE_LIMIT = 8;
 
 /**
- * Health-check cases the platform monitor cannot execute, and stale-if-error
- * serves no probe can see.
+ * Stale-if-error serves no probe can see, on the deprecated per-call path.
  *
- * The monitor runs a case's SERIALIZED `scenario` and nothing else — a closure
- * cannot cross the registry's serialization boundary. A case carrying only
- * `assertions` is still published as a probe, but the registry projects it as
- * `legacy_function_assertions_not_serializable` and the monitor answers
- * `unknown` / `monitoring_unavailable` for it forever: the operation reads as
- * monitored on the status page while nothing is checked.
+ * An operation that declares `cache: { staleIfErrorMs }` gets the freshness
+ * guard attached by `defineProvider` and is never linted here. An operation
+ * that still passes `staleIfErrorMs` to `ctx.cache.getOrSet` / `set` (kept
+ * one release, `@deprecated`, runtime warn) has nothing attached, so for that
+ * release the two rules main carried stay for exactly that path and are
+ * removed together with the per-call option in the next minor:
  *
- * A provider that reads its upstream through `ctx.cache.getOrSet(..., {
- * staleIfErrorMs })` answers an upstream outage with HTTP 200 and a
- * schema-valid body for the whole stale window, so every clause over
- * `status_code` and `data` passes and the probe rolls up `ok` through the
- * outage. `served_stale_cache` on the operation step result is the only operand
- * that separates that from a live read.
+ * - `health-check-stale-serve-unguarded`: the provider serves stale-if-error
+ *   per call and a case of an undeclared operation never checks
+ *   `served_stale_cache`. During an upstream outage the cache answers HTTP 200
+ *   with a schema-valid body, so every clause over `status_code` and `data`
+ *   passes and the probe reports `ok` for the whole stale window.
+ * - `health-check-stale-serve-reason`: a freshness guard of such an operation
+ *   attributes `expected_absence`, which the platform publishes as a
+ *   non-incident status, so the outage it catches reads as "nothing to
+ *   return" instead of `degraded`.
  *
- * Both are warnings while the fleet migrates; they become errors once no
- * repository carries an unmonitored case.
+ * Both messages name the declaration as the fix: it replaces the per-call
+ * option and the hand-written guard at once.
  */
-function lintHealthCheckMonitorability(provider: {
+function lintHealthCheckStaleServe(provider: {
 	id?: string;
 	providerSourceFiles?: Record<string, string>;
-	operations?: Record<string, { handler?: unknown; source?: string; healthCheck?: unknown }>;
+	operations?: Record<
+		string,
+		{ handler?: unknown; source?: string; healthCheck?: unknown; cache?: unknown }
+	>;
 }): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [];
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	// Freshness is judged per CASE. Operation-level bookkeeping would let one
-	// guarded case silence its unguarded siblings, which still report `ok`
-	// through a stale serve — the same fail-open this rule exists to close.
-	const uncoveredByOperation = new Map<string, string[]>();
-
-	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-		const cases = readHealthCheckCases(operation.healthCheck);
-		const unmonitored: string[] = [];
-		const absenceAttributed: string[] = [];
-		for (const [caseIndex, healthCase] of cases.entries()) {
-			const caseLabel =
-				typeof healthCase.name === "string" && healthCase.name.length > 0
-					? `"${healthCase.name}"`
-					: `[${caseIndex}]`;
-			if (healthCase.scenario === undefined) {
-				unmonitored.push(caseLabel);
-			}
-			if (!scenarioChecksFreshness(healthCase.scenario, operationKey)) {
-				const uncovered = uncoveredByOperation.get(operationKey) ?? [];
-				uncovered.push(`${operationKey} ${caseLabel}`);
-				uncoveredByOperation.set(operationKey, uncovered);
-			}
-			if (freshnessGuardAttributesExpectedAbsence(healthCase.scenario, operationKey)) {
-				absenceAttributed.push(caseLabel);
-			}
-		}
-		if (absenceAttributed.length > 0) {
-			diagnostics.push({
-				rule: "health-check-stale-serve-reason",
-				level: "warn",
-				field: `operations.${operationKey}.healthCheck.cases`,
-				message: `${providerLabel} operation "${operationKey}" health-check ${absenceAttributed.length === 1 ? "case" : "cases"} ${absenceAttributed.join(", ")} guard ${SERVED_STALE_CACHE_OPERAND} but attribute reasonCode "expected_absence". The platform publishes expected_absence as a non-incident status (neither ok nor degraded, excluded from uptime and incidents), so an upstream outage this guard catches would read as "nothing to return" instead of degraded. Attribute reasonCode "served_stale_cache" instead; the reasonKey and its copy can stay.`,
-			});
-		}
-		if (unmonitored.length > 0) {
-			diagnostics.push({
-				rule: "health-check-assertions-not-monitored",
-				level: "warn",
-				field: `operations.${operationKey}.healthCheck.cases`,
-				message: `${providerLabel} operation "${operationKey}" health-check ${unmonitored.length === 1 ? "case" : "cases"} ${unmonitored.join(", ")} declare assertions without a scenario. The platform health monitor executes only a case's serialized scenario, so this operation publishes a probe whose outcome is permanently unknown/monitoring_unavailable — it reads as monitored while nothing is checked. Express the checks as scenario: defineHealthScenario({ ... }).`,
-			});
-		}
-	}
-
-	if (uncoveredByOperation.size === 0) return diagnostics;
-
 	// Attribution. A handler that carries the cache call in its OWN source names
 	// exactly the operation that serves stale. A file does not: the linter cannot
 	// follow the call graph, and it cannot reliably tell a handler's own file
@@ -3256,8 +3216,41 @@ function lintHealthCheckMonitorability(provider: {
 		unattributed = true;
 	}
 	if (sources.size === 0) return diagnostics;
-
 	const attributable = !unattributed;
+
+	// Freshness is judged per CASE. Operation-level bookkeeping would let one
+	// guarded case silence its unguarded siblings, which still report `ok`
+	// through a stale serve. An operation that declares `cache` is skipped
+	// outright: the SDK attached its guard.
+	const uncoveredByOperation = new Map<string, string[]>();
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		if (operation.cache !== undefined) continue;
+		if (attributable && !operationsServingStale.has(operationKey)) continue;
+		const absenceAttributed: string[] = [];
+		for (const [caseIndex, healthCase] of readHealthCheckCases(operation.healthCheck).entries()) {
+			const caseLabel =
+				typeof healthCase.name === "string" && healthCase.name.length > 0
+					? `"${healthCase.name}"`
+					: `[${caseIndex}]`;
+			if (!scenarioChecksFreshness(healthCase.scenario, operationKey)) {
+				const uncovered = uncoveredByOperation.get(operationKey) ?? [];
+				uncovered.push(`${operationKey} ${caseLabel}`);
+				uncoveredByOperation.set(operationKey, uncovered);
+			}
+			if (freshnessGuardAttributesExpectedAbsence(healthCase.scenario, operationKey)) {
+				absenceAttributed.push(caseLabel);
+			}
+		}
+		if (absenceAttributed.length > 0) {
+			diagnostics.push({
+				rule: "health-check-stale-serve-reason",
+				level: "warn",
+				field: `operations.${operationKey}.healthCheck.cases`,
+				message: `${providerLabel} operation "${operationKey}" health-check ${absenceAttributed.length === 1 ? "case" : "cases"} ${absenceAttributed.join(", ")} guard ${SERVED_STALE_CACHE_OPERAND} but attribute reasonCode "expected_absence". The platform publishes expected_absence as a non-incident status (neither ok nor degraded, excluded from uptime and incidents), so an upstream outage this guard catches would read as "nothing to return" instead of degraded. Declare cache: { staleIfErrorMs } on the operation and delete the per-call option and this guard: the SDK attaches a guard that attributes "served_stale_cache". Until then, attribute reasonCode "served_stale_cache"; the reasonKey and its copy can stay.`,
+			});
+		}
+	}
+	if (uncoveredByOperation.size === 0) return diagnostics;
 	const uncovered = [...uncoveredByOperation]
 		.filter(([operationKey]) => !attributable || operationsServingStale.has(operationKey))
 		.flatMap(([, probes]) => probes);
@@ -3275,8 +3268,53 @@ function lintHealthCheckMonitorability(provider: {
 		rule: "health-check-stale-serve-unguarded",
 		level: "warn",
 		field: "healthCheck",
-		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...sources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "served_stale_cache" (a stale serve is an upstream fault; "expected_absence" is the non-incident status for an absence the provider declares in advance), placed before any row or emptiness guard.${caveat}`,
+		message: `${providerLabel} serves stale-if-error (staleIfErrorMs in ${[...sources].sort().join(", ")}) and these health-check cases never check ${SERVED_STALE_CACHE_OPERAND}: ${named}. During an upstream outage the cache answers HTTP 200 with a schema-valid body, so every clause over status_code and data still passes and those probes report ok for the whole stale window. Add one guard step per affected probe on { ref: { namespace: "steps", binding: "<operation step result>", path: ["${SERVED_STALE_CACHE_OPERAND}"] } } attributing status "degraded" with reasonCode "served_stale_cache" (a stale serve is an upstream fault; "expected_absence" is the non-incident status for an absence the provider declares in advance), placed before any row or emptiness guard, or declare cache: { staleIfErrorMs } on the operation and delete the per-call option: the SDK then attaches that guard and this rule no longer applies. The per-call option and this rule are removed in the next minor.${caveat}`,
 	});
+	return diagnostics;
+}
+
+/**
+ * Health-check cases the platform monitor cannot execute.
+ *
+ * The monitor runs a case's SERIALIZED `scenario` and nothing else — a closure
+ * cannot cross the registry's serialization boundary. A case carrying only
+ * `assertions` is still published as a probe, but the registry projects it as
+ * `legacy_function_assertions_not_serializable` and the monitor answers
+ * `unknown` / `monitoring_unavailable` for it forever: the operation reads as
+ * monitored on the status page while nothing is checked.
+ *
+ * Kept as a rule rather than a type because the only structural fix is making
+ * `scenario` required on `HealthCheckCase`, which removes the self-test-only
+ * `assertions` shape; that is a deprecation release, and this is the old
+ * path's rule until then. A warning while the fleet migrates; it becomes an
+ * error once no repository carries an unmonitored case.
+ */
+function lintHealthCheckMonitorability(provider: {
+	id?: string;
+	operations?: Record<string, { healthCheck?: unknown }>;
+}): LintDiagnostic[] {
+	const diagnostics: LintDiagnostic[] = [];
+	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const unmonitored = readHealthCheckCases(operation.healthCheck).flatMap(
+			(healthCase, caseIndex) =>
+				healthCase.scenario === undefined
+					? [
+							typeof healthCase.name === "string" && healthCase.name.length > 0
+								? `"${healthCase.name}"`
+								: `[${caseIndex}]`,
+						]
+					: [],
+		);
+		if (unmonitored.length > 0) {
+			diagnostics.push({
+				rule: "health-check-assertions-not-monitored",
+				level: "warn",
+				field: `operations.${operationKey}.healthCheck.cases`,
+				message: `${providerLabel} operation "${operationKey}" health-check ${unmonitored.length === 1 ? "case" : "cases"} ${unmonitored.join(", ")} declare assertions without a scenario. The platform health monitor executes only a case's serialized scenario, so this operation publishes a probe whose outcome is permanently unknown/monitoring_unavailable — it reads as monitored while nothing is checked. Express the checks as scenario: defineHealthScenario({ ... }).`,
+			});
+		}
+	}
 	return diagnostics;
 }
 
@@ -3311,11 +3349,21 @@ function isProviderErrorCategory(value: string): value is ProviderErrorCategory 
 
 type ExpectedErrorEntry = { status: number; code: string };
 
-/** The `expectedErrors` entries of one operation step, read structurally. */
+/**
+ * The by-code `expectedErrors` entries of one operation step, read
+ * structurally. A reference entry (`{ error: errors.X, attribute }`) is
+ * declared, status-bound and refusal-free by construction and serializes to
+ * the same `{ status, code, attribute }`, so only the entries
+ * `defineHealthScenario` tagged as authored by code are read; the reference
+ * path has no rule (DX rule 2).
+ */
 function readExpectedErrors(step: Record<string, unknown>): ExpectedErrorEntry[] {
 	if (step.kind !== "operation" || !Array.isArray(step.expectedErrors)) return [];
 	return step.expectedErrors.flatMap((entry) =>
-		isLintRecord(entry) && typeof entry.status === "number" && typeof entry.code === "string"
+		isLintRecord(entry) &&
+		isExpectedErrorByCode(entry) &&
+		typeof entry.status === "number" &&
+		typeof entry.code === "string"
 			? [{ status: entry.status, code: entry.code }]
 			: [],
 	);
@@ -3412,8 +3460,12 @@ function expectedErrorEnvelopeSources(
  * way the runtime reads them (a duplicate `errorCodes` entry resolves to its
  * last declaration).
  *
- * Error level: the clause is new, nothing in the fleet depends on a looser
- * reading, and a dead or dangerous entry has no partial value.
+ * Error level: a dead or dangerous entry has no partial value.
+ *
+ * The rule of the deprecated by-code form only. The reference form
+ * (`errorRefs(errorCodes).X`) makes an undeclared code, a status outside the
+ * absence class and a refusal code compile errors, so it is never linted;
+ * both rules are removed together with the by-code form in the next minor.
  */
 function lintHealthCheckExpectedErrors(provider: {
 	id?: string;
@@ -3677,6 +3729,8 @@ export function lintProvider(
 				source?: string;
 				/** Read structurally by the health-check monitorability rules. */
 				healthCheck?: unknown;
+				/** `cache: { staleIfErrorMs }`; an operation that declares it is never stale-serve linted. */
+				cache?: unknown;
 				errorCodes?: ReadonlyArray<{
 					code: string;
 					status?: number;
@@ -3722,6 +3776,7 @@ export function lintProviderWithInformation(
 		...lintProviderMetaNarrowing(provider),
 		...lintLegacyHandleDeclarations(provider),
 		...lintHealthCheckMonitorability(provider),
+		...lintHealthCheckStaleServe(provider),
 		...lintHealthCheckExpectedErrors(provider),
 	];
 	if (provider.operations) {
