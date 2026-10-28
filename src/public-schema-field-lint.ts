@@ -1,22 +1,5 @@
-import type { ZodType } from "zod";
-
 import type { LintDiagnostic } from "./lint.js";
-
-type SchemaLike = ZodType & {
-	def?: Record<string, unknown>;
-	_def?: Record<string, unknown>;
-	shape?: Record<string, SchemaLike> | (() => Record<string, SchemaLike>);
-	element?: SchemaLike;
-	items?: SchemaLike[];
-	options?: SchemaLike[] | Set<SchemaLike> | Map<string, SchemaLike>;
-	innerType?: SchemaLike;
-	sourceType?: () => SchemaLike;
-	unwrap?: () => SchemaLike;
-	in?: SchemaLike;
-	out?: SchemaLike;
-	left?: SchemaLike;
-	right?: SchemaLike;
-};
+import { type SchemaNode, isSchemaNode, schemaChildren } from "./schema-walk.js";
 
 const ESTABLISHED_APIFUSE_PROTOCOL_FIELDS = new Set(["externalRef"]);
 
@@ -32,112 +15,6 @@ const UPSTREAM_FIELD_REPLACEMENTS = new Map<string, string>([
 	["lastBuildDate", "upstream_generated_at"],
 	["meta", "summary"],
 ]);
-
-function isSchema(value: unknown): value is SchemaLike {
-	return (
-		!!value &&
-		typeof value === "object" &&
-		"safeParse" in value &&
-		typeof value.safeParse === "function"
-	);
-}
-
-function getSchemaDef(schema: SchemaLike): Record<string, unknown> {
-	const def = schema.def ?? schema._def;
-	return def && typeof def === "object" ? def : {};
-}
-
-function isSchemaRecord(value: unknown): value is Record<string, SchemaLike> {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-	return Object.values(value).every(isSchema);
-}
-
-function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
-	const rawShape = typeof schema.shape === "function" ? schema.shape() : schema.shape;
-	if (isSchemaRecord(rawShape)) {
-		return rawShape;
-	}
-
-	const defShape = getSchemaDef(schema).shape;
-	if (typeof defShape === "function") {
-		const resolved = defShape();
-		return isSchemaRecord(resolved) ? resolved : {};
-	}
-	return isSchemaRecord(defShape) ? defShape : {};
-}
-
-function appendSchemaChildren(children: SchemaLike[], value: unknown): SchemaLike[] {
-	if (isSchema(value)) {
-		children.push(value);
-		return children;
-	}
-	if (Array.isArray(value)) {
-		children.push(...value.filter(isSchema));
-		return children;
-	}
-	if (value instanceof Set) {
-		children.push(...Array.from(value).filter(isSchema));
-		return children;
-	}
-	if (value instanceof Map) {
-		children.push(...Array.from(value.values()).filter(isSchema));
-		return children;
-	}
-	return children;
-}
-
-function safeSourceType(schema: SchemaLike): SchemaLike | undefined {
-	try {
-		return schema.sourceType?.();
-	} catch {
-		return undefined;
-	}
-}
-
-function safeUnwrap(schema: SchemaLike): SchemaLike | undefined {
-	try {
-		return schema.unwrap?.();
-	} catch {
-		return undefined;
-	}
-}
-
-function getTransparentChildSchemas(schema: SchemaLike): SchemaLike[] {
-	const def = getSchemaDef(schema);
-	const children: SchemaLike[] = [];
-	for (const value of [
-		schema.element,
-		schema.items,
-		schema.options,
-		schema.innerType,
-		safeSourceType(schema),
-		safeUnwrap(schema),
-		schema.in,
-		schema.out,
-		schema.left,
-		schema.right,
-		def.schema,
-		def.innerType,
-		def.type,
-		def.valueType,
-		def.item,
-		def.items,
-		def.rest,
-		def.catchall,
-		def.option,
-		def.options,
-		def.pipe,
-		def.payload,
-		def.sourceType,
-		def.left,
-		def.right,
-	]) {
-		appendSchemaChildren(children, value);
-	}
-	return children;
-}
 
 function recommendedReplacement(fieldName: string): string | undefined {
 	if (/^category\d+$/.test(fieldName)) {
@@ -157,36 +34,36 @@ function collectPublicSchemaFieldDiagnostics(
 	operationId: string,
 	schema: unknown,
 	basePath: string,
-	seen = new Set<SchemaLike>(),
+	seen = new Set<SchemaNode>(),
 ): LintDiagnostic[] {
-	if (!isSchema(schema) || seen.has(schema)) {
+	if (!isSchemaNode(schema) || seen.has(schema)) {
 		return [];
 	}
 
 	seen.add(schema);
 	const diagnostics: LintDiagnostic[] = [];
-	for (const [fieldName, child] of Object.entries(getObjectShape(schema))) {
-		const fieldPath = `${basePath}.${fieldName}`;
-		const replacement = ESTABLISHED_APIFUSE_PROTOCOL_FIELDS.has(fieldName)
-			? undefined
-			: recommendedReplacement(fieldName);
-		if (replacement) {
-			diagnostics.push({
-				rule: "public-schema-upstream-field",
-				level: "error",
-				field: fieldPath,
-				message: `Provider "${providerId}" operation "${operationId}" public schema field "${fieldPath}" uses upstream-shaped field "${fieldName}"; use APIFuse field "${replacement}" instead.`,
-			});
+	for (const child of schemaChildren(schema)) {
+		if (child.kind === "property" && child.key !== undefined) {
+			const fieldPath = `${basePath}.${child.key}`;
+			const replacement = ESTABLISHED_APIFUSE_PROTOCOL_FIELDS.has(child.key)
+				? undefined
+				: recommendedReplacement(child.key);
+			if (replacement) {
+				diagnostics.push({
+					rule: "public-schema-upstream-field",
+					level: "error",
+					field: fieldPath,
+					message: `Provider "${providerId}" operation "${operationId}" public schema field "${fieldPath}" uses upstream-shaped field "${child.key}"; use APIFuse field "${replacement}" instead.`,
+				});
+			}
+			diagnostics.push(
+				...collectPublicSchemaFieldDiagnostics(providerId, operationId, child.schema, fieldPath, seen),
+			);
+			continue;
 		}
+		const childPath = child.kind === "element" ? `${basePath}[]` : basePath;
 		diagnostics.push(
-			...collectPublicSchemaFieldDiagnostics(providerId, operationId, child, fieldPath, seen),
-		);
-	}
-
-	for (const child of getTransparentChildSchemas(schema)) {
-		const childPath = schema.element === child ? `${basePath}[]` : basePath;
-		diagnostics.push(
-			...collectPublicSchemaFieldDiagnostics(providerId, operationId, child, childPath, seen),
+			...collectPublicSchemaFieldDiagnostics(providerId, operationId, child.schema, childPath, seen),
 		);
 	}
 

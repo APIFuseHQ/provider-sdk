@@ -626,10 +626,10 @@ function createHandleField<K extends HandleKindDeclaration>(
 	internals.refreshMeta(meta);
 	Object.defineProperty(meta, HANDLE_META_KIND, { value: kind, enumerable: false });
 	internals.metas.add(meta);
-	const described = z.string().min(1).describe(handleFieldDescription(meta));
-	// zod v4 `.meta()` replaces the registry entry, so carry the description over.
-	const existing = described.meta() ?? {};
-	return described.meta({ ...existing, [APIFUSE_HANDLE_META_KEY]: meta });
+	return z
+		.string()
+		.min(1)
+		.meta({ description: handleFieldDescription(meta), [APIFUSE_HANDLE_META_KEY]: meta });
 }
 
 function declaredLegacyOptions(options: {

@@ -189,6 +189,16 @@
 			"file": "src/__tests__/stealth-client.test.ts",
 			"symbol": "retryable",
 			"reason": "Tests the SDK's own TransportError retryability, carried on the instance for SDK-owned transport codes."
+		},
+		{
+			"file": "src/schema.ts",
+			"symbol": "description",
+			"reason": "field() applies the deprecated SensitiveFieldOptions.description for one release and fields.*() presets write their SDK-owned wording through the same option."
+		},
+		{
+			"file": "src/__tests__/schema-fields.test.ts",
+			"symbol": "description",
+			"reason": "The test builds the deprecated raw .describe() prose shape on purpose to pin how the SDK reports it."
 		}
 	]
 }

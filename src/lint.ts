@@ -1,17 +1,9 @@
-import type { ZodType } from "zod";
-
 import {
 	SDK_ERROR_REGISTRY_BY_CODE,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 } from "./error-resolution.js";
 import { legacyHandleOptionsOf } from "./handle/contract.js";
-import {
-	APIFUSE_HANDLE_META_KEY,
-	type HandleFieldMeta,
-	handleFieldDescription,
-	isHandleFieldMeta,
-} from "./handle-meta.js";
 import { isExpectedErrorByCode } from "./health-scenario.js";
 import {
 	PROVIDER_ERROR_CATEGORIES,
@@ -24,7 +16,6 @@ import {
 	isStealthOwnedHeaderName,
 	SDK_OWNED_CHROME_HEADER_PREFIX,
 } from "./runtime/stealth-owned-headers.js";
-import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 import { getTypeScript, scriptKindForSourceFile } from "./typescript-module.js";
 
@@ -156,24 +147,6 @@ type ProviderContractMetaLike = {
 		readonly path: string;
 		readonly reason: string;
 	}[];
-};
-
-type SchemaLike = ZodType & {
-	description?: string;
-	def?: Record<string, unknown>;
-	_def?: Record<string, unknown>;
-	meta?: () => Record<string, unknown> | undefined;
-	shape?: Record<string, SchemaLike> | (() => Record<string, SchemaLike>);
-	element?: SchemaLike;
-	items?: SchemaLike[];
-	options?: SchemaLike[] | Set<SchemaLike> | Map<string, SchemaLike>;
-	innerType?: SchemaLike;
-	sourceType?: () => SchemaLike;
-	unwrap?: () => SchemaLike;
-	in?: SchemaLike;
-	out?: SchemaLike;
-	left?: SchemaLike;
-	right?: SchemaLike;
 };
 
 export interface LintDiagnostic {
@@ -433,379 +406,6 @@ function lintAuthModel(provider: {
 			field: "context.keys",
 			message: `${providerLabel} should declare context.keys when auth flow code accesses ctx.context.*.`,
 		});
-	}
-
-	return diagnostics;
-}
-
-function isSchema(value: unknown): value is SchemaLike {
-	return (
-		!!value &&
-		typeof value === "object" &&
-		"safeParse" in value &&
-		typeof value.safeParse === "function"
-	);
-}
-
-function getSchemaDef(schema: SchemaLike): Record<string, unknown> {
-	const def = schema.def ?? schema._def;
-	if (def && typeof def === "object") {
-		return def;
-	}
-	return {};
-}
-
-function isSchemaRecord(value: unknown): value is Record<string, SchemaLike> {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-	for (const entry of Object.values(value)) {
-		if (!isSchema(entry)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
-	const rawShape = typeof schema.shape === "function" ? schema.shape() : schema.shape;
-	if (isSchemaRecord(rawShape)) {
-		return rawShape;
-	}
-
-	const defShape = getSchemaDef(schema).shape;
-	if (typeof defShape === "function") {
-		const resolved = defShape();
-		if (isSchemaRecord(resolved)) {
-			return resolved;
-		}
-		return {};
-	}
-
-	if (isSchemaRecord(defShape)) {
-		return defShape;
-	}
-	return {};
-}
-
-/**
- * Child edges of a schema node. `origin: "shape"` marks object properties whose
- * key is provider-chosen (and may collide with a structural edge name such as
- * `item`, `type`, or `schema`); `origin: "structural"` marks zod internals
- * (wrappers, array elements, union options, pipe stages).
- */
-type SchemaChildEdge = { key: string; schema: SchemaLike; origin: "shape" | "structural" };
-
-function getChildSchemas(schema: SchemaLike): SchemaChildEdge[] {
-	const seen = new Map<string, SchemaLike>();
-	const origins = new Map<string, "shape" | "structural">();
-	const def = getSchemaDef(schema);
-
-	const add = (key: string, value: unknown, origin: "shape" | "structural" = "structural") => {
-		if (!isSchema(value)) {
-			return;
-		}
-		const id = `${key}:${seen.size}`;
-		seen.set(id, value);
-		origins.set(id, origin);
-	};
-
-	for (const [key, value] of Object.entries(getObjectShape(schema))) {
-		add(key, value, "shape");
-	}
-
-	add("element", schema.element);
-	add("innerType", schema.innerType);
-	add("unwrap", schema.unwrap?.());
-	add("sourceType", schema.sourceType?.());
-	add("in", schema.in);
-	add("out", schema.out);
-	add("left", schema.left);
-	add("right", schema.right);
-
-	if (Array.isArray(schema.items)) {
-		for (const [index, item] of schema.items.entries()) {
-			add(String(index), item);
-		}
-	}
-
-	if (Array.isArray(def.items)) {
-		for (const [index, item] of def.items.entries()) {
-			add(String(index), item);
-		}
-	}
-
-	const options = schema.options ?? def.options;
-	if (Array.isArray(options)) {
-		for (const [index, option] of options.entries()) {
-			add(String(index), option);
-		}
-	} else if (options instanceof Set) {
-		for (const [index, option] of Array.from(options).entries()) {
-			add(String(index), option);
-		}
-	} else if (options instanceof Map) {
-		for (const [key, option] of options.entries()) {
-			add(String(key), option);
-		}
-	}
-
-	for (const key of [
-		"schema",
-		"innerType",
-		"type",
-		// zod v4 intersections keep their branches on the definition.
-		"left",
-		"right",
-		"valueType",
-		"keyType",
-		"item",
-		"rest",
-		"catchall",
-		"option",
-		"pipe",
-		"payload",
-		"shape",
-	]) {
-		const value = def[key];
-		if (Array.isArray(value)) {
-			for (const [index, item] of value.entries()) {
-				add(`${key}.${index}`, item);
-			}
-		} else {
-			add(key, value);
-		}
-	}
-
-	return Array.from(seen.entries()).map(([entryKey, child]) => ({
-		key: entryKey.split(":")[0] ?? entryKey,
-		schema: child,
-		origin: origins.get(entryKey) ?? "structural",
-	}));
-}
-
-function uniqueFields(fields: string[]): string[] {
-	return Array.from(new Set(fields));
-}
-
-function readSensitivityDeclaration(
-	schema: unknown,
-	seen = new Set<unknown>(),
-): boolean | undefined {
-	// Declarations sit on the leaf; same-path wrappers such as .optional(),
-	// .nullable(), .pipe() or z.lazy() carry no metadata of their own, so look
-	// through them.
-	if (!isSchema(schema) || seen.has(schema)) return undefined;
-	seen.add(schema);
-	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_SENSITIVE_META_KEY);
-	if (typeof value === "boolean") return value;
-	const def = getSchemaDef(schema);
-	const children =
-		def.type === "pipe"
-			? [def.in, def.out]
-			: def.type === "lazy" && typeof def.getter === "function"
-				? [def.getter()]
-				: [def.innerType];
-	for (const child of children) {
-		const declaration = readSensitivityDeclaration(child, seen);
-		if (declaration !== undefined) return declaration;
-	}
-	return undefined;
-}
-
-function getSchemaMetadata(schema: SchemaLike): Record<string, unknown> {
-	return schema.meta?.() ?? {};
-}
-
-function getSchemaDescriptionKey(schema: SchemaLike): string | undefined {
-	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_DESCRIPTION_KEY_META_KEY);
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-const SENSITIVE_FIELD_NAMES = new Set([
-	"apikey",
-	"authorization",
-	"cookie",
-	"secret",
-	"secrets",
-	"token",
-	"accesstoken",
-	"refreshtoken",
-	"password",
-	"passwd",
-	"otp",
-	"otpcode",
-	"phone",
-	"phonenumber",
-	"paymenturl",
-]);
-
-// Only phone-shaped keys can hold reviewed public data (facility phones); the
-// rest are credentials, which a public declaration must not launder.
-const PUBLIC_DECLARABLE_FIELD_NAMES = new Set(["phone", "phonenumber"]);
-
-function normalizeFieldName(name: string): string {
-	return name.toLowerCase().replace(/[-_\s]/g, "");
-}
-
-function isSensitiveFieldName(name: string): boolean {
-	return SENSITIVE_FIELD_NAMES.has(normalizeFieldName(name));
-}
-
-function isDeclaredSensitiveField(key: string, schema: unknown): boolean {
-	const declaration = readSensitivityDeclaration(schema);
-	return (
-		declaration === true ||
-		(declaration === false && PUBLIC_DECLARABLE_FIELD_NAMES.has(normalizeFieldName(key)))
-	);
-}
-
-// Child keys produced by getChildSchemas() that wrap a schema without adding a
-// property path segment (optional/nullable/default/pipe/effects/etc.).
-const SCHEMA_WRAPPER_NODE_KEYS: readonly string[] = [
-	"unwrap",
-	"innerType",
-	"sourceType",
-	"schema",
-	"type",
-	"in",
-	"out",
-	"option",
-	"pipe",
-	"payload",
-	"item",
-	"rest",
-	"catchall",
-	"keyType",
-	"valueType",
-	// zod v4 intersection branches: transparent, the enclosing property key applies.
-	"left",
-	"right",
-];
-
-function isSchemaWrapperNodeKey(key: string): boolean {
-	return SCHEMA_WRAPPER_NODE_KEYS.includes(key) || key.startsWith("pipe.");
-}
-
-function getOwnHandleFieldMeta(schema: SchemaLike): HandleFieldMeta | undefined {
-	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_HANDLE_META_KEY);
-	return isHandleFieldMeta(value) ? value : undefined;
-}
-
-/**
- * True when `schema` is a handle field (directly or through zod wrappers) whose
- * description is still the SDK-generated wording and no wrapper adds its own
- * description.
- */
-function isSdkOwnedHandleField(schema: unknown, seen = new Set<SchemaLike>()): boolean {
-	if (!isSchema(schema) || seen.has(schema)) return false;
-	seen.add(schema);
-	const own = getOwnHandleFieldMeta(schema);
-	if (own) return schema.description === handleFieldDescription(own);
-	if (schema.description) return false;
-	for (const child of getChildSchemas(schema)) {
-		if (child.origin === "shape" || !isSchemaWrapperNodeKey(child.key)) continue;
-		if (isSdkOwnedHandleField(child.schema, seen)) return true;
-	}
-	return false;
-}
-
-function collectUnmarkedSensitiveFields(
-	schema: unknown,
-	basePath: string,
-	seen = new Set<SchemaLike>(),
-): string[] {
-	if (!isSchema(schema) || seen.has(schema)) {
-		return [];
-	}
-	seen.add(schema);
-	const out: string[] = [];
-	for (const [key, child] of Object.entries(getObjectShape(schema))) {
-		const childPath = basePath ? `${basePath}.${key}` : key;
-		if (isSensitiveFieldName(key) && !isDeclaredSensitiveField(key, child)) {
-			out.push(childPath);
-		}
-		out.push(...collectUnmarkedSensitiveFields(child, childPath, seen));
-	}
-	for (const child of getChildSchemas(schema)) {
-		if (Object.hasOwn(getObjectShape(schema), child.key)) continue;
-		const isWrapperNode = SCHEMA_WRAPPER_NODE_KEYS.includes(child.key);
-		const childPath =
-			child.key === "element" || child.key.startsWith("element.")
-				? `${basePath}[]`
-				: isWrapperNode || child.key.startsWith("pipe.")
-					? basePath
-					: basePath
-						? `${basePath}.${child.key}`
-						: child.key;
-		out.push(...collectUnmarkedSensitiveFields(child.schema, childPath, seen));
-	}
-	return out;
-}
-
-function collectSchemaDescriptionKeyDiagnostics(
-	schema: unknown,
-	basePath: string,
-	seen = new Set<SchemaLike>(),
-	requireCurrentDescription = true,
-): LintDiagnostic[] {
-	if (!isSchema(schema) || seen.has(schema)) {
-		return [];
-	}
-
-	seen.add(schema);
-	const diagnostics: LintDiagnostic[] = [];
-	const currentPath = basePath || "schema";
-	const hasDescriptionKey = getSchemaDescriptionKey(schema) !== undefined;
-
-	// Handle fields (`kind.field()`, ADR-0012) carry SDK-owned wording via
-	// .describe() plus x-apifuse-handle meta; they count as described and are
-	// leaves, so neither this node nor its wrapper chain needs a describeKey.
-	// A provider override of that wording (`.describe("…")` on the field or on
-	// a wrapper) is provider prose again and stays subject to the rules below.
-	if (isSdkOwnedHandleField(schema)) {
-		return diagnostics;
-	}
-
-	if (schema.description && !hasDescriptionKey) {
-		diagnostics.push({
-			rule: "schema-description-raw-prose",
-			level: "error",
-			field: currentPath,
-			message: `Schema field "${currentPath}" must use .describeKey() or describeKey() instead of raw static prose.`,
-		});
-	}
-
-	if (requireCurrentDescription && !hasDescriptionKey) {
-		diagnostics.push({
-			rule: "schema-description-key-required",
-			level: "error",
-			field: currentPath,
-			message: schema.description
-				? `Schema field "${currentPath}" has a raw description but is missing .describeKey() or describeKey() metadata.`
-				: `Schema field "${currentPath}" is missing .describeKey() or describeKey() metadata.`,
-		});
-	}
-
-	for (const child of getChildSchemas(schema)) {
-		const isWrapperNode = SCHEMA_WRAPPER_NODE_KEYS.includes(child.key);
-		const isStructuralNode =
-			isWrapperNode ||
-			child.key.startsWith("pipe.") ||
-			child.key === "element" ||
-			child.key.startsWith("element.");
-		const childPath = isWrapperNode
-			? currentPath
-			: currentPath === "schema"
-				? child.key
-				: /^\d+$/.test(child.key)
-					? `${currentPath}[${child.key}]`
-					: child.key === "element" || child.key.startsWith("element.")
-						? `${currentPath}[]`
-						: `${currentPath}.${child.key}`;
-		diagnostics.push(
-			...collectSchemaDescriptionKeyDiagnostics(child.schema, childPath, seen, !isStructuralNode),
-		);
 	}
 
 	return diagnostics;
@@ -3298,6 +2898,9 @@ export function lintOperation(op: {
 	const diagnostics: LintDiagnostic[] = [];
 	const hasDescriptionKey = typeof op.descriptionKey === "string" && op.descriptionKey.length > 0;
 
+	// Stays one release: making `descriptionKey` required on OperationDefinition
+	// touches 66 SDK test files (~300 operation literals) that wave 2 lanes edit
+	// concurrently; the fleet declares it on every operation (0 missing / 135).
 	if (!hasDescriptionKey) {
 		diagnostics.push({
 			rule: "description-key-required",
@@ -3307,35 +2910,12 @@ export function lintOperation(op: {
 		});
 	}
 
-	diagnostics.push(
-		...collectSchemaDescriptionKeyDiagnostics(op.input, "input"),
-		...collectSchemaDescriptionKeyDiagnostics(op.output, "output"),
-	);
-
 	if (!hasBidirectionalFixtures(op.fixtures)) {
 		diagnostics.push({
 			rule: "fixtures-both-directions",
 			level: "error",
 			field: "fixtures",
 			message: "Fixtures must include both request and response.",
-		});
-	}
-
-	for (const field of uniqueFields(collectUnmarkedSensitiveFields(op.input, "input"))) {
-		diagnostics.push({
-			rule: "sensitive-field-unmarked",
-			level: "warn",
-			field,
-			message: `Schema field "${field}" looks sensitive; mark it with fields.*() or sensitive(...); publicField(...) is accepted only for reviewed public phone-shaped fields.`,
-		});
-	}
-
-	for (const field of uniqueFields(collectUnmarkedSensitiveFields(op.output, "output"))) {
-		diagnostics.push({
-			rule: "sensitive-field-unmarked",
-			level: "warn",
-			field,
-			message: `Schema field "${field}" looks sensitive; mark it with fields.*() or sensitive(...); publicField(...) is accepted only for reviewed public phone-shaped fields.`,
 		});
 	}
 

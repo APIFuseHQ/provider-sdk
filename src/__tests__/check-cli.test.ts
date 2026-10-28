@@ -585,14 +585,18 @@ export default {
   allowedHosts: ["api.example.com"],
   reviewed: "community",
   auth: { mode: "none" },
-  meta: { displayName: "Bad Provider", category: "other" },
+  meta: {
+    displayName: "Bad Provider",
+    category: "other",
+    contract: { publicSchemaFieldNames: "normalized" },
+  },
   operations: {
     lookup: {
       description: "Too short.",
       input: z.object({ q: z.string() }),
-      output: z.object({ ok: z.boolean() }),
-      handler: async () => ({ ok: true }),
-      fixtures: { request: { q: "btc" }, response: { ok: true } },
+      output: z.object({ mallName: z.string() }),
+      handler: async () => ({ mallName: "x" }),
+      fixtures: { request: { q: "btc" }, response: { mallName: "x" } },
       healthCheckUnsupported: { reason: "Unit test operation." },
     },
   },
@@ -605,7 +609,7 @@ export default {
 
 		expect(authoring?.passed).toBe(false);
 		expect(authoring?.details?.join("\n")).toContain("description-key-required");
-		expect(authoring?.details?.join("\n")).toContain("schema-description-key-required");
+		expect(authoring?.details?.join("\n")).toContain("public-schema-upstream-field");
 	});
 
 	it("passes public authoring lint for a review-ready provider", async () => {

@@ -24,8 +24,7 @@ function handleField(meta: HandleFieldMeta = WAITING_META) {
 	return z
 		.string()
 		.min(1)
-		.describe(handleFieldDescription(meta))
-		.meta({ [APIFUSE_HANDLE_META_KEY]: meta });
+		.meta({ description: handleFieldDescription(meta), [APIFUSE_HANDLE_META_KEY]: meta });
 }
 
 function described<TSchema extends z.ZodType>(schema: TSchema, key: string): TSchema {
@@ -263,90 +262,6 @@ describe("handle lint rules", () => {
 			};
 
 			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toHaveLength(1);
-		});
-	});
-
-	describe("description-key exemption", () => {
-		it("does not require describeKey on handle fields or flag their SDK-owned prose", () => {
-			const diagnostics = lintProvider(validProvider());
-
-			const descriptionRules = diagnostics.filter(
-				(diagnostic) =>
-					diagnostic.rule === "schema-description-key-required" ||
-					diagnostic.rule === "schema-description-raw-prose",
-			);
-
-			expect(descriptionRules).toEqual([]);
-		});
-
-		it("exempts the two-issuer SDK wording as well", () => {
-			const provider = validProvider();
-			const meta: HandleFieldMeta = {
-				...WAITING_META,
-				issuedBy: ["waiting-prepare", "waiting-restart"],
-			};
-			provider.operations["waiting-prepare"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{ waiting_token: handleField(meta) },
-			);
-
-			expect(rulesOf(lintProvider(provider), "schema-description")).toEqual([]);
-		});
-
-		it("looks through optional/nullable wrappers around a handle field", () => {
-			const provider = validProvider();
-			provider.operations["waiting-confirm"] = operation(
-				{ waiting_token: handleField().optional() },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-
-			const diagnostics = lintProvider(provider);
-
-			expect(
-				diagnostics.filter(
-					(diagnostic) =>
-						diagnostic.field === "operations.waiting-confirm.input.waiting_token" &&
-						diagnostic.rule.startsWith("schema-description"),
-				),
-			).toEqual([]);
-			expect(rulesOf(diagnostics, "handle-")).toEqual([]);
-		});
-
-		it("still requires describeKey on ordinary sibling fields", () => {
-			const provider = validProvider();
-			provider.operations["waiting-confirm"] = operation(
-				{ waiting_token: handleField(), note: z.string() },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-
-			const found = byRule(lintProvider(provider), "schema-description-key-required");
-
-			expect(found.map((diagnostic) => diagnostic.field)).toEqual([
-				"operations.waiting-confirm.input.note",
-			]);
-		});
-
-		it("exempts handle fields nested inside arrays of objects", () => {
-			const provider = validProvider();
-			provider.operations["waiting-prepare"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{
-					offers: described(
-						z.array(
-							described(
-								z.object({
-									label: described(z.string(), "fields.label"),
-									waiting_token: handleField(),
-								}),
-								"fields.offer",
-							),
-						),
-						"fields.offers",
-					),
-				},
-			);
-
-			expect(byRule(lintProvider(provider), "schema-description-key-required")).toEqual([]);
 		});
 	});
 });

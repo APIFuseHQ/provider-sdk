@@ -1,0 +1,92 @@
+# Public schema description codemod (provider-sdk DX program, 2026-10-28).
+#
+# Public schema nodes describe themselves through the SDK: `describeKey()` with
+# a locale key, a `kind.field()` handle, or a `fields.*()` preset. Raw
+# `.describe("prose")` is deprecated (`@deprecated` on `ZodType.describe`,
+# `defineProvider` warns once per provider) and refused in the next release.
+#
+# Dry run (prints the diff, changes nothing):
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/schema.yml .
+# Apply:
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/schema.yml --update-all .
+#
+# 1. A property `name: <schema>.describe("prose")` becomes
+#    `name: <schema>.describeKey("schema.<name>")` (property name in camelCase,
+#    the fleet's `schema.*` convention). The prose moves to the catalogs by
+#    hand: add `schema.<name>` with that text to locales/en.json (and ko.json,
+#    ja.json where present); the match message quotes it. Two properties with
+#    the same name share one key; split the key if their prose differs.
+# 2. `fields.<preset>({ description: "prose" })` becomes
+#    `fields.<preset>()` on a property; the description goes the same way.
+# 3. A `.describe("prose")` that is not a property value (an operation input
+#    or output root, a union branch, a shared schema constant) is reported,
+#    not rewritten: there is no property name to derive the key from. Wrap
+#    it as `describeKey(<schema>, "<key>")` and add the key by hand.
+#
+# After applying, `defineProvider` must load the provider without the
+# `[provider-sdk] Provider "..." has N public schema fields without a locale key`
+# warning.
+id: schema-describe-prose-on-property
+language: typescript
+severity: warning
+message: 'Raw .describe() prose on property $KEY; replaced by describeKey("schema.$KEY_NAME"). Add "schema.$KEY_NAME": $PROSE to locales/en.json (and the other catalogs).'
+rule:
+  pattern: $SCHEMA.describe($PROSE)
+  inside:
+    kind: pair
+    has:
+      field: key
+      pattern: $KEY
+    stopBy:
+      not:
+        kind: call_expression
+transform:
+  KEY_TEXT:
+    replace:
+      source: $KEY
+      replace: '^["'']|["'']$'
+      by: ''
+  KEY_NAME:
+    convert:
+      source: $KEY_TEXT
+      toCase: camelCase
+fix: $SCHEMA.describeKey("schema.$KEY_NAME")
+---
+id: schema-preset-description-option
+language: typescript
+severity: warning
+message: 'fields.$PRESET({ description }) on property $KEY carries raw prose; the preset keeps its SDK wording. To keep the prose, add "schema.$KEY_NAME": $PROSE to locales/en.json and chain .describeKey("schema.$KEY_NAME").'
+rule:
+  pattern: 'fields.$PRESET({ description: $PROSE })'
+  inside:
+    kind: pair
+    has:
+      field: key
+      pattern: $KEY
+    stopBy:
+      not:
+        kind: call_expression
+transform:
+  KEY_TEXT:
+    replace:
+      source: $KEY
+      replace: '^["'']|["'']$'
+      by: ''
+  KEY_NAME:
+    convert:
+      source: $KEY_TEXT
+      toCase: camelCase
+fix: fields.$PRESET()
+---
+id: schema-describe-prose-without-property
+language: typescript
+severity: warning
+message: 'Raw .describe() prose on a public schema node that is not a property; wrap it as describeKey(<schema>, "<key>") and add the key to locales/en.json by hand.'
+rule:
+  pattern: $SCHEMA.describe($PROSE)
+  not:
+    inside:
+      kind: pair
+      stopBy:
+        not:
+          kind: call_expression
