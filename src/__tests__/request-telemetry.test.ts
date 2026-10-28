@@ -268,7 +268,7 @@ describe("request telemetry ledger", () => {
 			const envelope = decode(ledger.toHeaderValue() ?? "");
 			const proxy = envelope.proxy as { attemptSamples?: Record<string, unknown>[] };
 			expect(proxy).toBeDefined();
-			expect(proxy.attemptSamples?.[0]).toEqual({ n: 1, a: 1, o: "error" });
+			expect(proxy.attemptSamples?.[0]).toEqual({ n: 1, a: 1, v: "smartproxy", o: "error" });
 			expect(warn).not.toHaveBeenCalled();
 		} finally {
 			console.warn = original;
