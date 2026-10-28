@@ -851,6 +851,7 @@ describe("serve option forwarding", () => {
 	it("forwards localeCatalogs from serve() into the served app", async () => {
 		const handle = await serve(localizedProvider(), {
 			port: 0,
+			metricsPort: 0,
 			localeCatalogs: CATALOGS,
 			shutdown: { signals: false },
 			logger: () => {},

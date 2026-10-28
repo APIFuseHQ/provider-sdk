@@ -182,6 +182,13 @@ export {
 	type RuntimeDiagnosticsThreadWindow,
 } from "./runtime-diagnostics.js";
 export {
+	DEFAULT_PROVIDER_METRICS_PORT,
+	PROVIDER_METRICS_CONTENT_TYPE,
+	PROVIDER_METRICS_ROUTE,
+	PROVIDER_RUNTIME_METRICS_PORT_ENV,
+	resolveProviderMetricsPort,
+} from "./provider-metrics.js";
+export {
 	DEFAULT_SELF_TEST_PORT,
 	deriveSelfTestToken,
 	PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV,
