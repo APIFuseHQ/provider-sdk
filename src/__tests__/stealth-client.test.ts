@@ -5657,7 +5657,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1 },
+						session: { affinity: "connection" },
 					},
 				},
 				affinityKey: "connection-1",
@@ -5712,7 +5712,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(allWreqCalls()).toHaveLength(4);
 	});
 
-	it("mints after pool rotation and rebinds the exact endpoint without resolving on turn two", async () => {
+	it("mints after a session rotation and rebinds the exact endpoint without resolving on turn two", async () => {
 		const {
 			APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
 			createCeremonyEgressLeaseRuntime,
@@ -5732,7 +5732,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		const policy = {
 			mode: "required" as const,
 			providers: ["nodemaven" as const],
-			session: { affinity: "connection" as const, poolSize: 2, lifetimeMinutes: 30 },
+			session: { affinity: "connection" as const, lifetimeMinutes: 30 },
 		};
 		let resolutions = 0;
 		const telemetry = {
@@ -5747,7 +5747,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			affinityKey: "connection-1",
 			environment,
 		});
-		mockStealthState.queuedErrors.push(new Error("first pool endpoint unavailable"));
+		mockStealthState.queuedErrors.push(new Error("first session endpoint unavailable"));
 		mockStealthState.queuedResponses.push({ status: 200, body: "turn one", headers: {} });
 		await createStealthClient(
 			"https://example.com",
@@ -5760,9 +5760,17 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			}),
 		).fetch("/bind");
 		const handle = firstLease.handle();
-		expect(firstLease.binding?.poolIndex).toBe(1);
 		expect(resolutions).toBe(2);
+		const sessionOf = (proxy: unknown) => /-sid-([a-z0-9]+)-/u.exec(String(proxy))?.[1];
+		const failedProxy = mockStealthState.clients.at(0)?.options?.proxy;
 		const selectedProxy = mockStealthState.clients.at(-1)?.options?.proxy;
+		// The failed attempt and the retry ran on two different sticky sessions, and the
+		// lease sealed the one that reached the origin.
+		expect(sessionOf(failedProxy)).toBeString();
+		expect(sessionOf(selectedProxy)).toBeString();
+		expect(sessionOf(selectedProxy)).not.toBe(sessionOf(failedProxy));
+		expect(firstLease.binding?.proxyUrl).toBe(String(selectedProxy));
+		expect(firstLease.binding?.sessionId).toBe(sessionOf(selectedProxy));
 
 		const secondLease = createCeremonyEgressLeaseRuntime({
 			tenantId: "tenant-1",
@@ -5786,7 +5794,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 
 		expect(resolutions).toBe(2);
 		expect(mockStealthState.clients.at(-1)?.options?.proxy).toBe(selectedProxy);
-		expect(secondLease.binding?.poolIndex).toBe(1);
+		expect(secondLease.binding?.sessionId).toBe(sessionOf(selectedProxy));
 	});
 
 	it("rebinds a fresh egress and drops remembered SBSD state when the ceremony lease expires", async () => {
@@ -5828,7 +5836,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 5 },
+						session: { affinity: "connection", lifetimeMinutes: 5 },
 					},
 				},
 				affinityKey: "connection-1",
@@ -5902,7 +5910,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 5 },
+						session: { affinity: "connection", lifetimeMinutes: 5 },
 					},
 				},
 				affinityKey: "connection-1",
@@ -5950,9 +5958,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		const foreignBinding = {
 			vendor: "nodemaven" as const,
 			proxyUrl: "http://other-sid:password@gate.nodemaven.com:8080",
-			poolIndex: 1,
 			affinityKey: "connection-1",
-			refreshEpoch: 0,
+			sessionId: "other",
 			lifetimeMinutes: 30,
 		};
 		const lease: CeremonyEgressLeaseRuntime = {
@@ -5975,7 +5982,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1 },
+						session: { affinity: "connection" },
 					},
 				},
 				affinityKey: "connection-1",
@@ -5999,12 +6006,13 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(allWreqCalls()).toHaveLength(1);
 	});
 
-	it("keeps a Smartproxy binding across fetches 20 s apart: the lease follows the session lifetime, not the extraction cache", async () => {
+	it("keeps a smartproxy gateway binding across fetches inside its session lifetime without resolving again", async () => {
 		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
 			"../runtime/egress-lease.js"
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const boundProxy = "http://user:password@198.51.100.7:9000";
+		const boundProxy =
+			"http://user_area-KR_life-30_session-deadsessn0:password@proxy.smartproxy.net:3120";
 		let now = 0;
 		let resolutions = 0;
 		const lease = createCeremonyEgressLeaseRuntime({
@@ -6018,9 +6026,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		lease.bind({
 			vendor: "smartproxy",
 			proxyUrl: boundProxy,
-			poolIndex: 0,
 			affinityKey: "connection-1",
-			refreshEpoch: 0,
+			sessionId: "deadsessn0",
 			lifetimeMinutes: 30,
 		});
 		const handle = lease.handle();
@@ -6049,7 +6056,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		).createSession();
 
 		await expect(session.fetch("/one")).resolves.toMatchObject({ status: 200 });
-		now = 20_000;
+		// 29 minutes later the `life-30` session is still the ceremony's egress.
+		now = 29 * 60_000;
 		await expect(session.fetch("/two")).resolves.toMatchObject({ status: 200 });
 
 		expect(resolutions).toBe(0);
@@ -6069,9 +6077,10 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			"../runtime/proxy-nodemaven.js"
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		// A raw Smartproxy endpoint bound by an earlier turn that has since died. The fresh
-		// selection goes to the policy's NodeMaven leg (Smartproxy needs the allocator API).
-		const deadProxy = "http://user:password@198.51.100.7:9000";
+		// A smartproxy gateway session bound by an earlier turn that has since died. The fresh
+		// selection goes to the policy's NodeMaven leg (the policy's only vendor).
+		const deadProxy =
+			"http://user_area-KR_life-30_session-deadsessn0:password@proxy.smartproxy.net:3120";
 		let resolutions = 0;
 		const attempts: Array<{ outcome: string; errorCode?: string }> = [];
 		const lease = createCeremonyEgressLeaseRuntime({
@@ -6084,9 +6093,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		lease.bind({
 			vendor: "smartproxy",
 			proxyUrl: deadProxy,
-			poolIndex: 0,
 			affinityKey: "connection-1",
-			refreshEpoch: 0,
+			sessionId: "deadsessn0",
 			lifetimeMinutes: 30,
 		});
 		const deadHandle = lease.handle();
@@ -6099,7 +6107,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+						session: { affinity: "connection", lifetimeMinutes: 30 },
 					},
 				},
 				affinityKey: "connection-1",
@@ -6144,7 +6152,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			"../runtime/egress-lease.js"
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const boundProxy = "http://user:password@198.51.100.7:9000";
+		const boundProxy =
+			"http://user_area-KR_life-30_session-deadsessn0:password@proxy.smartproxy.net:3120";
 		let resolutions = 0;
 		const lease = createCeremonyEgressLeaseRuntime({
 			tenantId: "tenant-1",
@@ -6156,9 +6165,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		lease.bind({
 			vendor: "smartproxy",
 			proxyUrl: boundProxy,
-			poolIndex: 0,
 			affinityKey: "connection-1",
-			refreshEpoch: 0,
+			sessionId: "deadsessn0",
 			lifetimeMinutes: 30,
 		});
 		const handle = lease.handle();
@@ -6196,7 +6204,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(lease.handle()).toBe(handle);
 	});
 
-	it("refreshes the pool when the released bound endpoint is the one a sticky pool re-selects", async () => {
+	it("moves to the next sticky session when the released bound endpoint is refused, with no refresh pass", async () => {
 		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
 			"../runtime/egress-lease.js"
 		);
@@ -6209,11 +6217,12 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			[NODEMAVEN_USERNAME_ENV]: "fixture-account",
 			[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
 		};
-		// One sticky NodeMaven SID: without a refresh pass every selection is the same endpoint.
+		// One sticky NodeMaven affinity: each attempt of a request derives its own sid, so a
+		// refused bound session is left on the next attempt without any pool refresh.
 		const policy = {
 			mode: "required" as const,
 			providers: ["nodemaven" as const],
-			session: { affinity: "connection" as const, poolSize: 1, lifetimeMinutes: 30 },
+			session: { affinity: "connection" as const, lifetimeMinutes: 30 },
 		};
 		let resolutions = 0;
 		const telemetry = {
@@ -6241,11 +6250,12 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			}),
 		).fetch("/one");
 		const boundProxy = firstLease.binding?.proxyUrl;
+		const boundSession = firstLease.binding?.sessionId;
 		expect(boundProxy).toBeString();
-		expect(firstLease.binding?.refreshEpoch).toBe(0);
+		expect(boundSession).toBeString();
 
-		// Turn two: the bound endpoint answers with a pool-level refusal. Releasing it and
-		// re-selecting yields the same SID, so only the allocator refresh pass can move on.
+		// Turn two: the bound session is refused by the vendor edge. Releasing it moves the
+		// request to its next attempt, which derives the next sticky sid.
 		const secondLease = createCeremonyEgressLeaseRuntime({ ...scope, handle: firstLease.handle() });
 		mockStealthState.queuedErrors.push(new Error("proxy pool unavailable"));
 		mockStealthState.queuedResponses.push({ status: 200, body: "turn two", headers: {} });
@@ -6262,13 +6272,15 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			).fetch("/two"),
 		).resolves.toMatchObject({ status: 200 });
 
+		// turn one, the refused bound session, and the next session
 		expect(allWreqCalls()).toHaveLength(3);
-		expect(secondLease.binding?.refreshEpoch).toBe(1);
 		expect(secondLease.binding?.proxyUrl).toBeString();
 		expect(secondLease.binding?.proxyUrl).not.toBe(boundProxy);
+		expect(secondLease.binding?.sessionId).toBeString();
+		expect(secondLease.binding?.sessionId).not.toBe(boundSession);
 		expect(secondLease.handle()).not.toBe(firstLease.handle());
-		// turn one, the deduplicated re-selection, and the refreshed selection
-		expect(resolutions).toBe(3);
+		// turn one and the fresh selection; the bound session needed no resolution
+		expect(resolutions).toBe(2);
 	});
 
 	it("retires a sibling session's replay record when this session releases and rebinds the shared lease", async () => {
@@ -6279,7 +6291,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			"../runtime/proxy-nodemaven.js"
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const deadProxy = "http://user:password@198.51.100.7:9000";
+		const deadProxy =
+			"http://user_area-KR_life-30_session-deadsessn0:password@proxy.smartproxy.net:3120";
 		let solves = 0;
 		const lease = createCeremonyEgressLeaseRuntime({
 			tenantId: "tenant-1",
@@ -6291,9 +6304,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		lease.bind({
 			vendor: "smartproxy",
 			proxyUrl: deadProxy,
-			poolIndex: 0,
 			affinityKey: "connection-1",
-			refreshEpoch: 0,
+			sessionId: "deadsessn0",
 			lifetimeMinutes: 30,
 		});
 		const client = createStealthClient(
@@ -6303,7 +6315,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+						session: { affinity: "connection", lifetimeMinutes: 30 },
 					},
 				},
 				affinityKey: "connection-1",
@@ -6363,7 +6375,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			"../runtime/proxy-nodemaven.js"
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const deadProxy = "http://user:password@198.51.100.7:9000";
+		const deadProxy =
+			"http://user_area-KR_life-30_session-deadsessn0:password@proxy.smartproxy.net:3120";
 		let solves = 0;
 		let releaseSolve!: () => void;
 		const solveReleased = new Promise<void>((resolve) => {
@@ -6379,9 +6392,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		lease.bind({
 			vendor: "smartproxy",
 			proxyUrl: deadProxy,
-			poolIndex: 0,
 			affinityKey: "connection-1",
-			refreshEpoch: 0,
+			sessionId: "deadsessn0",
 			lifetimeMinutes: 30,
 		});
 		const client = createStealthClient(
@@ -6391,7 +6403,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+						session: { affinity: "connection", lifetimeMinutes: 30 },
 					},
 				},
 				affinityKey: "connection-1",
@@ -8206,7 +8218,7 @@ describe("stealth telemetry transport differential", () => {
 
 describe("stealth telemetry managed proxy observations", () => {
 	for (const diagnostic of [false, true]) {
-		it(`preserves managed pool refresh and diagnostic=${diagnostic} exchanges with recorder on/off`, async () => {
+		it(`preserves managed session rotation and diagnostic=${diagnostic} exchanges with recorder on/off`, async () => {
 			const { createStealthClient } = await import("../runtime/stealth.js");
 			const { StealthTelemetryCollector } = await import("../runtime/stealth-telemetry.js");
 			const { NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV } = await import(
@@ -8223,8 +8235,11 @@ describe("stealth telemetry managed proxy observations", () => {
 						status: 512,
 						cause: new Error("proxy non-200 code: 512"),
 					});
+				// Without the diagnostic the second session succeeds; with it every session the
+				// one-vendor budget allows (PROXY_ATTEMPTS_PER_VENDOR = 3) is refused and the
+				// auth diagnostic classifies the last one.
 				mockStealthState.queuedErrors.push(stale());
-				if (diagnostic) mockStealthState.queuedErrors.push(stale());
+				if (diagnostic) mockStealthState.queuedErrors.push(stale(), stale());
 				mockStealthState.queuedResponses.push({
 					status: 200,
 					body: diagnostic ? "source IP denied" : "ok",
@@ -8234,7 +8249,7 @@ describe("stealth telemetry managed proxy observations", () => {
 						proxy: {
 							mode: "required",
 							providers: ["nodemaven"],
-							session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+							session: { affinity: "connection", lifetimeMinutes: 30 },
 						},
 					},
 					affinityKey: "stealth-telemetry-managed-fixture",
@@ -8257,11 +8272,15 @@ describe("stealth telemetry managed proxy observations", () => {
 					};
 				}
 				const calls = allWreqCalls();
-				expect(calls).toHaveLength(diagnostic ? 3 : 2);
+				expect(calls).toHaveLength(diagnostic ? 4 : 2);
+				// Every attempt took its own vendor session; the auth diagnostic probes the last
+				// refused one.
+				const proxies = mockStealthState.clients.map(({ options }) => options?.proxy);
+				expect(new Set(proxies).size).toBe(2 + (diagnostic ? 1 : 0));
+				if (diagnostic) expect(proxies.at(-1)).toBe(proxies.at(-2));
 				if (recording) {
 					expect(collector.toLogPayload()).toMatchObject({
-						attempts: diagnostic ? 3 : 2,
-						poolRefreshes: 1,
+						attempts: diagnostic ? 4 : 2,
 						proxyUsed: true,
 					});
 					expect(collector.toLogPayload()?.attemptSamples).toHaveLength(calls.length);
@@ -8293,14 +8312,13 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 
 	type RecordedProxyAttempt = {
 		attempt: number;
-		poolIndex?: number;
 		proxyHash?: string;
 		outcome: string;
 		errorCode?: string;
 		status?: number;
 	};
 
-	async function createPooledClient(poolSize: number) {
+	async function createSessionClient(fixture: string) {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const { ProxyTelemetryCollector } = await import("../runtime/proxy-telemetry.js");
 		const { NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV } = await import(
@@ -8313,10 +8331,10 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 				proxy: {
 					mode: "required",
 					providers: ["nodemaven"],
-					session: { affinity: "connection", poolSize, lifetimeMinutes: 30 },
+					session: { affinity: "connection", lifetimeMinutes: 30 },
 				},
 			},
-			affinityKey: `exit-rotation-fixture-${poolSize}`,
+			affinityKey: `exit-rotation-fixture-${fixture}`,
 			engineCredentials: {
 				[NODEMAVEN_USERNAME_ENV]: "fixture-account",
 				[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
@@ -8336,12 +8354,12 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 
 	const usedProxies = () => mockStealthState.clients.map((client) => client.options?.proxy);
 
-	it("rotates once to the next pool entry on a headerless first-attempt 403 and returns the second answer", async () => {
+	it("rotates once to the next vendor session on a headerless first-attempt 403 and returns the second answer", async () => {
 		mockStealthState.queuedResponses.push(
 			{ status: 403, body: "<html><body>Forbidden</body></html>", headers: {} },
 			{ status: 200, body: "admitted", headers: {} },
 		);
-		const { client, attempts, collector } = await createPooledClient(2);
+		const { client, attempts, collector } = await createSessionClient("1");
 
 		const response = await client.fetch("/gated", {
 			stealth: { rotateExitOnAdmissionRefusal: true },
@@ -8354,38 +8372,35 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 		expect(second).toBeDefined();
 		expect(second).not.toBe(first);
 		expect(
-			attempts.map(({ attempt, poolIndex, outcome, errorCode, status }) => [
+			attempts.map(({ attempt, outcome, errorCode, status }) => [
 				attempt,
-				poolIndex,
 				outcome,
 				errorCode,
 				status,
 			]),
 		).toEqual([
-			[1, 0, "error", "PROXY_EXIT_REFUSED", 403],
-			[2, 1, "ok", undefined, 200],
+			[1, "error", "PROXY_EXIT_REFUSED", 403],
+			[2, "ok", undefined, 200],
 		]);
 		expect(attempts[0]?.proxyHash).toEqual(expect.any(String));
 		expect(attempts[1]?.proxyHash).toEqual(expect.any(String));
 		expect(attempts[0]?.proxyHash).not.toBe(attempts[1]?.proxyHash);
 		expect(
-			collector
-				.toLogPayload()
-				?.attemptSamples?.map(({ a, i, h, o, c, s }) => ({ a, i, h, o, c, s })),
+			collector.toLogPayload()?.attemptSamples?.map(({ a, h, o, c, s }) => ({ a, h, o, c, s })),
 		).toEqual([
-			{ a: 1, i: 0, h: attempts[0]?.proxyHash, o: "error", c: "PROXY_EXIT_REFUSED", s: 403 },
-			{ a: 2, i: 1, h: attempts[1]?.proxyHash, o: "ok", c: undefined, s: 200 },
+			{ a: 1, h: attempts[0]?.proxyHash, o: "error", c: "PROXY_EXIT_REFUSED", s: 403 },
+			{ a: 2, h: attempts[1]?.proxyHash, o: "ok", c: undefined, s: 200 },
 		]);
 		client.close?.();
 	});
 
-	it("rotates exactly once: a refusal through the next entry too is terminal", async () => {
+	it("rotates exactly once: a refusal on the next session too is terminal", async () => {
 		mockStealthState.queuedResponses.push(
 			{ status: 503, body: "upstream down", headers: {} },
 			{ status: 503, body: "still down", headers: {} },
 			{ status: 200, body: "must not be reached", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(3);
+		const { client, attempts } = await createSessionClient("2");
 
 		await expect(
 			client.fetch("/gated", { stealth: { rotateExitOnAdmissionRefusal: true } }),
@@ -8405,7 +8420,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
 			{ status: 403, body: "<html>Forbidden again</html>", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(2);
+		const { client, attempts } = await createSessionClient("3");
 
 		const response = await client.fetch("/gated", {
 			throwOnHttpError: false,
@@ -8426,7 +8441,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
 			{ status: 200, body: "must not be reached", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(2);
+		const { client, attempts } = await createSessionClient("4");
 
 		await expect(client.fetch("/gated")).rejects.toMatchObject({
 			code: "upstream_http_error",
@@ -8450,7 +8465,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			},
 			{ status: 200, body: "must not be reached", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(2);
+		const { client, attempts } = await createSessionClient("5");
 
 		const response = await client.fetch("/gated", {
 			throwOnHttpError: false,
@@ -8468,7 +8483,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			{ status: 503, body: "upstream down", headers: {} },
 			{ status: 200, body: "must not be reached", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(2);
+		const { client, attempts } = await createSessionClient("6");
 
 		await expect(
 			client.fetch("/orders", {
@@ -8492,7 +8507,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			{ status: 503, body: "upstream down", headers: {} },
 			{ status: 200, body: "must not be reached", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(2);
+		const { client, attempts } = await createSessionClient("7");
 
 		const response = await client.fetch("/orders", {
 			method: "POST",
@@ -8513,7 +8528,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			{ status: 503, body: "upstream down", headers: {} },
 			{ status: 200, body: "must not be reached", headers: {} },
 		);
-		const { client } = await createPooledClient(2);
+		const { client } = await createSessionClient("8");
 
 		await expect(
 			client.fetch("/orders", {
@@ -8532,7 +8547,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			{ status: 503, body: "upstream down", headers: {} },
 			{ status: 200, body: "admitted", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(2);
+		const { client, attempts } = await createSessionClient("9");
 
 		const response = await client.fetch("/orders", {
 			method: "POST",
@@ -8557,7 +8572,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			{ status: 503, body: "upstream down", headers: {} },
 			{ status: 200, body: "admitted", headers: {} },
 		);
-		const { client, attempts } = await createPooledClient(2);
+		const { client, attempts } = await createSessionClient("10");
 
 		const response = await client.fetch("/gated", {
 			method: "GET",
@@ -8572,24 +8587,6 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 			["error", 503, "PROXY_EXIT_REFUSED"],
 			["ok", 200, undefined],
 		]);
-		client.close?.();
-	});
-
-	it("does not rotate when the pool has a single entry", async () => {
-		mockStealthState.queuedResponses.push(
-			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
-			{ status: 200, body: "must not be reached", headers: {} },
-		);
-		const { client, attempts } = await createPooledClient(1);
-
-		const response = await client.fetch("/gated", {
-			throwOnHttpError: false,
-			stealth: { rotateExitOnAdmissionRefusal: true },
-		});
-
-		expect(response.status).toBe(403);
-		expect(allWreqCalls()).toHaveLength(1);
-		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([["ok", 403]]);
 		client.close?.();
 	});
 });

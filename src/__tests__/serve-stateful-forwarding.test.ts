@@ -1,12 +1,8 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
-import { clearProxyResolutionCache } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
-import {
-	APIFUSE__TRACE__ENABLED,
-	APIFUSE__TRACE__EXPORTER,
-} from "../runtime/trace-config.js";
+import { APIFUSE__TRACE__ENABLED, APIFUSE__TRACE__EXPORTER } from "../runtime/trace-config.js";
 import {
 	createServerApp,
 	type ProviderServerLogEvent,
@@ -297,9 +293,12 @@ describe("signed stateful operation forwarding", () => {
 
 	it("logs proxy telemetry recorded by a forwarded operation", async () => {
 		const originalFetch = global.fetch;
-		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		clearProxyResolutionCache();
-		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const smartproxyEnvNames = [
+			"APIFUSE__PROXY__SMARTPROXY_USERNAME",
+			"APIFUSE__PROXY__SMARTPROXY_PASSWORD",
+		] as const;
+		const originalSmartproxyEnv = smartproxyEnvNames.map((name) => process.env[name]);
+		for (const name of smartproxyEnvNames) delete process.env[name];
 		global.fetch = createLocalFetchDouble(async () => Response.json({ ok: true }));
 		const baseProvider = createTestProvider({ defaultExecutions: 0 });
 		const provider = {
@@ -340,12 +339,11 @@ describe("signed stateful operation forwarding", () => {
 			});
 		} finally {
 			global.fetch = originalFetch;
-			if (originalSmartproxyKey === undefined) {
-				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
-			}
-			clearProxyResolutionCache();
+			smartproxyEnvNames.forEach((name, index) => {
+				const original = originalSmartproxyEnv[index];
+				if (original === undefined) delete process.env[name];
+				else process.env[name] = original;
+			});
 		}
 	});
 

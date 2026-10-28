@@ -6,6 +6,10 @@
 - Scope: `@apifuse/provider-sdk` native network transport — gateway vendor resolution and tunnelling protocol
 - Builds on: `0001-native-socks5-gateway-proxy.md`, `0002-structural-gates-for-contract-integrity.md`
 
+> **Status note (2026-10-28):** ADR 0015 replaces the smartproxy allocation
+> path named in the ADR-0001 status note and in decision 3 here; the native
+> smartproxy adapter now synthesizes a gateway URL with a session id.
+
 ## Context
 
 The native transport landed with a single vendor adapter and a single tunnelling protocol:

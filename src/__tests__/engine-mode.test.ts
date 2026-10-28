@@ -334,6 +334,7 @@ describe("serve engine mode telemetry", () => {
 		const handle = await serve(provider(), {
 			...options,
 			port: 0,
+			metricsPort: 0,
 			shutdown: { signals: false },
 			logger: (event) => events.push(event),
 		});
@@ -403,6 +404,7 @@ describe("serve engine mode telemetry", () => {
 			const events: ProviderServerLogEvent[] = [];
 			const handle = await serve(provider({ runtimeTarget: "vanilla" }), {
 				port: 0,
+				metricsPort: 0,
 				shutdown: { signals: false },
 				logger: (event) => events.push(event),
 			});

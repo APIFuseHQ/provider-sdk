@@ -246,6 +246,7 @@ describe("serve", () => {
 				const events: ProviderServerLogEvent[] = [];
 				const handle = await serve(provider(), {
 					port: 0,
+					metricsPort: 0,
 					shutdown: { signals: false },
 					logger: (event) => events.push(event),
 				});

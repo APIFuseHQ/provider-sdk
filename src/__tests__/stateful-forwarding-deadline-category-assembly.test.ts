@@ -172,6 +172,7 @@ async function startOwnerPod(): Promise<OwnerPod> {
 	const handle = await serve(provider, {
 		host: "127.0.0.1",
 		port: 0,
+		metricsPort: 0,
 		logger: (event) => events.push(event),
 		statefulForwarding: {
 			secret: FORWARDING_SECRET,

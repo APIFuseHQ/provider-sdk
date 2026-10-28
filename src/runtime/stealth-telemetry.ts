@@ -60,7 +60,6 @@ export type StealthTelemetrySbsdEvent = {
 
 export interface StealthTelemetrySink {
 	recordAttempt(event: StealthTelemetryAttemptEvent): void;
-	recordPoolRefresh(): void;
 	recordRedirectHop(): void;
 	recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
 	recordSafeRefetch(): void;
@@ -77,7 +76,6 @@ export type StealthTelemetryAttemptSample = {
 
 export type StealthTelemetryLogPayload = {
 	attempts: number;
-	poolRefreshes: number;
 	redirectHops: number;
 	profileId?: StealthProfileDescriptor;
 	proxyUsed: boolean;
@@ -102,7 +100,6 @@ export type StealthTelemetryLogPayload = {
 
 export type StealthTelemetryHeaderPayload = {
 	attempts: number;
-	poolRefreshes: number;
 	redirectHops: number;
 	profileId?: {
 		browser: ClosedEnum<StealthBrowser>;
@@ -188,7 +185,6 @@ export class StealthTelemetryCollector
 	readonly key = "stealth" as const;
 	readonly #redact: ((text: string) => string) | undefined;
 	#attempts = 0;
-	#poolRefreshes = 0;
 	#redirectHops = 0;
 	#profileId: StealthProfileDescriptor | undefined;
 	#proxyUsed = false;
@@ -232,10 +228,6 @@ export class StealthTelemetryCollector
 		this.#attemptSamples.push(sample);
 	}
 
-	recordPoolRefresh(): void {
-		this.#poolRefreshes = saturatingAdd(this.#poolRefreshes, 1);
-	}
-
 	recordRedirectHop(): void {
 		this.#redirectHops = saturatingAdd(this.#redirectHops, 1);
 	}
@@ -271,7 +263,6 @@ export class StealthTelemetryCollector
 	toLogPayload(): StealthTelemetryLogPayload | undefined {
 		if (
 			this.#attempts === 0 &&
-			this.#poolRefreshes === 0 &&
 			this.#redirectHops === 0 &&
 			this.#safeRefetch === 0 &&
 			this.#sbsdDetected === undefined &&
@@ -281,7 +272,6 @@ export class StealthTelemetryCollector
 		}
 		return {
 			attempts: this.#attempts,
-			poolRefreshes: this.#poolRefreshes,
 			redirectHops: this.#redirectHops,
 			...(this.#profileId ? { profileId: cloneProfile(this.#profileId) } : {}),
 			proxyUsed: this.#proxyUsed,
@@ -320,7 +310,6 @@ export class StealthTelemetryCollector
 		}));
 		return {
 			attempts: log.attempts,
-			poolRefreshes: log.poolRefreshes,
 			redirectHops: log.redirectHops,
 			...(log.profileId
 				? {

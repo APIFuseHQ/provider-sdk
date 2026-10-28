@@ -200,8 +200,8 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   provider-owned client outside `ctx.stealth` needs the provider's proxy, such
   as a CAPTCHA solver that must use matching egress. Pass the provider proxy
   policy used by the provider and consume the returned `url`; the SDK owns
-  vendor selection, allocation, failover, and URL formats. Never call proxy
-  allocator APIs or hardcode proxy vendor hostnames in provider code.
+  vendor selection, session ids, failover, and URL formats. Never call proxy
+  vendor APIs or hardcode proxy vendor hostnames in provider code.
 
   ```ts
   import { resolveProxy } from "@apifuse/provider-sdk"

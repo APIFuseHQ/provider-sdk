@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { type Socket, createServer } from "node:net";
 import { z } from "zod";
 
-import { clearProxyResolutionCache } from "../config/loader.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { PROVIDER_ERROR_CATEGORIES } from "../observability.js";
 import {
@@ -38,6 +37,25 @@ import type {
 	ProviderDefinition,
 } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
+
+/** Smartproxy credential env names a test clears; the app key is the retired extraction key. */
+const SMARTPROXY_ENV_NAMES = [
+	"APIFUSE__PROXY__SMARTPROXY_USERNAME",
+	"APIFUSE__PROXY__SMARTPROXY_PASSWORD",
+	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
+] as const;
+
+/** Clear the smartproxy credential env for one test and return its restore function. */
+function clearSmartproxyEnv(): () => void {
+	const saved = SMARTPROXY_ENV_NAMES.map((name) => [name, process.env[name]] as const);
+	for (const name of SMARTPROXY_ENV_NAMES) delete process.env[name];
+	return () => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	};
+}
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
 import { createProviderDefinitionDouble } from "./test-utils.js";
@@ -620,7 +638,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
 					throw new TransportError(
-						"Proxy provider rejected a candidate endpoint during authentication. The SDK will retry or refresh the proxy pool when safe.",
+						"Proxy provider rejected a session during authentication. The SDK retries with a new session when safe.",
 						{ code: "PROXY_EDGE_AUTH_REJECTED" },
 					);
 				},
@@ -865,9 +883,7 @@ describe("provider HTTP server", () => {
 
 	it("logs optional proxy credential failover and emits the same payload in the header", async () => {
 		const originalFetch = global.fetch;
-		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		clearProxyResolutionCache();
-		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const restoreSmartproxyEnv = clearSmartproxyEnv();
 		global.fetch = createLocalFetchDouble(
 			async () =>
 				new Response(JSON.stringify({ ok: true }), {
@@ -934,19 +950,12 @@ describe("provider HTTP server", () => {
 			});
 		} finally {
 			global.fetch = originalFetch;
-			if (originalSmartproxyKey === undefined) {
-				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
-			}
-			clearProxyResolutionCache();
+			restoreSmartproxyEnv();
 		}
 	});
 
 	it("logs the proxy failover trail when required egress has no credentials", async () => {
-		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		clearProxyResolutionCache();
-		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const restoreSmartproxyEnv = clearSmartproxyEnv();
 		const baseProvider = createTestProvider();
 		const provider = {
 			...baseProvider,
@@ -983,12 +992,7 @@ describe("provider HTTP server", () => {
 				failovers: [{ v: "smartproxy", p: "resolution", r: "no_credentials" }],
 			});
 		} finally {
-			if (originalSmartproxyKey === undefined) {
-				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
-			}
-			clearProxyResolutionCache();
+			restoreSmartproxyEnv();
 		}
 	});
 
@@ -1903,8 +1907,7 @@ describe("provider HTTP server", () => {
 		expect(emptyTenantResponse.status).toBe(200);
 		const emptyTenantEvent = events.find(
 			(event) =>
-				event.event === "provider_request_completed" &&
-				event.requestId === "req_auth_empty_tenant",
+				event.event === "provider_request_completed" && event.requestId === "req_auth_empty_tenant",
 		);
 		expect(emptyTenantEvent).toBeDefined();
 		expect("tenantId" in (emptyTenantEvent ?? {})).toBe(false);
@@ -2240,13 +2243,13 @@ describe("provider HTTP server", () => {
 					output: z.object({ ok: z.boolean() }),
 					descriptionKey: "order",
 					errorCodes: [
-							{
-								code: "SOLD_OUT",
-								status: 422 as const,
-								description: "Item is sold out",
-								retryable: false,
-							},
-						],
+						{
+							code: "SOLD_OUT",
+							status: 422 as const,
+							description: "Item is sold out",
+							retryable: false,
+						},
+					],
 					handler: async () => {
 						throw new ProviderError("Item is sold out.", { code: "SOLD_OUT" });
 					},
@@ -2679,7 +2682,7 @@ describe("provider HTTP server", () => {
 			error: {
 				code: "PROXY_EDGE_AUTH_REJECTED",
 				message:
-					"Proxy provider rejected a candidate endpoint during authentication. The SDK will retry or refresh the proxy pool when safe.",
+					"Proxy provider rejected a session during authentication. The SDK retries with a new session when safe.",
 				requestId: "req_proxy_edge_auth",
 				retryable: true,
 				source: "apifuse",
@@ -2692,14 +2695,12 @@ describe("provider HTTP server", () => {
 		});
 	});
 
-	it("returns Smartproxy allocator failures with private telemetry and proxy-pool classification", async () => {
-		const originalFetch = global.fetch;
-		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		clearProxyResolutionCache();
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createLocalFetchDouble(
-			async () => new Response("allocator denied", { status: 503 }),
-		);
+	it("fails required smartproxy egress that has only the retired app key, naming the gateway credentials", async () => {
+		const restoreSmartproxyEnv = clearSmartproxyEnv();
+		// The extraction key alone no longer resolves smartproxy: the gateway needs the
+		// sub-account pair, and a deployment that still carries only the key fails at
+		// resolution with the missing names instead of falling back to it.
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "retired-app-key-value";
 		const baseProvider = createTestProvider();
 		const provider = {
 			...baseProvider,
@@ -2709,11 +2710,11 @@ describe("provider HTTP server", () => {
 				mode: "required",
 				provider: "smartproxy",
 				geo: { country: "KR" },
-				session: { affinity: "connection", poolSize: 1 },
+				session: { affinity: "connection" },
 			},
 			operations: {
 				...baseProvider.operations,
-				proxyAllocationFailure: {
+				proxyGatewayCredentialsMissing: {
 					riskClass: READ_RISK_CLASS,
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
@@ -2728,11 +2729,11 @@ describe("provider HTTP server", () => {
 		const proxyApp = createServerApp(provider, { logger: (event) => events.push(event) });
 
 		try {
-			const response = await proxyApp.request("/v1/proxyAllocationFailure", {
+			const response = await proxyApp.request("/v1/proxyGatewayCredentialsMissing", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					requestId: "req_proxy_alloc",
+					requestId: "req_proxy_gateway_credentials",
 					input: {},
 					connection: {
 						id: "af_con_failure",
@@ -2753,24 +2754,12 @@ describe("provider HTTP server", () => {
 				proxy: {
 					kind: "unresolved",
 					vendors: ["smartproxy"],
-					cacheStatus: "allocator",
-					cacheHit: false,
-					attempts: 3,
-					allocatorAttempts: 3,
-					allocatorStatus: 503,
-					allocatorBodyClass: "http_error",
-					failovers: [
-						{
-							v: "smartproxy",
-							p: "resolution",
-							r: "allocation_failed",
-						},
-					],
+					failovers: [{ v: "smartproxy", p: "resolution", r: "no_credentials" }],
 				},
 			});
 			expect(decoded.proxy).not.toHaveProperty("provider");
 			expect(decoded.proxy).not.toHaveProperty("protocol");
-			expect(decoded.proxy).not.toHaveProperty("userAgentSource");
+			expect(decoded.proxy).not.toHaveProperty("cacheStatus");
 			const failedEvent = events.find((event) => event.event === "provider_request_failed");
 			expect(failedEvent).toBeDefined();
 			expect(failedEvent).toMatchObject({ connectionId: "af_con_failure" });
@@ -2778,7 +2767,7 @@ describe("provider HTTP server", () => {
 				decoded.proxy,
 			);
 			const body = await response.json();
-			expect(body.error.code).toBe("PROXY_ALLOCATION_FAILED");
+			expect(body.error.code).toBe("PROXY_REQUIRED");
 			expect(body.error.retryable).toBe(true);
 			expect(body.error.details).toBeUndefined();
 			expect(errorObservability(response)).toMatchObject({
@@ -2790,18 +2779,18 @@ describe("provider HTTP server", () => {
 				decoded,
 				error: errorObservability(response),
 			});
-			expect(tenantSerialized).not.toContain("redacted-test-key");
-			expect(tenantSerialized).not.toContain("5.78.24.25");
+			expect(tenantSerialized).not.toContain("retired-app-key-value");
 			expect(tenantSerialized).not.toContain("af_con_failure");
-			expect(JSON.stringify(failedEvent)).toContain("af_con_failure");
+			const failedSerialized = JSON.stringify(failedEvent);
+			expect(failedSerialized).toContain("af_con_failure");
+			expect(failedSerialized).not.toContain("retired-app-key-value");
+			// The operator log carries the resolver's missing-credential failure (the
+			// diagnostic sanitizer masks the env names themselves as opaque tokens).
+			expect(failedEvent && "message" in failedEvent ? failedEvent.message : "").toContain(
+				"no vendor credentials are configured. Missing:",
+			);
 		} finally {
-			global.fetch = originalFetch;
-			if (originalSmartproxyKey) {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
-			} else {
-				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-			}
-			clearProxyResolutionCache();
+			restoreSmartproxyEnv();
 		}
 	});
 
@@ -2939,9 +2928,7 @@ describe("provider HTTP server", () => {
 				// Only an engine-internal `node:` module id may keep a `/`, and
 				// its grammar admits no directory or traversal segment.
 				if (frame.includes("node:")) {
-					expect(frame).toMatch(
-						/\(node:[A-Za-z_][\w.-]*(?:\/[A-Za-z_][\w.-]*)*:\d+:\d+\)$/,
-					);
+					expect(frame).toMatch(/\(node:[A-Za-z_][\w.-]*(?:\/[A-Za-z_][\w.-]*)*:\d+:\d+\)$/);
 				} else {
 					expect(frame).not.toContain("/");
 				}
@@ -4415,13 +4402,13 @@ describe("operation-declared error resolution", () => {
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					errorCodes: [
-							{
-								code: "STRUCTURAL_INVALID_STATUS",
-								// @ts-expect-error test-invalid: structural validation must reject non-emittable status
-								status: 600,
-								description: "Invalid structural status",
-							},
-						],
+						{
+							code: "STRUCTURAL_INVALID_STATUS",
+							// @ts-expect-error test-invalid: structural validation must reject non-emittable status
+							status: 600,
+							description: "Invalid structural status",
+						},
+					],
 					handler: async () => {
 						throw new ProviderError("Structural failure", {
 							code: "STRUCTURAL_INVALID_STATUS",
@@ -4484,13 +4471,13 @@ describe("provider HTTP server cross-module error identity", () => {
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					errorCodes: [
-							{
-								code: "DUPLICATE_DECLARED_ERROR",
-								status: 502,
-								description: "Duplicate-module declared failure",
-								retryable: true,
-							},
-						],
+						{
+							code: "DUPLICATE_DECLARED_ERROR",
+							status: 502,
+							description: "Duplicate-module declared failure",
+							retryable: true,
+						},
+					],
 					handler: async () => {
 						throw new Dup.ProviderError("Duplicate declared failure", {
 							code: "DUPLICATE_DECLARED_ERROR",

@@ -126,8 +126,9 @@ Declare `runtimeTarget: "vanilla"` for portable provider business logic. Use
 `runtimeTarget: "engine"` only for an approved session-bearing provider that
 must remain engine-resident. A vanilla target cannot declare `native`.
 
-Proxy vendor application keys, usernames, and passwords are engine-owned. Do
-not list `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
+Proxy vendor usernames, passwords, and application keys are engine-owned. Do
+not list `APIFUSE__PROXY__SMARTPROXY_USERNAME`,
+`APIFUSE__PROXY__SMARTPROXY_PASSWORD`, `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
 `APIFUSE__PROXY__NODEMAVEN_USERNAME`, or
 `APIFUSE__PROXY__NODEMAVEN_PASSWORD` in provider `secrets`; `proxy` contains
 policy intent only.
@@ -150,11 +151,11 @@ proxy: {
 },
 ```
 
-Each attempt encodes one carrier, `isp[poolIndex % isp.length]`. When an
+Each attempt encodes one carrier, `isp[attempt % isp.length]`. When an
 upstream's edge answers with a block page that issues a session cookie, do not
 retry by hand: declare the cookie as session state (below). The SDK re-sends
-the blocked request once carrying the cookie, on the next pool slot (next
-carrier, new sid), exactly as a caller retry with `proxyAttemptOffset: 1`
+the blocked request once carrying the cookie, on the next attempt (next
+carrier, new session id), exactly as a caller retry with `proxyAttemptOffset: 1`
 would, and later calls carry the pooled cookie from the start.
 
 ### Session state (`sessionState`)
@@ -1639,8 +1640,8 @@ const network = createNativeNetworkClient({
 ```
 
 Never include credential values in adapter skip messages or thrown errors. The
-SDK redacts built-in proxy URL userinfo, CONNECT authentication, and allocator
-causes, but a custom adapter remains responsible for not publishing secrets in
+SDK redacts built-in proxy URL userinfo, CONNECT authentication, and vendor
+resolution causes, but a custom adapter remains responsible for not publishing secrets in
 its own diagnostics.
 
 ### Limiting stealth response bodies

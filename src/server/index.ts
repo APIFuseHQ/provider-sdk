@@ -5,7 +5,6 @@ export type {
 	ProxyProtocol,
 	ProxyUserAgentSource,
 	ProxyVendorName,
-	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
 export type {
 	ProxyTelemetryHeaderPayload,
@@ -182,6 +181,13 @@ export {
 	type RuntimeDiagnosticsThreadCpuTicks,
 	type RuntimeDiagnosticsThreadWindow,
 } from "./runtime-diagnostics.js";
+export {
+	DEFAULT_PROVIDER_METRICS_PORT,
+	PROVIDER_METRICS_CONTENT_TYPE,
+	PROVIDER_METRICS_ROUTE,
+	PROVIDER_RUNTIME_METRICS_PORT_ENV,
+	resolveProviderMetricsPort,
+} from "./provider-metrics.js";
 export {
 	DEFAULT_SELF_TEST_PORT,
 	deriveSelfTestToken,

@@ -1,25 +1,108 @@
 import { HttpTelemetryCollector } from "../runtime/http-telemetry.js";
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import type { Callback, Redis, RedisKey, RedisValue } from "ioredis";
 
 import { assertIsError } from "./test-utils.js";
 import {
-	__getSmartproxyCacheSizesForTests,
-	__setProxyRedisForTests,
-	__setSmartproxyAllocatorDeadlineMsForTests,
-	__setSmartproxyPoolCacheMaxEntriesForTests,
-	clearProxyResolutionCache,
-	invalidateProxyResolutionCache,
-	invalidateProxyResolutionCacheAsync,
+	PROXY_ATTEMPTS_PER_VENDOR,
+	type ProxyAttemptOutcome,
+	type ProxyAttemptRecord,
+	type ProxyAttemptRequest,
+	type ProxyVendorSelector,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
-	SMARTPROXY_MAX_LIFETIME_MINUTES,
+	setProxyVendorSelector,
+	staticOrderProxyVendorSelector,
 } from "../config/loader.js";
 import type { HttpRetrySummary, ProviderProxyPolicy } from "../types.js";
 import { TransportError } from "../errors.js";
 import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
+import { deriveProxySessionId, proxySessionWindow } from "../runtime/proxy-session-id.js";
+import {
+	SMARTPROXY_GATEWAY_HOST,
+	SMARTPROXY_GATEWAY_PORT,
+	SMARTPROXY_MAX_LIFETIME_MINUTES,
+	SMARTPROXY_MIN_LIFETIME_MINUTES,
+} from "../runtime/proxy-smartproxy.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
+import { SESSION_STATE_PINNED_EGRESS } from "../runtime/session-state.js";
 import { HttpRetryUnsafeMethodPolicy } from "../types.js";
+
+// Fake gateway sub-account credentials; no test reaches a real vendor.
+const SMARTPROXY_TEST_USERNAME = "smart-acct";
+const SMARTPROXY_TEST_PASSWORD = "sp-secret";
+const SMARTPROXY_GATEWAY = `${SMARTPROXY_GATEWAY_HOST}:${SMARTPROXY_GATEWAY_PORT}`;
+const SMARTPROXY_URL_PATTERN =
+	/^http:\/\/smart-acct(?:_area-[A-Z]{2})?_life-\d+_session-[0-9a-f]{10}:sp-secret@proxy\.smartproxy\.net:3120$/;
+const NODEMAVEN_URL_PATTERN = /@gate\.nodemaven\.com:\d+$/;
+
+/** Every env the proxy resolver reads; saved and cleared around each test. */
+const PROXY_ENV_NAMES = [
+	"APIFUSE__PROXY__SMARTPROXY_USERNAME",
+	"APIFUSE__PROXY__SMARTPROXY_PASSWORD",
+	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
+	"APIFUSE__PROXY__NODEMAVEN_USERNAME",
+	"APIFUSE__PROXY__NODEMAVEN_PASSWORD",
+	"APIFUSE__PROXY__NODEMAVEN_FILTER",
+	"APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES",
+	"APIFUSE__PROXY__DEFAULT_COUNTRY",
+	"APIFUSE__PROXY__PROVIDER",
+] as const;
+
+function useSmartproxyCredentials(): void {
+	process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = SMARTPROXY_TEST_USERNAME;
+	process.env.APIFUSE__PROXY__SMARTPROXY_PASSWORD = SMARTPROXY_TEST_PASSWORD;
+}
+
+function useNodemavenCredentials(): void {
+	process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
+	process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+}
+
+/** The `key-value` tokens of a smartproxy gateway username, keyed by token name. */
+function smartproxyTokens(proxyUrl: unknown): Record<string, string> {
+	if (typeof proxyUrl !== "string") throw new Error(`not a proxy URL: ${String(proxyUrl)}`);
+	const username = decodeURIComponent(new URL(proxyUrl).username);
+	const [user, ...tokens] = username.split("_");
+	const parsed: Record<string, string> = { user: user ?? "" };
+	for (const token of tokens) {
+		const separator = token.indexOf("-");
+		parsed[token.slice(0, separator)] = token.slice(separator + 1);
+	}
+	return parsed;
+}
+
+function smartproxySession(proxyUrl: unknown): string {
+	const session = smartproxyTokens(proxyUrl).session;
+	if (!session) throw new Error("smartproxy username carries no session token");
+	return session;
+}
+
+/** Each URL is a smartproxy gateway URL and no two attempts share a vendor session. */
+function expectDistinctSmartproxySessions(proxies: readonly unknown[], count: number): void {
+	expect(proxies).toHaveLength(count);
+	for (const proxy of proxies) expect(proxy).toMatch(SMARTPROXY_URL_PATTERN);
+	expect(new Set(proxies.map(smartproxySession)).size).toBe(count);
+}
+
+/** Static selector that also records what it was asked and told. */
+function createRecordingSelector(): ProxyVendorSelector & {
+	readonly requests: ProxyAttemptRequest[];
+	readonly outcomes: ProxyAttemptOutcome[];
+} {
+	const requests: ProxyAttemptRequest[] = [];
+	const outcomes: ProxyAttemptOutcome[] = [];
+	return {
+		requests,
+		outcomes,
+		select(request) {
+			requests.push({ ...request, ...(request.history ? { history: [...request.history] } : {}) });
+			return staticOrderProxyVendorSelector.select(request);
+		},
+		report(outcome) {
+			outcomes.push(outcome);
+		},
+	};
+}
 
 type MockWreqResponse = {
 	status: number;
@@ -56,199 +139,6 @@ const stealthState = {
 	queuedResponses: [] as MockWreqQueuedItem[],
 };
 
-type ProxyRedisSurface = Pick<
-	Redis,
-	"connect" | "del" | "eval" | "get" | "on" | "pttl" | "set" | "status"
->;
-
-type RedisExpiryMode = "EX" | "EXAT" | "PX" | "PXAT";
-type RedisSetCondition = "NX" | "XX";
-
-class FakeRedis implements ProxyRedisSurface {
-	status: Redis["status"] = "ready";
-	readonly setCalls: Array<{
-		key: string;
-		mode?: string;
-		ttlMs?: number;
-		condition?: string;
-	}> = [];
-	private readonly values = new Map<string, string>();
-	private readonly expiresAt = new Map<string, number>();
-
-	async connect(): Promise<void> {
-		this.status = "ready";
-	}
-
-	on(..._args: unknown[]): never {
-		throw new Error("Injected ready Redis fake does not register event listeners");
-	}
-
-	async get(key: RedisKey, callback?: Callback<string | null>): Promise<string | null> {
-		const normalizedKey = String(key);
-		this.deleteIfExpired(normalizedKey);
-		const result = this.values.get(normalizedKey) ?? null;
-		callback?.(null, result);
-		return result;
-	}
-
-	set(key: RedisKey, value: RedisValue, callback?: Callback<"OK">): Promise<"OK">;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		get: "GET",
-		callback?: Callback<string | null>,
-	): Promise<string | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		condition: RedisSetCondition,
-		callback?: Callback<"OK" | null>,
-	): Promise<"OK" | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		condition: RedisSetCondition,
-		get: "GET",
-		callback?: Callback<string | null>,
-	): Promise<string | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		expiryMode: RedisExpiryMode,
-		expiry: number | string,
-		callback?: Callback<"OK">,
-	): Promise<"OK">;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		expiryMode: RedisExpiryMode,
-		expiry: number | string,
-		get: "GET",
-		callback?: Callback<string | null>,
-	): Promise<string | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		expiryMode: RedisExpiryMode,
-		expiry: number | string,
-		condition: RedisSetCondition,
-		callback?: Callback<"OK" | null>,
-	): Promise<"OK" | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		expiryMode: RedisExpiryMode,
-		expiry: number | string,
-		condition: RedisSetCondition,
-		get: "GET",
-		callback?: Callback<string | null>,
-	): Promise<string | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		keepTtl: "KEEPTTL",
-		callback?: Callback<"OK">,
-	): Promise<"OK">;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		keepTtl: "KEEPTTL",
-		get: "GET",
-		callback?: Callback<string | null>,
-	): Promise<string | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		keepTtl: "KEEPTTL",
-		condition: RedisSetCondition,
-		callback?: Callback<"OK" | null>,
-	): Promise<"OK" | null>;
-	set(
-		key: RedisKey,
-		value: RedisValue,
-		keepTtl: "KEEPTTL",
-		condition: RedisSetCondition,
-		get: "GET",
-		callback?: Callback<string | null>,
-	): Promise<string | null>;
-	async set(
-		key: RedisKey,
-		value: RedisValue,
-		...args: readonly unknown[]
-	): Promise<"OK" | string | null> {
-		const normalizedKey = String(key);
-		const mode = typeof args[0] === "string" ? args[0] : undefined;
-		const ttlMs = typeof args[1] === "number" ? args[1] : undefined;
-		const condition = typeof args[2] === "string" ? args[2] : undefined;
-		this.deleteIfExpired(normalizedKey);
-		this.setCalls.push({ key: normalizedKey, mode, ttlMs, condition });
-		if (condition === "NX" && this.values.has(normalizedKey)) return null;
-		this.values.set(normalizedKey, String(value));
-		if (mode === "PX" && typeof ttlMs === "number") {
-			this.expiresAt.set(normalizedKey, Date.now() + ttlMs);
-		}
-		return "OK";
-	}
-
-	async del(...args: Array<RedisKey | RedisKey[] | Callback<number>>): Promise<number> {
-		const keys = args.flatMap((arg) =>
-			typeof arg === "function" ? [] : Array.isArray(arg) ? arg : [arg],
-		);
-		const result = keys.reduce((count, key) => count + this.deleteValue(String(key)), 0);
-		const callback = args.find(
-			(argument): argument is Callback<number> => typeof argument === "function",
-		);
-		callback?.(null, result);
-		return result;
-	}
-
-	async pttl(key: RedisKey, callback?: Callback<number>): Promise<number> {
-		const normalizedKey = String(key);
-		this.deleteIfExpired(normalizedKey);
-		const expiresAt = this.expiresAt.get(normalizedKey);
-		const result = !this.values.has(normalizedKey)
-			? -2
-			: expiresAt === undefined
-				? -1
-				: Math.max(0, expiresAt - Date.now());
-		callback?.(null, result);
-		return result;
-	}
-
-	async eval(
-		_script: RedisKey,
-		_keyCount: number | string,
-		...args: Array<RedisValue | RedisKey[] | Callback<unknown> | undefined>
-	): Promise<unknown> {
-		const values = args.flatMap((arg) =>
-			typeof arg === "function" || arg === undefined ? [] : Array.isArray(arg) ? arg : [arg],
-		);
-		const key = String(values[0]);
-		const token = String(values[1]);
-		this.deleteIfExpired(key);
-		const result = this.values.get(key) === token ? this.deleteValue(key) : 0;
-		const callback = args.find(
-			(argument): argument is Callback<unknown> => typeof argument === "function",
-		);
-		callback?.(null, result);
-		return result;
-	}
-
-	private deleteValue(key: string): number {
-		const existed = this.values.delete(key);
-		this.expiresAt.delete(key);
-		return existed ? 1 : 0;
-	}
-
-	private deleteIfExpired(key: string): void {
-		const expiresAt = this.expiresAt.get(key);
-		if (expiresAt !== undefined && expiresAt <= Date.now()) {
-			this.values.delete(key);
-			this.expiresAt.delete(key);
-		}
-	}
-}
-
 function stealthProxyCalls(): unknown[] {
 	return stealthState.clients.flatMap((client) => client.calls.map((call) => call.options.proxy));
 }
@@ -268,31 +158,6 @@ function queueNativeFetchResponses(...responses: MockWreqResponse[]): void {
 		mock(async (input: string | URL | Request, init?: RequestInit) => {
 			nativeFetchCalls.push({
 				url: String(input),
-				init: init as RequestInit & { proxy?: string },
-			});
-			const response = queue.shift();
-			if (!response) throw new Error("No queued native response");
-			return new Response(response.body, {
-				headers: response.headers as HeadersInit,
-				status: response.status,
-			});
-		}),
-	);
-}
-
-function queueAllocatorAndNativeResponses(
-	allocatorBody: string,
-	...responses: MockWreqResponse[]
-): void {
-	const queue = [...responses];
-	global.fetch = createFetchDouble(
-		mock(async (input: string | URL | Request, init?: RequestInit) => {
-			const url = String(input);
-			if (url.includes("get-ip-v3")) {
-				return new Response(allocatorBody, { status: 200 });
-			}
-			nativeFetchCalls.push({
-				url,
 				init: init as RequestInit & { proxy?: string },
 			});
 			const response = queue.shift();
@@ -411,74 +276,43 @@ mock.module("wreq-js", () => ({
 
 describe("proxy integration", () => {
 	let originalFetch: typeof fetch;
-	let originalSmartproxyKey: string | undefined;
-	let originalProxyDefaultLifetime: string | undefined;
-	let originalNodemavenUsername: string | undefined;
-	let originalNodemavenPassword: string | undefined;
+	const originalEnv = new Map<string, string | undefined>();
 
 	beforeEach(() => {
 		originalFetch = global.fetch;
-		originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		originalProxyDefaultLifetime = process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
-		originalNodemavenUsername = process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
-		originalNodemavenPassword = process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
-		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		delete process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
-		delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
-		delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
-		clearProxyResolutionCache();
+		for (const name of PROXY_ENV_NAMES) {
+			originalEnv.set(name, process.env[name]);
+			delete process.env[name];
+		}
+		setProxyVendorSelector(undefined);
 		stealthState.clients.length = 0;
 		stealthState.queuedResponses.length = 0;
 		nativeFetchCalls.length = 0;
-		__setProxyRedisForTests(undefined);
-		__setSmartproxyAllocatorDeadlineMsForTests(undefined);
-		__setSmartproxyPoolCacheMaxEntriesForTests(undefined);
 	});
 
 	afterEach(() => {
 		global.fetch = originalFetch;
-		if (originalSmartproxyKey) {
-			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
-		} else {
-			delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		for (const name of PROXY_ENV_NAMES) {
+			const value = originalEnv.get(name);
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
 		}
-		if (originalProxyDefaultLifetime) {
-			process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = originalProxyDefaultLifetime;
-		} else {
-			delete process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
-		}
-		if (originalNodemavenUsername) {
-			process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = originalNodemavenUsername;
-		} else {
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
-		}
-		if (originalNodemavenPassword) {
-			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = originalNodemavenPassword;
-		} else {
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
-		}
-		clearProxyResolutionCache();
-		__setProxyRedisForTests(undefined);
-		__setSmartproxyAllocatorDeadlineMsForTests(undefined);
-		__setSmartproxyPoolCacheMaxEntriesForTests(undefined);
+		setProxyVendorSelector(undefined);
 	});
 
 	it("encodes bounded public-safe per-attempt proxy telemetry", () => {
 		const telemetry = new ProxyTelemetryCollector();
 		telemetry.recordProxyResolution({
 			provider: "smartproxy",
-			cacheStatus: "allocator",
+			protocol: "http",
+			cacheStatus: "disabled",
 			cacheHit: false,
 			resolutionMs: 12,
-			allocatorStatus: 500,
-			allocatorBodyClass: "http_error",
-			allocatorAttempts: 2,
-			attempts: 2,
+			attempts: 1,
 		});
 		telemetry.recordProxyAttempt({
 			provider: "smartproxy",
 			attempt: 1,
-			poolIndex: 0,
 			proxyHash: "abcdef123456",
 			outcome: "error",
 			errorCode: "PROXY_EDGE_AUTH_REJECTED",
@@ -488,7 +322,6 @@ describe("proxy integration", () => {
 		telemetry.recordProxyAttempt({
 			provider: "smartproxy",
 			attempt: 2,
-			poolIndex: 1,
 			proxyHash: "123456abcdef",
 			outcome: "ok",
 			status: 200,
@@ -501,24 +334,37 @@ describe("proxy integration", () => {
 
 		expect(decoded.proxy).toMatchObject({
 			kind: "resolved",
-			allocatorStatus: 500,
-			allocatorBodyClass: "http_error",
-			allocatorAttempts: 2,
+			provider: "smartproxy",
+			cacheStatus: "disabled",
+			cacheHit: false,
+			attempts: 1,
 		});
+		// The allocator-era fields and the pool index are no longer emitted.
+		for (const retired of [
+			"allocatorMs",
+			"allocatorStatus",
+			"allocatorBodyClass",
+			"allocatorAttempts",
+			"lockWaitMs",
+			"poolAgeMs",
+			"poolExpiresInMs",
+			"refreshes",
+		]) {
+			expect(decoded.proxy).not.toHaveProperty(retired);
+		}
 		expect(decoded.proxy.attemptSamples).toEqual([
 			{
 				n: 1,
 				a: 1,
-				i: 0,
 				h: "abcdef123456",
 				o: "error",
 				c: "PROXY_EDGE_AUTH_REJECTED",
 				s: 512,
 				d: 37,
 			},
-			{ n: 2, a: 2, i: 1, h: "123456abcdef", o: "ok", s: 200, d: 42 },
+			{ n: 2, a: 2, h: "123456abcdef", o: "ok", s: 200, d: 42 },
 		]);
-		expect(JSON.stringify(decoded)).not.toContain("5.78.24.25");
+		expect(JSON.stringify(decoded)).not.toContain(SMARTPROXY_TEST_PASSWORD);
 	});
 
 	it("emits unresolved telemetry with distinct vendors and header parity", () => {
@@ -573,14 +419,10 @@ describe("proxy integration", () => {
 		telemetry.recordProxyResolution({
 			provider: "smartproxy",
 			outcome: "error",
-			cacheStatus: "allocator",
+			cacheStatus: "disabled",
 			cacheHit: false,
 			resolutionMs: 12,
-			allocatorMs: 10,
-			allocatorStatus: 503,
-			allocatorBodyClass: "http_error",
-			allocatorAttempts: 2,
-			attempts: 2,
+			attempts: 1,
 		});
 		telemetry.recordProxyVendorFailover({
 			vendor: "smartproxy",
@@ -601,14 +443,10 @@ describe("proxy integration", () => {
 			kind: "resolved",
 			provider: "nodemaven",
 			protocol: "http",
-			cacheStatus: "allocator",
+			cacheStatus: "disabled",
 			cacheHit: false,
 			resolutionMs: 20,
-			allocatorMs: 10,
-			allocatorStatus: 503,
-			allocatorBodyClass: "http_error",
-			allocatorAttempts: 2,
-			attempts: 3,
+			attempts: 2,
 			vendors: ["smartproxy", "nodemaven"],
 			failovers: [
 				{
@@ -623,15 +461,15 @@ describe("proxy integration", () => {
 
 	it("keeps the serving vendor when a later resolution fails", () => {
 		// Transport-phase failover ordering: a vendor resolves OK first, the
-		// transport then fails, and the NEXT vendor's allocation fails — the
+		// transport then fails, and the NEXT vendor's resolution fails — the
 		// failure event is recorded LAST. The serving vendor must stay the
 		// successful one, never the trailing failure.
 		const telemetry = new ProxyTelemetryCollector();
 		telemetry.recordProxyResolution({
 			provider: "smartproxy",
 			protocol: "http",
-			cacheStatus: "memory_hit",
-			cacheHit: true,
+			cacheStatus: "disabled",
+			cacheHit: false,
 			resolutionMs: 3,
 			attempts: 1,
 		});
@@ -645,7 +483,7 @@ describe("proxy integration", () => {
 		telemetry.recordProxyResolution({
 			provider: "nodemaven",
 			outcome: "error",
-			cacheStatus: "allocator",
+			cacheStatus: "disabled",
 			cacheHit: false,
 			resolutionMs: 9,
 			attempts: 1,
@@ -727,27 +565,19 @@ describe("proxy integration", () => {
 		expect(stealthState.clients[0]?.calls[0]?.options).toMatchObject({
 			proxy: "https://request-stealth-proxy.example:8443",
 		});
-		expect(stealthState.clients[0]?.calls[0]?.options).toMatchObject({
-			proxy: "https://request-stealth-proxy.example:8443",
-		});
 	});
 
-	it("allocates Smartproxy raw CONNECT endpoints from provider proxy policy", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		let requestedUrl = "";
-		global.fetch = createFetchDouble(async (url) => {
-			requestedUrl = String(url);
-			return new Response(
-				JSON.stringify({
-					code: 0,
-					data: { list: [{ ip: "5.78.24.25", port: 31001 }] },
-				}),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
-			);
+	it("synthesizes the smartproxy gateway URL from the provider proxy policy without a network call", async () => {
+		useSmartproxyCredentials();
+		const fetchDouble = mock(async (): Promise<Response> => {
+			throw new Error("gateway resolution must not call fetch");
 		});
+		global.fetch = createFetchDouble(fetchDouble);
+		const now = Date.UTC(2026, 9, 28, 5, 10, 0);
 
 		const resolved = await resolveProxyConfigAsync({
 			affinityKey: "af_con_123",
+			now,
 			upstream: {
 				proxy: {
 					mode: "required",
@@ -761,710 +591,251 @@ describe("proxy integration", () => {
 			},
 		});
 
+		const window = proxySessionWindow(SMARTPROXY_MAX_LIFETIME_MINUTES, now);
+		const sessionId = deriveProxySessionId({
+			sticky: true,
+			affinityKey: "af_con_123",
+			windowEpoch: window.windowEpoch,
+			attempt: 0,
+		});
 		expect(resolved).toMatchObject({
 			shouldWarn: false,
-			source: "smartproxy-allocator",
-			url: "http://5.78.24.25:31001",
+			source: "smartproxy-gateway",
+			protocol: "http",
+			sticky: true,
+			sessionId,
+			expiresAt: window.expiresAt,
+			lifetimeMinutes: SMARTPROXY_MAX_LIFETIME_MINUTES,
+			url: `http://smart-acct_area-KR_life-${SMARTPROXY_MAX_LIFETIME_MINUTES}_session-${sessionId}:sp-secret@${SMARTPROXY_GATEWAY}`,
 			diagnostics: {
-				provider: "smartproxy",
+				vendor: "smartproxy",
+				protocol: "http",
+				sticky: true,
 				country: "KR",
 				lifetimeMinutes: SMARTPROXY_MAX_LIFETIME_MINUTES,
-				rawConnect: true,
+				lifetimeClamped: true,
+				attempt: 0,
 			},
 		});
-		const allocatorUrl = new URL(requestedUrl);
-		expect(allocatorUrl.searchParams.get("app_key")).toBe("redacted-test-key");
-		expect(allocatorUrl.searchParams.get("cc")).toBe("KR");
-		expect(allocatorUrl.searchParams.get("num")).toBe("20");
-		expect(allocatorUrl.searchParams.get("life")).toBe(String(SMARTPROXY_MAX_LIFETIME_MINUTES));
+		expect(fetchDouble).not.toHaveBeenCalled();
 	});
 
-	it("shares Smartproxy allocator results through Redis across SDK cache resets", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		__setProxyRedisForTests(new FakeRedis());
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response("5.78.24.25:31001", { status: 200 });
-		});
+	it("clamps a lifetime below the vendor minimum to the shortest sticky window", async () => {
+		useSmartproxyCredentials();
 
-		const policy: ProviderProxyPolicy = {
-			mode: "required",
-			provider: "smartproxy",
-			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 1 },
-		};
-
-		const first = await resolveProxyConfigAsync({
-			affinityKey: "af_con_shared",
-			upstream: { proxy: policy },
-		});
-		clearProxyResolutionCache();
-		const second = await resolveProxyConfigAsync({
-			affinityKey: "af_con_shared",
-			upstream: { proxy: policy },
-		});
-
-		expect(first.url).toBe("http://5.78.24.25:31001");
-		expect(second.url).toBe("http://5.78.24.25:31001");
-		expect(allocatorCalls).toBe(1);
-	});
-
-	it("expires Smartproxy extraction cache independently from requested session life", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const originalNow = Date.now;
-		let now = 1_700_000_000_000;
-		Date.now = () => now;
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(`5.78.24.${20 + allocatorCalls}:31001`, {
-				status: 200,
-			});
-		});
-
-		const policy: ProviderProxyPolicy = {
-			mode: "required",
-			provider: "smartproxy",
-			geo: { country: "KR" },
-			session: {
-				affinity: "connection",
-				lifetimeMinutes: 120,
-				poolSize: 1,
+		const resolved = await resolveProxyConfigAsync({
+			affinityKey: "af_con_short",
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection", lifetimeMinutes: 1 },
+				},
 			},
-		};
+		});
 
-		try {
-			const first = await resolveProxyConfigAsync({
-				affinityKey: "af_con_fresh_window",
-				upstream: { proxy: policy },
-			});
-			const cached = await resolveProxyConfigAsync({
-				affinityKey: "af_con_fresh_window",
-				upstream: { proxy: policy },
-			});
-			now += 16_000;
-			const fresh = await resolveProxyConfigAsync({
-				affinityKey: "af_con_fresh_window",
-				upstream: { proxy: policy },
-			});
-
-			expect(first.url).toBe("http://5.78.24.21:31001");
-			expect(cached.url).toBe("http://5.78.24.21:31001");
-			expect(fresh.url).toBe("http://5.78.24.22:31001");
-			expect(allocatorCalls).toBe(2);
-		} finally {
-			Date.now = originalNow;
-		}
+		expect(smartproxyTokens(resolved.url).life).toBe(String(SMARTPROXY_MIN_LIFETIME_MINUTES));
+		expect(resolved.lifetimeMinutes).toBe(SMARTPROXY_MIN_LIFETIME_MINUTES);
+		expect(resolved.diagnostics?.lifetimeClamped).toBe(true);
 	});
 
-	it("reclaims expired Smartproxy pools when another affinity is allocated", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const originalNow = Date.now;
-		let now = 1_700_000_000_000;
-		Date.now = () => now;
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(`5.78.24.${40 + allocatorCalls}:31001`, { status: 200 });
-		});
+	it("derives one sticky smartproxy session per affinity key and lifetime window, and a new one per attempt", async () => {
+		useSmartproxyCredentials();
 		const policy: ProviderProxyPolicy = {
 			mode: "required",
 			provider: "smartproxy",
 			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 1 },
+			session: { affinity: "connection", lifetimeMinutes: 30 },
 		};
-
-		try {
-			await resolveProxyConfigAsync({
-				affinityKey: "af_con_reclaim_a",
+		// 05:10Z sits in the [05:00, 05:30) window of a 30 minute lifetime.
+		const now = Date.UTC(2026, 9, 28, 5, 10, 0);
+		const resolve = (overrides: { affinityKey?: string; now?: number; proxyAttempt?: number }) =>
+			resolveProxyConfigAsync({
 				upstream: { proxy: policy },
-			});
-			expect(__getSmartproxyCacheSizesForTests().pools).toBe(1);
-
-			now += 16_000;
-			await resolveProxyConfigAsync({
-				affinityKey: "af_con_reclaim_b",
-				upstream: { proxy: policy },
+				affinityKey: "af_con_sticky",
+				now,
+				...overrides,
 			});
 
-			expect(allocatorCalls).toBe(2);
-			expect(__getSmartproxyCacheSizesForTests().pools).toBe(1);
-		} finally {
-			Date.now = originalNow;
-		}
+		const first = await resolve({});
+		const sameWindow = await resolve({ now: now + 60_000 });
+		const otherKey = await resolve({ affinityKey: "af_con_other" });
+		const nextWindow = await resolve({ now: now + 30 * 60_000 });
+		const retry = await resolve({ proxyAttempt: 1 });
+
+		expect(first.url).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(first.sticky).toBe(true);
+		// Every process serving the key in the same window reaches the same egress.
+		expect(sameWindow.url).toBe(first.url);
+		expect(sameWindow.sessionId).toBe(first.sessionId);
+		expect(otherKey.sessionId).not.toBe(first.sessionId);
+		expect(nextWindow.sessionId).not.toBe(first.sessionId);
+		// A retry leaves the session that failed for the attempt's own derived id.
+		expect(retry.sessionId).not.toBe(first.sessionId);
+		expect(retry.sessionId).toBe(
+			deriveProxySessionId({
+				sticky: true,
+				affinityKey: "af_con_sticky",
+				windowEpoch: proxySessionWindow(30, now).windowEpoch,
+				attempt: 1,
+			}),
+		);
+		expect(smartproxySession(retry.url)).toBe(retry.sessionId ?? "");
 	});
 
-	it("evicts the least recently used Smartproxy pool past capacity and counts it", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		__setSmartproxyPoolCacheMaxEntriesForTests(1);
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(`5.78.24.${50 + allocatorCalls}:31001`, { status: 200 });
-		});
-		const policy: ProviderProxyPolicy = {
-			mode: "required",
-			provider: "smartproxy",
-			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 1 },
-		};
-
-		const first = await resolveProxyConfigAsync({
-			affinityKey: "af_con_cap_a",
-			upstream: { proxy: policy },
-		});
-		const second = await resolveProxyConfigAsync({
-			affinityKey: "af_con_cap_b",
-			upstream: { proxy: policy },
-		});
-		// The still-fresh pool for `a` was evicted by capacity, so `a` re-allocates
-		// and lands on a different endpoint than it first received.
-		const firstAgain = await resolveProxyConfigAsync({
-			affinityKey: "af_con_cap_a",
-			upstream: { proxy: policy },
-		});
-
-		expect(first.diagnostics?.poolCacheEvictions).toBe(0);
-		expect(second.diagnostics?.poolCacheEvictions).toBe(1);
-		expect(firstAgain.diagnostics?.poolCacheEvictions).toBe(2);
-		expect(firstAgain.url).not.toBe(first.url);
-		expect(allocatorCalls).toBe(3);
-		expect(__getSmartproxyCacheSizesForTests().pools).toBe(1);
-	});
-
-	it("sweeps expired Smartproxy invalidation tombstones on the next invalidation", () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const originalNow = Date.now;
-		let now = 1_700_000_000_000;
-		Date.now = () => now;
-		const policy: ProviderProxyPolicy = {
-			mode: "required",
-			provider: "smartproxy",
-			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 1 },
-		};
-
-		try {
-			expect(
-				invalidateProxyResolutionCache({
-					affinityKey: "af_con_tombstone_a",
-					upstream: { proxy: policy },
-				}),
-			).toBe(true);
-			expect(__getSmartproxyCacheSizesForTests().tombstones).toBe(1);
-
-			now += 31_000;
-			expect(
-				invalidateProxyResolutionCache({
-					affinityKey: "af_con_tombstone_b",
-					upstream: { proxy: policy },
-				}),
-			).toBe(true);
-
-			expect(__getSmartproxyCacheSizesForTests().tombstones).toBe(1);
-		} finally {
-			Date.now = originalNow;
-		}
-	});
-
-	it("purges shared Smartproxy Redis pools when a stale pool is invalidated", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		__setProxyRedisForTests(new FakeRedis());
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(`5.78.24.${30 + allocatorCalls}:31001`, {
-				status: 200,
-			});
-		});
-
-		const policy: ProviderProxyPolicy = {
-			mode: "required",
-			provider: "smartproxy",
-			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 1 },
-		};
+	it("mints a random smartproxy session per attempt for a rotating policy", async () => {
+		useSmartproxyCredentials();
 		const options = {
-			affinityKey: "af_con_purge",
-			upstream: { proxy: policy },
+			affinityKey: "af_con_rotating",
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+				} satisfies ProviderProxyPolicy,
+			},
 		};
 
 		const first = await resolveProxyConfigAsync(options);
-		clearProxyResolutionCache();
-		await invalidateProxyResolutionCacheAsync(options);
 		const second = await resolveProxyConfigAsync(options);
 
-		expect(first.url).toBe("http://5.78.24.31:31001");
-		expect(second.url).toBe("http://5.78.24.32:31001");
-		expect(allocatorCalls).toBe(2);
+		expect(first.url).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(second.url).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(first.sticky).toBe(false);
+		expect(first.expiresAt).toBeUndefined();
+		expect(second.sessionId).not.toBe(first.sessionId);
+		expect(smartproxySession(first.url)).toBe(first.sessionId ?? "");
 	});
 
-	it("clamps non-finite Smartproxy proxy attempts to the first pool endpoint", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
-
+	it("clamps non-finite smartproxy proxy attempts to the first attempt's session", async () => {
+		useSmartproxyCredentials();
 		const policy: ProviderProxyPolicy = {
 			mode: "required",
 			provider: "smartproxy",
 			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 2 },
+			session: { affinity: "connection" },
 		};
-
-		const nanAttempt = await resolveProxyConfigAsync({
-			affinityKey: "af_con_nonfinite_attempt",
-			upstream: { proxy: policy },
-			proxyAttempt: Number.NaN,
-		});
-		const infiniteAttempt = await resolveProxyConfigAsync({
-			affinityKey: "af_con_nonfinite_attempt",
-			upstream: { proxy: policy },
-			proxyAttempt: Number.POSITIVE_INFINITY,
-		});
-		const rotatedAttempt = await resolveProxyConfigAsync({
-			affinityKey: "af_con_nonfinite_attempt",
-			upstream: { proxy: policy },
-			proxyAttempt: 1,
-		});
-
-		expect(nanAttempt.url).toBe("http://5.78.24.25:31001");
-		expect(infiniteAttempt.url).toBe("http://5.78.24.25:31001");
-		expect(rotatedAttempt.url).toBe("http://5.78.24.26:31002");
-	});
-
-	it("singleflights concurrent Smartproxy allocator requests and reports lock-wait telemetry", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		__setProxyRedisForTests(new FakeRedis());
-		let allocatorCalls = 0;
-		const events: unknown[] = [];
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			await new Promise((resolve) => setTimeout(resolve, 25));
-			return new Response("5.78.24.25:31001", { status: 200 });
-		});
-
-		const policy: ProviderProxyPolicy = {
-			mode: "required",
-			provider: "smartproxy",
-			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 1 },
-		};
-
-		const [first, second] = await Promise.all([
+		const now = Date.UTC(2026, 9, 28, 5, 10, 0);
+		const resolve = (proxyAttempt?: number) =>
 			resolveProxyConfigAsync({
-				affinityKey: "af_con_concurrent",
+				affinityKey: "af_con_nonfinite_attempt",
 				upstream: { proxy: policy },
-				telemetry: { recordProxyResolution: (event) => events.push(event) },
-			}),
-			resolveProxyConfigAsync({
-				affinityKey: "af_con_concurrent",
-				upstream: { proxy: policy },
-				telemetry: { recordProxyResolution: (event) => events.push(event) },
-			}),
-		]);
-
-		expect(first.url).toBe("http://5.78.24.25:31001");
-		expect(second.url).toBe("http://5.78.24.25:31001");
-		expect(allocatorCalls).toBe(1);
-		expect(events).toContainEqual(expect.objectContaining({ cacheStatus: "allocator" }));
-		expect(events).toContainEqual(
-			expect.objectContaining({ cacheStatus: "lock_wait", cacheHit: true }),
-		);
-	});
-
-	it("aborts a hung Smartproxy allocator attempt within the allocator deadline", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		__setSmartproxyAllocatorDeadlineMsForTests(35);
-		const events: unknown[] = [];
-		let allocatorCalls = 0;
-		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = createFetchDouble(
-			mock(async (_input: string | URL | Request, init?: RequestInit) => {
-				allocatorCalls += 1;
-				allocatorSignal = init?.signal ?? undefined;
-				return await new Promise<Response>((_resolve, reject) => {
-					allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
-						once: true,
-					});
-				});
-			}),
-		);
-
-		const startedAt = Date.now();
-		await expect(
-			resolveProxyConfigAsync({
-				affinityKey: "af_con_hung_allocator",
-				upstream: {
-					proxy: {
-						mode: "required",
-						provider: "smartproxy",
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 1 },
-					},
-				},
-				telemetry: { recordProxyResolution: (event) => events.push(event) },
-			}),
-		).rejects.toMatchObject({
-			code: "PROXY_ALLOCATION_FAILED",
-		});
-
-		expect(Date.now() - startedAt).toBeLessThan(500);
-		expect(allocatorCalls).toBe(1);
-		expect(allocatorSignal).toBeInstanceOf(AbortSignal);
-		expect(allocatorSignal?.aborted).toBe(true);
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				cacheStatus: "allocator",
-				allocatorAttempts: 1,
-				allocatorBodyClass: "network_error",
-			}),
-		);
-	});
-
-	it("fails within the allocator deadline when the Smartproxy response body stalls", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		__setSmartproxyAllocatorDeadlineMsForTests(35);
-		const events: unknown[] = [];
-		const redis = new FakeRedis();
-		__setProxyRedisForTests(redis);
-		let allocatorCalls = 0;
-		let allocatorSignal: AbortSignal | undefined;
-		let bodyReadStarted = false;
-		global.fetch = createFetchDouble(
-			mock(async (_input: string | URL | Request, init?: RequestInit) => {
-				allocatorCalls += 1;
-				allocatorSignal = init?.signal ?? undefined;
-				return {
-					ok: true,
-					status: 200,
-					text: () => {
-						bodyReadStarted = true;
-						return new Promise<string>(() => undefined);
-					},
-				} as Response;
-			}),
-		);
-
-		const startedAt = Date.now();
-		await expect(
-			resolveProxyConfigAsync({
-				affinityKey: "af_con_stalled_allocator_body",
-				upstream: {
-					proxy: {
-						mode: "required",
-						provider: "smartproxy",
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 1 },
-					},
-				},
-				telemetry: { recordProxyResolution: (event) => events.push(event) },
-			}),
-		).rejects.toMatchObject({
-			code: "PROXY_ALLOCATION_FAILED",
-		});
-
-		const lockCall = redis.setCalls.find((call) => call.condition === "NX");
-		expect(lockCall?.ttlMs).toBe(10_000);
-		expect(Date.now() - startedAt).toBeLessThan(500);
-		expect(allocatorCalls).toBe(1);
-		expect(bodyReadStarted).toBe(true);
-		expect(allocatorSignal).toBeInstanceOf(AbortSignal);
-		expect(allocatorSignal?.aborted).toBe(true);
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				provider: "smartproxy",
-				cacheStatus: "allocator",
-				cacheHit: false,
-				attempts: 1,
-				allocatorAttempts: 1,
-				allocatorStatus: 200,
-				allocatorBodyClass: "network_error",
-			}),
-		);
-		const serialized = JSON.stringify(events);
-		expect(serialized).not.toContain("redacted-test-key");
-		expect(serialized).not.toContain("af_con_stalled_allocator_body");
-		expect(serialized).not.toContain("get-ip-v3");
-		expect(serialized).not.toContain("app_key");
-	});
-
-	it("aborts allocator work before the Redis singleflight lock TTL can expire", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		__setSmartproxyAllocatorDeadlineMsForTests(35);
-		const redis = new FakeRedis();
-		__setProxyRedisForTests(redis);
-		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = createFetchDouble(
-			mock(async (_input: string | URL | Request, init?: RequestInit) => {
-				allocatorSignal = init?.signal ?? undefined;
-				return await new Promise<Response>((_resolve, reject) => {
-					allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
-						once: true,
-					});
-				});
-			}),
-		);
-
-		const startedAt = Date.now();
-		await expect(
-			resolveProxyConfigAsync({
-				affinityKey: "af_con_lock_timeout",
-				upstream: {
-					proxy: {
-						mode: "required",
-						provider: "smartproxy",
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 1 },
-					},
-				},
-			}),
-		).rejects.toMatchObject({
-			code: "PROXY_ALLOCATION_FAILED",
-		});
-
-		const lockCall = redis.setCalls.find((call) => call.condition === "NX");
-		expect(lockCall?.ttlMs).toBe(10_000);
-		expect(Date.now() - startedAt).toBeLessThan(500);
-		expect(allocatorSignal).toBeInstanceOf(AbortSignal);
-		expect(allocatorSignal?.aborted).toBe(true);
-	});
-
-	it("reports redacted Smartproxy allocator failure telemetry before throwing", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const events: unknown[] = [];
-		global.fetch = createFetchDouble(async () => new Response("allocator denied", { status: 503 }));
-
-		await expect(
-			resolveProxyConfigAsync({
-				affinityKey: "af_con_failure",
-				upstream: {
-					proxy: {
-						mode: "required",
-						provider: "smartproxy",
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 1 },
-					},
-				},
-				telemetry: { recordProxyResolution: (event) => events.push(event) },
-			}),
-		).rejects.toMatchObject({
-			code: "PROXY_ALLOCATION_FAILED",
-		});
-
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				provider: "smartproxy",
-				cacheStatus: "allocator",
-				cacheHit: false,
-				attempts: 3,
-				allocatorAttempts: 3,
-				allocatorStatus: 503,
-				allocatorBodyClass: "http_error",
-			}),
-		);
-		const serialized = JSON.stringify(events);
-		expect(serialized).not.toContain("redacted-test-key");
-		expect(serialized).not.toContain("af_con_failure");
-		expect(serialized).not.toContain("allocator denied");
-	});
-
-	it("retries Smartproxy allocator after a network error and reports attempts", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const events: unknown[] = [];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			if (allocatorCalls === 1) {
-				throw new Error("transient allocator network failure");
-			}
-			return new Response("5.78.24.25:31001", { status: 200 });
-		});
-
-		const resolved = await resolveProxyConfigAsync({
-			affinityKey: "af_con_retry_network",
-			upstream: {
-				proxy: {
-					mode: "required",
-					provider: "smartproxy",
-					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 1 },
-				},
-			},
-			telemetry: { recordProxyResolution: (event) => events.push(event) },
-		});
-
-		expect(resolved.url).toBe("http://5.78.24.25:31001");
-		expect(allocatorCalls).toBe(2);
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				cacheStatus: "allocator",
-				allocatorAttempts: 2,
-				allocatorBodyClass: "network_error",
-			}),
-		);
-	});
-
-	it("retries Smartproxy allocator after HTTP errors and keeps safe classification telemetry", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const events: unknown[] = [];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			if (allocatorCalls === 1) {
-				return new Response("allocator denied with private body", {
-					status: 500,
-				});
-			}
-			return new Response(
-				JSON.stringify({
-					code: 0,
-					data: { list: [{ ip: "5.78.24.26", port: 31002 }] },
-				}),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
-			);
-		});
-
-		const resolved = await resolveProxyConfigAsync({
-			affinityKey: "af_con_retry_http",
-			upstream: {
-				proxy: {
-					mode: "required",
-					provider: "smartproxy",
-					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 1 },
-				},
-			},
-			telemetry: { recordProxyResolution: (event) => events.push(event) },
-		});
-
-		expect(resolved.url).toBe("http://5.78.24.26:31002");
-		expect(allocatorCalls).toBe(2);
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				allocatorAttempts: 2,
-				allocatorStatus: 500,
-				allocatorBodyClass: "http_error",
-			}),
-		);
-		expect(JSON.stringify(events)).not.toContain("allocator denied");
-	});
-
-	it("retries Smartproxy allocator after empty/no-proxy responses", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const events: unknown[] = [];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			if (allocatorCalls === 1) {
-				return new Response("", { status: 200 });
-			}
-			return new Response("5.78.24.27:31003", { status: 200 });
-		});
-
-		const resolved = await resolveProxyConfigAsync({
-			affinityKey: "af_con_retry_empty",
-			upstream: {
-				proxy: {
-					mode: "required",
-					provider: "smartproxy",
-					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 1 },
-				},
-			},
-			telemetry: { recordProxyResolution: (event) => events.push(event) },
-		});
-
-		expect(resolved.url).toBe("http://5.78.24.27:31003");
-		expect(allocatorCalls).toBe(2);
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				allocatorAttempts: 2,
-				allocatorBodyClass: "empty",
-			}),
-		);
-	});
-
-	it("fails Smartproxy allocation after retry exhaustion with safe final telemetry", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const events: unknown[] = [];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(JSON.stringify({ code: 0, data: { list: [{ ip: "", port: "" }] } }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
+				now,
+				...(proxyAttempt === undefined ? {} : { proxyAttempt }),
 			});
+
+		const firstAttempt = await resolve();
+		const nanAttempt = await resolve(Number.NaN);
+		const infiniteAttempt = await resolve(Number.POSITIVE_INFINITY);
+		const rotatedAttempt = await resolve(1);
+
+		expect(nanAttempt.url).toBe(firstAttempt.url);
+		expect(infiniteAttempt.url).toBe(firstAttempt.url);
+		expect(rotatedAttempt.url).not.toBe(firstAttempt.url);
+	});
+
+	it("omits the smartproxy area token when no country is known", async () => {
+		useSmartproxyCredentials();
+
+		const resolved = await resolveProxyConfigAsync({
+			upstream: { proxy: { mode: "required", provider: "smartproxy" } },
 		});
+
+		expect(resolved.url).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(smartproxyTokens(resolved.url)).not.toHaveProperty("area");
+		expect(smartproxyTokens(resolved.url).user).toBe(SMARTPROXY_TEST_USERNAME);
+	});
+
+	it("points a vendor at a gateway override without changing its username grammar", async () => {
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
+
+		const smartproxy = await resolveProxyConfigAsync({
+			upstream: { proxy: { mode: "required", provider: "smartproxy", geo: { country: "KR" } } },
+			gatewayOverrides: { smartproxy: { host: "127.0.0.1", port: 18080 } },
+		});
+		const nodemaven = await resolveProxyConfigAsync({
+			upstream: { proxy: { mode: "required", provider: "nodemaven", geo: { country: "KR" } } },
+			gatewayOverrides: { nodemaven: { host: "127.0.0.1", port: 18081 } },
+		});
+
+		expect(smartproxy.url).toMatch(
+			/^http:\/\/smart-acct_area-KR_life-30_session-[0-9a-f]{10}:sp-secret@127\.0\.0\.1:18080$/,
+		);
+		expect(nodemaven.url).toMatch(/^http:\/\/acct123-country-kr-.*@127\.0\.0\.1:18081$/);
+		await expect(
+			resolveProxyConfigAsync({
+				upstream: { proxy: { mode: "required", provider: "smartproxy" } },
+				gatewayOverrides: { smartproxy: { host: "evil.example/path", port: 18080 } },
+			}),
+		).rejects.toThrow("Proxy gateway override host");
+		await expect(
+			resolveProxyConfigAsync({
+				upstream: { proxy: { mode: "required", provider: "smartproxy" } },
+				gatewayOverrides: { smartproxy: { host: "127.0.0.1", port: 0 } },
+			}),
+		).rejects.toThrow("Proxy gateway override port");
+	});
+
+	it("fails closed naming the gateway credentials when required smartproxy egress lacks them", async () => {
+		// The retired extraction key is not a substitute for the gateway sub-account.
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "retired-extraction-key";
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+		};
+
+		await expect(resolveProxyConfigAsync({ upstream: { proxy: policy } })).rejects.toMatchObject({
+			code: "PROXY_REQUIRED",
+			message: expect.stringContaining(
+				"Missing: APIFUSE__PROXY__SMARTPROXY_USERNAME and APIFUSE__PROXY__SMARTPROXY_PASSWORD (smartproxy).",
+			),
+		});
+
+		process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = SMARTPROXY_TEST_USERNAME;
+		let error: unknown;
+		try {
+			await resolveProxyConfigAsync({ upstream: { proxy: policy } });
+		} catch (caught) {
+			error = caught;
+		}
+		assertIsError(error);
+		expect(error).toMatchObject({ code: "PROXY_REQUIRED" });
+		expect(error.message).toContain("Missing: APIFUSE__PROXY__SMARTPROXY_PASSWORD (smartproxy).");
+		expect(error.message).not.toContain("APIFUSE__PROXY__SMARTPROXY_USERNAME");
+		expect(error.message).not.toContain("retired-extraction-key");
+	});
+
+	it("rejects malformed default smartproxy lifetime before optional fallback", async () => {
+		useSmartproxyCredentials();
+		process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = "abc";
+		global.fetch = createFetchDouble(
+			mock(async (): Promise<Response> => {
+				throw new Error("resolution should not call fetch");
+			}),
+		);
 
 		await expect(
 			resolveProxyConfigAsync({
-				affinityKey: "af_con_retry_exhausted",
 				upstream: {
 					proxy: {
-						mode: "required",
+						mode: "optional",
 						provider: "smartproxy",
 						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 1 },
 					},
 				},
-				telemetry: { recordProxyResolution: (event) => events.push(event) },
 			}),
-		).rejects.toMatchObject({
-			code: "PROXY_ALLOCATION_FAILED",
-		});
-
-		expect(allocatorCalls).toBe(3);
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				cacheStatus: "allocator",
-				cacheHit: false,
-				attempts: 3,
-				allocatorAttempts: 3,
-				allocatorStatus: 200,
-				allocatorBodyClass: "json_without_proxies",
-			}),
-		);
-		expect(JSON.stringify(events)).not.toContain("redacted-test-key");
-		expect(JSON.stringify(events)).not.toContain("af_con_retry_exhausted");
+		).rejects.toThrow("APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES must be a positive number");
+		expect(global.fetch).not.toHaveBeenCalled();
 	});
 
-	it("encodes safe Smartproxy allocator fields in telemetry headers", () => {
-		const telemetry = new ProxyTelemetryCollector();
-		telemetry.recordProxyResolution({
-			provider: "smartproxy",
-			cacheStatus: "allocator",
-			cacheHit: false,
-			resolutionMs: 12,
-			allocatorStatus: 500,
-			allocatorBodyClass: "http_error",
-			allocatorAttempts: 3,
-			attempts: 3,
-		});
-
-		const header = telemetry.toHeaderValue();
-		expect(header).toBeTruthy();
-		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
-
-		expect(decoded.proxy).toMatchObject({
-			allocatorStatus: 500,
-			allocatorBodyClass: "http_error",
-			allocatorAttempts: 3,
-		});
-		const serialized = JSON.stringify(decoded);
-		expect(serialized).not.toContain("redacted-test-key");
-		expect(serialized).not.toContain("allocator denied with private body");
-	});
-
-	it("forwards Smartproxy telemetry through ctx.http native transport", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+	it("forwards smartproxy telemetry through ctx.http native transport", async () => {
+		useSmartproxyCredentials();
 		const events: unknown[] = [];
 		const attempts: unknown[] = [];
-		queueAllocatorAndNativeResponses("5.78.24.25:31001", {
+		queueNativeFetchResponses({
 			status: 200,
 			body: JSON.stringify({ ok: true }),
 			headers: { "Content-Type": "application/json" },
@@ -1478,7 +849,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 1 },
+					session: { affinity: "connection" },
 				},
 			},
 			telemetry: {
@@ -1489,41 +860,44 @@ describe("proxy integration", () => {
 
 		await http.get("/health");
 
-		expect(nativeProxyCalls()).toEqual(["http://5.78.24.25:31001"]);
+		expectDistinctSmartproxySessions(nativeProxyCalls(), 1);
 		expect(events).toContainEqual(
 			expect.objectContaining({
 				provider: "smartproxy",
-				cacheStatus: "allocator",
+				protocol: "http",
+				cacheStatus: "disabled",
 				cacheHit: false,
+				attempts: 1,
 			}),
 		);
-		expect(attempts).toEqual([]);
+		// ctx.http records the same per-attempt sample as ctx.stealth.
+		expect(attempts).toEqual([
+			{
+				provider: "smartproxy",
+				attempt: 1,
+				proxyHash: expect.stringMatching(/^[0-9a-f]{12}$/),
+				outcome: "ok",
+				status: 200,
+				durationMs: expect.any(Number),
+			},
+		]);
 	});
 
 	it("advances a ctx.http transport failure across the vendor chain into nodemaven", async () => {
-		// Native-transport twin of the stealth crossover regression: the ctx.http
-		// retry loop must rotate past the primary vendor's whole pool span on
-		// transport failure and reach the NodeMaven leg, not stop at the retry
-		// budget (TransportTransient = 4) and strand the request on Smartproxy.
-		// NodeMaven credentials are restored by the suite afterEach.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
-		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+		// The implicit GET budget on a two-vendor chain is 2 × PROXY_ATTEMPTS_PER_VENDOR,
+		// split evenly: three smartproxy sessions, then the NodeMaven leg. The retry
+		// loop must not stop at the retry budget and strand the request on smartproxy.
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
 		global.fetch = createFetchDouble(
 			mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					return new Response(
-						["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
-							"\n",
-						),
-						{ status: 200 },
-					);
-				}
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
 				const proxy = (init as { proxy?: string } | undefined)?.proxy;
-				// The NodeMaven leg answers; every Smartproxy endpoint fails transport.
-				if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+				// The NodeMaven leg answers; every smartproxy session fails transport.
+				if (typeof proxy === "string" && NODEMAVEN_URL_PATTERN.test(proxy)) {
 					return new Response(JSON.stringify({ ok: true }), {
 						status: 200,
 						headers: { "Content-Type": "application/json" },
@@ -1541,7 +915,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 4 },
+					session: { affinity: "connection" },
 				},
 			},
 		});
@@ -1550,73 +924,54 @@ describe("proxy integration", () => {
 
 		expect(response.status).toBe(200);
 		const proxies = nativeProxyCalls();
-		// Four Smartproxy endpoints exhausted, then the NodeMaven crossover.
-		expect(proxies.length).toBeGreaterThanOrEqual(5);
-		for (const proxy of proxies.slice(0, 4)) {
-			expect(proxy).toMatch(/^http:\/\/5\.78\.24\.\d+:\d+$/);
-		}
-		expect(proxies.some((proxy) => proxy?.includes("gate.nodemaven.com"))).toBe(true);
+		expect(proxies).toHaveLength(PROXY_ATTEMPTS_PER_VENDOR + 1);
+		expectDistinctSmartproxySessions(proxies.slice(0, PROXY_ATTEMPTS_PER_VENDOR), 3);
+		expect(proxies[PROXY_ATTEMPTS_PER_VENDOR]).toMatch(NODEMAVEN_URL_PATTERN);
 	});
 
-	it("stops re-hammering a partial ctx.http allocation instead of retrying duplicate endpoints", async () => {
-		// A Smartproxy allocation succeeds but returns fewer live endpoints (2)
-		// than the configured pool size (4), and every endpoint fails transport.
-		// The flat offset would otherwise map indices 2/3 back onto endpoints 0/1
-		// (modulo), so without de-duplication the loop would resend the same GET up
-		// to the whole widened span. Duplicate offsets are skipped, so only the two
-		// distinct allocated endpoints are ever issued a request.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+	it("issues every ctx.http attempt on a new smartproxy session", async () => {
+		// Each attempt mints its own vendor session, so nothing repeats and the
+		// implicit budget (PROXY_ATTEMPTS_PER_VENDOR for one vendor) is spent on
+		// three distinct egress sessions before the request fails.
+		useSmartproxyCredentials();
 		global.fetch = createFetchDouble(
 			mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
-				}
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
 				throw new Error("socket hang up");
 			}),
 		);
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
-			affinityKey: "af_con_http_partial_alloc",
+			affinityKey: "af_con_http_sessions",
 			upstream: {
 				proxy: {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 4 },
+					session: { affinity: "connection" },
 				},
 			},
 		});
 
-		await expect(http.get("/health")).rejects.toThrow();
-		const proxies = nativeProxyCalls();
-		// Exactly the two distinct allocated endpoints — duplicate offsets skipped,
-		// no re-hammering of an already-attempted endpoint.
-		expect(proxies).toHaveLength(2);
-		expect(new Set(proxies).size).toBe(2);
+		await expect(http.get("/health")).rejects.toBeInstanceOf(TransportError);
+		expectDistinctSmartproxySessions(nativeProxyCalls(), PROXY_ATTEMPTS_PER_VENDOR);
 	});
 
-	it("reaches the nodemaven leg past duplicate ctx.http offsets from a partial allocation", async () => {
-		// The critical crossover case: Smartproxy pool configured to 4 but the
-		// allocator returns only 2 live URLs. Flat offsets 2/3 map back onto the two
-		// Smartproxy endpoints (modulo), while NodeMaven begins at offset 4 (the
-		// configured pool-size boundary). Skipping — not breaking on — the duplicate
-		// offsets is what lets the loop walk into the NodeMaven leg; a break would
-		// strand the request on Smartproxy exactly like the original SPOF bug.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
-		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+	it("counts every issued ctx.http attempt across the vendor crossover", async () => {
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
 		global.fetch = createFetchDouble(
 			mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
-				}
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
 				const proxy = (init as { proxy?: string } | undefined)?.proxy;
-				if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+				if (typeof proxy === "string" && NODEMAVEN_URL_PATTERN.test(proxy)) {
 					return new Response(JSON.stringify({ ok: true }), {
 						status: 200,
 						headers: { "Content-Type": "application/json" },
@@ -1630,7 +985,7 @@ describe("proxy integration", () => {
 		const httpTelemetry = new HttpTelemetryCollector();
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
-			affinityKey: "af_con_http_partial_crossover",
+			affinityKey: "af_con_http_crossover_summary",
 			httpTelemetry,
 			onRetrySummary: (summary) => {
 				retrySummary = summary;
@@ -1640,7 +995,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 4 },
+					session: { affinity: "connection" },
 				},
 			},
 		});
@@ -1648,45 +1003,31 @@ describe("proxy integration", () => {
 		const response = await http.get("/health");
 
 		expect(response.status).toBe(200);
-		const proxies = nativeProxyCalls();
-		const smartproxyCalls = proxies.filter((proxy) => /^http:\/\/5\.78\.24\./.test(proxy ?? ""));
-		// Each of the two live Smartproxy endpoints is issued exactly once (duplicate
-		// offsets skipped, not re-hammered)...
-		expect(smartproxyCalls).toHaveLength(2);
-		expect(new Set(smartproxyCalls).size).toBe(2);
-		// ...and the NodeMaven leg is still reached despite the duplicate offsets.
-		expect(proxies.some((proxy) => proxy?.includes("gate.nodemaven.com"))).toBe(true);
-		// The retry summary counts only issued requests (2 Smartproxy + 1 NodeMaven),
-		// not the two skipped duplicate offsets — 3 attempts / 2 retries, not 5 / 4.
+		// Three smartproxy sessions and one NodeMaven session were issued.
 		expect(retrySummary).toEqual({
-			attempts: 3,
-			retries: 2,
+			attempts: 4,
+			retries: 3,
 			preset: "transport_transient",
 			transport: "native",
 			lastErrorCode: "transport_network_error",
 		});
-		expect(httpTelemetry.toLogPayload()?.attempts).toBe(3);
-		expect(httpTelemetry.toLogPayload()?.attemptSamples.map(({ n }) => n)).toEqual([1, 2, 3]);
+		expect(httpTelemetry.toLogPayload()?.attempts).toBe(4);
+		expect(httpTelemetry.toLogPayload()?.attemptSamples.map(({ n }) => n)).toEqual([1, 2, 3, 4]);
 		expect(httpTelemetry.toLogPayload()?.retry as unknown).toEqual(retrySummary);
 		expect(httpTelemetry.toLogPayload()?.proxyUsed).toBe(true);
 	});
 
-	it("does not invoke a header factory for a dedupe-skipped ctx.http offset", async () => {
-		// Same partial-allocation crossover as above: five flat offsets, three
-		// issued requests. A single-use proof must be minted only for issued
-		// attempts, so the factory call count tracks `issued`, not the offset.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
-		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+	it("numbers header-factory attempts by issued request across the vendor crossover", async () => {
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
 		global.fetch = createFetchDouble(
 			mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
-				}
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
 				const proxy = (init as { proxy?: string } | undefined)?.proxy;
-				if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+				if (typeof proxy === "string" && NODEMAVEN_URL_PATTERN.test(proxy)) {
 					return new Response(JSON.stringify({ ok: true }), {
 						status: 200,
 						headers: { "Content-Type": "application/json" },
@@ -1699,13 +1040,13 @@ describe("proxy integration", () => {
 		const attempts: number[] = [];
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
-			affinityKey: "af_con_http_partial_crossover_factory",
+			affinityKey: "af_con_http_crossover_factory",
 			upstream: {
 				proxy: {
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 4 },
+					session: { affinity: "connection" },
 				},
 			},
 		});
@@ -1718,48 +1059,43 @@ describe("proxy integration", () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(nativeFetchCalls).toHaveLength(3);
-		expect(attempts).toEqual([1, 2, 3]);
+		expect(nativeFetchCalls).toHaveLength(4);
+		expect(attempts).toEqual([1, 2, 3, 4]);
 		expect(
 			nativeFetchCalls.map((call) => (call.init?.headers as Record<string, string>).dpop),
-		).toEqual(["proof-1", "proof-2", "proof-3"]);
+		).toEqual(["proof-1", "proof-2", "proof-3", "proof-4"]);
 	});
 
-	it("numbers the first issued header-factory attempt as 1 after failed proxy allocations", async () => {
-		// The retry loop counts an allocator failure as an attempt (it consumed a
-		// slot of the retry budget), but no request was built and no proof minted.
-		// A single-use proof minter must therefore still see `attempt: 1` on the
-		// first request that actually goes out, or callers branch on the wrong
-		// attempt (e.g. skip a first-attempt-only nonce cache).
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		let allocations = 0;
-		global.fetch = createFetchDouble(
-			mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					allocations += 1;
-					return allocations <= 3
-						? new Response("allocator unavailable", { status: 503 })
-						: new Response("5.78.24.25:31001", { status: 200 });
-				}
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
-				return new Response(JSON.stringify({ ok: true }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
-			}),
-		);
+	it("numbers the first issued header-factory attempt as 1 after a failed proxy resolution", async () => {
+		// A resolution failure spends a slot of the retry budget but builds no
+		// request, so a single-use proof minter still sees `attempt: 1` on the first
+		// request that actually goes out. The selector resolves no vendor once.
+		useSmartproxyCredentials();
+		let selections = 0;
+		const vendorSelector: ProxyVendorSelector = {
+			select(request) {
+				selections += 1;
+				return selections === 1 ? [] : staticOrderProxyVendorSelector.select(request);
+			},
+			report() {},
+		};
+		queueNativeFetchResponses({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
 
 		const attempts: number[] = [];
 		const { createHttpClient } = await import("../runtime/http.js");
 		const response = await createHttpClient("https://example.com", {
-			affinityKey: "af_con_http_alloc_failure_factory",
+			affinityKey: "af_con_http_resolution_failure_factory",
+			vendorSelector,
 			upstream: {
 				proxy: {
 					mode: "required",
 					providers: ["smartproxy"],
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 1 },
+					session: { affinity: "connection" },
 				},
 			},
 		}).get("/health", {
@@ -1771,79 +1107,70 @@ describe("proxy integration", () => {
 		});
 
 		expect(response.status).toBe(200);
+		expect(selections).toBe(2);
 		expect(nativeFetchCalls).toHaveLength(1);
 		expect(attempts).toEqual([1]);
 		expect((nativeFetchCalls[0]?.init?.headers as Record<string, string>).dpop).toBe("proof-1");
 	});
 
-	it("never starts the header factory once the per-call deadline fired during proxy resolution", async () => {
-		// Proxy resolution is awaited before header resolution, so the request
-		// timeout can fire while the allocator is in flight. Starting the factory
-		// then would burn a single-use proof for a request that can never be
-		// issued — and its rejection would land outside the transport error path
-		// (unredacted, unhandled).
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					await Bun.sleep(40);
-					return new Response("5.78.24.25:31001", { status: 200 });
-				}
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
-				return new Response("{}", { status: 200 });
-			}),
-		);
-
-		let factoryCalls = 0;
-		const { createHttpClient } = await import("../runtime/http.js");
-		let caught: unknown;
-		try {
-			await createHttpClient("https://example.com", {
-				affinityKey: "af_con_http_deadline_factory",
-				upstream: {
-					proxy: {
-						mode: "required",
-						providers: ["smartproxy"],
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 1 },
-					},
-				},
-			}).get("/health", {
-				retry: false,
-				timeout: 5,
-				sensitiveParams: { serviceKey: "redacted-test-secret" },
-				headers: ({ url }) => {
-					factoryCalls += 1;
-					throw new Error(`cannot sign ${url}`);
-				},
-			});
-		} catch (error) {
-			caught = error;
-		}
-
-		assertIsError(caught);
-		expect(caught).toMatchObject({ code: "transport_timeout" });
-		expect(factoryCalls).toBe(0);
-		expect(nativeFetchCalls).toHaveLength(0);
-	});
-
-	it("honors an explicit ctx.http retry count against a single-endpoint allocation", async () => {
-		// Regression: de-duplication must not engage for an explicit retry policy. A
-		// Smartproxy pool of 1 resolves the same endpoint every attempt, but a caller
-		// that pinned `retry: { attempts: 3, statusCodes: [503] }` documented three
-		// attempts — skipping the "duplicates" would collapse it to a single fetch
-		// and mask the 503 behind a synthetic retry_exhausted error.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+	it("moves each ctx.http retry to a new sticky session on a vendor entered by resolution fallback", async () => {
+		// smartproxy has no credentials, so every attempt of its share resolves the
+		// NodeMaven fallback. Each retry must leave the sticky session that just failed
+		// rather than derive NodeMaven's first session again.
+		useNodemavenCredentials();
 		let targetCalls = 0;
 		global.fetch = createFetchDouble(
 			mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					return new Response("5.78.24.25:31001", { status: 200 });
-				}
 				targetCalls += 1;
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
+				if (targetCalls < 3) throw new Error("socket hang up");
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}),
+		);
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_resolution_fallback",
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection" },
+				},
+			},
+		});
+
+		const response = await http.get("/health", {
+			retry: { attempts: 3, baseDelayMs: 0, maxDelayMs: 0, jitter: "none" },
+		});
+
+		expect(response.status).toBe(200);
+		const proxies = nativeProxyCalls();
+		expect(proxies).toHaveLength(3);
+		for (const proxy of proxies) expect(proxy).toMatch(NODEMAVEN_URL_PATTERN);
+		const sids = proxies.map((proxy) => /-sid-([0-9a-f]{10})-/.exec(proxy ?? "")?.[1]);
+		expect(new Set(sids).size).toBe(3);
+	});
+
+	it("honors an explicit ctx.http retry count on a smartproxy policy", async () => {
+		// A caller that pinned `retry: { attempts: 3, statusCodes: [503] }` documented
+		// three attempts, and each one goes out on its own vendor session.
+		useSmartproxyCredentials();
+		let targetCalls = 0;
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				targetCalls += 1;
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
 				return new Response("upstream busy", { status: 503 });
 			}),
 		);
@@ -1856,7 +1183,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 1 },
+					session: { affinity: "connection" },
 				},
 			},
 		});
@@ -1876,45 +1203,81 @@ describe("proxy integration", () => {
 			error = caught;
 		}
 
-		// All three explicit attempts are issued against the single endpoint...
 		expect(targetCalls).toBe(3);
-		// ...and the terminal error surfaces the real 503, not a synthetic exhaustion.
+		expectDistinctSmartproxySessions(nativeProxyCalls(), 3);
+		// The terminal error surfaces the real 503, not a synthetic exhaustion.
 		expect((error as { status?: number }).status).toBe(503);
 		expect((error as { code?: string }).code).toBe("upstream_http_error");
 	});
 
-	it("rejects malformed default Smartproxy lifetime before optional allocator fallback", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = "abc";
+	it("reports every ctx.http attempt to the request's selector with one request id and its history", async () => {
+		useSmartproxyCredentials();
+		const vendorSelector = createRecordingSelector();
+		const processSelector = createRecordingSelector();
+		setProxyVendorSelector(processSelector);
+		let calls = 0;
 		global.fetch = createFetchDouble(
-			mock(async () => {
-				throw new Error("allocator should not be called");
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				calls += 1;
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
+				if (calls < 3) throw new Error("socket hang up");
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
 			}),
 		);
 
-		await expect(
-			resolveProxyConfigAsync({
-				upstream: {
-					proxy: {
-						mode: "optional",
-						provider: "smartproxy",
-						geo: { country: "KR" },
-					},
+		const { createHttpClient } = await import("../runtime/http.js");
+		const response = await createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_selector",
+			vendorSelector,
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection" },
 				},
-			}),
-		).rejects.toThrow("APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES must be a positive number");
-		expect(global.fetch).not.toHaveBeenCalled();
+			},
+		}).get("/health");
+
+		expect(response.status).toBe(200);
+		const requestId = vendorSelector.requests[0]?.requestId;
+		expect(requestId).toEqual(expect.any(String));
+		expect(vendorSelector.requests.map((request) => request.requestId)).toEqual([
+			requestId,
+			requestId,
+			requestId,
+		]);
+		expect(vendorSelector.requests.map((request) => request.attempt)).toEqual([0, 1, 2]);
+		const failed: ProxyAttemptRecord = {
+			vendor: "smartproxy",
+			outcome: "error",
+			errorCode: "transport_network_error",
+		};
+		expect(vendorSelector.requests.map((request) => request.history ?? [])).toEqual([
+			[],
+			[failed],
+			[failed, failed],
+		]);
+		const transport = vendorSelector.outcomes.filter((outcome) => outcome.phase === "transport");
+		expect(transport.map((outcome) => outcome.outcome)).toEqual(["error", "error", "ok"]);
+		expect(transport.map((outcome) => outcome.status)).toEqual([0, 0, 200]);
+		expect(vendorSelector.outcomes.filter((outcome) => outcome.phase === "resolution").length).toBe(
+			3,
+		);
+		expect(vendorSelector.outcomes.every((outcome) => outcome.requestId === requestId)).toBe(true);
+		// The process selector neither served nor heard about this request.
+		expect(processSelector.requests).toEqual([]);
+		expect(processSelector.outcomes).toEqual([]);
 	});
 
-	it("retries Smartproxy stealth requests with the next raw CONNECT endpoint on proxy failure", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			});
-		});
+	it("retries a refused smartproxy stealth session on a new session id", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(new Error("Proxy responded with non 200 code: 512 OK"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -1928,7 +1291,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -1937,36 +1300,19 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(allocatorCalls).toBe(1);
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+		const proxies = stealthProxyCalls();
+		expectDistinctSmartproxySessions(proxies, 2);
+		expect(smartproxyTokens(proxies[0])).toMatchObject({ area: "KR", life: "30" });
 	});
 
-	it("advances a policy-allocator transport failure across the vendor chain into nodemaven", async () => {
-		// Regression for the fallback SPOF: a Smartproxy allocation succeeds but
-		// every allocated endpoint fails at the transport level. The stealth loop
-		// must keep rotating past the primary vendor's whole pool span and fail
-		// over into the NodeMaven leg — not stop at the per-endpoint retry budget
-		// (3) and strand the request on Smartproxy. Pool span 4 puts the NodeMaven
-		// crossover at flat attempt index 4, beyond the old min(span, attempts=3)
-		// cap, so this asserts the corrected full-span rotation.
-		// NodeMaven credentials are restored by the suite afterEach, matching the
-		// Smartproxy app-key handling above — no per-test teardown needed.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
-		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(
-				["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join("\n"),
-				{ status: 200 },
-			);
-		});
-		// Four Smartproxy endpoints fail with a plain network error
-		// (transport_network_error — retryable, not pool-refreshable), then the
-		// NodeMaven leg answers 200.
+	it("advances a stealth transport failure across the vendor chain into nodemaven", async () => {
+		// Regression for the fallback SPOF: every smartproxy session fails at the
+		// transport level. The stealth loop spends the primary vendor's share of
+		// the attempt budget (PROXY_ATTEMPTS_PER_VENDOR) and then fails over into
+		// the NodeMaven leg instead of stranding the request on smartproxy.
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
 		stealthState.queuedResponses.push(
-			new Error("socket hang up"),
 			new Error("socket hang up"),
 			new Error("socket hang up"),
 			new Error("socket hang up"),
@@ -1984,7 +1330,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 4 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_vendor_advance",
@@ -1993,34 +1339,63 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(allocatorCalls).toBe(1);
-		const proxies = stealthProxyCalls() as string[];
-		expect(proxies).toHaveLength(5);
-		// The first four attempts exhaust the Smartproxy pool...
-		for (const proxy of proxies.slice(0, 4)) {
-			expect(proxy).toMatch(/^http:\/\/5\.78\.24\.\d+:\d+$/);
-		}
-		// ...and the fifth crosses over into the NodeMaven gateway leg.
-		expect(proxies[4]).toMatch(/@gate\.nodemaven\.com:\d+$/);
+		const proxies = stealthProxyCalls();
+		expect(proxies).toHaveLength(PROXY_ATTEMPTS_PER_VENDOR + 1);
+		expectDistinctSmartproxySessions(proxies.slice(0, PROXY_ATTEMPTS_PER_VENDOR), 3);
+		expect(proxies[PROXY_ATTEMPTS_PER_VENDOR]).toMatch(NODEMAVEN_URL_PATTERN);
 	});
 
-	it("throws only after attempting every vendor in the chain on persistent transport failure", async () => {
-		// NodeMaven credentials are restored by the suite afterEach.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
-		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
-		// Pool span 2 (Smartproxy) + 2 (NodeMaven) = 4 attempts, all failing.
+	it("splits an explicit stealth retry budget across the chain like ctx.http", async () => {
+		// `retry.attempts: 2` on a two-vendor chain is the budget the selector splits:
+		// the second attempt is the fallback vendor's, as on ctx.http, rather than a
+		// second smartproxy session inside a chain-span budget the retry never reaches.
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
+		stealthState.queuedResponses.push(new Error("socket hang up"), {
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+		const selector = createRecordingSelector();
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+				},
+			},
+			vendorSelector: selector,
+		});
+
+		const response = await client.fetch("/health", { retry: { attempts: 2, baseDelayMs: 0 } });
+
+		expect(response.status).toBe(200);
+		const proxies = stealthProxyCalls();
+		expect(proxies).toHaveLength(2);
+		expect(proxies[0]).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(proxies[1]).toMatch(NODEMAVEN_URL_PATTERN);
+		expect(selector.requests.map(({ attempt, attemptCap }) => [attempt, attemptCap])).toEqual([
+			[0, 2],
+			[1, 2],
+		]);
+	});
+
+	it("runs edge refusals past an explicit budget on the last vendor of the chain", async () => {
+		// Vendor edge refusals may use the whole rotation span; the attempts past the
+		// explicit budget stay on the fallback vendor instead of returning to the first.
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
 		stealthState.queuedResponses.push(
-			new Error("socket hang up"),
-			new Error("socket hang up"),
-			new Error("socket hang up"),
-			new Error("socket hang up"),
+			{ status: 512, body: "proxy pool unavailable", headers: { "content-type": "text/plain" } },
+			{ status: 512, body: "proxy pool unavailable", headers: { "content-type": "text/plain" } },
+			{
+				status: 200,
+				body: JSON.stringify({ ok: true }),
+				headers: { "Content-Type": "application/json" },
+			},
 		);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
@@ -2030,7 +1405,73 @@ describe("proxy integration", () => {
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
+				},
+			},
+			affinityKey: "af_con_explicit_budget",
+		});
+
+		const response = await client.fetch("/health", { retry: { attempts: 2, baseDelayMs: 0 } });
+
+		expect(response.status).toBe(200);
+		const proxies = stealthProxyCalls();
+		expect(proxies).toHaveLength(3);
+		expect(proxies[0]).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(proxies[1]).toMatch(NODEMAVEN_URL_PATTERN);
+		expect(proxies[2]).toMatch(NODEMAVEN_URL_PATTERN);
+		expect(proxies[2]).not.toBe(proxies[1]);
+	});
+
+	it("does not re-send a session-state pinned egress within one stealth request", async () => {
+		// The one place a gateway URL repeats inside a request is a state pinned to the
+		// egress it was acquired on: every attempt resolves that same URL, and a retry
+		// would re-hammer the exit that just failed, so the repeat is skipped.
+		useSmartproxyCredentials();
+		stealthState.queuedResponses.push(new Error("socket hang up"), {
+			status: 200,
+			body: "must not be reached",
+			headers: { "content-type": "text/plain" },
+		});
+		const pinnedUrl = `http://${SMARTPROXY_TEST_USERNAME}_area-KR_life-30_session-0123456789:${SMARTPROXY_TEST_PASSWORD}@proxy.smartproxy.net:3120`;
+		const pinnedFetch = {
+			method: "GET" as const,
+			[SESSION_STATE_PINNED_EGRESS]: {
+				url: pinnedUrl,
+				vendor: "smartproxy",
+				sessionId: "0123456789",
+			},
+		};
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: { mode: "required", providers: ["smartproxy"], geo: { country: "KR" } },
+			},
+		});
+
+		await expect(client.fetch("/state", pinnedFetch)).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(stealthProxyCalls()).toEqual([pinnedUrl]);
+		expect(stealthState.queuedResponses).toHaveLength(1);
+	});
+
+	it("throws only after attempting every vendor in the chain on persistent transport failure", async () => {
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
+		// Two vendors × PROXY_ATTEMPTS_PER_VENDOR attempts, all failing.
+		for (let index = 0; index < 2 * PROXY_ATTEMPTS_PER_VENDOR; index += 1) {
+			stealthState.queuedResponses.push(new Error("socket hang up"));
+		}
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_vendor_exhaust",
@@ -2044,75 +1485,16 @@ describe("proxy integration", () => {
 		}
 
 		expect(error).toBeInstanceOf(TransportError);
-		const proxies = stealthProxyCalls() as string[];
-		// The NodeMaven leg is exercised before the chain gives up.
-		expect(proxies.some((proxy) => /@gate\.nodemaven\.com:\d+$/.test(proxy))).toBe(true);
+		const proxies = stealthProxyCalls();
+		expect(proxies).toHaveLength(2 * PROXY_ATTEMPTS_PER_VENDOR);
+		expectDistinctSmartproxySessions(proxies.slice(0, PROXY_ATTEMPTS_PER_VENDOR), 3);
+		for (const proxy of proxies.slice(PROXY_ATTEMPTS_PER_VENDOR)) {
+			expect(proxy).toMatch(NODEMAVEN_URL_PATTERN);
+		}
 	});
 
-	it("reaches the nodemaven leg past duplicate stealth offsets from a partial allocation", async () => {
-		// Stealth twin of the ctx.http partial-allocation crossover: Smartproxy pool
-		// configured to 4 but the allocator returns only 2 live URLs. Flat offsets
-		// 2/3 fold back onto the two endpoints (modulo), and NodeMaven begins at the
-		// configured boundary offset 4. The widened stealth cap only helps if those
-		// duplicate offsets are *skipped* rather than treated as chain exhaustion —
-		// a break on the first repeat would strand the request on Smartproxy exactly
-		// like the SPOF this change targets.
-		// NodeMaven credentials are restored by the suite afterEach.
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
-		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
-		// Only the two distinct Smartproxy endpoints issue a request (offsets 0/1);
-		// the duplicate offsets 2/3 are skipped without consuming a response, then
-		// the NodeMaven leg answers 200.
-		stealthState.queuedResponses.push(new Error("socket hang up"), new Error("socket hang up"), {
-			status: 200,
-			body: JSON.stringify({ ok: true }),
-			headers: { "Content-Type": "application/json" },
-		});
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			upstream: {
-				proxy: {
-					mode: "required",
-					providers: ["smartproxy", "nodemaven"],
-					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 4 },
-				},
-			},
-			affinityKey: "af_con_stealth_partial_crossover",
-		});
-
-		const response = await client.fetch("/health");
-
-		expect(response.status).toBe(200);
-		const proxies = stealthProxyCalls() as string[];
-		const smartproxyCalls = proxies.filter((proxy) => /^http:\/\/5\.78\.24\./.test(proxy));
-		// Each live Smartproxy endpoint is attempted exactly once (duplicates skipped)...
-		expect(smartproxyCalls).toHaveLength(2);
-		expect(new Set(smartproxyCalls).size).toBe(2);
-		// ...and the NodeMaven leg is still reached despite the duplicate offsets.
-		expect(proxies.some((proxy) => /@gate\.nodemaven\.com:\d+$/.test(proxy))).toBe(true);
-	});
-
-	it("retry false preserves Smartproxy stale-pool candidate rotation before refresh", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const pools = [
-			["5.78.24.25:31001", "5.78.24.26:31002"],
-			["5.78.24.27:31003", "5.78.24.28:31004"],
-		];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
-			allocatorCalls += 1;
-			return new Response(pool.join("\n"), { status: 200 });
-		});
+	it("retry false still moves a refused smartproxy stealth session to a new session", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(
 			{
 				status: 512,
@@ -2138,35 +1520,20 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
-			affinityKey: "af_con_retry_false_stale_pool",
+			affinityKey: "af_con_retry_false_refused_session",
 		});
 
 		const response = await client.fetch("/health", { retry: false });
 
 		expect(response.status).toBe(200);
-		expect(allocatorCalls).toBe(2);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-			"http://5.78.24.27:31003",
-		]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 3);
 	});
 
-	it("refreshes stale Smartproxy stealth pools after all endpoints return 509 or 512", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const pools = [
-			["5.78.24.25:31001", "5.78.24.26:31002"],
-			["5.78.24.27:31003", "5.78.24.28:31004"],
-		];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
-			allocatorCalls += 1;
-			return new Response(pool.join("\n"), { status: 200 });
-		});
+	it("moves past smartproxy sessions the edge refused with 509 or 512 without a refresh pass", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(
 			{
 				status: 509,
@@ -2192,7 +1559,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2201,23 +1568,61 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(allocatorCalls).toBe(2);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-			"http://5.78.24.27:31003",
-		]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 3);
 	});
 
-	it("does not refresh Smartproxy stealth pools for origin 509 responses without proxy markers", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			});
+	it("fails as exhausted once every smartproxy session the budget allows is refused", async () => {
+		// One pass over the attempt budget: there is no pool to refresh, so after
+		// PROXY_ATTEMPTS_PER_VENDOR refused sessions the request fails and no
+		// further attempt is made.
+		useSmartproxyCredentials();
+		stealthState.queuedResponses.push(
+			{
+				status: 509,
+				body: "proxy pool lease expired",
+				headers: { "content-type": "text/plain" },
+			},
+			{
+				status: 512,
+				body: "proxy pool unavailable",
+				headers: { "content-type": "text/plain" },
+			},
+			{
+				status: 512,
+				body: "proxy pool unavailable",
+				headers: { "content-type": "text/plain" },
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection" },
+				},
+			},
+			affinityKey: "af_con_exhausted",
 		});
+
+		let error: unknown;
+		try {
+			await client.fetch("/health");
+		} catch (caught) {
+			error = caught;
+		}
+
+		expect(error).toBeInstanceOf(TransportError);
+		expect(error).toMatchObject({ code: "PROXY_POOL_EXHAUSTED" });
+		assertIsError(error);
+		expect(error.message).toBe("Proxy provider refused every session the attempt budget allowed.");
+		expectDistinctSmartproxySessions(stealthProxyCalls(), PROXY_ATTEMPTS_PER_VENDOR);
+	});
+
+	it("does not rotate smartproxy stealth sessions for origin 509 responses without proxy markers", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push({
 			status: 509,
 			body: "origin quota exceeded",
@@ -2231,7 +1636,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2246,24 +1651,11 @@ describe("proxy integration", () => {
 
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).status).toBe(509);
-		expect(allocatorCalls).toBe(1);
-		expect(stealthState.clients[0]?.calls.map((call) => call.options.proxy)).toEqual([
-			"http://5.78.24.25:31001",
-		]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 1);
 	});
 
-	it("refreshes Smartproxy stealth pools after all endpoints return edge certificate 495", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const pools = [
-			["5.78.24.25:31001", "5.78.24.26:31002"],
-			["5.78.24.27:31003", "5.78.24.28:31004"],
-		];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
-			allocatorCalls += 1;
-			return new Response(pool.join("\n"), { status: 200 });
-		});
+	it("moves a smartproxy session the edge refused with certificate 495 to a new session", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(
 			{
 				status: 495,
@@ -2289,7 +1681,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2298,23 +1690,11 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(allocatorCalls).toBe(2);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-			"http://5.78.24.27:31003",
-		]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 3);
 	});
 
-	it("does not refresh Smartproxy stealth pools for origin 495 responses without proxy markers", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			allocatorCalls += 1;
-			return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			});
-		});
+	it("does not rotate smartproxy stealth sessions for origin 495 responses without proxy markers", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push({
 			status: 495,
 			body: "origin SSL certificate error",
@@ -2328,7 +1708,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2343,10 +1723,7 @@ describe("proxy integration", () => {
 
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).status).toBe(495);
-		expect(allocatorCalls).toBe(1);
-		expect(stealthState.clients[0]?.calls.map((call) => call.options.proxy)).toEqual([
-			"http://5.78.24.25:31001",
-		]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 1);
 	});
 
 	it("does not retry origin certificate 495 responses without policy-managed proxy", async () => {
@@ -2398,14 +1775,8 @@ describe("proxy integration", () => {
 		expect(stealthState.clients).toHaveLength(2);
 	});
 
-	it("retries Smartproxy stealth requests when impit returns a status-zero proxy CONNECT response", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("retries smartproxy stealth requests when impit returns a status-zero proxy CONNECT response", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(
 			{
 				status: 0,
@@ -2426,7 +1797,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2435,17 +1806,11 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 2);
 	});
 
-	it("retries Smartproxy stealth requests when impit throws a proxy CONNECT error", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("retries smartproxy stealth requests when impit throws a proxy CONNECT error", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(
 			new Error("failed to do request: proxy CONNECT tunnel failed with non 200 code: 509 OK"),
 			{
@@ -2462,7 +1827,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2471,17 +1836,11 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 2);
 	});
 
-	it("retries safe Smartproxy stealth reads when impit throws a generic network error", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("retries safe smartproxy stealth reads when impit throws a generic network error", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(new Error("socket hang up"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2495,7 +1854,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2504,17 +1863,11 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 2);
 	});
 
-	it("retries safe Smartproxy stealth reads when impit throws a timeout error", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("retries safe smartproxy stealth reads when impit throws a timeout error", async () => {
+		useSmartproxyCredentials();
 		const timeoutError = new Error("request timeout after 10ms");
 		timeoutError.name = "TimeoutError";
 		stealthState.queuedResponses.push(timeoutError, {
@@ -2530,7 +1883,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2539,17 +1892,11 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health", { timeout: 10 });
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 2);
 	});
 
-	it("does not retry generic Smartproxy stealth network errors for unsafe methods", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("does not retry generic smartproxy stealth network errors for unsafe methods", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(new Error("socket hang up"));
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
@@ -2559,7 +1906,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2576,17 +1923,11 @@ describe("proxy integration", () => {
 		expect((error as TransportError).code).toBe("transport_network_error");
 		assertIsError(error);
 		expect(error.message).toBe("Network error");
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001"]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 1);
 	});
 
-	it("rejects explicit Smartproxy stealth POST retry without unsafe acknowledgement", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("rejects explicit smartproxy stealth POST retry without unsafe acknowledgement", async () => {
+		useSmartproxyCredentials();
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
@@ -2595,7 +1936,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2611,14 +1952,8 @@ describe("proxy integration", () => {
 		expect(stealthProxyCalls()).toEqual([]);
 	});
 
-	it("retries explicit read-like Smartproxy stealth POST network errors with proxy rotation", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("retries explicit read-like smartproxy stealth POST network errors on a new session", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push(new Error("socket hang up"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2632,7 +1967,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2650,17 +1985,11 @@ describe("proxy integration", () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 2);
 	});
 
-	it("retries Smartproxy stealth requests when impit exposes structured proxy tunnel status", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
+	it("retries smartproxy stealth requests when impit exposes structured proxy tunnel status", async () => {
+		useSmartproxyCredentials();
 		const proxyTunnelError = Object.assign(new Error("proxy tunnel failed"), {
 			status: 509,
 		});
@@ -2677,7 +2006,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2686,39 +2015,18 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+		expectDistinctSmartproxySessions(stealthProxyCalls(), 2);
 	});
 
-	it("classifies Smartproxy stealth auth-ip edge rejection without source-IP allowlist messaging", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(
-			async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				}),
-		);
-		stealthState.queuedResponses.push(
-			{
+	it("classifies smartproxy stealth auth-ip edge rejection without source-IP allowlist messaging", async () => {
+		useSmartproxyCredentials();
+		for (let index = 0; index < PROXY_ATTEMPTS_PER_VENDOR; index += 1) {
+			stealthState.queuedResponses.push({
 				status: 0,
 				body: 'failed to do request: Post "https://ct-api.catchtable.co.kr/api/v6/search/list": Proxy responded with non 200 code: 512 OK: auth ip err 203.0.113.10 userid=123 5.78.24.25',
 				headers: {},
-			},
-			{
-				status: 0,
-				body: 'failed to do request: Post "https://ct-api.catchtable.co.kr/api/v6/search/list": Proxy responded with non 200 code: 512 OK: auth ip err 203.0.113.10 userid=123 5.78.24.26',
-				headers: {},
-			},
-			{
-				status: 0,
-				body: 'failed to do request: Post "https://ct-api.catchtable.co.kr/api/v6/search/list": Proxy responded with non 200 code: 512 OK: auth ip err 203.0.113.10 userid=123 5.78.24.25',
-				headers: {},
-			},
-			{
-				status: 0,
-				body: 'failed to do request: Post "https://ct-api.catchtable.co.kr/api/v6/search/list": Proxy responded with non 200 code: 512 OK: auth ip err 203.0.113.10 userid=123 5.78.24.26',
-				headers: {},
-			},
-		);
+			});
+		}
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
@@ -2727,7 +2035,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2743,42 +2051,26 @@ describe("proxy integration", () => {
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).code).toBe("PROXY_EDGE_AUTH_REJECTED");
 		assertIsError(error);
-		expect(error.message).toContain("candidate endpoint");
+		expect(error.message).toContain("rejected a session during authentication");
+		expect(error.message).not.toContain("allowlist");
 		expect(error.message).not.toContain("userid=123");
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-			"http://5.78.24.26:31002",
-		]);
+		// Every session the budget allows is tried once; none is retried.
+		expectDistinctSmartproxySessions(stealthProxyCalls(), PROXY_ATTEMPTS_PER_VENDOR);
 	});
 
-	it("refreshes stale Smartproxy stealth pools before classifying hidden CONNECT 512 auth rejection", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const pools = [
-			["5.78.24.25:31001", "5.78.24.26:31002"],
-			["5.78.24.27:31003", "5.78.24.28:31004"],
-		];
-		let allocatorCalls = 0;
-		global.fetch = createFetchDouble(async () => {
-			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
-			allocatorCalls += 1;
-			return new Response(pool.join("\n"), { status: 200 });
+	it("classifies a hidden CONNECT 512 auth rejection through the proxy diagnostic after every session is refused", async () => {
+		// The CONNECT 512 carries no body, so after the last refused session the
+		// stealth runtime sends one diagnostic request through that session and
+		// classifies the vendor's answer.
+		useSmartproxyCredentials();
+		for (let index = 0; index < PROXY_ATTEMPTS_PER_VENDOR; index += 1) {
+			stealthState.queuedResponses.push(new Error("Proxy responded with non 200 code: 512 OK"));
+		}
+		stealthState.queuedResponses.push({
+			status: 200,
+			body: "auth ip err 203.0.113.10 userid=123",
+			headers: { "content-type": "text/plain" },
 		});
-		stealthState.queuedResponses.push(
-			new Error("Proxy responded with non 200 code: 512 OK"),
-			new Error("Proxy responded with non 200 code: 512 OK"),
-			{
-				status: 512,
-				body: "auth ip err 203.0.113.10 userid=123 5.78.24.27",
-				headers: { "content-type": "text/plain" },
-			},
-			{
-				status: 512,
-				body: "auth ip err 203.0.113.10 userid=123 5.78.24.28",
-				headers: { "content-type": "text/plain" },
-			},
-		);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
@@ -2787,7 +2079,7 @@ describe("proxy integration", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection" },
 				},
 			},
 			affinityKey: "af_con_123",
@@ -2803,20 +2095,18 @@ describe("proxy integration", () => {
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).code).toBe("PROXY_EDGE_AUTH_REJECTED");
 		assertIsError(error);
-		expect(error.message).toContain("candidate endpoint");
+		expect(error.message).toContain("rejected a session during authentication");
 		expect(error.message).not.toContain("userid=123");
-		expect(allocatorCalls).toBe(2);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-			"http://5.78.24.27:31003",
-			"http://5.78.24.28:31004",
-		]);
+		const proxies = stealthProxyCalls();
+		expectDistinctSmartproxySessions(proxies.slice(0, PROXY_ATTEMPTS_PER_VENDOR), 3);
+		// The diagnostic runs on the last refused session, after the request attempts.
+		expect(proxies).toHaveLength(PROXY_ATTEMPTS_PER_VENDOR + 1);
+		expect(proxies[PROXY_ATTEMPTS_PER_VENDOR]).toBe(proxies[PROXY_ATTEMPTS_PER_VENDOR - 1]);
 		expect(stealthState.clients.flatMap((client) => client.calls.map((call) => call.url))).toEqual([
 			"https://example.com/health",
 			"https://example.com/health",
 			"https://example.com/health",
-			"https://example.com/health",
+			"http://example.com/",
 		]);
 	});
 
@@ -2841,26 +2131,8 @@ describe("proxy integration", () => {
 		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toBeUndefined();
 	});
 
-	it("fails closed when required Smartproxy egress lacks an app key", async () => {
-		await expect(
-			resolveProxyConfigAsync({
-				upstream: {
-					proxy: {
-						mode: "required",
-						provider: "smartproxy",
-						geo: { country: "KR" },
-					},
-				},
-			}),
-		).rejects.toMatchObject({
-			code: "PROXY_REQUIRED",
-			message: expect.stringContaining("APIFUSE__PROXY__SMARTPROXY_APP_KEY"),
-		});
-	});
-
-	it("keeps Smartproxy policy stealth clients on origin certificate verification", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () => new Response("5.78.24.25:31001", { status: 200 }));
+	it("keeps smartproxy policy stealth clients on origin certificate verification", async () => {
+		useSmartproxyCredentials();
 		stealthState.queuedResponses.push({
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2880,8 +2152,66 @@ describe("proxy integration", () => {
 
 		await client.fetch("/health");
 
-		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toBe("http://5.78.24.25:31001");
+		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toMatch(SMARTPROXY_URL_PATTERN);
 		expect(stealthState.clients[0]?.calls[0]?.options.insecure).toBeUndefined();
+	});
+
+	it("reports every stealth attempt to the request's selector with one request id and its history", async () => {
+		useSmartproxyCredentials();
+		const vendorSelector = createRecordingSelector();
+		const processSelector = createRecordingSelector();
+		setProxyVendorSelector(processSelector);
+		stealthState.queuedResponses.push(new Error("socket hang up"), {
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection" },
+				},
+			},
+			affinityKey: "af_con_stealth_selector",
+			vendorSelector,
+		});
+
+		const response = await client.fetch("/health");
+
+		expect(response.status).toBe(200);
+		const requestId = vendorSelector.requests[0]?.requestId;
+		expect(requestId).toEqual(expect.any(String));
+		expect(vendorSelector.requests.map((request) => request.requestId)).toEqual([
+			requestId,
+			requestId,
+		]);
+		expect(vendorSelector.requests.map((request) => request.history ?? [])).toEqual([
+			[],
+			[{ vendor: "smartproxy", outcome: "error", errorCode: "transport_network_error" }],
+		]);
+		const transport = vendorSelector.outcomes.filter((outcome) => outcome.phase === "transport");
+		expect(transport.map((outcome) => outcome.outcome)).toEqual(["error", "ok"]);
+		expect(transport.map((outcome) => outcome.attempt)).toEqual([0, 1]);
+		expect(vendorSelector.outcomes.every((outcome) => outcome.requestId === requestId)).toBe(true);
+		expect(processSelector.requests).toEqual([]);
+		expect(processSelector.outcomes).toEqual([]);
+
+		// The next request is a new request id with an empty history.
+		stealthState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+		await client.fetch("/health");
+		const next = vendorSelector.requests[2];
+		expect(next?.requestId).toEqual(expect.any(String));
+		expect(next?.requestId).not.toBe(requestId);
+		expect(next?.history ?? []).toEqual([]);
 	});
 });
 
@@ -2890,30 +2220,30 @@ describe("resolvePolicyTransportAttemptCap", () => {
 		mode: "required",
 		providers: ["smartproxy", "nodemaven"],
 		geo: { country: "KR" },
-		session: { affinity: "connection", poolSize: 4 },
+		session: { affinity: "connection" },
 	};
 
-	it("widens an implicit, safe-method allocator request to the full chain span", () => {
-		// Smartproxy(4) + NodeMaven(4) = span 8, so the flat index reaches the
-		// NodeMaven leg at attempt 4 — well past the default per-endpoint budget.
+	it("widens an implicit, safe-method policy request to every vendor's share of the chain", () => {
+		// Two vendors × PROXY_ATTEMPTS_PER_VENDOR: the even split reaches NodeMaven
+		// at attempt 3, past the default per-endpoint budget.
 		expect(
 			resolvePolicyTransportAttemptCap({
 				policy: chainPolicy,
-				usesPolicyAllocator: true,
+				usesPolicyProxy: true,
 				retryAttempts: 3,
 				explicitRetry: false,
 				method: "GET",
 			}),
-		).toBe(8);
+		).toBe(2 * PROXY_ATTEMPTS_PER_VENDOR);
 	});
 
 	it("honours an explicit retry policy's attempt ceiling instead of widening", () => {
 		// A caller that pinned attempts:2 must not have the request duplicated
-		// across the whole pool — `attempts` is the documented total ceiling.
+		// across the whole chain — `attempts` is the documented total ceiling.
 		expect(
 			resolvePolicyTransportAttemptCap({
 				policy: chainPolicy,
-				usesPolicyAllocator: true,
+				usesPolicyProxy: true,
 				retryAttempts: 2,
 				explicitRetry: true,
 				method: "GET",
@@ -2921,11 +2251,11 @@ describe("resolvePolicyTransportAttemptCap", () => {
 		).toBe(2);
 	});
 
-	it("never widens an unsafe method across the pool", () => {
+	it("never widens an unsafe method across the chain", () => {
 		expect(
 			resolvePolicyTransportAttemptCap({
 				policy: chainPolicy,
-				usesPolicyAllocator: true,
+				usesPolicyProxy: true,
 				retryAttempts: 2,
 				explicitRetry: false,
 				method: "POST",
@@ -2934,18 +2264,18 @@ describe("resolvePolicyTransportAttemptCap", () => {
 	});
 
 	it("keeps the retry budget for non-registry vendor policies", () => {
-		// Deprecated `custom`/`decodo` policies have no managed pool, so widening
-		// cannot cross over to another endpoint.
+		// Deprecated `custom`/`decodo` policies have no managed endpoint, so widening
+		// cannot cross over to another vendor session.
 		const staticPolicy: ProviderProxyPolicy = {
 			mode: "required",
 			provider: "custom",
 			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 4 },
+			session: { affinity: "connection" },
 		};
 		expect(
 			resolvePolicyTransportAttemptCap({
 				policy: staticPolicy,
-				usesPolicyAllocator: true,
+				usesPolicyProxy: true,
 				retryAttempts: 3,
 				explicitRetry: false,
 				method: "GET",
@@ -2953,11 +2283,11 @@ describe("resolvePolicyTransportAttemptCap", () => {
 		).toBe(3);
 	});
 
-	it("keeps the retry budget when the request is not allocator-managed", () => {
+	it("keeps the retry budget when the request is not policy-managed", () => {
 		expect(
 			resolvePolicyTransportAttemptCap({
 				policy: chainPolicy,
-				usesPolicyAllocator: false,
+				usesPolicyProxy: false,
 				retryAttempts: 3,
 				explicitRetry: false,
 				method: "GET",
@@ -2965,25 +2295,33 @@ describe("resolvePolicyTransportAttemptCap", () => {
 		).toBe(3);
 	});
 
-	it("reaches the fallback vendor behind a large NodeMaven-first pool", () => {
-		// Regression for the 40-attempt ceiling bug: NodeMaven allows a 50-slot
-		// pool, so a NodeMaven-first chain with poolSize 50 spans 50 + 20 = 70.
-		// A hard cap of 40 would strand the request inside the NodeMaven pool and
-		// never cross into the Smartproxy fallback.
+	it("keeps a retry budget larger than the chain span for any vendor order", () => {
+		// The span no longer depends on a declared pool size: a NodeMaven-first
+		// chain is entitled to the same 2 × PROXY_ATTEMPTS_PER_VENDOR, and a larger
+		// implicit budget is never truncated.
 		const nodemavenFirst: ProviderProxyPolicy = {
 			mode: "required",
 			providers: ["nodemaven", "smartproxy"],
 			geo: { country: "KR" },
-			session: { affinity: "connection", poolSize: 50 },
+			session: { affinity: "connection" },
 		};
 		expect(
 			resolvePolicyTransportAttemptCap({
 				policy: nodemavenFirst,
-				usesPolicyAllocator: true,
+				usesPolicyProxy: true,
 				retryAttempts: 3,
 				explicitRetry: false,
 				method: "GET",
 			}),
-		).toBe(70);
+		).toBe(2 * PROXY_ATTEMPTS_PER_VENDOR);
+		expect(
+			resolvePolicyTransportAttemptCap({
+				policy: nodemavenFirst,
+				usesPolicyProxy: true,
+				retryAttempts: 8,
+				explicitRetry: false,
+				method: "GET",
+			}),
+		).toBe(8);
 	});
 });

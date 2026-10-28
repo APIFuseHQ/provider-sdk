@@ -40,7 +40,6 @@ describe("stealth telemetry collector", () => {
 		const collector = new StealthTelemetryCollector();
 		recordAttempt(collector, { status: 302, ms: 10.8, requestClass: "script_navigation" });
 		collector.recordRedirectHop();
-		collector.recordPoolRefresh();
 		recordAttempt(collector, {
 			status: 503,
 			ms: 20.2,
@@ -53,7 +52,6 @@ describe("stealth telemetry collector", () => {
 
 		expect(collector.toLogPayload()).toEqual({
 			attempts: 2,
-			poolRefreshes: 1,
 			redirectHops: 1,
 			profileId: { browser: "chrome", os: "macos" },
 			proxyUsed: true,
@@ -120,7 +118,6 @@ describe("stealth telemetry collector", () => {
 			proxyUsed: false,
 			requestClass: "navigation",
 		});
-		collector.recordPoolRefresh();
 		collector.recordRedirectHop();
 		collector.recordSafeRefetch();
 		const log = collector.toLogPayload()!;
@@ -132,7 +129,6 @@ describe("stealth telemetry collector", () => {
 			Number.MAX_SAFE_INTEGER,
 			0,
 		]);
-		expect(log.poolRefreshes).toBe(1);
 		expect(log.redirectHops).toBe(1);
 		expect(log.safeRefetch).toBe(1);
 	});
@@ -212,7 +208,6 @@ describe("stealth telemetry collector", () => {
 
 		expect(header as unknown).toEqual({
 			attempts: 1,
-			poolRefreshes: 0,
 			redirectHops: 0,
 			profileId: { browser: "safari", os: "ios" },
 			proxyUsed: false,

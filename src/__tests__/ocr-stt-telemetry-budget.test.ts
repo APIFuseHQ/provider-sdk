@@ -23,7 +23,6 @@ const existing = {
 };
 const stealth = {
 	attempts: 2,
-	poolRefreshes: 1,
 	redirectHops: 2,
 	proxyUsed: true,
 	safeRefetch: 1,

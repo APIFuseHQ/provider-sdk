@@ -1198,7 +1198,7 @@ function validateProviderProxy(config: {
 		}
 		rejectUnknownFields(
 			proxy.session,
-			new Set(["affinity", "lifetimeMinutes", "poolSize", "drainLeadSeconds"]),
+			new Set(["affinity", "lifetimeMinutes", "drainLeadSeconds"]),
 			"proxy.session",
 		);
 		if (proxy.session.affinity !== undefined) {
@@ -1213,12 +1213,6 @@ function validateProviderProxy(config: {
 		if (lifetime !== undefined && (!Number.isFinite(lifetime) || lifetime <= 0)) {
 			throw new ValidationError(
 				`Provider "${config.id}" has invalid proxy.session.lifetimeMinutes: must be a positive number of minutes.`,
-			);
-		}
-		const poolSize = proxy.session.poolSize;
-		if (poolSize !== undefined && (!Number.isInteger(poolSize) || poolSize <= 0)) {
-			throw new ValidationError(
-				`Provider "${config.id}" has invalid proxy.session.poolSize: must be a positive integer.`,
 			);
 		}
 		const drainLeadSeconds = proxy.session.drainLeadSeconds;
@@ -1638,10 +1632,7 @@ function validateOperationErrorCodes(
 					},
 				);
 			}
-			if (
-				errorCode.status !== undefined &&
-				SDK_RUNTIME_OWNED_ERROR_CODES.has(errorCode.code)
-			) {
+			if (errorCode.status !== undefined && SDK_RUNTIME_OWNED_ERROR_CODES.has(errorCode.code)) {
 				console.warn(
 					`[provider-sdk] Provider "${providerId}" operation "${operationName}" declares status ${errorCode.status} for SDK-owned error code "${errorCode.code}"; the declared status is documentation-only and will be ignored at runtime.`,
 				);
@@ -3353,18 +3344,15 @@ function validateProviderDeployment(providerId: string, deployment: unknown): vo
 /** The second authoring phase for a declaration established by defineProvider. */
 export type ProviderBuilder<TConfig extends ProviderDeclaration> = <
 	TOperations extends Record<string, ProviderOperation>,
->(
-	implementation: {
-		operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
-	},
-) => Omit<ProviderDefinition, "operations"> & {
+>(implementation: {
+	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
+}) => Omit<ProviderDefinition, "operations"> & {
 	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 };
 
 /** Extract the declaration-derived operation context from a provider builder. */
-export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TConfig>
-	? ProviderContext<TConfig>
-	: never;
+export type ProviderContextOf<TBuilder> =
+	TBuilder extends ProviderBuilder<infer TConfig> ? ProviderContext<TConfig> : never;
 
 /** Annotate an operation while preserving the declaration-derived context. */
 export type OperationDefinitionFor<
@@ -3383,11 +3371,9 @@ export function defineProvider<const TConfig extends ProviderDeclaration>(
 		AuthStartNoInputGuard<TConfig>,
 ): ProviderBuilder<TConfig> {
 	validateProviderDeclaration(declaration);
-	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(
-		implementation: {
-			operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
-		},
-	) =>
+	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(implementation: {
+		operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
+	}) =>
 		finalizeProvider({
 			...declaration,
 			...implementation,
@@ -3442,10 +3428,7 @@ function validateProviderDeclaration(config: ProviderDeclaration): void {
 	validateFailClosedProviderDeclaration(config);
 }
 
-function finalizeProvider<
-	TOperations extends Record<string, ProviderOperation>,
-	TContext,
->(
+function finalizeProvider<TOperations extends Record<string, ProviderOperation>, TContext>(
 	config: ProviderConfig<TOperations, TContext>,
 ): Omit<ProviderDefinition, "operations"> & {
 	operations: OperationMapConfig<TOperations, TContext>;

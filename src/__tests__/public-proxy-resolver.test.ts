@@ -15,6 +15,8 @@ const { resolveProxy } = await built;
 
 const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
+	"APIFUSE__PROXY__SMARTPROXY_USERNAME",
+	"APIFUSE__PROXY__SMARTPROXY_PASSWORD",
 	"APIFUSE__PROXY__NODEMAVEN_USERNAME",
 	"APIFUSE__PROXY__NODEMAVEN_PASSWORD",
 	"APIFUSE__PROXY__PROVIDER",
@@ -24,7 +26,7 @@ const typeWitness = {
 	options: { proxyPolicy: { mode: "disabled" } } satisfies ProxyResolutionOptions,
 	protocol: "http" as ProxyProtocol,
 	result: undefined as ResolvedProxyConfig | undefined,
-	source: "smartproxy-allocator" as ProxyResolutionSource,
+	source: "smartproxy-gateway" as ProxyResolutionSource,
 	vendor: "smartproxy" as ProxyVendorName,
 };
 
@@ -54,7 +56,7 @@ describe("public proxy resolver", () => {
 		expect(typeWitness.options.proxyPolicy.mode).toBe("disabled");
 		expect(typeWitness.protocol).toBe("http");
 		expect(typeWitness.result).toBeUndefined();
-		expect(typeWitness.source).toBe("smartproxy-allocator");
+		expect(typeWitness.source).toBe("smartproxy-gateway");
 		expect(typeWitness.vendor).toBe("smartproxy");
 	});
 
@@ -84,8 +86,9 @@ describe("public proxy resolver", () => {
 		expect(allocator).not.toHaveBeenCalled();
 	});
 
-	it("allocates a vendor-chain proxy and reports its vendor and source", async () => {
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+	it("synthesizes a vendor-chain gateway proxy and reports its vendor and source", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = "test-user";
+		process.env.APIFUSE__PROXY__SMARTPROXY_PASSWORD = "test-password";
 		const allocator = mock(
 			async (_input: RequestInfo | URL, _init?: RequestInit) =>
 				new Response("192.0.2.10:31001", { status: 200 }),
@@ -97,21 +100,37 @@ describe("public proxy resolver", () => {
 				mode: "required",
 				providers: ["smartproxy"],
 				geo: { country: "KR" },
-				session: { poolSize: 1 },
+				session: { affinity: "connection", lifetimeMinutes: 10 },
 			},
+			affinityKey: "public-resolver",
 		});
 
 		expect(resolved).toMatchObject({
 			shouldWarn: false,
-			url: "http://192.0.2.10:31001",
 			vendor: "smartproxy",
-			source: "smartproxy-allocator",
+			source: "smartproxy-gateway",
 			protocol: "http",
+			sticky: true,
+			lifetimeMinutes: 10,
 		});
-		expect(allocator).toHaveBeenCalledTimes(1);
-		expect(String(allocator.mock.calls[0]?.[0])).toStartWith(
-			"https://api.smartproxy.org/web_v1/ip/get-ip-v3?",
+		expect(resolved.url).toBe(
+			`http://test-user_area-KR_life-10_session-${resolved.sessionId}:test-password@proxy.smartproxy.net:3120`,
 		);
+		expect(resolved.expiresAt).toBeString();
+		// The gateway is synthesized locally: no allocation API call.
+		expect(allocator).not.toHaveBeenCalled();
+	});
+
+	it("fails a required smartproxy policy that only has the retired app key, naming the gateway pair", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "retired-extraction-key";
+
+		await expect(
+			resolveProxy({ proxyPolicy: { mode: "required", providers: ["smartproxy"] } }),
+		).rejects.toMatchObject({
+			code: "PROXY_REQUIRED",
+			message:
+				"Proxy egress is required but no vendor credentials are configured. Missing: APIFUSE__PROXY__SMARTPROXY_USERNAME and APIFUSE__PROXY__SMARTPROXY_PASSWORD (smartproxy).",
+		});
 	});
 });
 

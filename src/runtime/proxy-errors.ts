@@ -5,12 +5,18 @@ export const PROXY_AUTH_IP_DENIED_MESSAGE =
 	"Proxy source IP is not authorized. Add the runtime egress IP to the proxy provider allowlist.";
 export const PROXY_EDGE_AUTH_REJECTED_CODE = "PROXY_EDGE_AUTH_REJECTED";
 export const PROXY_EDGE_AUTH_REJECTED_MESSAGE =
-	"Proxy provider rejected a candidate endpoint during authentication. The SDK will retry or refresh the proxy pool when safe.";
+	"Proxy provider rejected a session during authentication. The SDK retries with a new session when safe.";
+/**
+ * The vendor edge refused this attempt's session (CONNECT 509/512 and their
+ * message forms). The code keeps its allocator-era name because the gateway
+ * persists it under the `proxy_pool` category; there is no pool behind it.
+ */
 export const PROXY_POOL_STALE_CODE = "PROXY_POOL_STALE";
 export const PROXY_EDGE_TLS_REJECTED_CODE = "PROXY_EDGE_TLS_REJECTED";
+/** Every session the request's attempt budget allowed was refused by the vendor edge. */
 export const PROXY_POOL_EXHAUSTED_CODE = "PROXY_POOL_EXHAUSTED";
 export const PROXY_POOL_EXHAUSTED_MESSAGE =
-	"Proxy provider pool was exhausted. The SDK refreshed the proxy allocation, but all candidate endpoints failed.";
+	"Proxy provider refused every session the attempt budget allowed.";
 
 const PROXY_POOL_STALE_STATUS_CODES = new Set([509, 512]);
 const PROXY_EDGE_TLS_REJECTED_STATUS_CODES = new Set([495]);
@@ -96,7 +102,7 @@ export function isProxyPoolRefreshableError(error: unknown): boolean {
 export const isProxyPoolStaleError = isProxyPoolRefreshableError;
 
 export function createProxyPoolStaleError(status: number, cause?: Error): TransportError {
-	return new TransportError(`Proxy provider pool failed with status ${status}`, {
+	return new TransportError(`Proxy provider refused the session with status ${status}`, {
 		code: PROXY_POOL_STALE_CODE,
 		status,
 		cause,

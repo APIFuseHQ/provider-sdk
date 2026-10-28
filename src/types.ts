@@ -1077,21 +1077,21 @@ export type ProviderProxyMode = "disabled" | "optional" | "required";
  * Proxy egress vendors. These are FOUR DISTINCT services — do not conflate them
  * (a common mistake because the names collide with a well-known rebrand):
  *
- * - `smartproxy` — **api.smartproxy.org**, a residential proxy with an IP
- *	 *extraction/allocation* API (app_key → a pool of raw `ip:port` CONNECT
- *	 endpoints). This is our own vendor. It is NOT the company formerly named
- *	 "Smartproxy". Credentials: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ * - `smartproxy` — **smartproxy.ai** (api.smartproxy.org), a residential
+ *	 *gateway* proxy at `proxy.smartproxy.net:3120`; geo, lifetime and session
+ *	 encoded in the username (`<user>_area-<CC>_life-<min>_session-<id>`). This
+ *	 is our own vendor. It is NOT the company formerly named "Smartproxy".
+ *	 Credentials: the gateway sub-account `APIFUSE__PROXY__SMARTPROXY_USERNAME`
+ *	 and `APIFUSE__PROXY__SMARTPROXY_PASSWORD`.
  * - `nodemaven` — **gate.nodemaven.com**, a *gateway* proxy with static
  *	 credentials; geo/session encoded in the username, no allocation API.
  * - `decodo` — **decodo.com**, the *gateway* proxy that was named "Smartproxy"
  *	 (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
  *	 username params. A different company from `smartproxy` above.
  *	 **@deprecated** — unused; no managed adapter. Declare a
- *	 `ProviderProxyPolicy` using `smartproxy` or `nodemaven` instead; the
- *	 `smartproxy` allocator requires `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ *	 `ProviderProxyPolicy` using `smartproxy` or `nodemaven` instead.
  * - `custom` — **@deprecated** static proxy marker with no managed adapter.
- *	 Use `ProviderProxyPolicy` with `smartproxy`/`nodemaven`; the `smartproxy`
- *	 allocator requires `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ *	 Use `ProviderProxyPolicy` with `smartproxy`/`nodemaven`.
  */
 export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
@@ -1123,9 +1123,9 @@ export interface ProviderProxyNodemavenOptions {
 	type?: NodemavenConnectionType;
 	/**
 	 * Carrier slugs in NodeMaven's `-isp-` grammar (`[a-z0-9_]+`, multi-word
-	 * names use `_`). One slug is encoded per attempt, chosen by pool index
-	 * (`isp[poolIndex % isp.length]`), so a caller-managed retry with
-	 * `proxyAttemptOffset: 1` moves to the next carrier.
+	 * names use `_`). One slug is encoded per attempt, chosen by the attempt
+	 * within the vendor (`isp[attempt % isp.length]`), so a caller-managed retry
+	 * with `proxyAttemptOffset: 1` moves to the next carrier.
 	 */
 	isp?: readonly string[];
 	/**
@@ -1140,8 +1140,8 @@ export interface ProviderProxyNodemavenOptions {
 
 export interface ProviderProxyPolicy {
 	/**
-	 * Provider intent only. Transport details such as raw CONNECT, origin
-	 * certificate verification, and vendor allocator endpoints are SDK-owned.
+	 * Provider intent only. Transport details such as the vendor gateway, the
+	 * session id and origin certificate verification are SDK-owned.
 	 */
 	mode: ProviderProxyMode;
 	/**
@@ -1150,10 +1150,11 @@ export interface ProviderProxyPolicy {
 	 */
 	provider?: ProviderProxyProvider;
 	/**
-	 * Ordered proxy-vendor fallback chain. The SDK tries each vendor in order and
-	 * fails over to the next when a vendor lacks credentials or its allocation /
-	 * transport is exhausted. When omitted, `provider` (or the platform default)
-	 * is used as a single-vendor chain.
+	 * Ordered proxy-vendor fallback chain. A request's transport attempt budget
+	 * is split evenly across the vendors in this order (`mapAttemptToVendor`),
+	 * and within one attempt the SDK moves to the next vendor when one lacks
+	 * credentials or cannot synthesize a proxy. When omitted, `provider` (or the
+	 * platform default) is used as a single-vendor chain.
 	 */
 	providers?: ProviderProxyProvider[];
 	geo?: {
@@ -1163,9 +1164,22 @@ export interface ProviderProxyPolicy {
 		city?: string;
 	};
 	session?: {
+		/**
+		 * Which requests share one egress IP. `request` (default): every attempt
+		 * mints a random vendor session, so each request leaves on a fresh IP.
+		 * `operation`, `auth-flow`, `connection`: the SDK derives one session id
+		 * from the affinity key for the whole lifetime window, so every process
+		 * serving that key keeps the same IP without shared storage. A transport
+		 * retry derives the next session id for its attempt; there is no pool.
+		 */
 		affinity?: ProviderProxySessionAffinity;
+		/**
+		 * Sticky session lifetime in whole minutes: the width of the window a
+		 * sticky session id is derived in, and the `life` / `-ttl-` the gateway
+		 * is asked for. Each vendor clamps it to its own range (smartproxy 5..120,
+		 * NodeMaven 1..1440) and reports the clamp in the resolution diagnostics.
+		 */
 		lifetimeMinutes?: number;
-		poolSize?: number;
 		/**
 		 * Seconds before hard sticky expiry at which native connections receive
 		 * the `expiring` event so the provider can drain and reconnect cleanly.
@@ -1565,7 +1579,7 @@ export interface HttpAttemptContext {
 	/**
 	 * 1-based number of this request build: the first request is `1`, its first
 	 * retry `2`. Only attempts that reach header resolution count; a failed
-	 * proxy allocation or a skipped duplicate proxy offset builds no request
+	 * proxy resolution or a skipped duplicate proxy endpoint builds no request
 	 * and is not numbered.
 	 */
 	attempt: number;
@@ -1733,10 +1747,12 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	 */
 	maxBodyBytes?: number;
 	/**
-	 * Offsets policy-managed proxy pool selection for caller-managed retries.
-	 * Use when a request receives an upstream challenge page rather than a
-	 * transport error, so the next logical retry does not restart at the same
-	 * operation-affinity proxy.
+	 * Offsets the policy-managed proxy attempt for caller-managed retries: the
+	 * request resolves the vendor session of that attempt (a new session id,
+	 * and past a vendor's share of the attempt budget the next vendor). Use when
+	 * a request receives an upstream challenge page rather than a transport
+	 * error, so the next logical retry does not restart on the same
+	 * operation-affinity egress.
 	 */
 	proxyAttemptOffset?: number;
 	/**
@@ -1777,8 +1793,8 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 		 * Opt-in exit rotation for origins whose admission layer refuses an egress
 		 * IP outright. When the first attempt of a policy-managed proxied request
 		 * returns a headerless 403 (no challenge marker in headers or body) or any
-		 * 5xx, the request is sent exactly once more through the next pool entry,
-		 * and the call keeps that offset. The second answer is final: a refusal
+		 * 5xx, the request is sent exactly once more on the next attempt's vendor
+		 * session (a new session id, so a new exit), and the call keeps that offset. The second answer is final: a refusal
 		 * there is returned or thrown as usual. The refused attempt is recorded in
 		 * proxy telemetry as outcome `error` with `errorCode: "PROXY_EXIT_REFUSED"`,
 		 * the exit hash and status, so an exit refusal and an upstream 5xx are

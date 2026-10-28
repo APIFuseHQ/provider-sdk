@@ -1312,8 +1312,8 @@ describe("createHttpClient", () => {
 	});
 
 	it("does not default-retry optional proxy policies that resolve without a proxy URL", async () => {
-		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const originalSmartproxyUsername = process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME;
+		delete process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME;
 		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
 		mockNativeFetchState.queuedResponses.push({
 			status: 200,
@@ -1342,10 +1342,10 @@ describe("createHttpClient", () => {
 				(mockNativeFetchState.calls[0]?.init as RequestInit & { proxy?: string })?.proxy,
 			).toBeUndefined();
 		} finally {
-			if (originalSmartproxyKey === undefined) {
-				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			if (originalSmartproxyUsername === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME;
 			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
+				process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = originalSmartproxyUsername;
 			}
 		}
 	});
@@ -1394,8 +1394,8 @@ describe("createHttpClient", () => {
 	});
 
 	it("honors explicit retry when optional proxy policies resolve without a proxy URL", async () => {
-		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const originalSmartproxyUsername = process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME;
+		delete process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME;
 		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
 		mockNativeFetchState.queuedResponses.push({
 			status: 200,
@@ -1426,25 +1426,26 @@ describe("createHttpClient", () => {
 				expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(undefined);
 			}
 		} finally {
-			if (originalSmartproxyKey === undefined) {
-				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			if (originalSmartproxyUsername === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME;
 			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
+				process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = originalSmartproxyUsername;
 			}
 		}
 	});
 
-	it("rotates provider-policy proxy attempts across default HTTP retries", async () => {
-		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+	it("rotates provider-policy proxy sessions across default HTTP retries", async () => {
+		const savedEnv = [
+			"APIFUSE__PROXY__SMARTPROXY_USERNAME",
+			"APIFUSE__PROXY__SMARTPROXY_PASSWORD",
+		].map((name) => [name, process.env[name]] as const);
 		const originalFetch = globalThis.fetch;
-		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = "test-user";
+		process.env.APIFUSE__PROXY__SMARTPROXY_PASSWORD = "test-password";
 		const upstreamCalls: MockNativeFetchCall[] = [];
 		globalThis.fetch = createLocalFetchDouble(
 			mock(async (input: string | URL | Request, init?: RequestInit) => {
 				const url = String(input);
-				if (url.includes("smartproxy.org/web_v1/ip/get-ip-v3")) {
-					return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
-				}
 				upstreamCalls.push({ url, init });
 				if (upstreamCalls.length === 1) {
 					throw new Error("Network error");
@@ -1456,8 +1457,6 @@ describe("createHttpClient", () => {
 			}),
 		);
 
-		const { clearProxyResolutionCache } = await import("../config/loader.js");
-		clearProxyResolutionCache();
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, {
 			affinityKey: "http_retry_rotation",
@@ -1466,7 +1465,7 @@ describe("createHttpClient", () => {
 					mode: "required",
 					provider: "smartproxy",
 					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 2 },
+					session: { affinity: "connection", lifetimeMinutes: 120 },
 				},
 			},
 			warn: () => undefined,
@@ -1477,19 +1476,21 @@ describe("createHttpClient", () => {
 
 			expect(response.data).toEqual({ ok: true });
 			expect(upstreamCalls).toHaveLength(2);
-			expect((upstreamCalls[0]?.init as RequestInit & { proxy?: string })?.proxy).toBe(
-				"http://5.78.24.25:31001",
+			const proxies = upstreamCalls.map(
+				(call) => (call.init as RequestInit & { proxy?: string })?.proxy ?? "",
 			);
-			expect((upstreamCalls[1]?.init as RequestInit & { proxy?: string })?.proxy).toBe(
-				"http://5.78.24.26:31002",
-			);
+			const sessionPattern =
+				/^http:\/\/test-user_area-KR_life-120_session-([0-9a-f]{10}):test-password@proxy\.smartproxy\.net:3120$/;
+			const sessions = proxies.map((proxy) => sessionPattern.exec(proxy)?.[1]);
+			expect(sessions[0]).toBeString();
+			expect(sessions[1]).toBeString();
+			// The retry is attempt 1 of the same sticky affinity: the next derived session.
+			expect(sessions[1]).not.toBe(sessions[0]);
 		} finally {
-			clearProxyResolutionCache();
 			globalThis.fetch = originalFetch;
-			if (originalSmartproxyKey === undefined) {
-				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
+			for (const [name, value] of savedEnv) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
 			}
 		}
 	});
@@ -2169,9 +2170,13 @@ describe("createHttpClient", () => {
 
 			const { createHttpClient } = await import("../runtime/http.js");
 			const http = createHttpClient(undefined, { userAgent: "native-agent" });
-			await http.post("https://example.com/items", { key: "value" }, {
-				headers: () => ({ dpop: "proof" }),
-			});
+			await http.post(
+				"https://example.com/items",
+				{ key: "value" },
+				{
+					headers: () => ({ dpop: "proof" }),
+				},
+			);
 			await http.post("https://example.com/items", "raw", {
 				headers: async () => ({ "content-type": "text/plain" }),
 			});

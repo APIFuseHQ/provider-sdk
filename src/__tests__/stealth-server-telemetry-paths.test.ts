@@ -412,7 +412,6 @@ describe("stealth server terminal telemetry paths", () => {
 		if (path === "/v1/probe" && outcome === "completed") {
 			expect(log).toEqual({
 				attempts: 1,
-				poolRefreshes: 0,
 				redirectHops: 0,
 				profileId: { browser: "chrome", os: "macos" },
 				proxyUsed: false,

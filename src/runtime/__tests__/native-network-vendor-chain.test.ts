@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server, Socket } from "node:net";
 
 import { assertIsError } from "../../__tests__/test-utils.js";
-import { clearProxyResolutionCache, SMARTPROXY_APP_KEY_ENV } from "../../config/loader.js";
 import type { NativeNetworkConnection, ProviderProxyPolicy } from "../../types.js";
 import {
 	createNativeNetworkClient,
@@ -16,6 +15,12 @@ import {
 } from "../native-network.js";
 import { NativeTelemetryCollector } from "../native-telemetry.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
+import {
+	SMARTPROXY_GATEWAY_HOST,
+	SMARTPROXY_GATEWAY_PORT,
+	SMARTPROXY_PASSWORD_ENV,
+	SMARTPROXY_USERNAME_ENV,
+} from "../proxy-smartproxy.js";
 import { ProxyTelemetryCollector } from "../proxy-telemetry.js";
 
 const originalFetch = globalThis.fetch;
@@ -32,7 +37,6 @@ function createFetchDouble(
 
 afterEach(async () => {
 	globalThis.fetch = originalFetch;
-	clearProxyResolutionCache();
 	for (const connection of connections.splice(0)) await connection.close();
 	for (const fixture of fixtures.splice(0).reverse()) {
 		for (const socket of fixture.sockets) socket.destroy();
@@ -59,17 +63,26 @@ async function listen(server: Server): Promise<{ host: string; port: number }> {
 	return { host: "127.0.0.1", port: address.port };
 }
 
+/** Counts calls so a test can assert that gateway synthesis makes no HTTP request. */
+function forbiddenFetch(calls: { count: number }): typeof fetch {
+	return createFetchDouble(async () => {
+		calls.count += 1;
+		throw new Error("gateway synthesis must not call an allocation API");
+	});
+}
+
 function injectedCredentials(options: {
-	smartproxy?: string;
+	smartproxy?: { username: string; password: string };
 	nodemaven?: { username: string; password: string };
 }): VendorCredentialResolver {
 	return (vendor) => {
 		if (vendor === "smartproxy") {
 			if (!options.smartproxy) {
-				return { kind: "absent", missing: [SMARTPROXY_APP_KEY_ENV] };
+				return { kind: "absent", missing: [SMARTPROXY_USERNAME_ENV, SMARTPROXY_PASSWORD_ENV] };
 			}
 			const values: Record<string, string> = {
-				[SMARTPROXY_APP_KEY_ENV]: options.smartproxy,
+				[SMARTPROXY_USERNAME_ENV]: options.smartproxy.username,
+				[SMARTPROXY_PASSWORD_ENV]: options.smartproxy.password,
 			};
 			return { kind: "present", values };
 		}
@@ -92,34 +105,40 @@ function injectedCredentials(options: {
 
 describe("native vendor chain", () => {
 	it("honors declared order and resolves smartproxy before nodemaven", async () => {
-		let allocations = 0;
-		globalThis.fetch = createFetchDouble(async () => {
-			allocations += 1;
-			return new Response("127.0.0.1:18080", { status: 200 });
-		});
+		const fetches = { count: 0 };
+		globalThis.fetch = forbiddenFetch(fetches);
+		const now = Date.parse("2026-10-28T05:10:00.000Z");
 		const resolved = await resolveNativeGatewayProxy({
 			policy: {
 				mode: "required",
 				providers: ["smartproxy", "nodemaven"],
-				session: { affinity: "connection", poolSize: 1 },
+				geo: { country: "KR" },
+				session: { affinity: "connection", lifetimeMinutes: 30 },
 			},
 			affinityKey: "account-a",
+			now,
 			credentials: injectedCredentials({
-				smartproxy: "smart-key",
+				smartproxy: { username: "smart-user", password: "smart-pass" },
 				nodemaven: { username: "node-user", password: "node-pass" },
 			}),
 		});
 
-		expect(resolved).toMatchObject({
-			vendor: "smartproxy",
-			url: "http://127.0.0.1:18080",
-			sticky: true,
-		});
-		expect(allocations).toBe(1);
+		expect(resolved).toMatchObject({ vendor: "smartproxy", sticky: true });
+		const url = new URL(resolved?.url ?? "");
+		expect(url.hostname).toBe(SMARTPROXY_GATEWAY_HOST);
+		expect(Number(url.port)).toBe(SMARTPROXY_GATEWAY_PORT);
+		expect(decodeURIComponent(url.username)).toBe(
+			`smart-user_area-KR_life-30_session-${resolved?.sessionId}`,
+		);
+		expect(resolved?.sessionId).toMatch(/^[0-9a-f]{10}$/);
+		// Native smartproxy connections now carry the sticky window end for the drain contract.
+		expect(resolved?.expiresAt).toBe(
+			new Date((Math.floor(now / 1_800_000) + 1) * 1_800_000).toISOString(),
+		);
+		expect(fetches.count).toBe(0);
 	});
 
-	it("falls through an allocation failure to nodemaven", async () => {
-		globalThis.fetch = createFetchDouble(async () => new Response("unavailable", { status: 503 }));
+	it("falls through a smartproxy synthesis failure to nodemaven", async () => {
 		const resolved = await resolveNativeGatewayProxy({
 			policy: {
 				mode: "required",
@@ -128,7 +147,8 @@ describe("native vendor chain", () => {
 			},
 			affinityKey: "account-a",
 			credentials: injectedCredentials({
-				smartproxy: "smart-key",
+				// `_` is the gateway's token separator, so this username cannot be encoded.
+				smartproxy: { username: "smart_user", password: "smart-pass" },
 				nodemaven: { username: "node-user", password: "node-pass" },
 			}),
 		});
@@ -137,14 +157,13 @@ describe("native vendor chain", () => {
 		expect(resolved?.url).toMatch(/^http:\/\//);
 	});
 
-	it("reports every exhausted vendor reason and redacts allocation credentials", async () => {
-		const appKey = `smart-key-${randomUUID()}`;
-		globalThis.fetch = createFetchDouble(async () => {
-			throw new Error(`allocator rejected ${appKey}`);
-		});
+	it("reports every exhausted vendor reason without exposing smartproxy credentials", async () => {
+		const secret = randomUUID();
+		const username = `smart_${secret.slice(0, 8)}`;
+		const password = `pass-${secret}`;
 		const client = createNativeNetworkClient({
 			proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
-			credentials: injectedCredentials({ smartproxy: appKey }),
+			credentials: injectedCredentials({ smartproxy: { username, password } }),
 		});
 
 		let thrown: unknown;
@@ -157,11 +176,29 @@ describe("native vendor chain", () => {
 		const message = thrown.message;
 		expect(thrown).toMatchObject({ code: "PROXY_REQUIRED" });
 		expect(message).toContain("smartproxy: allocation failed");
+		expect(message).toContain(SMARTPROXY_USERNAME_ENV);
 		expect(message).toContain(
 			`nodemaven: credentials absent (missing ${NODEMAVEN_USERNAME_ENV}, ${NODEMAVEN_PASSWORD_ENV})`,
 		);
-		expect(JSON.stringify(thrown)).not.toContain(appKey);
-		expect(message).not.toContain(appKey);
+		for (const value of [username, password]) {
+			expect(JSON.stringify(thrown)).not.toContain(value);
+			expect(message).not.toContain(value);
+		}
+	});
+
+	it("names both smartproxy gateway credentials when they are absent", async () => {
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["smartproxy"] },
+			credentials: injectedCredentials({}),
+		});
+		await expect(
+			client.connectTcp({ host: "127.0.0.1", port: 9, timeoutMs: 1_000 }),
+		).rejects.toMatchObject({
+			code: "PROXY_REQUIRED",
+			message: expect.stringContaining(
+				`smartproxy: credentials absent (missing ${SMARTPROXY_USERNAME_ENV}, ${SMARTPROXY_PASSWORD_ENV})`,
+			),
+		});
 	});
 
 	it("reports unsupported protocol per vendor without invoking adapters", async () => {
@@ -209,31 +246,37 @@ describe("native vendor chain", () => {
 		await expect(attempt).rejects.toMatchObject({ code: "native_connection_aborted" });
 	});
 
-	it("separates Smartproxy allocation caches by injected credential", async () => {
-		let allocations = 0;
-		globalThis.fetch = createFetchDouble(async () => {
-			allocations += 1;
-			return new Response(`127.0.0.${allocations}:8080`, { status: 200 });
-		});
+	it("synthesizes each injected credential's own gateway username with no shared state", async () => {
+		const fetches = { count: 0 };
+		globalThis.fetch = forbiddenFetch(fetches);
+		const now = Date.parse("2026-10-28T05:10:00.000Z");
 		const policy: ProviderProxyPolicy = {
 			mode: "required",
 			providers: ["smartproxy"],
-			session: { affinity: "connection", poolSize: 1 },
+			session: { affinity: "connection" },
 		};
 		const first = await resolveNativeGatewayProxy({
 			policy,
 			affinityKey: "same-account",
-			credentials: injectedCredentials({ smartproxy: "tenant-a-key" }),
+			now,
+			credentials: injectedCredentials({
+				smartproxy: { username: "tenant-a", password: "a-pass" },
+			}),
 		});
 		const second = await resolveNativeGatewayProxy({
 			policy,
 			affinityKey: "same-account",
-			credentials: injectedCredentials({ smartproxy: "tenant-b-key" }),
+			now,
+			credentials: injectedCredentials({
+				smartproxy: { username: "tenant-b", password: "b-pass" },
+			}),
 		});
 
-		expect(first?.url).toBe("http://127.0.0.1:8080");
-		expect(second?.url).toBe("http://127.0.0.2:8080");
-		expect(allocations).toBe(2);
+		expect(decodeURIComponent(new URL(first?.url ?? "").username)).toStartWith("tenant-a_");
+		expect(decodeURIComponent(new URL(second?.url ?? "").username)).toStartWith("tenant-b_");
+		// The same affinity in the same window derives the same session id for every caller.
+		expect(first?.sessionId).toBe(second?.sessionId);
+		expect(fetches.count).toBe(0);
 	});
 });
 
@@ -334,7 +377,7 @@ async function connectFailureScenario(
 	});
 }
 
-async function recordAllocatorRequest(
+async function recordFetch(
 	operations: string[],
 	input: Parameters<typeof fetch>[0],
 	init?: Parameters<typeof fetch>[1],
@@ -498,11 +541,11 @@ const DIFFERENTIAL_SCENARIOS: readonly DifferentialScenario[] = [
 			}),
 	},
 	{
-		name: "Smartproxy allocator success",
+		name: "Smartproxy gateway success",
 		async run(context) {
 			globalThis.fetch = createFetchDouble(async (input, init) => {
-				await recordAllocatorRequest(context.operations, input, init);
-				return new Response("127.0.0.1:18080", { status: 200 });
+				await recordFetch(context.operations, input, init);
+				return new Response("unexpected", { status: 500 });
 			});
 			return await resolveScenario(context, {
 				policy: { mode: "required", providers: ["smartproxy"] },
@@ -510,30 +553,32 @@ const DIFFERENTIAL_SCENARIOS: readonly DifferentialScenario[] = [
 				now: 1_700_000_000_000,
 				credentials: observedCredentials(
 					context.operations,
-					injectedCredentials({ smartproxy: "recorder-parity-key" }),
+					injectedCredentials({
+						smartproxy: { username: "recorder-parity", password: "recorder-pass" },
+					}),
 				),
 			});
 		},
 	},
 	{
-		name: "Smartproxy allocator failure falls through to NodeMaven",
+		name: "Smartproxy synthesis failure falls through to NodeMaven",
 		async run(context) {
 			globalThis.fetch = createFetchDouble(async (input, init) => {
-				await recordAllocatorRequest(context.operations, input, init);
-				return new Response("unavailable", { status: 503 });
+				await recordFetch(context.operations, input, init);
+				return new Response("unexpected", { status: 500 });
 			});
 			return await resolveScenario(context, {
 				policy: {
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
-					session: { affinity: "connection", poolSize: 1 },
+					session: { affinity: "connection" },
 				},
 				affinityKey: "recorder-parity",
 				now: 1_700_000_000_000,
 				credentials: observedCredentials(
 					context.operations,
 					injectedCredentials({
-						smartproxy: "recorder-parity-key",
+						smartproxy: { username: "recorder_parity", password: "recorder-pass" },
 						nodemaven: { username: "node-user", password: "node-password" },
 					}),
 				),
@@ -717,12 +762,10 @@ describe("native recorder behavior differential", () => {
 		expect(DIFFERENTIAL_SCENARIOS.length).toBeGreaterThanOrEqual(10);
 		for (const scenario of DIFFERENTIAL_SCENARIOS) {
 			globalThis.fetch = originalFetch;
-			clearProxyResolutionCache();
 			const withoutOperations: string[] = [];
 			const without = await scenario.run({ operations: withoutOperations });
 
 			globalThis.fetch = originalFetch;
-			clearProxyResolutionCache();
 			const withOperations: string[] = [];
 			const withRecorders = await scenario.run({
 				operations: withOperations,
@@ -738,15 +781,14 @@ describe("native recorder behavior differential", () => {
 	});
 
 	it("threads the existing proxy sink through native Smartproxy resolution", async () => {
-		globalThis.fetch = createFetchDouble(
-			async () => new Response("127.0.0.1:18080", { status: 200 }),
-		);
 		const telemetry = new ProxyTelemetryCollector();
 		const nativeTelemetry = new NativeTelemetryCollector();
 		const resolved = await resolveNativeGatewayProxy({
 			policy: { mode: "required", providers: ["smartproxy"] },
 			affinityKey: "native-proxy-sink",
-			credentials: injectedCredentials({ smartproxy: "native-proxy-sink-key" }),
+			credentials: injectedCredentials({
+				smartproxy: { username: "native-proxy-sink", password: "sink-pass" },
+			}),
 			telemetry,
 			nativeTelemetry,
 		});
@@ -756,7 +798,7 @@ describe("native recorder behavior differential", () => {
 			kind: "resolved",
 			provider: "smartproxy",
 			protocol: "http",
-			cacheStatus: "allocator",
+			cacheStatus: "disabled",
 			cacheHit: false,
 			attempts: 1,
 		});
