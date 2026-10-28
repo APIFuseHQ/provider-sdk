@@ -1035,6 +1035,9 @@ export function statefulProviderMetricLabels(input: StatefulProviderMetricLabelI
 // @public (undocumented)
 export type StatefulProviderMetricName = (typeof STATEFUL_PROVIDER_METRIC_NAMES)[number];
 
+// @public
+export const statefulProviderMetricRegistry: StatefulProviderMetricEmitter;
+
 // @public (undocumented)
 export type StatefulProviderReconnectPolicy = "resume" | "recreate" | "unsupported";
 
