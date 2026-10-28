@@ -1067,7 +1067,8 @@ export type CredentialsAuthInput<TFields extends CredentialsAuthFields> = {
 export type CredentialsAuthLoginResult<TCredentialKeys extends readonly string[], TChallengeId extends string = string> = CredentialsAuthCompleteResult<TCredentialKeys> | CredentialsAuthChallengeRequest<TChallengeId>;
 
 // @public (undocumented)
-export interface CursorKind<TSchema extends ZodType = ZodType> extends HandleKindBase<TSchema> {
+export interface CursorKind<TSchema extends ZodType = ZodType, TName extends string = string> extends HandleKindBase<TSchema> {
+    readonly name: TName;
     // (undocumented)
     readonly strength: HandleStrength;
     // (undocumented)
@@ -1119,6 +1120,11 @@ interface DeclarativeStealthResponse {
     url?: string;
 }
 
+// @public
+export type DeclaredHandleKind<TConfig> = TConfig extends {
+    handle: readonly (infer K)[];
+} ? [K] extends [never] ? HandleKind : K extends HandleKind ? K : HandleKind : HandleKind;
+
 // @public (undocumented)
 export function defineCredentialsAuth<TFields extends CredentialsAuthFields, TCredentialKeys extends readonly [string, ...string[]], TChallenges extends Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, keyof TChallenges & string>> = Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, string>>>(options: DefineCredentialsAuthOptions<TFields, TCredentialKeys, TChallenges>): DefinedCredentialsAuth;
 
@@ -1149,16 +1155,18 @@ export interface DefineCredentialsAuthOptions<TFields extends CredentialsAuthFie
 }
 
 // @public
-export function defineCursor<TSchema extends ZodType>(options: DefineCursorOptions<TSchema>): CursorKind<TSchema>;
+export function defineCursor<TSchema extends ZodType, const TName extends string = string>(options: DefineCursorOptions<TSchema, TName>): CursorKind<TSchema, TName>;
 
 // @public (undocumented)
-export interface DefineCursorOptions<TSchema extends ZodType> {
+export interface DefineCursorOptions<TSchema extends ZodType, TName extends string = string> {
     readonly access?: HandleAccess;
+    // @deprecated (undocumented)
     readonly fieldName?: string | HandleFieldNames;
+    // @deprecated (undocumented)
     readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
-    readonly name: string;
+    readonly name: TName;
     // (undocumented)
     readonly schema: TSchema;
     readonly strength?: HandleStrength;
@@ -1183,17 +1191,19 @@ export interface DefinedCredentialsAuth {
 }
 
 // @public
-export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodType | undefined = undefined>(options: DefineDraftOptions<TSchema, TResultSchema>): DraftKind<TSchema, TResultSchema>;
+export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodType | undefined = undefined, const TName extends string = string>(options: DefineDraftOptions<TSchema, TResultSchema, TName>): DraftKind<TSchema, TResultSchema, TName>;
 
 // @public (undocumented)
-export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema extends ZodType | undefined> {
+export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema extends ZodType | undefined, TName extends string = string> {
     readonly access?: HandleAccess;
+    // @deprecated (undocumented)
     readonly fieldName?: string | HandleFieldNames;
+    // @deprecated (undocumented)
     readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
     // (undocumented)
-    readonly name: string;
+    readonly name: TName;
     readonly result?: TResultSchema;
     readonly resultTtl?: ProviderStateDurationString;
     // (undocumented)
@@ -1223,7 +1233,7 @@ export function defineOperation<TContext>(): <TInput extends SchemaLike, TOutput
 // Warning: (ae-forgotten-export) The symbol "AuthStartNoInputGuard" needs to be exported by the entry point provider.d.ts
 //
 // @public
-export function defineProvider<const TConfig extends ProviderDeclaration>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TConfig>): ProviderBuilder<TConfig>;
+export function defineProvider<const TConfig extends ProviderDeclaration>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TConfig> & HandleRequiresStateGuard<TConfig>): ProviderBuilder<TConfig>;
 
 // @public (undocumented)
 export function defineSmsOtpMatcher(config: Omit<SmsOtpMatcherDefinition, "extractOtp">): SmsOtpMatcherDefinition;
@@ -1235,12 +1245,13 @@ export function delayed(maxDelay: string): HealthScheduleRandomization;
 export function describeKey<TSchema extends ZodType>(schema: TSchema, key: ProviderLocaleKey | string): TSchema;
 
 // @public (undocumented)
-export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined> extends HandleKindBase<TSchema> {
+export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined, TName extends string = string> extends HandleKindBase<TSchema> {
     readonly access: HandleAccess;
     // (undocumented)
     readonly idleTtlMs: number;
     // (undocumented)
     readonly maxTtlMs: number;
+    readonly name: TName;
     readonly result: TResultSchema | undefined;
     // (undocumented)
     readonly resultTtl: ProviderStateDurationString;
@@ -1542,6 +1553,9 @@ export const GuardStepSchema: z.ZodObject<{
     }, z.core.$strict>;
 }, z.core.$strict>;
 
+// @public (undocumented)
+const HANDLE_FIELD_KIND: unique symbol;
+
 // @public
 export const HANDLE_KIND_NAME_PATTERN: RegExp;
 
@@ -1558,14 +1572,14 @@ export interface HandleCommitResult<K extends HandleKind> {
     readonly status: "committed" | "replayed";
 }
 
-// @public (undocumented)
-export interface HandleContext {
-    commit<K extends DraftKind>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
-    create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
-    createRecord<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
-    discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
-    read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
-    update<K extends DraftKind>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
+// @public
+export interface HandleContext<TKind extends HandleKind = HandleKind> {
+    commit<K extends Extract<TKind, DraftKind<any, any, any>>>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
+    create<K extends TKind>(kind: K, data: InputOf<K>): Promise<string>;
+    createRecord<K extends TKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
+    discard<K extends TKind>(kind: K, handle: string): Promise<void>;
+    read<K extends TKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
+    update<K extends Extract<TKind, DraftKind<any, any, any>>>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
 }
 
 // @public (undocumented)
@@ -1585,6 +1599,11 @@ export type HandleErrorCode = "HANDLE_INVALID" | "HANDLE_NOT_FOUND" | "HANDLE_EX
 // @public (undocumented)
 export type HandleErrorOptions = Omit<ProviderErrorOptions, "code"> & {
     readonly kind?: string;
+};
+
+// @public
+export type HandleField<K extends HandleKindDeclaration = HandleKindDeclaration> = ZodString & {
+    readonly [HANDLE_FIELD_KIND]?: K;
 };
 
 // @public
@@ -1625,11 +1644,11 @@ export function handleHasDirectionalFieldNames(kind: Pick<HandleKindDeclaration,
 export type HandleIssuedBy = string | readonly string[];
 
 // @public (undocumented)
-export type HandleKind = CursorKind<any> | DraftKind<any, any>;
+export type HandleKind = CursorKind<any, any> | DraftKind<any, any, any>;
 
 // @public (undocumented)
 export interface HandleKindBase<TSchema extends ZodType = ZodType> extends HandleKindDeclaration {
-    field(): ZodString;
+    field(): HandleField<this>;
     readonly maxEntries: number;
     readonly maxValueBytes: number;
     readonly schema: TSchema;
@@ -1651,6 +1670,11 @@ export interface HandleKindDeclaration {
     // (undocumented)
     readonly type: HandleKindType;
 }
+
+// @public
+export type HandleKindOfField<F> = F extends {
+    readonly [HANDLE_FIELD_KIND]?: infer K;
+} ? K : never;
 
 // @public (undocumented)
 export type HandleKindType = "cursor" | "draft";
@@ -1684,6 +1708,15 @@ export function handleRecoverySentence(kind: {
     readonly outputFieldName?: string;
     readonly issuedBy?: HandleIssuedBy;
 }): string;
+
+// @public
+export type HandleRequiresStateGuard<TConfig> = TConfig extends {
+    handle: readonly [];
+} ? unknown : TConfig extends {
+    handle: readonly unknown[];
+} ? "state" extends keyof TConfig ? unknown : {
+    "handle: [...] requires the state capability; add state: {} (ctx.handle stores records through ctx.state)": never;
+} : unknown;
 
 // @public (undocumented)
 export type HandleStatus = "active" | "committing" | "committed";
@@ -2369,10 +2402,10 @@ export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodT
 export type InputOf<K extends HandleKind> = z.input<K["schema"]>;
 
 // @public (undocumented)
-export function isCursorKind(kind: HandleKind): kind is CursorKind<any>;
+export function isCursorKind(kind: HandleKind): kind is CursorKind<any, any>;
 
 // @public (undocumented)
-export function isDraftKind(kind: HandleKind): kind is DraftKind<any, any>;
+export function isDraftKind(kind: HandleKind): kind is DraftKind<any, any, any>;
 
 // @public
 export function isEngineOwnedEnvName(name: string): boolean;
@@ -2391,6 +2424,9 @@ export function isEngineOwnedTelemetryEnvName(name: string): boolean;
 
 // @public
 export function isHandleError(value: unknown): value is HandleError;
+
+// @public
+export function isHandleFieldDescription(text: string): boolean;
 
 // @public (undocumented)
 export function isHandleFieldMeta(value: unknown): value is HandleFieldMeta;
@@ -3808,7 +3844,7 @@ export type ProviderContext<TConfig = Record<string, unknown>> = {
 } : Record<never, never>) & ("resolver" extends keyof TConfig ? {
     resolver: ResolverContext;
 } : Record<never, never>) & ("handle" extends keyof TConfig ? {
-    handle: HandleContext;
+    handle: HandleContext<DeclaredHandleKind<TConfig>>;
 } : Record<never, never>);
 
 // @public
@@ -4759,7 +4795,7 @@ export interface ResponseMatcher {
 }
 
 // @public (undocumented)
-export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R> ? (R extends ZodType ? z.output<R> : unknown) : never;
+export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
 
 // @public (undocumented)
 export type RetryPolicy = {
@@ -6364,8 +6400,8 @@ export { z }
 // dist/config/loader.d.ts:152:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/config/loader.d.ts:153:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:117:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:149:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:134:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:166:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
 // dist/errors.d.ts:9:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts

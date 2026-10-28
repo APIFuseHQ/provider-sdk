@@ -141,3 +141,11 @@ export function handleFieldDescription(meta: Pick<HandleFieldMeta, "issuedBy">):
 	const origin = issuers ? ` issued by ${issuers}` : "";
 	return `Opaque handle${origin}. Copy it exactly as returned; do not edit or shorten it.`;
 }
+
+const HANDLE_FIELD_DESCRIPTION_PATTERN =
+	/^Opaque handle(?: issued by .+)?\. Copy it exactly as returned; do not edit or shorten it\.$/;
+
+/** True for any wording `handleFieldDescription` can emit, whatever issuers it named. */
+export function isHandleFieldDescription(text: string): boolean {
+	return HANDLE_FIELD_DESCRIPTION_PATTERN.test(text);
+}

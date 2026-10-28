@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 import { ProviderError } from "../errors.js";
 import {
@@ -15,6 +15,7 @@ import {
 	pick,
 	type ResultOf,
 } from "../handle.js";
+import { bindHandleContract } from "../handle/contract.js";
 import { APIFUSE_HANDLE_META_KEY, isHandleFieldMeta } from "../handle-meta.js";
 import {
 	createHandleContext,
@@ -40,31 +41,27 @@ const WaitingSchema = z.object({
 });
 const WaitingResultSchema = z.object({ waitingId: z.string() });
 
-const BoundPage = defineCursor({
-	name: "page",
-	fieldName: "cursor",
-	schema: PageSchema,
-	ttl: "10m",
-	issuedBy: "search",
-});
+// The property key and issuer come from the operation schemas at
+// defineProvider time; these fixtures bind them directly, as a provider
+// definition would, so the runtime text under test is the bound text.
+const BoundPage = defineCursor({ name: "page", schema: PageSchema, ttl: "10m" });
+bindHandleContract(BoundPage, { fieldName: "cursor", issuedBy: "search" });
 const PublicPage = defineCursor({
 	name: "pub",
-	fieldName: "page_token",
 	schema: PageSchema,
 	ttl: "10m",
 	access: "public",
 	maxEntries: 1_000,
-	issuedBy: "search",
 });
+bindHandleContract(PublicPage, { fieldName: "page_token", issuedBy: "search" });
 const WaitingDraft = defineDraft({
 	name: "waiting",
-	fieldName: "waiting_token",
 	schema: WaitingSchema,
 	result: WaitingResultSchema,
 	ttl: { idle: "30m", max: "2h" },
 	resultTtl: "24h",
-	issuedBy: "waiting-prepare",
 });
+bindHandleContract(WaitingDraft, { fieldName: "waiting_token", issuedBy: "waiting-prepare" });
 
 const T0 = Date.UTC(2026, 8, 8, 12, 0, 0);
 const MINUTE = 60_000;
@@ -182,7 +179,15 @@ describe("handle kinds", () => {
 		expect(defaulted.resultTtl).toBe("24h");
 	});
 
-	describe("directional fieldName", () => {
+	describe("deprecated directional fieldName option", () => {
+		let warn: ReturnType<typeof spyOn>;
+		beforeAll(() => {
+			warn = spyOn(console, "warn").mockImplementation(() => {});
+		});
+		afterAll(() => {
+			warn.mockRestore();
+		});
+
 		it("accepts { input, output } and carries both names on the kind and the meta", () => {
 			const page = defineCursor({
 				name: "page",
@@ -1663,18 +1668,18 @@ describe("codex review regressions (2026-09-08)", () => {
 const LocationSchema = z.object({ lat: z.number(), lng: z.number(), label: z.string() });
 const LocationCursor = defineCursor({
 	name: "location",
-	fieldName: "location_token",
 	schema: LocationSchema,
 	ttl: "10m",
 	access: "public",
 	maxEntries: 1_000,
-	issuedBy: ["search-address", "reverse-geocode"],
 });
-const BoundLocation = defineCursor({
-	name: "loc",
+bindHandleContract(LocationCursor, {
+	fieldName: "location_token",
+	issuedBy: Object.freeze(["search-address", "reverse-geocode"]),
+});
+const BoundLocation = defineCursor({ name: "loc", schema: LocationSchema, ttl: "10m" });
+bindHandleContract(BoundLocation, {
 	fieldName: "loc_token",
-	schema: LocationSchema,
-	ttl: "10m",
 	issuedBy: ["search-address", "reverse-geocode"],
 });
 
@@ -1686,20 +1691,27 @@ const PaymentSchema = z.object({
 const PaymentResultSchema = z.object({ receipt: z.string() });
 const PublicPayment = defineDraft({
 	name: "pay",
-	fieldName: "pay_token",
 	schema: PaymentSchema,
 	result: PaymentResultSchema,
 	ttl: { idle: "5m", max: "30m" },
 	access: "public",
 	maxEntries: 5_000,
-	issuedBy: "parking-quote",
 });
+bindHandleContract(PublicPayment, { fieldName: "pay_token", issuedBy: "parking-quote" });
 
 function paymentData(): z.input<typeof PaymentSchema> {
 	return { lot: "lot-7", amount: 4_000 };
 }
 
 describe("multi-issuer kinds", () => {
+	let warn: ReturnType<typeof spyOn>;
+	beforeAll(() => {
+		warn = spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterAll(() => {
+		warn.mockRestore();
+	});
+
 	it("accepts a list of issuing operations and keeps a single string valid", () => {
 		expect(LocationCursor.issuedBy).toEqual(["search-address", "reverse-geocode"]);
 		expect(Object.isFrozen(LocationCursor.issuedBy)).toBe(true);

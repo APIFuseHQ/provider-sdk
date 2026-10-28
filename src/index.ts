@@ -77,6 +77,7 @@ export {
 	defineStreamOperation,
 	every,
 	type AuthStartNoInputGuard,
+	type HandleRequiresStateGuard,
 	type OperationDefinitionFor,
 	type ProviderBuilder,
 	type ProviderContextOf,
@@ -223,6 +224,7 @@ export {
 	handleFieldDescription,
 	handleFieldNameFor,
 	handleHasDirectionalFieldNames,
+	isHandleFieldDescription,
 	isHandleFieldMeta,
 } from "./handle-meta.js";
 export {
@@ -727,6 +729,7 @@ export type {
 	VerificationCodeCandidateSource,
 	VerificationCodeExtractionResult,
 } from "./types.js";
+export type { DeclaredHandleKind } from "./types.js";
 export {
 	DEFAULT_OPERATION_TRANSPORT,
 	HttpRetryAfterPolicy,

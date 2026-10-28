@@ -2689,7 +2689,22 @@ export type ProviderContext<TConfig = Record<string, unknown>> = {
 	("ocr" extends keyof TConfig ? { ocr: OcrContext } : Record<never, never>) &
 	("stt" extends keyof TConfig ? { stt: SttContext } : Record<never, never>) &
 	("resolver" extends keyof TConfig ? { resolver: ResolverContext } : Record<never, never>) &
-	("handle" extends keyof TConfig ? { handle: HandleContext } : Record<never, never>);
+	("handle" extends keyof TConfig
+		? { handle: HandleContext<DeclaredHandleKind<TConfig>> }
+		: Record<never, never>);
+
+/**
+ * The kinds a declaration lists in `handle: [...]`, as a union, so `ctx.handle`
+ * refuses any other kind at the call. A list typed as `readonly HandleKind[]`
+ * (or an empty list) keeps every kind.
+ */
+export type DeclaredHandleKind<TConfig> = TConfig extends { handle: readonly (infer K)[] }
+	? [K] extends [never]
+		? HandleKind
+		: K extends HandleKind
+			? K
+			: HandleKind
+	: HandleKind;
 
 /** Backwards-compatible name for a declaration-derived provider context. */
 export type ProviderContextFor<TConfig> = ProviderContext<TConfig>;

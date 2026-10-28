@@ -784,7 +784,8 @@ const credentialReferenceSchema: z.ZodObject<{
 // Warning: (ae-forgotten-export) The symbol "HandleKindBase" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
-interface CursorKind<TSchema extends ZodType = ZodType> extends HandleKindBase<TSchema> {
+interface CursorKind<TSchema extends ZodType = ZodType, TName extends string = string> extends HandleKindBase<TSchema> {
+    readonly name: TName;
     // Warning: (ae-forgotten-export) The symbol "HandleStrength" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -844,6 +845,11 @@ interface DeclarativeStealthResponse {
     url?: string;
 }
 
+// @public
+type DeclaredHandleKind<TConfig> = TConfig extends {
+    handle: readonly (infer K)[];
+} ? [K] extends [never] ? HandleKind : K extends HandleKind ? K : HandleKind : HandleKind;
+
 // @public (undocumented)
 export const DEFAULT_PROCFS_SELF_ROOT = "/proc/self";
 
@@ -863,13 +869,14 @@ export const DEFAULT_SELF_TEST_REQUEST_BUDGET_MS = 120000;
 export function deriveSelfTestToken(masterSecret: string, providerId: string): string;
 
 // @public (undocumented)
-interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined> extends HandleKindBase<TSchema> {
+interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined, TName extends string = string> extends HandleKindBase<TSchema> {
     // Warning: (ae-forgotten-export) The symbol "HandleAccess" needs to be exported by the entry point index.d.ts
     readonly access: HandleAccess;
     // (undocumented)
     readonly idleTtlMs: number;
     // (undocumented)
     readonly maxTtlMs: number;
+    readonly name: TName;
     readonly result: TResultSchema | undefined;
     // (undocumented)
     readonly resultTtl: ProviderStateDurationString;
@@ -1049,6 +1056,9 @@ type GuardStep = StepBase & {
 };
 
 // @public (undocumented)
+const HANDLE_FIELD_KIND: unique symbol;
+
+// @public (undocumented)
 type HandleAccess = "bound" | "public";
 
 // @public (undocumented)
@@ -1063,20 +1073,27 @@ interface HandleCommitResult<K extends HandleKind> {
     readonly status: "committed" | "replayed";
 }
 
-// @public (undocumented)
-interface HandleContext {
+// @public
+interface HandleContext<TKind extends HandleKind = HandleKind> {
     // Warning: (ae-forgotten-export) The symbol "HandleCommitResult" needs to be exported by the entry point index.d.ts
-    commit<K extends DraftKind>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
+    commit<K extends Extract<TKind, DraftKind<any, any, any>>>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
     // Warning: (ae-forgotten-export) The symbol "InputOf" needs to be exported by the entry point index.d.ts
-    create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
+    create<K extends TKind>(kind: K, data: InputOf<K>): Promise<string>;
     // Warning: (ae-forgotten-export) The symbol "HandleRecord" needs to be exported by the entry point index.d.ts
-    createRecord<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
-    discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
-    read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
+    createRecord<K extends TKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
+    discard<K extends TKind>(kind: K, handle: string): Promise<void>;
+    read<K extends TKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
     // Warning: (ae-forgotten-export) The symbol "DraftKind" needs to be exported by the entry point index.d.ts
     // Warning: (ae-forgotten-export) The symbol "DataOf" needs to be exported by the entry point index.d.ts
-    update<K extends DraftKind>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
+    update<K extends Extract<TKind, DraftKind<any, any, any>>>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
 }
+
+// Warning: (ae-forgotten-export) The symbol "HandleKindDeclaration" needs to be exported by the entry point index.d.ts
+//
+// @public
+type HandleField<K extends HandleKindDeclaration = HandleKindDeclaration> = ZodString & {
+    readonly [HANDLE_FIELD_KIND]?: K;
+};
 
 // @public
 type HandleIssuedBy = string | readonly string[];
@@ -1084,13 +1101,12 @@ type HandleIssuedBy = string | readonly string[];
 // Warning: (ae-forgotten-export) The symbol "CursorKind" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
-type HandleKind = CursorKind<any> | DraftKind<any, any>;
+type HandleKind = CursorKind<any, any> | DraftKind<any, any, any>;
 
-// Warning: (ae-forgotten-export) The symbol "HandleKindDeclaration" needs to be exported by the entry point index.d.ts
-//
 // @public (undocumented)
 interface HandleKindBase<TSchema extends ZodType = ZodType> extends HandleKindDeclaration {
-    field(): ZodString;
+    // Warning: (ae-forgotten-export) The symbol "HandleField" needs to be exported by the entry point index.d.ts
+    field(): HandleField<this>;
     readonly maxEntries: number;
     readonly maxValueBytes: number;
     readonly schema: TSchema;
@@ -3390,7 +3406,7 @@ type ProviderContext<TConfig = Record<string, unknown>> = {
 } : Record<never, never>) & ("resolver" extends keyof TConfig ? {
     resolver: ResolverContext;
 } : Record<never, never>) & ("handle" extends keyof TConfig ? {
-    handle: HandleContext;
+    handle: HandleContext<DeclaredHandleKind<TConfig>>;
 } : Record<never, never>);
 
 // @public (undocumented)
@@ -4795,7 +4811,7 @@ interface ResponseMatcher {
 }
 
 // @public (undocumented)
-type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R> ? (R extends ZodType ? z.output<R> : unknown) : never;
+type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
 
 // @public (undocumented)
 type RetryPolicy = {
@@ -6581,7 +6597,8 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/types.d.ts:2391:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:2393:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:2401:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2495:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2401:5 - (ae-forgotten-export) The symbol "DeclaredHandleKind" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2503:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

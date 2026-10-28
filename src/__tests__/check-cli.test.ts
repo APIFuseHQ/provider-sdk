@@ -15,8 +15,6 @@ import {
 } from "../../bin/apifuse-check.js";
 import { PROMPT_ASSET_MANIFEST_PATH, syncPromptAssets } from "../cli/prompt-assets.js";
 
-const AUTHORING_LINT_CHECK_MESSAGE = "Provider authoring lint has no error-level diagnostics";
-
 const tempDirs: string[] = [];
 const tempRoot = join(process.cwd(), ".tmp-provider-sdk-tests");
 
