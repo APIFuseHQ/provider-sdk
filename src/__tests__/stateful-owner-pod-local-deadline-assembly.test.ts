@@ -520,6 +520,7 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			// Not the deadline: the router leaves it alone and serve masks it.
 			expect(result.owner?.status).toBe(500);
 			expect(result.owner?.observability).toEqual({
+				origin: "platform",
 				category: "internal_error",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: false,
