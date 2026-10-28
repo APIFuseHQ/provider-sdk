@@ -1,4 +1,5 @@
 import { isProviderError } from "../errors.js";
+import { isSdkIssuedError, issueSdkError, platformFaultOf } from "../sdk-issued-errors.js";
 import type {
 	HttpClient,
 	RequestOptions,
@@ -692,13 +693,24 @@ export function redactSensitiveError<T>(
 			}
 		}
 	}
-	return redactDiagnosticValue(error, {
+	const redacted = redactDiagnosticValue(error, {
 		classificationObjects,
 		sensitiveValues,
 		requestUrl,
 		redactedUrl,
 		seen: new Map(),
 	}) as T;
+	// A replacement stands for the same failure: an error the SDK issued keeps
+	// that record, and its platform fault, when redaction had to copy it.
+	if (
+		redacted !== error &&
+		redacted !== null &&
+		typeof redacted === "object" &&
+		isSdkIssuedError(error)
+	) {
+		issueSdkError(redacted, platformFaultOf(error));
+	}
+	return redacted;
 }
 
 /** Redacts failures that occur before a request URL can be fully serialized. */

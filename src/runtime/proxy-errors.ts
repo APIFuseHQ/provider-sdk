@@ -1,4 +1,5 @@
 import { TransportError } from "../errors.js";
+import { issueSdkError } from "../sdk-issued-errors.js";
 
 export const PROXY_AUTH_IP_DENIED_CODE = "PROXY_AUTH_IP_DENIED";
 export const PROXY_AUTH_IP_DENIED_MESSAGE =
@@ -17,6 +18,26 @@ export const PROXY_EDGE_TLS_REJECTED_CODE = "PROXY_EDGE_TLS_REJECTED";
 export const PROXY_POOL_EXHAUSTED_CODE = "PROXY_POOL_EXHAUSTED";
 export const PROXY_POOL_EXHAUSTED_MESSAGE =
 	"Proxy provider refused every session the attempt budget allowed.";
+
+// The status a proxy pool fault is served with when a transport throws it as a
+// TransportError, like any transport failure.
+export const PROXY_POOL_TRANSPORT_STATUS = 502;
+// The status a proxy resolution failure that reaches serve as itself is served
+// with: it is not a ProviderError, so its body is masked.
+export const PROXY_POOL_RESOLUTION_STATUS = 500;
+
+/**
+ * Records `error` as the platform fault `proxy_pool`: the proxy egress APIFuse
+ * runs could not carry the request, because no proxy endpoint could be
+ * resolved or the vendor edge refused the request's sessions, and a retry on
+ * a new session can succeed. Only the SDK's proxy resolution and transports
+ * call this, where they create the error they throw for such a failure; serve
+ * classifies from the record, never from the error's code, so a provider that
+ * throws an error with one of these codes has thrown a provider failure.
+ */
+export function issueProxyPoolFault<T extends object>(error: T, code: string, status: number): T {
+	return issueSdkError(error, { category: "proxy_pool", code, status, retryable: true });
+}
 
 const PROXY_POOL_STALE_STATUS_CODES = new Set([509, 512]);
 const PROXY_EDGE_TLS_REJECTED_STATUS_CODES = new Set([495]);
@@ -54,10 +75,14 @@ export function isProxyEdgeAuthRejectedMessage(message: string): boolean {
 }
 
 export function createProxyEdgeAuthRejectedError(cause?: Error): TransportError {
-	return new TransportError(PROXY_EDGE_AUTH_REJECTED_MESSAGE, {
-		code: PROXY_EDGE_AUTH_REJECTED_CODE,
-		cause,
-	});
+	return issueProxyPoolFault(
+		new TransportError(PROXY_EDGE_AUTH_REJECTED_MESSAGE, {
+			code: PROXY_EDGE_AUTH_REJECTED_CODE,
+			cause,
+		}),
+		PROXY_EDGE_AUTH_REJECTED_CODE,
+		PROXY_POOL_TRANSPORT_STATUS,
+	);
 }
 
 export function isProxyPoolStaleStatus(status: number): boolean {
@@ -118,8 +143,12 @@ export function createProxyEdgeTlsRejectedError(status: number, cause?: Error): 
 }
 
 export function createProxyPoolExhaustedError(cause?: Error): TransportError {
-	return new TransportError(PROXY_POOL_EXHAUSTED_MESSAGE, {
-		code: PROXY_POOL_EXHAUSTED_CODE,
-		cause,
-	});
+	return issueProxyPoolFault(
+		new TransportError(PROXY_POOL_EXHAUSTED_MESSAGE, {
+			code: PROXY_POOL_EXHAUSTED_CODE,
+			cause,
+		}),
+		PROXY_POOL_EXHAUSTED_CODE,
+		PROXY_POOL_TRANSPORT_STATUS,
+	);
 }

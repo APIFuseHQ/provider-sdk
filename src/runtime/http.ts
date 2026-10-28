@@ -13,6 +13,7 @@ import {
 } from "./proxy-vendor-selector.js";
 import { proxyAttemptHash } from "./proxy-telemetry.js";
 import { ProviderError, TransportError } from "../errors.js";
+import { platformFaultOf } from "../sdk-issued-errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
 	HttpAttemptContext,
@@ -60,6 +61,7 @@ import {
 } from "./request-options.js";
 
 import { startHttpTelemetry } from "./http-telemetry-guard.js";
+import { issueProxyPoolFault, PROXY_POOL_TRANSPORT_STATUS } from "./proxy-errors.js";
 import { scopedHttpTelemetry } from "./http-telemetry-binding.js";
 import {
 	createSessionStateResponseView,
@@ -393,11 +395,16 @@ function toHttpTransportError(
 			error.name === "AbortError" ||
 			error.name === "TimeoutError" ||
 			isTimeoutMessage(error.message);
-		return new TransportError(timeout ? "Request timed out" : "Network error", {
+		const transportError = new TransportError(timeout ? "Request timed out" : "Network error", {
 			code: timeout ? "transport_timeout" : "transport_network_error",
 			status: 0,
 			cause: error,
 		});
+		// A required proxy the SDK could not allocate is the proxy pool's fault,
+		// recorded by the proxy resolver, and stays that fault wrapped here.
+		return !timeout && platformFaultOf(error)?.category === "proxy_pool"
+			? issueProxyPoolFault(transportError, "transport_network_error", PROXY_POOL_TRANSPORT_STATUS)
+			: transportError;
 	}
 
 	return new TransportError("Network error", {

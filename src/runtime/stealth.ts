@@ -60,8 +60,10 @@ import {
 	isProxyPoolRefreshableError,
 	isProxyPoolStaleMessage,
 	isProxyPoolStaleStatus,
+	issueProxyPoolFault,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
 	PROXY_POOL_STALE_CODE,
+	PROXY_POOL_TRANSPORT_STATUS,
 } from "./proxy-errors.js";
 import {
 	createProxyExitRefusedError,
@@ -1164,11 +1166,17 @@ function isTimeoutError(error: unknown, message: string): boolean {
 
 function normalizeStealthTransportError(error: unknown): TransportError {
 	if (error instanceof ProxyResolutionError) {
-		return new TransportError(error.message, {
+		const transportError = new TransportError(error.message, {
 			code: error.code,
 			status: 0,
 			cause: error,
 		});
+		// No proxy endpoint could be allocated for a request that needs one:
+		// the proxy pool's fault, served like the transport's other proxy pool
+		// failures. An unsupported proxy protocol stays a transport failure.
+		return error.code === "PROXY_REQUIRED" || error.code === "PROXY_ALLOCATION_FAILED"
+			? issueProxyPoolFault(transportError, error.code, PROXY_POOL_TRANSPORT_STATUS)
+			: transportError;
 	}
 
 	if (error instanceof TransportError) {
