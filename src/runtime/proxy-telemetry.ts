@@ -297,7 +297,7 @@ export class ProxyTelemetryCollector
 				? {}
 				: { poolIndex: Math.max(0, Math.floor(event.poolIndex)) }),
 			...(event.proxyHash ? { proxyHash: event.proxyHash.slice(0, 16) } : {}),
-			outcome: event.outcome === "ok" ? "ok" : "error",
+			outcome: event.outcome === "ok" || event.outcome === "exit_refused" ? event.outcome : "error",
 			...(event.errorCode ? { errorCode: event.errorCode.slice(0, 80) } : {}),
 			...(event.status === undefined ? {} : { status: Math.max(0, Math.floor(event.status)) }),
 			...(event.durationMs === undefined

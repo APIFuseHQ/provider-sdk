@@ -18,7 +18,10 @@ import {
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
 import { withDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { createDiagnosticRedactor } from "../runtime/diagnostic-redactor.js";
-import { type CeremonyEgressLeaseRuntime, ENGINE_CEREMONY_EGRESS_LEASE } from "../runtime/egress-lease.js";
+import {
+	type CeremonyEgressLeaseRuntime,
+	ENGINE_CEREMONY_EGRESS_LEASE,
+} from "../runtime/egress-lease.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/request-telemetry.js";
 import { ResolverTelemetryCollector } from "../runtime/resolver-telemetry.js";
 import { normalizeResponse, type StealthClientOptions } from "../runtime/stealth.js";
@@ -5397,7 +5400,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=0b6d3c1e-5a2f-4c8e-9d71-2a4b6c8e0f13&t=replay-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=0b6d3c1e-5a2f-4c8e-9d71-2a4b6c8e0f13&t=replay-token",
+				),
 				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
 				url: "https://example.com/mutate",
 			},
@@ -5539,7 +5544,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 	it("reuses a settled successful safe solve for a later same-epoch explicit replay", async () => {
 		const challenge = {
 			status: 403,
-			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=3e9a6f4b-8d5c-4fba-8a24-5d7e9fba3c46&t=shared-token"),
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=3e9a6f4b-8d5c-4fba-8a24-5d7e9fba3c46&t=shared-token",
+			),
 			headers: { "set-cookie": "sbsd_o=shared-state; Path=/; Secure" },
 			url: "https://example.com/protected",
 		};
@@ -5880,7 +5887,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=9ef01cab-e3b2-4f10-8a8a-b3def01a920c&t=token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=9ef01cab-e3b2-4f10-8a8a-b3def01a920c&t=token",
+				),
 				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
 				url: "https://example.com/mutate",
 			},
@@ -6620,9 +6629,7 @@ describe("server SBSD bound-transport wiring", () => {
 	});
 
 	it("fails an auth request before provider code when the engine lease key is missing", async () => {
-		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import(
-			"../runtime/egress-lease.js"
-		);
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
 		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
 		delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
 		try {
@@ -6686,9 +6693,7 @@ describe("server SBSD bound-transport wiring", () => {
 	});
 
 	it("fails an auth request before provider code when the ceremony tenant is missing", async () => {
-		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import(
-			"../runtime/egress-lease.js"
-		);
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
 		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
 		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = FIXTURE_LEASE_KEY;
 		try {
@@ -6720,12 +6725,8 @@ describe("server SBSD bound-transport wiring", () => {
 	});
 
 	it("threads request metering through safe auto-solve, explicit replay, failure, and early exit", async () => {
-		const {
-			APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
-			APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
-		} = await import(
-			"../runtime/resolver-config.js"
-		);
+		const { APIFUSE__RESOLVER__CAPSOLVER__API_KEY, APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } =
+			await import("../runtime/resolver-config.js");
 		const envNames = [
 			APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 			APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
@@ -6813,7 +6814,9 @@ describe("server SBSD bound-transport wiring", () => {
 			mockStealthState.queuedResponses.push(
 				{
 					status: 403,
-					body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=6bcd9c7e-b08f-4ced-9d57-80abcded6f79&t=token"),
+					body: sbsdInterstitial(
+						"/EdTyEb8L/9iGcpl/Gm?v=6bcd9c7e-b08f-4ced-9d57-80abcded6f79&t=token",
+					),
 					headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
 					url: "https://example.com/protected",
 				},
@@ -6835,7 +6838,9 @@ describe("server SBSD bound-transport wiring", () => {
 			delete process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY];
 			mockStealthState.queuedResponses.push({
 				status: 403,
-				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=7cdead8f-c190-4dfe-8e68-91bcdefe708a&t=token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=7cdead8f-c190-4dfe-8e68-91bcdefe708a&t=token",
+				),
 				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
 				url: "https://example.com/protected",
 			});
@@ -8276,6 +8281,205 @@ describe("stealth telemetry managed proxy observations", () => {
 			expect(await run(true)).toEqual(await run(false));
 		});
 	}
+});
+
+describe("stealth.rotateExitOnAdmissionRefusal", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	type RecordedProxyAttempt = {
+		attempt: number;
+		poolIndex?: number;
+		proxyHash?: string;
+		outcome: string;
+		errorCode?: string;
+		status?: number;
+	};
+
+	async function createPooledClient(poolSize: number) {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const { ProxyTelemetryCollector } = await import("../runtime/proxy-telemetry.js");
+		const { NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const attempts: RecordedProxyAttempt[] = [];
+		const collector = new ProxyTelemetryCollector();
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["nodemaven"],
+					session: { affinity: "connection", poolSize, lifetimeMinutes: 30 },
+				},
+			},
+			affinityKey: `exit-rotation-fixture-${poolSize}`,
+			engineCredentials: {
+				[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+				[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+			},
+			telemetry: {
+				recordProxyResolution(event) {
+					collector.recordProxyResolution(event);
+				},
+				recordProxyAttempt(event) {
+					attempts.push(event);
+					collector.recordProxyAttempt(event);
+				},
+			},
+		});
+		return { client, attempts, collector };
+	}
+
+	const usedProxies = () => mockStealthState.clients.map((client) => client.options?.proxy);
+
+	it("rotates once to the next pool entry on a headerless first-attempt 403 and returns the second answer", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 403, body: "<html><body>Forbidden</body></html>", headers: {} },
+			{ status: 200, body: "admitted", headers: {} },
+		);
+		const { client, attempts, collector } = await createPooledClient(2);
+
+		const response = await client.fetch("/gated", {
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 200, body: "admitted" });
+		expect(allWreqCalls()).toHaveLength(2);
+		const [first, second] = usedProxies();
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(second).not.toBe(first);
+		expect(
+			attempts.map(({ attempt, poolIndex, outcome, errorCode, status }) => [
+				attempt,
+				poolIndex,
+				outcome,
+				errorCode,
+				status,
+			]),
+		).toEqual([
+			[1, 0, "exit_refused", "PROXY_EXIT_REFUSED", 403],
+			[2, 1, "ok", undefined, 200],
+		]);
+		expect(attempts[0]?.proxyHash).toEqual(expect.any(String));
+		expect(attempts[1]?.proxyHash).toEqual(expect.any(String));
+		expect(attempts[0]?.proxyHash).not.toBe(attempts[1]?.proxyHash);
+		expect(
+			collector
+				.toLogPayload()
+				?.attemptSamples?.map(({ a, i, h, o, c, s }) => ({ a, i, h, o, c, s })),
+		).toEqual([
+			{ a: 1, i: 0, h: attempts[0]?.proxyHash, o: "exit_refused", c: "PROXY_EXIT_REFUSED", s: 403 },
+			{ a: 2, i: 1, h: attempts[1]?.proxyHash, o: "ok", c: undefined, s: 200 },
+		]);
+		client.close?.();
+	});
+
+	it("rotates exactly once: a refusal through the next entry too is terminal", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 503, body: "still down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(3);
+
+		await expect(
+			client.fetch("/gated", { stealth: { rotateExitOnAdmissionRefusal: true } }),
+		).rejects.toMatchObject({ code: "upstream_http_error", status: 503 });
+
+		expect(allWreqCalls()).toHaveLength(2);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["exit_refused", 503, "PROXY_EXIT_REFUSED"],
+			["error", 503, "upstream_http_error"],
+		]);
+		client.close?.();
+	});
+
+	it("returns the second refusal to a throwOnHttpError: false caller instead of throwing", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
+			{ status: 403, body: "<html>Forbidden again</html>", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(2);
+
+		const response = await client.fetch("/gated", {
+			throwOnHttpError: false,
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 403, body: "<html>Forbidden again</html>" });
+		expect(allWreqCalls()).toHaveLength(2);
+		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([
+			["exit_refused", 403],
+			["ok", 403],
+		]);
+		client.close?.();
+	});
+
+	it("does not rotate when the option is off", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(2);
+
+		await expect(client.fetch("/gated")).rejects.toMatchObject({
+			code: "upstream_http_error",
+			status: 403,
+		});
+
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 403, "upstream_http_error"],
+		]);
+		client.close?.();
+	});
+
+	it("does not rotate on a 403 that carries a challenge marker", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: '<html><script>window.gokuProps = {"key":"k"};</script></html>',
+				headers: {},
+			},
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(2);
+
+		const response = await client.fetch("/gated", {
+			throwOnHttpError: false,
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response.status).toBe(403);
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([["ok", 403]]);
+		client.close?.();
+	});
+
+	it("does not rotate when the pool has a single entry", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(1);
+
+		const response = await client.fetch("/gated", {
+			throwOnHttpError: false,
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response.status).toBe(403);
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([["ok", 403]]);
+		client.close?.();
+	});
 });
 
 describe("stealth redirect hop credentials and redirectPolicy", () => {

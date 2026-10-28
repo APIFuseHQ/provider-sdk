@@ -60,6 +60,11 @@ import {
 	PROXY_POOL_STALE_CODE,
 } from "./proxy-errors.js";
 import {
+	createProxyExitRefusedError,
+	isAdmissionRefusalResponse,
+	PROXY_EXIT_REFUSED_CODE,
+} from "./proxy-admission-refusal.js";
+import {
 	computeProxyAttemptIndex,
 	computeProxyTransportRetryDelayMs,
 	createDefaultProxyTransportRetryOptions,
@@ -1372,10 +1377,7 @@ function stripStealthCookieMaterial(text: string, cookieNames: readonly string[]
 		/(^|[^\p{L}\p{N}_-])[\t ]*(?:cookie|set-cookie)[\t ]*(?::|=)[^\r\n]*/giu,
 		"$1[REDACTED]",
 	);
-	result = result.replace(
-		/"(?:cookie|set-cookie)"[\t ]*:[\t ]*"(?:\\.|[^"\\])*"/giu,
-		"[REDACTED]",
-	);
+	result = result.replace(/"(?:cookie|set-cookie)"[\t ]*:[\t ]*"(?:\\.|[^"\\])*"/giu, "[REDACTED]");
 	for (const name of cookieNames) {
 		const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		result = result.replace(
@@ -1922,6 +1924,8 @@ function createSessionFetcher(
 				...(requestBody === undefined ? {} : { body: requestBody }),
 			};
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
+			const rotateExitOnAdmissionRefusal = options.stealth?.rotateExitOnAdmissionRefusal === true;
+			let exitRotationSpent = false;
 			let challengeSolveAttempted = false;
 			let challengeRefetchAttempted = false;
 			let challengeSolveFailure: { readonly error: unknown } | undefined;
@@ -2009,7 +2013,7 @@ function createSessionFetcher(
 					let attemptRecorded = false;
 					const attemptEgressGeneration = currentEgressGeneration();
 					const recordProxyAttempt = (
-						outcome: "ok" | "error",
+						outcome: "ok" | "error" | "exit_refused",
 						errorCode?: string,
 						status?: number,
 					) => {
@@ -2258,6 +2262,21 @@ function createSessionFetcher(
 							clientOptions.signal,
 						);
 						throwProxyTransportFault(response, normalized.body);
+						if (
+							rotateExitOnAdmissionRefusal &&
+							!exitRotationSpent &&
+							proxy &&
+							rotatesRegistryChain &&
+							attempt + 1 < maxAttempts &&
+							isAdmissionRefusalResponse(response.status, normalized.headers, normalized.body)
+						) {
+							// The refusal is read as "this exit", not "this origin": the request goes once
+							// more through the next pool entry (the attempt index is the offset and stays
+							// advanced for the rest of the call). Thrown before the ceremony binding so a
+							// refused exit is never sealed into a lease.
+							exitRotationSpent = true;
+							throw createProxyExitRefusedError(response.status);
+						}
 
 						// Commit only after the selected endpoint reached the origin. A failed
 						// proxy attempt may rotate pool index; the successful exact endpoint is
@@ -2537,6 +2556,11 @@ function createSessionFetcher(
 
 						return finalizeAttempt(response, normalized);
 					} catch (error) {
+						if (error instanceof TransportError && error.code === PROXY_EXIT_REFUSED_CODE) {
+							recordProxyAttempt("exit_refused", PROXY_EXIT_REFUSED_CODE, error.status);
+							lastError = redactAttemptError(error);
+							continue;
+						}
 						const normalizedError = normalizeAttemptError(error);
 						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
 						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
@@ -2971,7 +2995,9 @@ function createSessionFetcher(
 		]);
 		const profile = resolveStealthProfileSelection(callerOptions.stealth, defaultProfile);
 		const exchange = (response: StealthResponse, fallbackUrl: string): SessionStateExchange => {
-			const egress = (response as unknown as Record<symbol, unknown>)[SESSION_STATE_RESPONSE_EGRESS];
+			const egress = (response as unknown as Record<symbol, unknown>)[
+				SESSION_STATE_RESPONSE_EGRESS
+			];
 			return {
 				view: createSessionStateResponseView({
 					url: response.url ?? fallbackUrl,

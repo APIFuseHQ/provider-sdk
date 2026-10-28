@@ -326,7 +326,7 @@ type ProxyAttemptTelemetryEvent = {
     attempt: number;
     poolIndex?: number;
     proxyHash?: string;
-    outcome: "ok" | "error";
+    outcome: "ok" | "error" | "exit_refused";
     errorCode?: string;
     status?: number;
     durationMs?: number;
@@ -641,9 +641,9 @@ interface TraceRecorder {
 // dist/config/loader.d.ts:73:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:78:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:89:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:113:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:114:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:115:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:12:5 - (ae-forgotten-export) The symbol "TraceRecorder" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:24:9 - (ae-forgotten-export) The symbol "ProxyResolutionOptions" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:64:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point resolver-public.d.ts
@@ -652,8 +652,8 @@ interface TraceRecorder {
 // dist/runtime/resolver.d.ts:68:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:70:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
 // dist/types.d.ts:406:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:1040:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:1032:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:1037:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 
 // (No @packageDocumentation comment for this package)
 

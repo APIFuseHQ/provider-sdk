@@ -135,7 +135,12 @@ export type ProxyAttemptTelemetryEvent = {
 	attempt: number;
 	poolIndex?: number;
 	proxyHash?: string;
-	outcome: "ok" | "error";
+	/**
+	 * `exit_refused`: the origin's admission layer refused this proxy exit on
+	 * the first attempt (headerless 403 or 5xx) and the request was sent once
+	 * more through the next pool entry (`stealth.rotateExitOnAdmissionRefusal`).
+	 */
+	outcome: "ok" | "error" | "exit_refused";
 	errorCode?: string;
 	status?: number;
 	durationMs?: number;

@@ -1,0 +1,7 @@
+---
+"@apifuse/provider-sdk": patch
+---
+
+Lint: `thrown-error-retryable-conflicts-declaration` (error). A `new ProviderError|AuthError|ValidationError(...)` site whose literal `retryable` contradicts the provider's `errorCodes` declaration for that code (or the SDK canonical value for a registered code nobody declares) now fails `apifuse check`. Runtime retryability is `instance option ?? declared ?? false`, so the throw site wins and the published contract lies; this surfaces it at check time. Only literal codes and literal booleans are read, and the rule stays silent when operations declare the same code with different values.
+
+Stealth: `stealth.rotateExitOnAdmissionRefusal` (default off). When the first attempt of a policy-managed proxied request returns a headerless 403 (no challenge marker in headers or body) or any 5xx, the request is sent exactly once more through the next pool entry and the call keeps that offset; the second answer is final. The refused attempt is recorded in proxy telemetry as outcome `exit_refused` (`errorCode: PROXY_EXIT_REFUSED`) with the exit hash and status, so an exit refusal and an upstream 5xx are distinct classes. `ProxyAttemptTelemetryEvent.outcome` gains the `exit_refused` member.
