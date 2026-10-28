@@ -16,7 +16,9 @@ import {
 	type HandleFieldDirection,
 	type HandleFieldMeta,
 	type HandleIssuedBy,
+	type HandleKindDeclaration,
 	handleFieldDescription,
+	handleIssuerList,
 	isHandleFieldDescription,
 	isHandleFieldMeta,
 } from "../handle-meta.js";
@@ -131,48 +133,70 @@ function ownHandleMeta(schema: SchemaRecord): HandleFieldMeta | undefined {
 	return isHandleFieldMeta(value) ? value : undefined;
 }
 
+/**
+ * How a child position affects whether a handle below it is required by the
+ * schema as a whole: `always` keeps the parent's requirement (object
+ * properties, pipes, intersections, tuple items, lazy), `list` drops it (an
+ * empty array or record satisfies the schema), `branch` requires it only when
+ * every branch of the union does.
+ */
+type ChildMode = "always" | "list" | "branch";
+
 /** zod internals that are transparent for the property key (wrappers, pipes, branches). */
-const STRUCTURAL_DEF_KEYS = [
-	"innerType",
-	"in",
-	"out",
-	"left",
-	"right",
-	"element",
-	"valueType",
-	"keyType",
-	"catchall",
-	"rest",
-] as const;
+const STRUCTURAL_DEF_KEYS: readonly (readonly [key: string, mode: ChildMode])[] = [
+	["innerType", "always"],
+	["in", "always"],
+	["out", "always"],
+	["left", "always"],
+	["right", "always"],
+	["element", "list"],
+	["valueType", "list"],
+	["keyType", "list"],
+	["catchall", "list"],
+	["rest", "list"],
+];
+
+/** Wrappers whose value may be absent or null, so nothing below them is required. */
+const OPTIONAL_DEF_TYPES = new Set(["optional", "nullable", "default", "prefault", "catch"]);
 
 function* childSchemas(
 	schema: SchemaRecord,
-): Generator<{ readonly schema: SchemaRecord; readonly key?: string; readonly list?: boolean }> {
+): Generator<{ readonly schema: SchemaRecord; readonly key?: string; readonly mode: ChildMode }> {
 	const def = schemaDef(schema);
 	for (const [key, value] of Object.entries(objectShape(schema))) {
-		if (isSchema(value)) yield { schema: value, key };
+		if (isSchema(value)) yield { schema: value, key, mode: "always" };
 	}
-	for (const name of STRUCTURAL_DEF_KEYS) {
+	for (const [name, mode] of STRUCTURAL_DEF_KEYS) {
 		const value = def[name];
-		if (isSchema(value)) {
-			yield { schema: value, list: name === "element" || name === "valueType" };
-		}
+		if (isSchema(value)) yield { schema: value, mode };
 	}
 	if (typeof def.getter === "function") {
 		const value = (def.getter as () => unknown)();
-		if (isSchema(value)) yield { schema: value };
+		if (isSchema(value)) yield { schema: value, mode: "always" };
 	}
-	for (const listKey of ["items", "options"] as const) {
+	for (const [listKey, mode] of [
+		["items", "always"],
+		["options", "branch"],
+	] as const) {
 		const value = def[listKey];
 		const entries = Array.isArray(value)
 			? value
 			: value instanceof Set || value instanceof Map
 				? Array.from(value.values())
 				: [];
-		for (const entry of entries) if (isSchema(entry)) yield { schema: entry };
+		for (const entry of entries) if (isSchema(entry)) yield { schema: entry, mode };
 	}
 }
 
+function kindOf(meta: HandleFieldMeta): object | undefined {
+	return Reflect.get(meta, HANDLE_META_KIND) as object | undefined;
+}
+
+/**
+ * Collects every handle field below `schema` into `out` and returns the kinds
+ * the schema requires: those reachable through required object properties
+ * only, with no optional wrapper, list, or partial union branch on the way.
+ */
 function collect(
 	schema: unknown,
 	side: HandleFieldDirection,
@@ -180,28 +204,59 @@ function collect(
 	key: string | undefined,
 	ancestors: Set<SchemaRecord>,
 	out: HandleFieldOccurrence[],
-): void {
-	if (!isSchema(schema)) return;
+): Set<object> {
+	if (!isSchema(schema)) return new Set();
+	const type = schemaDef(schema).type;
+	const required = collectBelow(schema, side, path, key, ancestors, out);
+	return typeof type === "string" && OPTIONAL_DEF_TYPES.has(type) ? new Set() : required;
+}
+
+function collectBelow(
+	schema: SchemaRecord,
+	side: HandleFieldDirection,
+	path: string,
+	key: string | undefined,
+	ancestors: Set<SchemaRecord>,
+	out: HandleFieldOccurrence[],
+): Set<object> {
+	const required = new Set<object>();
 	const meta = ownHandleMeta(schema);
 	if (meta && key !== undefined) {
 		out.push({ path, key, side, meta, node: schema });
-		return;
+		const kind = kindOf(meta);
+		if (kind) required.add(kind);
+		return required;
 	}
 	// Ancestor-only cycle guard: one wrapped instance reused under two property
 	// keys is two fields and must be visited at both positions.
-	if (ancestors.has(schema)) return;
+	if (ancestors.has(schema)) return required;
 	ancestors.add(schema);
 	try {
+		const branches: Set<object>[] = [];
 		for (const child of childSchemas(schema)) {
-			if (child.key !== undefined) {
-				collect(child.schema, side, `${path}.${child.key}`, child.key, ancestors, out);
-			} else {
-				collect(child.schema, side, child.list ? `${path}[]` : path, key, ancestors, out);
+			const below =
+				child.key !== undefined
+					? collect(child.schema, side, `${path}.${child.key}`, child.key, ancestors, out)
+					: collect(
+							child.schema,
+							side,
+							child.mode === "list" ? `${path}[]` : path,
+							key,
+							ancestors,
+							out,
+						);
+			if (child.mode === "always") for (const kind of below) required.add(kind);
+			else if (child.mode === "branch") branches.push(below);
+		}
+		if (branches.length > 0) {
+			for (const kind of branches[0]!) {
+				if (branches.every((branch) => branch.has(kind))) required.add(kind);
 			}
 		}
 	} finally {
 		ancestors.delete(schema);
 	}
+	return required;
 }
 
 /** Every handle field in one operation side, with the property key it sits under. */
@@ -212,6 +267,16 @@ export function collectHandleFields(
 	const out: HandleFieldOccurrence[] = [];
 	collect(schema, side, side, undefined, new Set(), out);
 	return out;
+}
+
+/** Handle fields on one side plus the kinds that side requires (input only matters). */
+function walkSide(
+	schema: unknown,
+	side: HandleFieldDirection,
+): { readonly fields: HandleFieldOccurrence[]; readonly required: Set<object> } {
+	const fields: HandleFieldOccurrence[] = [];
+	const required = collect(schema, side, side, undefined, new Set(), fields);
+	return { fields, required };
 }
 
 // ---------------------------------------------------------------------------
@@ -225,44 +290,79 @@ interface KindUsage {
 	readonly issuers: string[];
 }
 
+const warnedIssuerDisagreements = new Set<string>();
+
 /**
  * Resolves and binds the handle contract for every kind used by `operations`,
  * then refreshes the SDK-owned description on every handle field so it names
- * the issuing operation(s). Throws when one kind travels under two different
- * keys on the same side: the LLM must see exactly one name per direction.
+ * the issuing operation(s).
+ *
+ * An operation issues a kind when its output places the field and its input
+ * does not require it; an operation that requires the handle on input and
+ * returns it is a continuation (a round of the same attempt), never an issuer.
+ * A pagination operation with an optional cursor on input is the issuer of its
+ * own first page.
+ *
+ * Throws when one kind travels under two different keys on the same side (the
+ * LLM must see exactly one name per direction) and when a kind listed in
+ * `handle: [...]` is never issued or never accepted by any operation.
  */
 export function bindHandleContracts(
 	providerId: string,
 	operations: Record<string, { readonly input?: unknown; readonly output?: unknown }>,
+	declared: readonly HandleKindDeclaration[] = [],
 ): void {
 	const usages = new Map<object, KindUsage>();
 	const occurrences: HandleFieldOccurrence[] = [];
 
 	for (const [operationKey, operation] of Object.entries(operations)) {
-		for (const side of ["input", "output"] as const) {
-			for (const occurrence of collectHandleFields(operation[side], side)) {
-				occurrences.push(occurrence);
-				const kind = Reflect.get(occurrence.meta, HANDLE_META_KIND) as object | undefined;
-				if (!kind) continue;
-				let usage = usages.get(kind);
-				if (!usage) {
-					usage = {
-						kind,
-						name: occurrence.meta.kind,
-						keys: { input: new Map(), output: new Map() },
-						issuers: [],
-					};
-					usages.set(kind, usage);
-				}
-				const keys = usage.keys[side];
-				if (!keys.has(occurrence.key)) {
-					keys.set(occurrence.key, `operations.${operationKey}.${occurrence.path}`);
-				}
-				if (side === "output" && !usage.issuers.includes(operationKey)) {
-					usage.issuers.push(operationKey);
-				}
+		const input = walkSide(operation.input, "input");
+		const output = walkSide(operation.output, "output");
+		for (const occurrence of [...input.fields, ...output.fields]) {
+			occurrences.push(occurrence);
+			const kind = kindOf(occurrence.meta);
+			if (!kind) continue;
+			let usage = usages.get(kind);
+			if (!usage) {
+				usage = {
+					kind,
+					name: occurrence.meta.kind,
+					keys: { input: new Map(), output: new Map() },
+					issuers: [],
+				};
+				usages.set(kind, usage);
+			}
+			const keys = usage.keys[occurrence.side];
+			if (!keys.has(occurrence.key)) {
+				keys.set(occurrence.key, `operations.${operationKey}.${occurrence.path}`);
+			}
+			if (
+				occurrence.side === "output" &&
+				!input.required.has(kind) &&
+				!usage.issuers.includes(operationKey)
+			) {
+				usage.issuers.push(operationKey);
 			}
 		}
+	}
+
+	for (const kind of declared) {
+		const usage = usages.get(kind);
+		const missing =
+			usage === undefined || usage.keys.output.size === 0
+				? "output"
+				: usage.keys.input.size === 0
+					? "input"
+					: undefined;
+		if (missing === undefined) continue;
+		const verb = missing === "output" ? "issued" : "accepted";
+		const role = missing === "output" ? "issuing" : "consuming";
+		throw new ValidationError(
+			`Provider "${providerId}" handle kind "${kind.name}" is listed in handle: [...] but never ${verb}: no operation ${missing} places ${kind.name}.field().`,
+			{
+				fix: `Add ${kind.name}.field() to the ${missing} of the ${role} operation, or remove ${kind.name} from handle: [...].`,
+			},
+		);
 	}
 
 	for (const usage of usages.values()) {
@@ -287,12 +387,15 @@ export function bindHandleContracts(
 			...(outputKey !== undefined && inputKey !== undefined && outputKey !== inputKey
 				? { outputFieldName: outputKey }
 				: {}),
+			// One issuer stays a string: the apifuse registry reads `issuedBy` as a
+			// string, and a list is emitted only when several operations issue.
 			...(usage.issuers.length === 1
 				? { issuedBy: usage.issuers[0] }
 				: usage.issuers.length > 1
 					? { issuedBy: Object.freeze([...usage.issuers]) }
 					: {}),
 		});
+		warnIssuerDisagreement(providerId, usage);
 	}
 
 	for (const occurrence of occurrences) refreshFieldDescription(occurrence.node, occurrence.meta);
@@ -300,6 +403,25 @@ export function bindHandleContracts(
 
 function first(keys: Map<string, string>): string | undefined {
 	return keys.keys().next().value;
+}
+
+/**
+ * During the deprecation window a declared `issuedBy` keeps precedence; when
+ * the schemas derive a different issuer set, say so once so the disagreement
+ * is fixed before the option goes away.
+ */
+function warnIssuerDisagreement(providerId: string, usage: KindUsage): void {
+	const internals = getHandleKindInternals(usage.kind);
+	if (!internals?.declared.includes("issuedBy")) return;
+	const declared = handleIssuerList((usage.kind as Partial<HandleKindDeclaration>).issuedBy);
+	const derived = usage.issuers;
+	if (declared.length === derived.length && declared.every((op, i) => op === derived[i])) return;
+	const token = `${providerId}:${usage.name}`;
+	if (warnedIssuerDisagreements.has(token)) return;
+	warnedIssuerDisagreements.add(token);
+	console.warn(
+		`[provider-sdk] Provider "${providerId}" handle kind "${usage.name}" declares issuedBy ${JSON.stringify(declared)} but its schemas derive ${JSON.stringify(derived)}; the declared value stays in effect until the option is removed. An operation issues a kind when its output places ${usage.name}.field() and its input does not require it. Fix the placements or the declaration so they agree.`,
+	);
 }
 
 /**

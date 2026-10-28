@@ -3467,7 +3467,7 @@ function finalizeProvider<TOperations extends Record<string, ProviderOperation>,
 	validateOperationErrorCodes(config.id, config.operations);
 	validateOperationTransports(config.id, config.operations);
 	validateOperationContracts(config.id, config.operations);
-	bindHandleContracts(config.id, config.operations);
+	bindHandleContracts(config.id, config.operations, config.handle);
 	validateOperationMetadata(config.id, config.operations);
 	const journeyCoveredOperations = validateHealthJourneys(
 		config.id,

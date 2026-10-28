@@ -103,19 +103,32 @@ export const WaitingDraft = defineDraft({
 
 The kind declares what it stores and for how long. **Where** it travels is
 written once, in the operation schemas: the property key you place
-`WaitingDraft.field()` under is the field name, and every operation whose
-*output* contains it is an issuer. `defineProvider` reads both from the
-schemas and binds them onto the kind, so the field description ("Opaque handle
-issued by `waiting-prepare`. Copy it exactly as returned; do not edit or shorten
-it."), every recovery sentence ("Call `waiting-prepare` again and pass the new
-`waiting_token` exactly as returned."), and the `x-apifuse-handle` meta all
-name what the schemas say. Several issuing operations are listed in operation
-order ("issued by `search-address` or `reverse-geocode`").
+`WaitingDraft.field()` under is the field name, and an operation issues the
+kind when its *output* contains the field and its *input* does not require it.
+`defineProvider` reads both from the schemas and binds them onto the kind, so
+the field description ("Opaque handle issued by `waiting-prepare`. Copy it
+exactly as returned; do not edit or shorten it."), every recovery sentence
+("Call `waiting-prepare` again and pass the new `waiting_token` exactly as
+returned."), and the `x-apifuse-handle` meta all name what the schemas say.
+Several issuing operations are listed in operation order ("issued by
+`search-address` or `reverse-geocode`").
+
+An operation that *requires* the handle on input and returns it is a
+continuation of the same attempt (`reserve-answer` echoing `attempt_token`
+round by round, a commit replaying the draft), not an issuer: a recovery
+sentence never tells the LLM to call it for a fresh handle. "Requires" means
+the field is reachable through required object properties only; a field under
+`.optional()`, `.nullable()`, `.default()`, inside an array, or in only some
+branches of a union is not required, so a pagination operation with an
+optional `cursor` on input issues its own first page.
 
 A kind must sit under one key per direction. Placing it under two different
 input keys (or two different output keys) makes `defineProvider` throw with both
 positions named: the LLM must see one name. Putting the *same* `field()`
-instance under two keys counts as two placements.
+instance under two keys counts as two placements. A kind listed in
+`handle: [...]` that no operation output places (never issued) or no operation
+input places (never accepted) also throws at definition time, naming the kind
+and the side to add `kind.field()` to.
 
 > `fieldName` and `issuedBy` on `defineCursor` / `defineDraft` are deprecated
 > and removed in the next release; while present they win over the bound

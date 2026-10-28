@@ -11,7 +11,7 @@ import {
 	type HandleKindOfField,
 	handleRecoverySentence,
 } from "../handle.js";
-import { bindHandleContract, collectHandleFields } from "../handle/contract.js";
+import { collectHandleFields } from "../handle/contract.js";
 import { APIFUSE_HANDLE_META_KEY, handleFieldDescription } from "../handle-meta.js";
 import { createTestHandleContext } from "../runtime/handle.js";
 import { describeKey, sensitive } from "../schema.js";
@@ -34,6 +34,10 @@ function sample(schema: z.ZodType): unknown {
 			return 1;
 		case "boolean":
 			return true;
+		case "literal":
+			return (def.values as unknown[])[0];
+		case "enum":
+			return Object.values(def.entries as Record<string, unknown>)[0];
 		case "object":
 			return Object.fromEntries(
 				Object.entries(def.shape as Record<string, z.ZodType>).map(([key, value]) => [
@@ -59,21 +63,29 @@ function sample(schema: z.ZodType): unknown {
 	}
 }
 
-function op<TInput extends z.ZodRawShape, TOutput extends z.ZodRawShape>(
-	input: TInput,
-	output: TOutput,
+function opWith<TInput extends z.ZodType, TOutput extends z.ZodType>(
+	inputSchema: TInput,
+	outputSchema: TOutput,
 ) {
-	const inputSchema = describeKey(z.object(input), "operations.op.input");
-	const outputSchema = describeKey(z.object(output), "operations.op.output");
 	return {
 		descriptionKey: "operations.op.description",
 		riskClass: "read" as const,
 		input: inputSchema,
 		output: outputSchema,
-		handler: async () => ({}) as z.output<z.ZodObject<TOutput>>,
+		handler: async () => ({}) as z.output<TOutput>,
 		fixtures: { request: sample(inputSchema), response: sample(outputSchema) },
 		healthCheckUnsupported: { reason: "test" },
 	};
+}
+
+function op<TInput extends z.ZodRawShape, TOutput extends z.ZodRawShape>(
+	input: TInput,
+	output: TOutput,
+) {
+	return opWith(
+		describeKey(z.object(input), "operations.op.input"),
+		describeKey(z.object(output), "operations.op.output"),
+	);
 }
 
 const shopId = describeKey(z.string(), "fields.shopId");
@@ -212,23 +224,95 @@ describe("handle contract bound from the operation schemas", () => {
 		);
 	});
 
-	it("keeps the ${name}_token default for a kind no schema places, and binds kinds outside handle: [...] too", () => {
+	it("refuses a kind listed in handle: [...] that no operation issues or accepts, naming the fix", () => {
 		const Internal = defineCursor({ name: "internal", schema: z.object({}), ttl: "10m" });
+		const build = defineProvider({
+			...DECLARATION,
+			id: "unused-demo",
+			state: {},
+			handle: [Internal],
+		});
+
+		const unplaced = () =>
+			build({ operations: { probe: op({ shop_id: shopId }, { ok: z.boolean() }) } });
+		expect(unplaced).toThrow(ValidationError);
+		expect(unplaced).toThrow(
+			'Provider "unused-demo" handle kind "internal" is listed in handle: [...] but never issued: no operation output places internal.field().',
+		);
+		try {
+			unplaced();
+		} catch (error) {
+			expect((error as ValidationError).fix).toBe(
+				"Add internal.field() to the output of the issuing operation, or remove internal from handle: [...].",
+			);
+		}
+
+		const issuedOnly = () =>
+			build({
+				operations: { probe: op({ shop_id: shopId }, { internal_ref: Internal.field() }) },
+			});
+		expect(issuedOnly).toThrow(
+			'handle kind "internal" is listed in handle: [...] but never accepted: no operation input places internal.field().',
+		);
+	});
+
+	it("binds kinds outside handle: [...] too", () => {
+		const Listed = defineCursor({ name: "listed", schema: z.object({}), ttl: "10m" });
 		const Unlisted = defineCursor({ name: "extra", schema: z.object({}), ttl: "10m" });
 
-		defineProvider({ ...DECLARATION, id: "unused-demo", state: {}, handle: [Internal] })({
+		defineProvider({ ...DECLARATION, id: "unlisted-demo", state: {}, handle: [Listed] })({
 			operations: {
-				probe: op({ extra_ref: Unlisted.field() }, { extra_ref: Unlisted.field() }),
+				list: op({ shop_id: shopId }, { listed_ref: Listed.field(), extra_ref: Unlisted.field() }),
+				take: op({ listed_ref: Listed.field(), extra_ref: Unlisted.field() }, { ok: z.boolean() }),
 			},
 		});
 
-		expect(Internal.fieldName).toBe("internal_token");
-		expect(Internal.issuedBy).toBeUndefined();
-		expect(handleRecoverySentence(Internal)).toBe(
-			"Request a new `internal_token` and pass it exactly as returned.",
-		);
 		expect(Unlisted.fieldName).toBe("extra_ref");
-		expect(Unlisted.issuedBy).toBe("probe");
+		expect(Unlisted.issuedBy).toBe("list");
+	});
+
+	it("treats an operation that requires the handle on input and returns it as a continuation, not an issuer", () => {
+		const Attempt = defineDraft({
+			name: "attempt",
+			schema: z.object({}),
+			ttl: { idle: "30m", max: "2h" },
+		});
+		const echo = z.object({ attempt_token: Attempt.field() });
+
+		defineProvider({ ...DECLARATION, id: "continuation-demo", state: {}, handle: [Attempt] })({
+			operations: {
+				// Issues: nothing required on input.
+				start: op({ shop_id: shopId }, { attempt_token: Attempt.field() }),
+				// Round of the same attempt: requires the handle, echoes it.
+				answer: op(
+					{ attempt_token: Attempt.field(), answer: z.string() },
+					{ attempt_token: Attempt.field() },
+				),
+				// Commit: requires the handle, may echo it inside one output branch.
+				commit: opWith(
+					z.object({ attempt_token: Attempt.field() }),
+					z.union([z.object({ done: z.boolean() }), echo]),
+				),
+				// Required in every input branch: still a continuation.
+				branches: opWith(
+					z.union([echo, z.object({ attempt_token: Attempt.field(), b: z.string() })]),
+					echo,
+				),
+				// Optional, nullable, inside a list, or in only one branch: callable without a handle, so it issues.
+				resume: op(
+					{ attempt_token: Attempt.field().optional() },
+					{ attempt_token: Attempt.field() },
+				),
+				reopen: op(
+					{ attempt_token: Attempt.field().nullable() },
+					{ attempt_token: Attempt.field() },
+				),
+				batch: op({ attempts: z.array(echo) }, { attempt_token: Attempt.field() }),
+				either: opWith(z.union([echo, z.object({ shop_id: shopId })]), echo),
+			},
+		});
+
+		expect(Attempt.issuedBy).toEqual(["start", "resume", "reopen", "batch", "either"]);
 	});
 
 	it("runtime errors read the bound names so an unmigrated-looking message is impossible", async () => {
@@ -281,9 +365,14 @@ describe("handle contract bound from the operation schemas", () => {
 				},
 			});
 
-			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn).toHaveBeenCalledTimes(2);
 			expect(String(warn.mock.calls[0]?.[0])).toContain(
 				'defineCursor "legacy": fieldName and issuedBy are deprecated',
+			);
+			// `search` requires the handle on input, so the schemas derive no issuer;
+			// the declared one stays in effect and the disagreement is said once.
+			expect(String(warn.mock.calls[1]?.[0])).toContain(
+				'Provider "legacy-demo" handle kind "legacy" declares issuedBy ["declared-op"] but its schemas derive []; the declared value stays in effect',
 			);
 			expect(Legacy.fieldName).toBe("cursor");
 			expect(Legacy.outputFieldName).toBe("next_cursor");
@@ -308,7 +397,7 @@ describe("handle contract bound from the operation schemas", () => {
 
 			defineProvider({ ...DECLARATION, id: "legacy-one", state: {}, handle: [Legacy] })({
 				operations: {
-					search: op({ token: Legacy.field() }, { next_token: Legacy.field() }),
+					search: op({ token: Legacy.field().optional() }, { next_token: Legacy.field() }),
 				},
 			});
 
@@ -316,12 +405,380 @@ describe("handle contract bound from the operation schemas", () => {
 			expect(Legacy.issuedBy).toBe("search");
 		});
 	});
+});
 
-	describe("bindHandleContract", () => {
-		it("is a no-op for values that are not SDK kinds", () => {
-			expect(() => bindHandleContract({ name: "x" }, { fieldName: "y" })).not.toThrow();
-			expect(() => bindHandleContract(undefined, { fieldName: "y" })).not.toThrow();
+/**
+ * Handle placements copied from the three fleet providers that use handles
+ * (catchtable, modu-parking, careem checkouts, 2026-10-28): every `kind.field()`
+ * position with its wrappers (optional, union branch, nested object, array,
+ * `sensitive()` / `describeKey()` clones). Fields that carry no handle are
+ * reduced to plain strings. Each kind is defined without the deprecated
+ * options (the post-codemod shape) and must derive the `issuedBy` the provider
+ * used to declare.
+ */
+describe("fleet shapes derive the issuedBy the providers declared", () => {
+	it("catchtable: reserve-answer, reserve-confirm and reservation-payment-ready echo attempt_token without issuing it", () => {
+		const WaitingDraft = defineDraft({
+			name: "waiting",
+			schema: z.object({ shop_ref: z.string() }),
+			ttl: { idle: "30m", max: "2h" },
 		});
+		const ReserveDraft = defineDraft({
+			name: "reserve",
+			schema: z.object({ shop_ref: z.string() }),
+			ttl: { idle: "30m", max: "2h" },
+		});
+		const CancellationDraft = defineDraft({
+			name: "cancellation",
+			schema: z.object({ reservation_ref: z.string() }),
+			ttl: { idle: "30m", max: "30m" },
+		});
+		const ReserveNeedsInputOutputSchema = z
+			.object({
+				status: z.literal("needs_input"),
+				attempt_token: ReserveDraft.field(),
+				required_selections: z.array(z.object({ selection_key: z.string() })),
+			})
+			.strict();
+		const ReserveReadyOutputSchema = z
+			.object({
+				status: z.literal("ready"),
+				attempt_token: ReserveDraft.field(),
+				summary: z.string(),
+			})
+			.strict();
+		const ReserveOutputSchema = z.union([ReserveNeedsInputOutputSchema, ReserveReadyOutputSchema]);
+		const ReserveConfirmOutputSchema = z.union([
+			z.object({ reservation_ref: z.string(), status: z.enum(["CONFIRMED", "PENDING"]) }),
+			ReserveNeedsInputOutputSchema,
+			z.object({ status: z.literal("unknown"), verify_via: z.literal("my-status") }),
+		]);
+		const ReservationPaymentReadyOutputSchema = z.union([
+			z
+				.object({
+					status: z.literal("needs_input"),
+					attempt_token: ReserveDraft.field().describeKey("schemaDescriptions.index.d0382"),
+					required_selections: z.array(z.object({ selection_key: z.string() })),
+				})
+				.strict(),
+			z
+				.object({
+					status: z.literal("no_payment_required"),
+					attempt_token: ReserveDraft.field().describeKey("schemaDescriptions.index.d0382"),
+				})
+				.strict(),
+			z
+				.object({
+					status: z.literal("ready"),
+					attempt_token: ReserveDraft.field().describeKey("schemaDescriptions.index.d0382"),
+					payment_ready_token: z.string().min(1),
+				})
+				.strict(),
+		]);
+		const ReservationCreatePaymentSchema = z.object({ pay_method: z.string() });
+
+		defineProvider({
+			...DECLARATION,
+			id: "catchtable",
+			state: {},
+			handle: [WaitingDraft, ReserveDraft, CancellationDraft],
+		})({
+			operations: {
+				"waiting-prepare": opWith(
+					z.object({ shop_ref: z.string() }),
+					z.object({ shop_ref: z.string() }).extend({
+						waiting_token: WaitingDraft.field().optional(),
+						tables: z.array(z.object({ table: z.string().min(1) })),
+					}),
+				),
+				"register-waiting": opWith(
+					z.object({ waiting_token: WaitingDraft.field(), table: z.string().min(1) }).strict(),
+					z.object({ waiting_ref: z.string() }),
+				),
+				reserve: opWith(
+					z.object({
+						shop_ref: z.string(),
+						date: z.string(),
+						time: z.string(),
+						person: z.number(),
+					}),
+					ReserveOutputSchema,
+				),
+				"reserve-answer": opWith(
+					z
+						.object({
+							attempt_token: ReserveDraft.field(),
+							answers: z.array(z.object({ selection_key: z.string() })),
+							use_point: z.number().optional(),
+						})
+						.strict(),
+					ReserveOutputSchema,
+				),
+				"reservation-payment-ready": opWith(
+					z
+						.object({
+							attempt_token: ReserveDraft.field().describeKey("schemaDescriptions.index.d0374"),
+							pg_type: z.enum(["TOSSPAY", "NICEPAY"]).optional(),
+							pay_method: z.enum(["CARD", "KAKAO_PAY"]).default("CARD"),
+							use_point: z.number().int().min(0).default(0),
+						})
+						.strict(),
+					ReservationPaymentReadyOutputSchema,
+				),
+				"reserve-confirm": opWith(
+					z
+						.object({
+							attempt_token: ReserveDraft.field(),
+							payment: z.lazy(() => ReservationCreatePaymentSchema).optional(),
+							payment_method: z.enum(["points"]).optional(),
+						})
+						.strict(),
+					ReserveConfirmOutputSchema,
+				),
+				"reservation-detail": opWith(
+					z.object({ reservation_ref: z.string() }),
+					z.object({
+						cancellation: z
+							.object({
+								cancellation_token: CancellationDraft.field(),
+								deposit_amount_krw: z.number().int().nonnegative(),
+							})
+							.strict()
+							.optional(),
+						reservation_ref: z.string(),
+					}),
+				),
+				"cancel-reservation": opWith(
+					z
+						.object({
+							cancellation_token: CancellationDraft.field(),
+							reason: z.string().optional(),
+						})
+						.strict(),
+					z.object({ reservation_ref: z.string(), status: z.literal("CANCELLED") }),
+				),
+			},
+		});
+
+		// handles.ts declared: waiting "waiting-prepare", reserve "reserve", cancellation "reservation-detail".
+		expect(WaitingDraft.fieldName).toBe("waiting_token");
+		expect(WaitingDraft.issuedBy).toBe("waiting-prepare");
+		expect(ReserveDraft.fieldName).toBe("attempt_token");
+		expect(ReserveDraft.issuedBy).toBe("reserve");
+		expect(CancellationDraft.fieldName).toBe("cancellation_token");
+		expect(CancellationDraft.issuedBy).toBe("reservation-detail");
+		expect(handleRecoverySentence(ReserveDraft)).toBe(
+			"Call `reserve` again and pass the new `attempt_token` exactly as returned.",
+		);
+		expect(ReserveNeedsInputOutputSchema.shape.attempt_token.description).toBe(
+			"Opaque handle issued by `reserve`. Copy it exactly as returned; do not edit or shorten it.",
+		);
+	});
+
+	it("modu-parking: a pagination cursor with an optional input issues its own first page; two detail operations issue one offer kind", () => {
+		const SearchPage = defineCursor({
+			name: "page",
+			schema: z.object({ offset: z.number() }),
+			ttl: "10m",
+			access: "public",
+			maxEntries: 100_000,
+		});
+		const PurchaseOffer = defineCursor({
+			name: "purchase",
+			schema: z.object({ kind: z.string() }),
+			ttl: "30m",
+			access: "public",
+			maxEntries: 20_000,
+		});
+		const PaymentAuth = defineCursor({
+			name: "payauth",
+			schema: z.object({ phone: z.string() }),
+			ttl: "10m",
+			access: "public",
+			strength: "high",
+			maxEntries: 20_000,
+		});
+
+		defineProvider({
+			...DECLARATION,
+			id: "modu-parking",
+			state: {},
+			handle: [SearchPage, PurchaseOffer, PaymentAuth],
+		})({
+			operations: {
+				"search-parking": opWith(
+					z
+						.object({ query: z.string().optional(), page_token: SearchPage.field().optional() })
+						.superRefine(() => {}),
+					z
+						.object({
+							parking_lots: z.array(z.object({ parking_lot_id: z.string() })),
+							page_token: SearchPage.field().optional(),
+							summary: z.string(),
+						})
+						.superRefine(() => {}),
+				),
+				"parking-detail": opWith(
+					z.object({ parking_lot_id: z.string() }),
+					z.object({
+						available_days: z.array(z.object({ date: z.string() })),
+						purchase_token: PurchaseOffer.field().optional(),
+						purchase_expires_at: z.string().optional(),
+					}),
+				),
+				"check-availability": opWith(
+					z.object({ parking_lot_id: z.string() }),
+					z.object({
+						slots: z.array(z.object({ using_time_minutes: z.number() })),
+						purchase_token: PurchaseOffer.field().optional(),
+					}),
+				),
+				"send-payment-sms": opWith(
+					z.object({ phone: z.string() }),
+					z.object({ payment_auth_token: PaymentAuth.field(), message: z.string() }),
+				),
+				"start-payment": opWith(
+					z.object({
+						purchase_token: PurchaseOffer.field(),
+						date: z.string().min(1).optional(),
+						using_time_minutes: z.number().int().positive().optional(),
+						payment_auth_token: PaymentAuth.field(),
+						auth_code: z.string(),
+					}),
+					z.object({ payment_id: z.string() }),
+				),
+			},
+		});
+
+		// handles.ts declared: page "search-parking", purchase none (comment names both), payauth "send-payment-sms".
+		expect(SearchPage.fieldName).toBe("page_token");
+		expect(SearchPage.issuedBy).toBe("search-parking");
+		expect(PurchaseOffer.fieldName).toBe("purchase_token");
+		expect(PurchaseOffer.issuedBy).toEqual(["parking-detail", "check-availability"]);
+		expect(PaymentAuth.fieldName).toBe("payment_auth_token");
+		expect(PaymentAuth.issuedBy).toBe("send-payment-sms");
+	});
+
+	it("careem: sensitive() and describeKey() clones inside arrays and strict objects", () => {
+		const paymentSelection = defineCursor({
+			name: "payment",
+			schema: z.object({ account_id: z.string() }).strict(),
+			ttl: "20m",
+			maxEntries: 100,
+		});
+		const rideQuote = defineDraft({
+			name: "quote",
+			schema: z.object({ account_id: z.string() }).strict(),
+			ttl: { idle: "5m", max: "5m" },
+			maxEntries: 100,
+		});
+		const cancellationAttempt = defineDraft({
+			name: "cancel",
+			schema: z.object({ account_id: z.string() }).strict(),
+			ttl: { idle: "1m", max: "1m" },
+			maxEntries: 100,
+		});
+		const CancellationDecisionSchema = z.object({ cancellation_reason: z.string() });
+
+		defineProvider({
+			...DECLARATION,
+			id: "careem",
+			state: {},
+			handle: [paymentSelection, rideQuote, cancellationAttempt],
+		})({
+			operations: {
+				"list-ride-payment-options": opWith(
+					z.object({ service_area_id: z.string() }).strict(),
+					z
+						.object({
+							currency: z.string(),
+							payment_options: z.array(
+								z
+									.object({
+										payment_option_token: sensitive(
+											paymentSelection.field().describeKey("taxi.fields.paymentOptionToken"),
+											"token",
+										),
+										display_name: z.string().min(1),
+										usable: z.boolean(),
+									})
+									.strict(),
+							),
+						})
+						.strict(),
+				),
+				"estimate-fare": opWith(
+					z
+						.object({
+							vehicle_type_id: z.string(),
+							pickup_time: z.string().optional(),
+							payment_option_token: sensitive(
+								paymentSelection.field().describeKey("taxi.fields.paymentOptionToken"),
+								"token",
+							),
+						})
+						.strict(),
+					z
+						.object({
+							quote_token: sensitive(
+								rideQuote.field().describeKey("taxi.fields.quoteToken"),
+								"token",
+							),
+							minimum_fare: z.number(),
+							maximum_fare: z.number(),
+						})
+						.strict()
+						.refine((value) => value.minimum_fare <= value.maximum_fare),
+				),
+				"request-ride": opWith(
+					z
+						.object({
+							quote_token: sensitive(
+								rideQuote.field().describeKey("taxi.lifecycle.requestRide.input.quoteToken"),
+								"token",
+							),
+							confirm: z.literal(true),
+						})
+						.strict(),
+					z.object({ ride_id: z.string() }).strict(),
+				),
+				"get-cancellation-policy": opWith(
+					z
+						.object({ ride_id: z.string(), origin: z.object({ latitude: z.number() }).optional() })
+						.strict(),
+					CancellationDecisionSchema.extend({
+						cancellation_token: sensitive(
+							cancellationAttempt
+								.field()
+								.describeKey("taxi.lifecycle.cancellation.output.cancellationToken"),
+							"token",
+						),
+					}).strict(),
+				),
+				"cancel-ride": opWith(
+					z
+						.object({
+							cancellation_token: sensitive(
+								cancellationAttempt
+									.field()
+									.describeKey("taxi.lifecycle.cancel.input.cancellationToken"),
+								"token",
+							),
+							confirm: z.literal(true),
+						})
+						.strict(),
+					z.object({ status: z.literal("cancelled") }).strict(),
+				),
+			},
+		});
+
+		// taxi-handles.ts declared: payment "list-ride-payment-options", quote "estimate-fare", cancel "get-cancellation-policy".
+		expect(paymentSelection.fieldName).toBe("payment_option_token");
+		expect(paymentSelection.issuedBy).toBe("list-ride-payment-options");
+		expect(rideQuote.fieldName).toBe("quote_token");
+		expect(rideQuote.issuedBy).toBe("estimate-fare");
+		expect(cancellationAttempt.fieldName).toBe("cancellation_token");
+		expect(cancellationAttempt.issuedBy).toBe("get-cancellation-policy");
 	});
 });
 

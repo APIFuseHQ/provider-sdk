@@ -95,14 +95,6 @@ function byRule(diagnostics: readonly LintDiagnostic[], rule: string): LintDiagn
 	return diagnostics.filter((diagnostic) => diagnostic.rule === rule);
 }
 
-const RETIRED_HANDLE_RULES = [
-	"handle-kind-undeclared",
-	"handle-field-name",
-	"handle-field-parity",
-	"handle-issued-by",
-	"handle-requires-state",
-] as const;
-
 describe("handle lint rules", () => {
 	it("is silent for a provider that declares its kinds and places their fields", () => {
 		const diagnostics = lintProvider(validProvider());
@@ -110,32 +102,6 @@ describe("handle lint rules", () => {
 		expect(rulesOf(diagnostics, "handle-")).toEqual([]);
 		expect(byRule(diagnostics, "legacy-handle-declaration")).toEqual([]);
 		expect(byRule(diagnostics, "legacy-choice-usage")).toEqual([]);
-	});
-
-	describe("retired rules", () => {
-		// The facts those rules cross-checked are now written once (the schema key
-		// and the issuing output) or refused by the compiler (`handle` without
-		// `state`, a kind outside `handle: [...]` passed to ctx.handle), so a
-		// provider that would have tripped them reports nothing here.
-		it("does not report a field under a key other than the kind's name, a missing side, or a missing state", () => {
-			const provider = validProvider();
-			delete provider.state;
-			provider.operations["waiting-confirm"] = operation(
-				{ token: handleField() },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-			provider.operations["waiting-prepare"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{
-					ok: described(z.boolean(), "fields.ok"),
-					page_cursor: handleField({ kind: "page", type: "cursor", fieldName: "page_cursor" }),
-				},
-			);
-
-			const rules = lintProvider(provider).map((diagnostic) => diagnostic.rule);
-
-			for (const retired of RETIRED_HANDLE_RULES) expect(rules).not.toContain(retired);
-		});
 	});
 
 	describe("legacy-handle-declaration", () => {
