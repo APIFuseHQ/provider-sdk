@@ -9,8 +9,18 @@ import type { ResolverVendorUnavailableReason } from "./resolver-vendors/types.j
  * It does not assert that a later protected request succeeded. Stealth reports
  * that verification separately through the refetch status and challenge outcome.
  */
-export type ResolverTelemetryOutcome = "solved" | "cached" | "exhausted" | "aborted" | "error";
-export type ResolverTelemetryCacheStatus = "hit" | "miss" | "disabled" | "not_cacheable";
+export type ResolverTelemetryOutcome =
+	| "solved"
+	| "cached"
+	| "exhausted"
+	| "aborted"
+	| "error"
+	/** The caller left mid-solve; the vendor poll finished afterwards and the cache was written. */
+	| "detached_completed"
+	/** The caller left mid-solve; the vendor poll failed afterwards. */
+	| "detached_failed";
+/** `in_flight`: no entry yet, but another caller is solving this challenge and this one joined it. */
+export type ResolverTelemetryCacheStatus = "hit" | "miss" | "in_flight" | "disabled" | "not_cacheable";
 export type ResolverTelemetryIdentitySource = "declared" | "defaulted" | "none";
 export type ResolverTelemetryPhase =
 	| "create_task"

@@ -8,6 +8,7 @@ import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	swapResolverAdapterFactoryForTests,
+	resetResolverRuntimeStateForTests,
 } from "../runtime/resolver.js";
 import { ResolverTelemetryCollector } from "../runtime/resolver-telemetry.js";
 import {
@@ -89,6 +90,7 @@ let providerOrdinal = 0;
 let restoreAdapter: (() => void) | undefined;
 
 beforeEach(() => {
+	resetResolverRuntimeStateForTests();
 	originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
 	originalCapsolverKey = process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY];
 	originalNodemavenUsername = process.env[NODEMAVEN_USERNAME_ENV];

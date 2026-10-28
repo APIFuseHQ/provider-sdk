@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { defineProvider } from "../../define.js";
@@ -14,7 +14,12 @@ import {
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	createResolverClientFromEnv,
 	swapResolverAdapterFactoryForTests,
+	resetResolverRuntimeStateForTests,
 } from "../resolver.js";
+
+beforeEach(() => {
+	resetResolverRuntimeStateForTests();
+});
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,

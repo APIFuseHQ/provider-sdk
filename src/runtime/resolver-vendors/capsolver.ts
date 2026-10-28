@@ -11,6 +11,7 @@ import {
 	type ResolverIdentity,
 	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
+	type ResolverVendorBalance,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	recordResolverVendorPoll,
@@ -30,6 +31,7 @@ const SDK_ESTIMATED_COOKIE_TTL_MS_BY_CHALLENGE_KIND = {
 
 type Delay = (ms: number, signal: AbortSignal) => Promise<void>;
 type CapsolverOperationPhase = "create_task" | "poll_result";
+type CapsolverRequestPhase = CapsolverOperationPhase | "get_balance";
 
 export interface CapsolverResolverVendorOptions {
 	readonly apiKey?: string;
@@ -73,7 +75,7 @@ class CapsolverUnavailableError extends ResolverVendorUnavailableError {
 	constructor(
 		reason: ResolverVendorUnavailableReason,
 		options: {
-			readonly phase: CapsolverOperationPhase;
+			readonly phase: CapsolverRequestPhase;
 			readonly cause?: unknown;
 			readonly errorCode?: string;
 			readonly errorDescription?: string;
@@ -101,6 +103,10 @@ interface CapsolverResponseErrorFields {
 
 interface CapsolverCreateTaskResponse extends CapsolverResponseErrorFields {
 	readonly taskId: string | number | undefined;
+}
+
+interface CapsolverBalanceResponse extends CapsolverResponseErrorFields {
+	readonly balance: number | undefined;
 }
 
 interface CapsolverPollResultResponse extends CapsolverResponseErrorFields {
@@ -187,7 +193,7 @@ function sanitizedJsonParseCause(): SyntaxError {
 function raceWithAbort<T>(
 	operation: () => Promise<T>,
 	signal: AbortSignal,
-	phase?: CapsolverOperationPhase,
+	phase?: CapsolverRequestPhase,
 	sensitiveValues: readonly string[] = [],
 ): Promise<T> {
 	if (signal.aborted) return Promise.reject(abortReason(signal));
@@ -250,6 +256,16 @@ function parseCreateTaskResponse(payload: JsonRecord): CapsolverCreateTaskRespon
 	return {
 		...responseErrorFields(payload),
 		taskId: typeof taskId === "string" || typeof taskId === "number" ? taskId : undefined,
+	};
+}
+
+function parseBalanceResponse(payload: JsonRecord): CapsolverBalanceResponse {
+	return {
+		...responseErrorFields(payload),
+		balance:
+			typeof payload.balance === "number" && Number.isFinite(payload.balance)
+				? payload.balance
+				: undefined,
 	};
 }
 
@@ -335,11 +351,11 @@ function vendorErrorDetails(
 
 function unavailableForPayload(
 	payload: CapsolverResponseErrorFields,
-	phase: CapsolverOperationPhase,
+	phase: CapsolverRequestPhase,
 	sensitiveValues: readonly string[],
 ): ResolverVendorUnavailableError | ResolverChallengeVerdictError {
 	const details = vendorErrorDetails(payload, sensitiveValues);
-	if (isNegativeVerdict(payload)) {
+	if (phase !== "get_balance" && isNegativeVerdict(payload)) {
 		return new CapsolverVerdictError({ phase, ...details });
 	}
 	return new CapsolverUnavailableError(
@@ -353,7 +369,7 @@ async function postJson<TResponse>(
 	url: string,
 	body: JsonRecord,
 	signal: AbortSignal,
-	phase: CapsolverOperationPhase,
+	phase: CapsolverRequestPhase,
 	sensitiveValues: readonly string[],
 	parseResponse: (payload: JsonRecord) => TResponse,
 ): Promise<{ readonly ok: boolean; readonly payload: TResponse }> {
@@ -460,6 +476,28 @@ export function createCapsolverResolverVendorAdapter(
 
 		supports(kind) {
 			return resolverVendorSupports(CAPSOLVER_VENDOR_ID, kind);
+		},
+
+		async getBalance(signal): Promise<ResolverVendorBalance> {
+			const apiKey = options.apiKey?.trim();
+			if (!apiKey) {
+				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "missing_credentials", {
+					phase: "get_balance",
+				});
+			}
+			const result = await postJson(
+				fetchImpl,
+				endpoint(baseUrl, "getBalance"),
+				{ clientKey: apiKey },
+				signal,
+				"get_balance",
+				[apiKey],
+				parseBalanceResponse,
+			);
+			if (!result.ok || result.payload.errorId !== 0 || result.payload.balance === undefined) {
+				throw unavailableForPayload(result.payload, "get_balance", [apiKey]);
+			}
+			return { balance: result.payload.balance };
 		},
 
 		async solve(challenge, identity, callerSignal, traceRecorder, _transport, usage) {

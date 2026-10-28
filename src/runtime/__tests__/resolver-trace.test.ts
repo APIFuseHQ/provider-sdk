@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 
 import { capturedError, createProviderContextDouble } from "../../__tests__/test-utils.js";
 import { ProviderError } from "../../errors.js";
@@ -12,7 +12,15 @@ import type {
 import { createProviderCache } from "../cache.js";
 import { wrapWithInstrumentation } from "../instrumentation.js";
 import { spansToOTLP } from "../otlp.js";
-import { createResolverClient, invalidateResolverSolution } from "../resolver.js";
+import {
+	createResolverClient,
+	invalidateResolverSolution,
+	resetResolverRuntimeStateForTests,
+} from "../resolver.js";
+
+beforeEach(() => {
+	resetResolverRuntimeStateForTests();
+});
 import type { ResolverVendorAdapter } from "../resolver-vendors/types.js";
 import { ResolverVendorUnavailableError } from "../resolver-vendors/types.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";

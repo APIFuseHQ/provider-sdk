@@ -26,6 +26,7 @@ import {
 	createResolverClientFromEnvForTests,
 	DEFAULT_RESOLVER_VENDOR_PREFERENCE,
 	RESOLVER_ADAPTER_REGISTRY,
+	resetResolverRuntimeStateForTests,
 	resolveProviderResolverVendors,
 	swapResolverDefaultUserAgentForTests,
 } from "../resolver.js";
@@ -77,6 +78,7 @@ let originalNodemavenUsername: string | undefined;
 let originalNodemavenPassword: string | undefined;
 
 beforeEach(() => {
+	resetResolverRuntimeStateForTests();
 	originalNodemavenUsername = process.env[NODEMAVEN_USERNAME_ENV];
 	originalNodemavenPassword = process.env[NODEMAVEN_PASSWORD_ENV];
 	delete process.env[NODEMAVEN_USERNAME_ENV];

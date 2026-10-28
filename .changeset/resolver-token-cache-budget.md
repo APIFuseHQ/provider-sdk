@@ -1,0 +1,5 @@
+---
+"@apifuse/provider-sdk": minor
+---
+
+Resolver runtime: cache token-form solutions of cacheable kinds (`aws_waf`) for a per-kind TTL, so a 2captcha solve is reused like a capsolver cookie solve; keep a vendor poll running after the caller aborts (bounded by the vendor timeout), write its result to the cache and report `detached_completed` / `detached_failed`, with later callers joining the in-flight solve (`cacheStatus: "in_flight"`) instead of paying for another task; lower `DEFAULT_RESOLVER_TIMEOUT_MS` to 45 s and solve within the operation's declared `timeoutMs` minus `RESOLVER_BUDGET_MARGIN_MS`, skipping a vendor whose measured median solve cannot finish in the time left (`budget_exceeded`); put a vendor that reported an exhausted allocation on a cooldown (`APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS`, default 10 min) during which the chain skips it without a paid call (`cooldown`); add `getBalance` to the capsolver and 2captcha adapters, `refreshResolverVendorBalances` for hosts to poll on their own cadence, and `getResolverVendorHealthSnapshot` (balance, cooldown, rolling p50 and success counts per kind, detached outcomes).

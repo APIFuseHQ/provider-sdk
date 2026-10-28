@@ -715,6 +715,7 @@ function createStealthChallengeDetection(
 										telemetry: resolverOptions.telemetry,
 										browserTelemetry: resolverOptions.browserTelemetry,
 										identityScope: resolverOptions.identityScope,
+										deadlineAtMs: resolverOptions.deadlineAtMs,
 										// No proxyIntent: the transport is already bound to the initiating
 										// request's lease, and a second identity resolution would allocate
 										// again (and fail closed without allocator credentials) for nothing
@@ -950,16 +951,24 @@ function createProviderContext(
 		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
 	);
 	const { capabilityModules } = options;
-	const resolverOptions = createResolverRuntimeOptions(
-		provider,
-		cache,
-		resolverIdentityScope,
-		proxyPolicy,
-		proxyClientOptions,
-		stealthProfile,
-		scope.resolverTelemetry,
-		scope.browserTelemetry,
-	);
+	const operationTimeoutMs = provider.operations[operationId]?.timeoutMs;
+	const resolverOptions: ResolverRuntimeOptions = {
+		...createResolverRuntimeOptions(
+			provider,
+			cache,
+			resolverIdentityScope,
+			proxyPolicy,
+			proxyClientOptions,
+			stealthProfile,
+			scope.resolverTelemetry,
+			scope.browserTelemetry,
+		),
+		// The declared operation timeout is the budget the hub enforces; a solve that
+		// outlives it is paid for nothing.
+		...(operationTimeoutMs !== undefined && operationTimeoutMs > 0
+			? { deadlineAtMs: Date.now() + operationTimeoutMs }
+			: {}),
+	};
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
 		capabilityModules.resolver,

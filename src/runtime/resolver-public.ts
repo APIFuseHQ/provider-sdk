@@ -5,22 +5,31 @@ export {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
+	APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS,
 	bindResolverSignal,
 	createResolverClient,
 	createResolverClientFromEnv,
 	createUnsupportedResolverClient,
 	DEFAULT_RESOLVER_VENDOR_PREFERENCE,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS,
 	getResolverSolutionSource,
+	getResolverVendorHealthSnapshot,
 	invalidateCachedResolverSolution,
 	invalidateResolverSolution,
+	refreshResolverVendorBalances,
 	RESOLVER_ADAPTER_REGISTRY,
+	RESOLVER_BUDGET_MARGIN_MS,
 	RESOLVER_INSTRUMENTATION_METADATA,
+	RESOLVER_TOKEN_SOLUTION_TTL_MS_BY_KIND,
 	resolveProviderResolverVendors,
 	type ResolverAdapterFactory,
 	type ResolverInstrumentationMetadata,
 	type ResolverRuntimeOptions,
 	type ResolverSolutionSource,
+	type ResolverVendorCooldownReason,
+	type ResolverVendorHealthSnapshot,
+	type ResolverVendorSolveStats,
 } from "./resolver.js";
 export {
 	type ResolverCacheReadTelemetryEvent,
@@ -40,5 +49,6 @@ export {
 } from "./resolver-telemetry.js";
 export type {
 	ResolverPaidUsageContext,
+	ResolverVendorBalance,
 	ResolverVendorUnavailableReason,
 } from "./resolver-vendors/types.js";
