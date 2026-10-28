@@ -550,9 +550,10 @@ export function createCapsolverResolverVendorAdapter(
 			try {
 				const createTask = async () => {
 					// AWS WAF tokens are portable (ADR 0006 lease A→B), so minting can use solver
-					// egress independently of the redemption proxy. Passing the caller proxy makes
-					// allowlisted allocators such as Smartproxy reject solver workers with
-					// "custom proxy connect failed" (production measurement, 2026-09-02).
+					// egress independently of the redemption proxy. Passing the caller proxy made
+					// Smartproxy's IP-allowlisted extraction endpoints reject solver workers with
+					// "custom proxy connect failed" (production measurement, 2026-09-02, before
+					// the SDK moved Smartproxy to gateway sessions).
 					const task =
 						challenge.kind === "aws_waf"
 							? {

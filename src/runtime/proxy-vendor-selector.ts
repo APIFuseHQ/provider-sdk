@@ -147,10 +147,18 @@ export const staticOrderProxyVendorSelector: ProxyVendorSelector = {
 				? {}
 				: { lifetimeMinutes: request.policy.session.lifetimeMinutes }),
 		};
+		// Attempts each vendor already served in this request. A vendor entered by
+		// resolution-time fallback (the one before it had no credentials or could not
+		// synthesize) continues after them, so a retry leaves the sticky session that
+		// just failed instead of deriving it again; the attempt's own vendor does the
+		// same once fallbacks have already used its first sessions.
+		const served = new Map<ProxyVendorName, number>();
+		for (const record of request.history ?? []) {
+			served.set(record.vendor, (served.get(record.vendor) ?? 0) + 1);
+		}
 		return request.chain.slice(slot.vendorIndex).map((vendor, offset) => ({
 			vendor,
-			// A vendor entered by resolution-time fallback starts at its first attempt.
-			vendorAttempt: offset === 0 ? slot.vendorAttempt : 0,
+			vendorAttempt: Math.max(offset === 0 ? slot.vendorAttempt : 0, served.get(vendor) ?? 0),
 			session,
 		}));
 	},

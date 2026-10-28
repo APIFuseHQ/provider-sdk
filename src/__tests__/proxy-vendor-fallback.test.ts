@@ -206,6 +206,43 @@ describe("proxy vendor fallback", () => {
 			]);
 		});
 
+		it("continues a vendor's sessions after the attempts it already served in the request", () => {
+			const policy = {
+				mode: "required" as const,
+				providers: ["smartproxy" as const, "nodemaven" as const],
+				session: { affinity: "connection" as const },
+			};
+			const select = (attempt: number, history: ProxyAttemptRequest["history"]) =>
+				staticOrderProxyVendorSelector
+					.select({
+						policy,
+						chain: ["smartproxy", "nodemaven"],
+						attempt,
+						attemptCap: 6,
+						now: 0,
+						...(history ? { history } : {}),
+					})
+					.map(({ vendor, vendorAttempt }) => [vendor, vendorAttempt]);
+			// smartproxy had no credentials on attempts 0 and 1, so NodeMaven served them.
+			const servedTwice = [
+				{ vendor: "nodemaven" as const, outcome: "error" as const },
+				{ vendor: "nodemaven" as const, outcome: "error" as const },
+			];
+			expect(select(2, servedTwice)).toEqual([
+				["smartproxy", 2],
+				["nodemaven", 2],
+			]);
+			// NodeMaven's own share starts after the sessions the fallback already used.
+			expect(select(3, [...servedTwice, { vendor: "nodemaven", outcome: "error" }])).toEqual([
+				["nodemaven", 3],
+			]);
+			// Without history (a caller outside a transport retry loop) nothing changes.
+			expect(select(2, undefined)).toEqual([
+				["smartproxy", 2],
+				["nodemaven", 0],
+			]);
+		});
+
 		it("asks the injected selector with the request id and history, and reports back to that instance", async () => {
 			const globalOutcomes: ProxyAttemptOutcome[] = [];
 			setProxyVendorSelector(recordingSelector([], globalOutcomes));

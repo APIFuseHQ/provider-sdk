@@ -1113,10 +1113,55 @@ describe("proxy integration", () => {
 		expect((nativeFetchCalls[0]?.init?.headers as Record<string, string>).dpop).toBe("proof-1");
 	});
 
+	it("moves each ctx.http retry to a new sticky session on a vendor entered by resolution fallback", async () => {
+		// smartproxy has no credentials, so every attempt of its share resolves the
+		// NodeMaven fallback. Each retry must leave the sticky session that just failed
+		// rather than derive NodeMaven's first session again.
+		useNodemavenCredentials();
+		let targetCalls = 0;
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				targetCalls += 1;
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
+				if (targetCalls < 3) throw new Error("socket hang up");
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}),
+		);
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_resolution_fallback",
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection" },
+				},
+			},
+		});
+
+		const response = await http.get("/health", {
+			retry: { attempts: 3, baseDelayMs: 0, maxDelayMs: 0, jitter: "none" },
+		});
+
+		expect(response.status).toBe(200);
+		const proxies = nativeProxyCalls();
+		expect(proxies).toHaveLength(3);
+		for (const proxy of proxies) expect(proxy).toMatch(NODEMAVEN_URL_PATTERN);
+		const sids = proxies.map((proxy) => /-sid-([0-9a-f]{10})-/.exec(proxy ?? "")?.[1]);
+		expect(new Set(sids).size).toBe(3);
+	});
+
 	it("honors an explicit ctx.http retry count on a smartproxy policy", async () => {
-		// De-duplication must not engage for an explicit retry policy: a caller that
-		// pinned `retry: { attempts: 3, statusCodes: [503] }` documented three
-		// attempts, and each one goes out on its own vendor session.
+		// A caller that pinned `retry: { attempts: 3, statusCodes: [503] }` documented
+		// three attempts, and each one goes out on its own vendor session.
 		useSmartproxyCredentials();
 		let targetCalls = 0;
 		global.fetch = createFetchDouble(

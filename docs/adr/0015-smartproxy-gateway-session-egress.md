@@ -110,16 +110,20 @@ No such credentials exist in the deployment today.
 
 4. **The fallback rule no longer depends on any policy value.** A request's
    transport attempt budget is split evenly across the declared vendors in
-   declaration order: vendor `i` serves attempts `[i × share, (i + 1) × share)`
-   with `share = ceil(cap / chainLength)` and the last vendor takes the
-   remainder (`mapAttemptToVendor`). The budget is the caller's explicit
-   `retry.attempts` when one is pinned, otherwise
-   `chainLength × PROXY_ATTEMPTS_PER_VENDOR` (3 per vendor). Every declared
-   vendor is reached whenever the budget is at least the chain length, so the
-   `poolSize <= 7` rule, the per-provider comments that restate it and the
-   runbook section that derives it have no successor. Resolution-time fallover
-   (a vendor without credentials or with an unsupported protocol, or an adapter
-   error) still moves to the next vendor inside the same attempt.
+   declaration order: vendor `i` starts at attempt `ceil(i × cap / chainLength)`
+   and serves until the next vendor's start, and the last vendor takes the
+   remainder (`mapAttemptToVendor`; a budget below the chain length counts as
+   the chain length). With two vendors the first serves `ceil(cap / 2)`
+   attempts. The budget is the caller's explicit `retry.attempts` when one is
+   pinned, otherwise `chainLength × PROXY_ATTEMPTS_PER_VENDOR` (3 per vendor),
+   on `ctx.http` and `ctx.stealth` alike. Every declared vendor is reached
+   whenever the budget is at least the chain length, so the `poolSize <= 7`
+   rule, the per-provider comments that restate it and the runbook section that
+   derives it have no successor. Resolution-time fallover (a vendor without
+   credentials or with an unsupported protocol, or an adapter error) still
+   moves to the next vendor inside the same attempt, and that vendor continues
+   after the sessions it already served in the request, so a retry leaves the
+   sticky session that just failed.
 
 5. **`session.poolSize` is removed from `ProviderProxyPolicy`** and
    `defineProvider` rejects it as an unknown field. The remaining session
@@ -158,8 +162,8 @@ Positive:
 - No allocator round trip, lock serialization, discarded batch or Redis
   dependency on the proxy path; a resolution is a pure function of the policy,
   the credentials, the affinity key, the attempt and the clock.
-- The fallback vendor is reached on attempt `share` of any request, independent
-  of any provider declaration; on the 2026-10-26 outage shape (every smartproxy
+- The fallback vendor of a two-vendor chain is reached on attempt
+  `ceil(cap / 2)` of any request, independent of any provider declaration; on the 2026-10-26 outage shape (every smartproxy
   session refused in 0.45 s) a CatchTable read reaches NodeMaven on attempt 4
   instead of 7 and an implicit GET on attempt 3 instead of 6.
 - Sticky sessions behave the same on every transport and both vendors, and
