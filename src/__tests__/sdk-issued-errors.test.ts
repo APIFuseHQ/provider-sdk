@@ -1,7 +1,24 @@
 import { describe, expect, it } from "bun:test";
 import { HandleError } from "../handle.js";
 import { ProviderError, ValidationError } from "../errors.js";
-import { isSdkIssuedError, issueSdkError, platformFaultOf } from "../sdk-issued-errors.js";
+import {
+	isSdkIssuedError,
+	issueSdkError,
+	type PlatformFault,
+	platformFaultOf,
+} from "../sdk-issued-errors.js";
+import {
+	issueStatefulRoutingDeadlineError,
+	statefulRoutingDeadlineErrorCausedBy,
+} from "../stateful/deadline-expiry.js";
+import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
+
+const STATEFUL_FORWARDING_DEADLINE_FAULT: PlatformFault = {
+	category: "stateful_forwarding_deadline",
+	code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+	status: 504,
+	retryable: false,
+};
 
 describe("sdk-issued error record", () => {
 	it("records only the very object the SDK issued", () => {
@@ -54,5 +71,28 @@ describe("sdk-issued error record", () => {
 			code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 		});
 		expect(platformFaultOf(providerCodeLookalike)).toBeUndefined();
+	});
+
+	it("records the stateful forwarding deadline fault on every deadline error the SDK raises", () => {
+		const expired = issueStatefulRoutingDeadlineError("request-1", "2026-10-28T00:00:00.000Z");
+		expect(platformFaultOf(expired)).toEqual(STATEFUL_FORWARDING_DEADLINE_FAULT);
+
+		// A conversion keeps the failure the deadline stopped as the cause of
+		// both the error and its fault.
+		const cancelled = new Error("cancelled by the deadline");
+		const converted = statefulRoutingDeadlineErrorCausedBy(
+			"request-1",
+			"2026-10-28T00:00:00.000Z",
+			cancelled,
+		);
+		expect(platformFaultOf(converted)).toEqual({
+			...STATEFUL_FORWARDING_DEADLINE_FAULT,
+			cause: cancelled,
+		});
+		expect(converted.cause).toBe(cancelled);
+
+		// The public class constructed outside the SDK carries no fault.
+		const constructed = new StatefulRoutingDeadlineError("request-1", "2026-10-28T00:00:00.000Z");
+		expect(platformFaultOf(constructed)).toBeUndefined();
 	});
 });

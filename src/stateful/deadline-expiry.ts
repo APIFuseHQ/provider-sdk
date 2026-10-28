@@ -1,24 +1,39 @@
 // Internal to the SDK: not re-exported from the stateful entry point.
-import { isSdkIssuedError, issueSdkError } from "../sdk-issued-errors.js";
+import { isSdkIssuedError, issueSdkError, type PlatformFault } from "../sdk-issued-errors.js";
 import { StatefulRoutingDeadlineError } from "./errors.js";
 
 const DEADLINE_EXPIRED_CODE = "STATEFUL_FORWARDING_DEADLINE_EXPIRED";
+
+/**
+ * The platform fault every deadline error the SDK raises stands for, before
+ * routing, while forwarding, during a local execution or on the owner route.
+ */
+const DEADLINE_EXPIRED_FAULT: PlatformFault = {
+	category: "stateful_forwarding_deadline",
+	code: DEADLINE_EXPIRED_CODE,
+	status: 504,
+	retryable: false,
+};
 
 type DeadlineAbortReasonName = "AbortError" | "TimeoutError";
 
 /**
  * The StatefulRoutingDeadlineError the SDK raises when a stateful request's
- * deadline expires, before routing, while forwarding or on the owner route.
- * The class is exported from the stateful entry point, so a provider can
- * construct one too; serve answers with the forwarding deadline's outcome
- * (504, STATEFUL_FORWARDING_DEADLINE_EXPIRED, source apifuse) only for an
- * error made here (`isIssuedStatefulRoutingDeadlineError`).
+ * deadline expires, before routing, while forwarding or on the owner route,
+ * issued with the deadline's platform fault. The class is exported from the
+ * stateful entry point, so a provider can construct one too; serve answers
+ * with the forwarding deadline's outcome (504,
+ * STATEFUL_FORWARDING_DEADLINE_EXPIRED, source apifuse) only for an error made
+ * here (`isIssuedStatefulRoutingDeadlineError`).
  */
 export function issueStatefulRoutingDeadlineError(
 	requestId: string,
 	deadlineAt: string,
 ): StatefulRoutingDeadlineError {
-	return issueSdkError(new StatefulRoutingDeadlineError(requestId, deadlineAt));
+	return issueSdkError(
+		new StatefulRoutingDeadlineError(requestId, deadlineAt),
+		DEADLINE_EXPIRED_FAULT,
+	);
 }
 
 /**
@@ -153,14 +168,18 @@ export function errorCauseChainCarriesDeadline(
 /**
  * A StatefulRoutingDeadlineError that keeps the failure the deadline produced
  * as its `cause`, attached like a native `{ cause }` option so the logged cause
- * chain still shows what was cancelled. The public constructor stays unchanged.
+ * chain still shows what was cancelled, and recorded as the deadline's platform
+ * fault with that same cause. The public constructor stays unchanged.
  */
 export function statefulRoutingDeadlineErrorCausedBy(
 	requestId: string,
 	deadlineAt: string,
 	cause: unknown,
 ): StatefulRoutingDeadlineError {
-	const expiry = issueStatefulRoutingDeadlineError(requestId, deadlineAt);
+	const expiry = issueSdkError(new StatefulRoutingDeadlineError(requestId, deadlineAt), {
+		...DEADLINE_EXPIRED_FAULT,
+		cause,
+	});
 	Object.defineProperty(expiry, "cause", {
 		value: cause,
 		writable: true,

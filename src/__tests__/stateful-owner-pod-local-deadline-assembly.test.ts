@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { TransportError } from "../errors.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
+import { type PlatformFault, platformFaultOf } from "../sdk-issued-errors.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
@@ -173,6 +174,8 @@ type Pod = {
 	readonly manager: StatefulProviderSessionManager<HoldSession>;
 	readonly events: ProviderServerLogEvent[];
 	readonly metrics: RecordedMetric[];
+	/** The error the pod's router threw for each request id, as serve received it. */
+	readonly routeErrors: Map<string, unknown>;
 	/** The error response each request id was answered with, whether or not its caller stayed. */
 	readonly served: Map<string, Served>;
 	readonly servedWaiters: Map<string, Waiter>;
@@ -199,6 +202,7 @@ function parseObservability(response: Response): unknown {
 function startPod(podId: string, role: "owner" | "source"): Pod {
 	const events: ProviderServerLogEvent[] = [];
 	const metrics: RecordedMetric[] = [];
+	const routeErrors = new Map<string, unknown>();
 	const served = new Map<string, Served>();
 	const servedWaiters = new Map<string, Waiter>();
 	const metricEmitter: StatefulProviderMetricEmitter = {
@@ -222,21 +226,26 @@ function startPod(podId: string, role: "owner" | "source"): Pod {
 	const execute: ProviderServerOperationExecutor = async ({ ctx, request, operationId }) => {
 		if (!router) throw new Error(`${podId} received an operation before its router was wired`);
 		const deadlineAt = request.deadlineAt ?? request.headers?.["x-test-deadline-at"];
-		const result = await router.route({
-			requestId: request.requestId,
-			sessionKey,
-			providerId: PROVIDER_ID,
-			operationId,
-			connectionId: "connection-1",
-			serviceAccountId: "account-1",
-			input: request.input,
-			...(deadlineAt ? { deadlineAt } : {}),
-			runtimeContext: withStatefulLocalProviderContext(
-				ctx,
-				statefulForwardingContextFromProviderRequest(request),
-			),
-		});
-		return result.output;
+		try {
+			const result = await router.route({
+				requestId: request.requestId,
+				sessionKey,
+				providerId: PROVIDER_ID,
+				operationId,
+				connectionId: "connection-1",
+				serviceAccountId: "account-1",
+				input: request.input,
+				...(deadlineAt ? { deadlineAt } : {}),
+				runtimeContext: withStatefulLocalProviderContext(
+					ctx,
+					statefulForwardingContextFromProviderRequest(request),
+				),
+			});
+			return result.output;
+		} catch (error) {
+			routeErrors.set(request.requestId, error);
+			throw error;
+		}
 	};
 
 	const app = createServerApp(provider, {
@@ -284,7 +293,18 @@ function startPod(podId: string, role: "owner" | "source"): Pod {
 		leaseDurationMs: 30_000,
 		metricEmitter,
 	});
-	return { podId, endpoint, server, router, manager, events, metrics, served, servedWaiters };
+	return {
+		podId,
+		endpoint,
+		server,
+		router,
+		manager,
+		events,
+		metrics,
+		routeErrors,
+		served,
+		servedWaiters,
+	};
 }
 
 const owner = startPod("pod-owner", "owner");
@@ -349,6 +369,8 @@ async function callSourcePod(operationId: string, requestId: string) {
 		caller,
 		holdReached,
 		owner: owner.served.get(requestId),
+		ownerRouteError: owner.routeErrors.get(requestId),
+		sourceRouteError: source.routeErrors.get(requestId),
 		ownerLog: failureLog(owner, requestId),
 		ownerDeadlineMetrics: deadlineMetrics(owner, requestId),
 	};
@@ -371,6 +393,17 @@ const DEADLINE_EXPIRED_OBSERVABILITY = {
 	taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	retryable: false,
 };
+// The platform fault the router records on the deadline error it raises for a
+// failure the deadline stopped, with that failure as the cause.
+function deadlineFaultCausedBy(cause: unknown): PlatformFault {
+	return {
+		category: "stateful_forwarding_deadline",
+		code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+		status: 504,
+		retryable: false,
+		cause,
+	};
+}
 
 describe("stateful forwarding deadline expiring during the owner pod's local execution", () => {
 	it(
@@ -402,6 +435,19 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			expect(result.caller.status).toBe(504);
 			expect(result.caller.observability).toEqual(DEADLINE_EXPIRED_OBSERVABILITY);
 			expect(result.caller.body).toEqual(DEADLINE_EXPIRED_BODY("owner-deadline-cancels-read"));
+			// Both routers raised the deadline as the platform fault, each with
+			// the failure it converted as the cause: the owner's local read, and
+			// the source's forwarding failure.
+			const ownerRouteError = result.ownerRouteError as { cause?: unknown } | undefined;
+			expect(ownerRouteError?.cause).toMatchObject({ code: "transport_cancelled" });
+			expect(platformFaultOf(ownerRouteError)).toEqual(
+				deadlineFaultCausedBy(ownerRouteError?.cause),
+			);
+			const sourceRouteError = result.sourceRouteError as { cause?: unknown } | undefined;
+			expect(sourceRouteError?.cause).toBeDefined();
+			expect(platformFaultOf(sourceRouteError)).toEqual(
+				deadlineFaultCausedBy(sourceRouteError?.cause),
+			);
 		},
 		{ timeout: 10_000 },
 	);
@@ -480,6 +526,9 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			expect(result.ownerDeadlineMetrics).toEqual([]);
 			expect(result.caller.status).toBe(500);
 			expect(result.caller.observability).not.toEqual(DEADLINE_EXPIRED_OBSERVABILITY);
+			// The router handed serve the provider's own instance, without a fault.
+			expect(result.ownerRouteError).toBeInstanceOf(StatefulRoutingDeadlineError);
+			expect(platformFaultOf(result.ownerRouteError)).toBeUndefined();
 		},
 		{ timeout: 10_000 },
 	);
@@ -509,6 +558,13 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			expect(result.ownerDeadlineMetrics).toHaveLength(1);
 			expect(result.caller.status).toBe(504);
 			expect(result.caller.observability).toEqual(DEADLINE_EXPIRED_OBSERVABILITY);
+			// The fault is on the router's own error, caused by the provider's.
+			const ownerRouteError = result.ownerRouteError as { cause?: unknown } | undefined;
+			expect(ownerRouteError?.cause).toBeInstanceOf(StatefulRoutingDeadlineError);
+			expect(platformFaultOf(ownerRouteError)).toEqual(
+				deadlineFaultCausedBy(ownerRouteError?.cause),
+			);
+			expect(platformFaultOf(ownerRouteError?.cause)).toBeUndefined();
 		},
 		{ timeout: 10_000 },
 	);
