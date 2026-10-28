@@ -22,9 +22,12 @@
 #
 # Rules, in order:
 #   1. throw-site          new ProviderError(msg, { code: "X", ...rest })  -> errors.X({ message: msg, ...rest })
-#                          (per-throw category/retryable are dropped: the declaration owns them)
+#                          (per-throw category/retryable are dropped: the declaration owns them;
+#                          a code that is not an identifier, e.g. "429", is reached as errors["429"])
 #   2. operation-list      errorCodes: [ { code: "X", ... }, ...TABLE ]     -> errors: [ errors.X, ...Object.values(TABLE) ]
 #   3. declaration-table   const T = [ { code: "X", status, description, retryable }, ... ] as const
+#                          (only a table whose rows carry both code and status; a lookup table of
+#                          { code, name } rows is not an error table and is left alone)
 #                          -> const T = defineErrors({ X: sdkErrors.X | { status, description, retryable, category? } })
 #                          (a registered code becomes `sdkErrors.X` only when the row's status and
 #                          retryable equal the registry's; otherwise the row keeps its values)
@@ -42,6 +45,7 @@ rule:
 constraints:
   CODE:
     kind: string
+    regex: "^[\"'][A-Za-z_$][A-Za-z0-9_$]*[\"']$"
 rewriters:
   - id: keep-throw-props
     rule:
@@ -76,9 +80,57 @@ transform:
   INPUT:
     replace:
       source: $REST
-      replace: '^(.+)$'
+      replace: '(?s)^(.+)$'
       by: ', $1'
 fix: 'errors.$CODE_NAME({ message: $MSG$INPUT })'
+---
+# A code that is not an identifier (numeric, hyphenated) is reached by bracket
+# access; defineErrors keeps it under the same string key.
+id: errors-factory-throw-site-bracket
+language: typescript
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  has:
+    pattern:
+      context: '{ code: $CODE }'
+      selector: pair
+    stopBy: end
+constraints:
+  CODE:
+    kind: string
+    regex: "^[\"'](.*[^A-Za-z0-9_$].*|[0-9].*)[\"']$"
+rewriters:
+  - id: keep-throw-props
+    rule:
+      pattern: $PROP
+      any:
+        - kind: pair
+          not:
+            any:
+              - pattern:
+                  context: '{ code: $_ }'
+                  selector: pair
+              - pattern:
+                  context: '{ category: $_ }'
+                  selector: pair
+              - pattern:
+                  context: '{ retryable: $_ }'
+                  selector: pair
+        - kind: spread_element
+        - kind: shorthand_property_identifier
+    fix: $PROP
+transform:
+  REST:
+    rewrite:
+      source: $$$PROPS
+      rewriters: [keep-throw-props]
+      joinBy: ', '
+  INPUT:
+    replace:
+      source: $REST
+      replace: '(?s)^(.+)$'
+      by: ', $1'
+fix: 'errors[$CODE]({ message: $MSG$INPUT })'
 ---
 id: errors-factory-operation-list
 language: typescript
@@ -101,6 +153,7 @@ rewriters:
     constraints:
       CODE:
         kind: string
+        regex: "^[\"'][A-Za-z_$][A-Za-z0-9_$]*[\"']$"
     transform:
       CODE_NAME:
         substring:
@@ -108,6 +161,18 @@ rewriters:
           startChar: 1
           endChar: -1
     fix: errors.$CODE_NAME
+  - id: entry-to-factory-bracket
+    rule:
+      kind: object
+      has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+    constraints:
+      CODE:
+        kind: string
+        regex: "^[\"'](.*[^A-Za-z0-9_$].*|[0-9].*)[\"']$"
+    fix: errors[$CODE]
   - id: spread-to-factories
     rule:
       pattern:
@@ -118,7 +183,7 @@ transform:
   FACTORIES:
     rewrite:
       source: $$$ENTRIES
-      rewriters: [entry-to-factory, spread-to-factories]
+      rewriters: [entry-to-factory, entry-to-factory-bracket, spread-to-factories]
       joinBy: ', '
 fix: 'errors: [$FACTORIES]'
 ---
@@ -131,10 +196,13 @@ rule:
     - pattern: 'const $NAME: $TYPE = [ $$$ENTRIES ]'
   has:
     kind: object
-    has:
-      pattern:
-        context: '{ code: $_, status: $_ }'
-        selector: pair
+    all:
+      - has:
+          kind: pair
+          has: { field: key, regex: '^code$' }
+      - has:
+          kind: pair
+          has: { field: key, regex: '^status$' }
     stopBy: end
 rewriters:
   - id: keep-row-fields
@@ -391,7 +459,7 @@ rewriters:
           source: $$$FIELDS
           rewriters: [keep-row-fields]
           joinBy: ', '
-    fix: '$CODE_NAME: { category: "upstream_rejected", $REST }'
+    fix: '$CODE: { category: "upstream_rejected", $REST }'
   - id: provider-row
     rule:
       pattern:
@@ -415,7 +483,7 @@ rewriters:
           source: $$$FIELDS
           rewriters: [keep-row-fields]
           joinBy: ', '
-    fix: '$CODE_NAME: { $REST }'
+    fix: '$CODE: { $REST }'
   - id: table-spread
     rule:
       kind: spread_element

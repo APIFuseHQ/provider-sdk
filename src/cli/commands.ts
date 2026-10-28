@@ -3,6 +3,7 @@ export type ApifuseCommandName =
 	| "dev"
 	| "check"
 	| "sync-assets"
+	| "migrate"
 	| "migrate-shape"
 	| "migrate-operation-declaration"
 	| "migrate-deployment"
@@ -58,6 +59,14 @@ export const COMMAND_MANIFEST: Record<
 		usage: "apifuse sync-assets [path] [--check]",
 		examples: ["apifuse sync-assets .", "apifuse sync-assets . --check"],
 		modulePath: "./apifuse-sync-assets",
+	},
+	migrate: {
+		name: "migrate",
+		summary:
+			"Run the SDK's migration codemods (errors-factory, health-refs, handles, runtime-boundary-allow-comments) against a provider in dependency order and report files changed and the residues left to you.",
+		usage: "apifuse migrate [path] [--dry-run] [--only <codemod>] [--json]",
+		examples: ["apifuse migrate . --dry-run", "apifuse migrate . --only errors-factory"],
+		modulePath: "./apifuse-migrate",
 	},
 	"migrate-shape": {
 		name: "migrate-shape",
@@ -156,6 +165,7 @@ export const COMMAND_ORDER: ApifuseCommandName[] = [
 	"dev",
 	"check",
 	"sync-assets",
+	"migrate",
 	"migrate-shape",
 	"migrate-operation-declaration",
 	"migrate-deployment",
