@@ -4138,15 +4138,42 @@ describe("operation-declared error resolution", () => {
 				retryable: true,
 			},
 			{
-				name: "instance-explicit retryable",
+				// The deprecated per-throw option keeps the order the server always
+				// had: a deterministic refusal thrown retryable: false stays
+				// non-retryable under a declaration that says true.
+				name: "the deprecated per-throw retryable beats the declaration",
 				entry: {
 					code: "INSTANCE_POLICY",
 					status: 502,
-					description: "Instance owns retry policy",
+					description: "The declaration says retryable; this throw is a refusal",
 					retryable: true,
 				},
 				createError: () =>
 					new ProviderError("Do not retry", { code: "INSTANCE_POLICY", retryable: false }),
+				status: 502,
+				retryable: false,
+			},
+			{
+				name: "the declaration answers a throw that sets no per-throw retryable",
+				entry: {
+					code: "DECLARED_POLICY",
+					status: 502,
+					description: "The declaration owns retry policy",
+					retryable: false,
+				},
+				createError: () => new ProviderError("Refused", { code: "DECLARED_POLICY" }),
+				status: 502,
+				retryable: false,
+			},
+			{
+				name: "per-throw retryable fills a silent declaration",
+				entry: {
+					code: "SILENT_POLICY",
+					status: 502,
+					description: "The declaration says nothing about retries",
+				},
+				createError: () =>
+					new ProviderError("Do not retry", { code: "SILENT_POLICY", retryable: false }),
 				status: 502,
 				retryable: false,
 			},

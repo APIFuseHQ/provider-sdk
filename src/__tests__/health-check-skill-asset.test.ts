@@ -70,9 +70,11 @@ describe("health-checks-and-fail-closed prompt asset", () => {
 		expect(section).toContain("error: errors.NO_DATA");
 		expect(section).toContain('reasonCode: "expected_absence"');
 		expect(section).toContain("never retries");
-		// What the reference type refuses, and what is never an absence.
+		// What the reference type refuses, the lint contract the by-code form
+		// still has to satisfy, and what is never an absence.
 		expect(section).toContain("`errorCodes`");
 		expect(section).toContain("compile errors");
+		expect(section).toContain("`defineErrors` factory");
 		expect(section).toContain("401/403/429");
 		expect(section).toContain("Keep the row guard");
 	});

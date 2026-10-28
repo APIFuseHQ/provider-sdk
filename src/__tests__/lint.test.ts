@@ -675,493 +675,87 @@ describe("lintProvider", () => {
 	});
 });
 
-describe("lintProvider thrown-error-code-undeclared", () => {
-	const undeclaredRule = (item: { rule: string }) => item.rule === "thrown-error-code-undeclared";
-
-	function providerWithSources(
-		providerSourceFiles: Record<string, string>,
-		errorCodes: ReadonlyArray<{ code: string; status?: 400 | 409; description: string }> = [],
-	) {
-		return {
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party" as const,
-			providerSourceFiles,
-			operations: {
-				lookup: {
-					riskClass: READ_RISK_CLASS,
-					descriptionKey: "operations.lookup.description",
-					input: withDescriptionKey(
-						z.object({
-							symbol: withDescriptionKey(z.string(), "operations.lookup.fields.symbol.description"),
-						}),
-						"operations.lookup.input.description",
-					),
-					output: withDescriptionKey(
-						z.object({
-							price: withDescriptionKey(z.number(), "operations.lookup.fields.price.description"),
-						}),
-						"operations.lookup.output.description",
-					),
-					fixtures: { request: { symbol: "BTC" }, response: { price: 100 } },
-					errorCodes: [...errorCodes],
-				},
-			},
-		};
-	}
-
-	it("warns on a literal thrown code that no operation declares", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"upstream/client.ts": `throw new ProviderError("sold out", { retryable: false, code: "ITEM_SOLD_OUT" });`,
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([
-			expect.objectContaining({
-				rule: "thrown-error-code-undeclared",
-				level: "warn",
-				field: "sourceFiles.upstream/client.ts",
-			}),
-		]);
-		expect(diagnostics[0]?.message).toContain('"ITEM_SOLD_OUT"');
-		expect(diagnostics[0]?.message).toContain("upstream/client.ts");
-		expect(diagnostics[0]?.message).toContain("errorCodes");
-	});
-
-	it("stays silent when any operation declares the thrown code", () => {
-		const diagnostics = lintProvider(
-			providerWithSources(
-				{
-					"upstream/client.ts": `throw new ProviderError("sold out", { code: "ITEM_SOLD_OUT" });`,
-				},
-				[{ code: "ITEM_SOLD_OUT", status: 409, description: "Upstream refused the purchase." }],
-			),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([]);
-	});
-
-	it("stays silent for SDK-registered codes", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"index.ts": [
-					`throw new ProviderError("upstream broke", { code: "UPSTREAM_ERROR" });`,
-					`throw new ProviderError("secret missing", { code: "MISSING_SECRET" });`,
-					`throw new ProviderError("relog", { code: "reauth_required" });`,
-					`throw new ProviderError("resign", { code: "http_header_factory_failed" });`,
-				].join("\n"),
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([]);
-	});
-
-	it("stays silent for the registered fleet-consensus codes", () => {
-		// Registering these is what lets 70+ provider repos stop repeating the
-		// same three errorCodes rows on every operation.
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"upstream/client.ts": [
-					`throw new ProviderError("key refused", { code: "UPSTREAM_AUTH_ERROR" });`,
-					`throw new ProviderError("shape drifted", { code: "UPSTREAM_SCHEMA_ERROR" });`,
-					`throw new ValidationError("bad input", { code: "INVALID_REQUEST" });`,
-				].join("\n"),
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([]);
-	});
-
-	it("still flags the minority spellings that migrate on the contract track", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"upstream/client.ts": [
-					`throw new ProviderError("shape drifted", { code: "UPSTREAM_SCHEMA_CHANGED" });`,
-					`throw new ValidationError("bad input", { code: "INVALID_INPUT" });`,
-				].join("\n"),
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics.map((item) => item.message).join("\n")).toContain(
-			'"UPSTREAM_SCHEMA_CHANGED"',
-		);
-		expect(diagnostics.map((item) => item.message).join("\n")).toContain('"INVALID_INPUT"');
-	});
-
-	it("skips computed or dynamic codes silently", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"index.ts": [
-					`throw new ProviderError("dyn", { code: upstreamCode });`,
-					// biome-ignore lint/suspicious/noTemplateCurlyInString: fixture intentionally embeds a template expression as source text.
-					'throw new ProviderError("tpl", { code: `UPSTREAM_${kind}` });',
-					`throw new ProviderError("ternary", { code: soldOut ? "A_CODE" : "B_CODE" });`,
-					`throw new ProviderError("concat", { code: "PREFIX_" + suffix });`,
-				].join("\n"),
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([]);
-	});
-
-	it("flags ValidationError constructions too", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"index.ts": `throw new ValidationError("bad input", { code: "WEIRD_INPUT" });`,
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([
-			expect.objectContaining({ level: "warn", field: "sourceFiles.index.ts" }),
-		]);
-		expect(diagnostics[0]?.message).toContain('"WEIRD_INPUT"');
-	});
-
-	it("does not read codes out of message strings or nested objects", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"index.ts": [
-					`throw new ProviderError('set code: "NOT_A_CODE" upstream', { code: dynamic });`,
-					`throw new ProviderError("nested", { details: { code: "INNER_CODE" }, code: dynamic });`,
-				].join("\n"),
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([]);
-	});
-
-	it("ignores test sources", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"index.test.ts": `throw new ProviderError("boom", { code: "TEST_ONLY_CODE" });`,
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([]);
-	});
-
-	it("falls back to operation handler source when no source files are provided", () => {
-		const base = providerWithSources({});
-		const provider = {
-			...base,
-			providerSourceFiles: undefined,
-			operations: {
-				lookup: {
-					...base.operations.lookup,
-					source: `async () => { throw new ProviderError("nope", { code: "HANDLER_ONLY_CODE" }); }`,
-				},
-			},
-		};
-
-		const diagnostics = lintProvider(provider).filter(undeclaredRule);
-
-		expect(diagnostics).toEqual([
-			expect.objectContaining({ level: "warn", field: "operations.lookup.handler" }),
-		]);
-		expect(diagnostics[0]?.message).toContain('"HANDLER_ONLY_CODE"');
-	});
-
-	it("reports each undeclared code once per file", () => {
-		const diagnostics = lintProvider(
-			providerWithSources({
-				"index.ts": [
-					`throw new ProviderError("first", { code: "DUP_CODE" });`,
-					`throw new ProviderError("second", { code: "DUP_CODE" });`,
-				].join("\n"),
-			}),
-		).filter(undeclaredRule);
-
-		expect(diagnostics).toHaveLength(1);
-	});
-});
-
-describe("lintProvider error-code declaration conflicts", () => {
-	const conflictRule = (item: { rule: string }) =>
-		item.rule === "error-code-status-conflicts-sdk" ||
-		item.rule === "error-code-retryable-conflicts-sdk";
-
-	function providerWithErrorCodes(
-		errorCodes: ReadonlyArray<{
-			code: string;
-			status?: number;
-			description: string;
-			retryable?: boolean;
-		}>,
-	) {
-		return lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			operations: {
-				lookup: {
-					riskClass: READ_RISK_CLASS,
-					descriptionKey: "operations.lookup.description",
-					input: withDescriptionKey(z.object({}), "operations.lookup.input.description"),
-					output: withDescriptionKey(z.object({}), "operations.lookup.output.description"),
-					fixtures: { request: {}, response: {} },
-					errorCodes: [...errorCodes],
-				},
-			},
-		}).filter(conflictRule);
-	}
-
-	it("warns when a declared status contradicts the SDK mapping", () => {
-		const diagnostics = providerWithErrorCodes([
-			{
-				code: "UPSTREAM_AUTH_ERROR",
-				status: 502,
-				description: "Upstream refused the platform service key.",
-			},
-		]);
-
-		expect(diagnostics).toEqual([
-			expect.objectContaining({
-				rule: "error-code-status-conflicts-sdk",
-				level: "warn",
-				field: "operations.lookup.errorCodes[0].status",
-			}),
-		]);
-		expect(diagnostics[0]?.message).toContain('"UPSTREAM_AUTH_ERROR"');
-		expect(diagnostics[0]?.message).toContain("502");
-		expect(diagnostics[0]?.message).toContain("400");
-		// The message must say the declaration still wins, because it does — an
-		// author who reads "SDK-registered" as "SDK now decides" would otherwise
-		// believe a status changed under them.
-		expect(diagnostics[0]?.message).toContain("still wins at runtime");
-	});
-
-	it("warns when a declared retryable contradicts the SDK mapping", () => {
-		const diagnostics = providerWithErrorCodes([
-			{
-				code: "UPSTREAM_SCHEMA_ERROR",
-				status: 502,
-				description: "Upstream changed its response shape.",
-				retryable: true,
-			},
-		]);
-
-		expect(diagnostics).toEqual([
-			expect.objectContaining({
-				rule: "error-code-retryable-conflicts-sdk",
-				level: "warn",
-				field: "operations.lookup.errorCodes[0].retryable",
-			}),
-		]);
-		expect(diagnostics[0]?.message).toContain('"UPSTREAM_SCHEMA_ERROR"');
-		expect(diagnostics[0]?.message).toContain("retryable true");
-	});
-
-	it("reports both axes when status and retryable each diverge", () => {
-		const diagnostics = providerWithErrorCodes([
-			{
-				code: "UPSTREAM_SCHEMA_ERROR",
-				status: 400,
-				description: "Upstream changed its response shape.",
-				retryable: true,
-			},
-		]);
-
-		expect(diagnostics.map((item) => item.rule)).toEqual([
-			"error-code-status-conflicts-sdk",
-			"error-code-retryable-conflicts-sdk",
-		]);
-	});
-
-	it("stays silent when a declaration agrees with the SDK mapping", () => {
-		// Agreeing declarations keep documentation value and are not churn the
-		// fleet should be asked to make; only divergence is reported.
-		expect(
-			providerWithErrorCodes([
-				{
-					code: "UPSTREAM_SCHEMA_ERROR",
-					status: 502,
-					description: "Upstream changed its response shape.",
-					retryable: false,
-				},
-				{ code: "INVALID_REQUEST", status: 400, description: "Caller sent bad input." },
-				{ code: "UPSTREAM_ERROR", status: 502, description: "Upstream failed." },
-			]),
-		).toEqual([]);
-	});
-
-	it("stays silent for codes the SDK does not register and for omitted fields", () => {
-		expect(
-			providerWithErrorCodes([
-				{ code: "ITEM_SOLD_OUT", status: 409, description: "Upstream refused the purchase." },
-				{ code: "UPSTREAM_AUTH_ERROR", description: "Upstream refused the platform key." },
-				{ code: "UPSTREAM_SCHEMA_ERROR", description: "Upstream changed its response shape." },
-			]),
-		).toEqual([]);
-	});
-
-	it("leaves SDK runtime-owned codes to defineProvider", () => {
-		// For runtime-owned codes the declaration really is ignored, and
-		// defineProvider already says so; two messages about one line is worse
-		// than one.
-		expect(
-			providerWithErrorCodes([
-				{ code: "NOT_FOUND", status: 502, description: "Resource missing.", retryable: true },
-			]),
-		).toEqual([]);
-	});
-});
-
-describe("lintProvider thrown-error-retryable-conflicts-declaration", () => {
-	const conflictRule = (item: { rule: string }) =>
-		item.rule === "thrown-error-retryable-conflicts-declaration";
-
-	function operation(
-		errorCodes: ReadonlyArray<{
-			code: string;
-			status?: number;
-			description: string;
-			retryable?: boolean;
-		}>,
-	) {
-		return {
-			riskClass: READ_RISK_CLASS,
-			descriptionKey: "operations.lookup.description",
-			input: withDescriptionKey(z.object({}), "operations.lookup.input.description"),
-			output: withDescriptionKey(z.object({}), "operations.lookup.output.description"),
-			fixtures: { request: {}, response: {} },
-			errorCodes: [...errorCodes],
-		};
-	}
+describe("lintProvider legacy-error-options", () => {
+	const legacy = (item: { rule: string }) => item.rule === "legacy-error-options";
 
 	function lintSources(
 		providerSourceFiles: Record<string, string>,
-		errorCodes: ReadonlyArray<{
-			code: string;
-			status?: number;
-			description: string;
-			retryable?: boolean;
-		}>,
-		extraOperations: Record<string, ReturnType<typeof operation>> = {},
+		errorCodes: ReadonlyArray<{ code: string; status?: 400 | 502; description: string }> = [],
 	) {
 		return lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
+			id: "demo",
 			providerSourceFiles,
-			operations: { lookup: operation(errorCodes), ...extraOperations },
-		}).filter(conflictRule);
+			operations: {
+				lookup: {
+					input: z.object({}),
+					output: z.object({}),
+					riskClass: READ_RISK_CLASS,
+					...(errorCodes.length > 0 ? { errorCodes: [...errorCodes] } : {}),
+				},
+			},
+		}).filter(legacy);
 	}
 
-	// Buyee shape: errors.ts declares UPSTREAM_ERROR non-retryable, upstream/buyee.ts
-	// mints the same code with retryable: true.
-	const upstreamErrorDeclaredNonRetryable = [
-		{
-			code: "UPSTREAM_ERROR",
-			status: 502,
-			description: "Buyee returned an unexpected HTTP status.",
-			retryable: false,
-		},
-	];
-
-	it("errors when a thrown retryable literal contradicts the declaration", () => {
-		const diagnostics = lintSources(
-			{
-				"upstream/buyee.ts": [
-					"throw new ProviderError(`Buyee responded with HTTP ${response.status}`, {",
-					'\tcode: "UPSTREAM_ERROR",',
-					"\tretryable: true,",
-					"});",
-				].join("\n"),
-			},
-			upstreamErrorDeclaredNonRetryable,
-		);
+	it("warns once per code and option set on a throw site that sets category or retryable", () => {
+		const diagnostics = lintSources({
+			"upstream/client.ts": [
+				`throw new ProviderError("blocked", { code: "BLOCKED", category: "anti_bot_blocked", retryable: false });`,
+				`throw new ProviderError("blocked again", { code: "BLOCKED", category: "anti_bot_blocked", retryable: false });`,
+				`throw new ValidationError("bad row", { code: "ROW_INVALID", retryable: true });`,
+			].join("\n"),
+		});
 
 		expect(diagnostics).toEqual([
 			expect.objectContaining({
-				rule: "thrown-error-retryable-conflicts-declaration",
-				level: "error",
-				field: "sourceFiles.upstream/buyee.ts",
+				rule: "legacy-error-options",
+				level: "warn",
+				field: "sourceFiles.upstream/client.ts",
+				message: expect.stringContaining('ProviderError with code "BLOCKED"'),
+			}),
+			expect.objectContaining({
+				field: "sourceFiles.upstream/client.ts",
+				message: expect.stringContaining('ValidationError with code "ROW_INVALID"'),
 			}),
 		]);
-		expect(diagnostics[0]?.message).toContain('"UPSTREAM_ERROR"');
-		expect(diagnostics[0]?.message).toContain("retryable true");
-		expect(diagnostics[0]?.message).toContain("declaration says retryable false");
-	});
-
-	it("stays silent when the thrown literal agrees with the declaration", () => {
-		expect(
-			lintSources(
-				{
-					"upstream/buyee.ts": `throw new ProviderError("bad gateway", { code: "UPSTREAM_ERROR", retryable: false });`,
-				},
-				upstreamErrorDeclaredNonRetryable,
-			),
-		).toEqual([]);
-	});
-
-	it("stays silent when the throw site sets no retryable literal", () => {
-		expect(
-			lintSources(
-				{
-					"upstream/buyee.ts": [
-						`throw new ProviderError("bad gateway", { code: "UPSTREAM_ERROR" });`,
-						`throw new ProviderError("dyn", { code: "UPSTREAM_ERROR", retryable: isTransient });`,
-						`throw new ProviderError("short", { code: "UPSTREAM_ERROR", retryable });`,
-					].join("\n"),
-				},
-				upstreamErrorDeclaredNonRetryable,
-			),
-		).toEqual([]);
-	});
-
-	it("falls back to the SDK canonical value for a registered code nobody declares", () => {
-		const diagnostics = lintSources(
-			{
-				"upstream/client.ts": `throw new ProviderError("shape", { code: "UPSTREAM_SCHEMA_ERROR", retryable: true });`,
-			},
-			[],
+		expect(diagnostics[0]?.message).toContain(
+			"defineErrors({ BLOCKED: { status, category, description } })",
 		);
+		expect(diagnostics[0]?.message).toContain("errors.BLOCKED({ details, cause })");
+	});
+
+	it("warns on a non-literal category too, since a variable may carry any category", () => {
+		const diagnostics = lintSources({
+			"upstream/client.ts": `throw new ProviderError("gone", { code: "ITEM_GONE", category });`,
+		});
 
 		expect(diagnostics).toHaveLength(1);
-		expect(diagnostics[0]?.message).toContain("SDK canonical registration says retryable false");
+		expect(diagnostics[0]?.message).toContain("sets category per throw");
 	});
 
-	it("stays silent for an undeclared, unregistered code and for test sources", () => {
-		expect(
-			lintSources(
-				{
-					"upstream/client.ts": `throw new ProviderError("sold out", { code: "ITEM_SOLD_OUT", retryable: true });`,
-					"upstream/buyee.test.ts": `throw new ProviderError("x", { code: "UPSTREAM_ERROR", retryable: true });`,
-				},
-				upstreamErrorDeclaredNonRetryable,
-			),
-		).toEqual([]);
+	it("warns on an operation that still declares codes in the errorCodes table", () => {
+		const diagnostics = lintSources({}, [
+			{ code: "ITEM_GONE", status: 502, description: "Item withdrawn." },
+			{ code: "UPSTREAM_ERROR", status: 502, description: "Upstream failed." },
+		]);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "legacy-error-options",
+				level: "warn",
+				field: "operations.lookup.errorCodes",
+				message: expect.stringContaining(
+					"declares ITEM_GONE, UPSTREAM_ERROR in the deprecated errorCodes table",
+				),
+			}),
+		]);
 	});
 
-	it("stays silent when operations declare the same code with different retryable values", () => {
-		expect(
-			lintSources(
-				{
-					"upstream/client.ts": `throw new ProviderError("x", { code: "UPSTREAM_ERROR", retryable: true });`,
-				},
-				upstreamErrorDeclaredNonRetryable,
-				{
-					search: operation([
-						{ code: "UPSTREAM_ERROR", status: 502, description: "Flaky.", retryable: true },
-					]),
-				},
-			),
-		).toEqual([]);
-	});
+	it("stays silent for a throw site that only sets code, details and cause", () => {
+		const diagnostics = lintSources({
+			"upstream/client.ts": `throw new ProviderError("gone", { code: "ITEM_GONE", details: { id }, cause });`,
+		});
 
-	it("reports one diagnostic per code and value per file", () => {
-		const diagnostics = lintSources(
-			{
-				"upstream/client.ts": [
-					`throw new ProviderError("first", { code: "UPSTREAM_ERROR", retryable: true });`,
-					`throw new ProviderError("second", { retryable: true, code: "UPSTREAM_ERROR" });`,
-				].join("\n"),
-			},
-			upstreamErrorDeclaredNonRetryable,
-		);
-
-		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics).toEqual([]);
 	});
 });
 

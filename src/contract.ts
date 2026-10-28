@@ -13,11 +13,13 @@ import {
 	type ProviderContractOperation,
 	type ProviderContractSnapshot,
 } from "./contract-types.js";
+import type { ProviderErrorDeclaration } from "./define-errors.js";
 import type {
 	HealthCheckSuite,
 	HealthCheckUnsupported,
 	HealthJourneyDefinition,
 	OperationDefinition,
+	OperationErrorCode,
 	OperationTransport,
 	ProviderDefinition,
 } from "./types.js";
@@ -95,7 +97,7 @@ function extractOperation(
 	const whenToUseKeys = toJsonValue(operation.whenToUseKeys);
 	const whenNotToUseKeys = toJsonValue(operation.whenNotToUseKeys);
 	const normalizationNotesKeys = toJsonValue(operation.normalizationNotesKeys);
-	const errorCodes = toJsonValue(operation.errorCodes);
+	const errorCodes = toJsonValue(contractErrorCodes(operation));
 	const examples = toJsonValue(operation.examples);
 	const contract = toJsonValue(operation.contract);
 	const tags = toJsonValue(operation.tags);
@@ -138,6 +140,29 @@ function extractOperation(
 		...(healthCheck === undefined ? {} : { healthCheck }),
 		...(healthCheckUnsupported === undefined ? {} : { healthCheckUnsupported }),
 		...(noMedia === undefined ? {} : { noMedia }),
+	};
+}
+
+// The contract publishes one `errorCodes` table whichever way the operation
+// declared its codes: the legacy entries as written, and each `errors`
+// factory's declaration projected to the same row shape (the catalog schema
+// pins it; category is served, not published).
+function contractErrorCodes(operation: OperationDefinition): OperationErrorCode[] | undefined {
+	const declared = (operation.errors ?? []).map(({ declaration }) =>
+		contractErrorCode(declaration),
+	);
+	const entries = [...(operation.errorCodes ?? []), ...declared];
+	return entries.length > 0 ? entries : undefined;
+}
+
+function contractErrorCode(declaration: ProviderErrorDeclaration): OperationErrorCode {
+	return {
+		code: declaration.code,
+		status: declaration.status,
+		description: declaration.description,
+		retryable: declaration.retryable,
+		...(declaration.messageKey === undefined ? {} : { messageKey: declaration.messageKey }),
+		...(declaration.fixKey === undefined ? {} : { fixKey: declaration.fixKey }),
 	};
 }
 

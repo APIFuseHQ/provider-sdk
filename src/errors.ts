@@ -46,7 +46,21 @@ export type ProviderErrorOptions = {
 	code?: string;
 	details?: unknown;
 	cause?: Error;
+	/**
+	 * @deprecated Declare the code once with `defineErrors({ CODE: { status, category, description } })`
+	 * and throw `errors.CODE({ details, cause })`; the category then comes from the
+	 * declaration. A per-throw category is honored for one more release and the
+	 * server logs one warning per code.
+	 */
 	category?: ProviderErrorCategory;
+	/**
+	 * @deprecated Declare the code once with `defineErrors({ CODE: { status, category, retryable, description } })`
+	 * and throw `errors.CODE({ details, cause })`; retryability then comes from the
+	 * declaration. This option is honored for one more release and still wins over
+	 * the declaration while it exists; the server logs one warning per code, naming
+	 * both values when they differ. For a condition with a different retryability,
+	 * declare a distinct code rather than override per throw.
+	 */
 	retryable?: boolean;
 	/** Provider-authored, bounded metadata safe for operational logs and error headers. */
 	observability?: ProviderErrorObservability;
@@ -85,7 +99,12 @@ export type ProviderErrorObservability = {
 	messageLength?: number;
 };
 
-export class ProviderError extends Error {
+/**
+ * `TCode` is the error's `code` as a literal union when a `defineErrors`
+ * factory made it (`errors.ITEM_NOT_FOUND()` is a `ProviderError<"ITEM_NOT_FOUND">`);
+ * a hand-constructed error is a `ProviderError<string>`.
+ */
+export class ProviderError<TCode extends string = string> extends Error {
 	constructor(
 		message: string,
 		public readonly options?: ProviderErrorOptions,
@@ -102,8 +121,8 @@ export class ProviderError extends Error {
 		return this.options?.fix;
 	}
 
-	get code(): string | undefined {
-		return this.options?.code;
+	get code(): TCode | undefined {
+		return this.options?.code as TCode | undefined;
 	}
 
 	get details(): unknown {

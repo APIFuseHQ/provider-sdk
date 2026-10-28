@@ -1,15 +1,20 @@
 import { defineOperation } from "@apifuse/provider-sdk/provider";
 import type { ProviderContext } from "../index";
 
+import { errors } from "../domain/errors";
 import { pingInputSchema, pingOutputSchema } from "../schemas/ping";
 
 export const pingOperation = defineOperation<ProviderContext>()({
   connectionMode: "none",
   riskClass: "read",
   descriptionKey: "operations.ping.description",
+  errors: [errors.VALUE_EMPTY],
   input: pingInputSchema,
   output: pingOutputSchema,
   handler: async ({{HANDLER_CTX}}, input) => {
+    if (input.value.trim().length === 0) {
+      throw errors.VALUE_EMPTY({ details: { value: input.value } });
+    }
     {{BROWSER_HANDLER_BLOCK}}
     return {
       ok: true,

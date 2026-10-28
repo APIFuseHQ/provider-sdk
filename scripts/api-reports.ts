@@ -102,6 +102,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType DeclaredHandleKind HandleField HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
+			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorObservability ProviderErrorOptions ProviderErrorCategory PROVIDER_ERROR_CATEGORIES
 		`,
 	),
 	"index.api.md": forgottenExports(
@@ -119,6 +120,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			TraceContext_2 VALID_OPERATION_ERROR_STATUSES WebSocketOperationConfig
 			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			CheckedDefineErrorsInput SDK_ERROR_REGISTRY
 		`,
 	),
 	"provider.api.md": forgottenExports(
@@ -146,6 +148,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			NativeConnectTelemetryEvent NativeLifecycleTelemetryEvent NativeTelemetryDiagnostics NativeTelemetryErrorCode NativeTelemetryKind NativeTelemetryLifecycleKind NativeTelemetryOutcome NativeTelemetrySink NativeTelemetryVendorSkipReason NativeVendorSkipTelemetryEvent ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent ProxyVendorName
+			CheckedDefineErrorsInput SDK_ERROR_REGISTRY
 		`,
 	),
 	"runtime-browser.api.md": forgottenExports(
@@ -235,6 +238,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 								CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType DeclaredHandleKind HandleField HandleOperation HandleRecord HandleStatus HandleStrength HandleTelemetryEvent HandleTelemetryOutcome HandleWordCount ResultOf
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
+			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorOptions
 		`,
 	),
 	"stateful.api.md": forgottenExports(
@@ -283,6 +287,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType DeclaredHandleKind HandleField HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
+			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorObservability ProviderErrorOptions ProviderErrorCategory PROVIDER_ERROR_CATEGORIES
 		`,
 	),
 };

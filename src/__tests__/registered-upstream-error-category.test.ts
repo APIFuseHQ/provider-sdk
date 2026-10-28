@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import {
+	SDK_ERROR_REGISTRY_BY_CODE,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
-	SDK_UPSTREAM_ERROR_CODE_REGISTRY,
 } from "../error-resolution.js";
 import { AuthError, ProviderError, type ProviderErrorOptions, ValidationError } from "../errors.js";
 import {
@@ -30,56 +30,112 @@ import { createProviderDefinitionDouble } from "./test-utils.js";
 const READ_RISK_CLASS: OperationRiskClass = "read";
 
 // The served contract for every registered upstream code thrown without a
-// category, written out literally: a registry row that changes its category,
-// or a new row, has to change this table too.
+// category or retryable option, written out literally: a registry row that
+// changes, or a new row, has to change this table too.
 const EXPECTED_UPSTREAM_CODES: ReadonlyArray<{
 	code: string;
 	status: ProviderErrorStatus;
 	category: ProviderErrorCategory;
 	source: ProviderErrorSource;
+	retryable: boolean;
 }> = [
-	{ code: "NOT_FOUND", status: 404, category: "upstream_http", source: "upstream_failure" },
-	{ code: "not_found", status: 404, category: "upstream_http", source: "upstream_failure" },
-	{ code: "NO_DATA", status: 404, category: "upstream_http", source: "upstream_failure" },
+	{
+		code: "NOT_FOUND",
+		status: 404,
+		category: "upstream_http",
+		source: "upstream_failure",
+		retryable: false,
+	},
+	{
+		code: "not_found",
+		status: 404,
+		category: "upstream_http",
+		source: "upstream_failure",
+		retryable: false,
+	},
+	{
+		code: "NO_DATA",
+		status: 404,
+		category: "upstream_http",
+		source: "upstream_failure",
+		retryable: false,
+	},
 	{
 		code: "RATE_LIMITED",
 		status: 429,
 		category: "upstream_rate_limited",
 		source: "upstream_rule",
+		retryable: true,
 	},
 	{
 		code: "UPSTREAM_RATE_LIMIT",
 		status: 429,
 		category: "upstream_rate_limited",
 		source: "upstream_rule",
+		retryable: true,
 	},
 	{
 		code: "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR",
 		status: 429,
 		category: "upstream_rate_limited",
 		source: "upstream_rule",
+		retryable: true,
 	},
 	{
 		code: "UPSTREAM_REJECTED",
 		status: 409,
 		category: "upstream_rejected",
 		source: "upstream_rule",
+		retryable: false,
 	},
-	{ code: "UPSTREAM_ERROR", status: 502, category: "upstream_http", source: "upstream_failure" },
-	{ code: "BLOCKED", status: 502, category: "anti_bot_blocked", source: "upstream_failure" },
+	{
+		code: "UPSTREAM_ERROR",
+		status: 502,
+		category: "upstream_http",
+		source: "upstream_failure",
+		retryable: true,
+	},
+	{
+		code: "BLOCKED",
+		status: 502,
+		category: "anti_bot_blocked",
+		source: "upstream_failure",
+		retryable: false,
+	},
 	{
 		code: "UPSTREAM_AUTH_ERROR",
 		status: 400,
 		category: "upstream_auth",
 		source: "upstream_failure",
+		retryable: false,
 	},
 	{
 		code: "UPSTREAM_SCHEMA_ERROR",
 		status: 502,
 		category: "upstream_schema_drift",
 		source: "upstream_failure",
+		retryable: false,
 	},
 ];
+
+// Caller-side registry rows: served from the registry too, but attributed to
+// the caller, so they sit outside the upstream table above.
+const EXPECTED_CALLER_CODES = [
+	{
+		code: "AUTH_REQUIRED",
+		status: 401,
+		category: "credential_unavailable",
+		source: "client",
+		retryable: false,
+	},
+	{
+		code: "INVALID_REQUEST",
+		status: 400,
+		category: "input_validation",
+		source: "client",
+		retryable: false,
+	},
+] as const;
 
 const ObservabilityHeaderSchema = z.object({
 	category: z.enum(PROVIDER_ERROR_CATEGORIES),
@@ -149,25 +205,30 @@ function throwing(code: string, options: ProviderErrorOptions = {}): () => Provi
 	return () => new ProviderError(`probe ${code}`, { code, ...options });
 }
 
-describe("registered upstream error code registry", () => {
+describe("registered error code registry", () => {
 	it("pins every registry row to the literal served contract", () => {
-		expect([...SDK_UPSTREAM_ERROR_CODE_REGISTRY.keys()].sort()).toEqual(
-			EXPECTED_UPSTREAM_CODES.map((entry) => entry.code).sort(),
+		expect([...SDK_ERROR_REGISTRY_BY_CODE.keys()].sort()).toEqual(
+			[...EXPECTED_UPSTREAM_CODES, ...EXPECTED_CALLER_CODES].map((entry) => entry.code).sort(),
 		);
-		for (const expected of EXPECTED_UPSTREAM_CODES) {
+		for (const expected of [...EXPECTED_UPSTREAM_CODES, ...EXPECTED_CALLER_CODES]) {
+			const row = SDK_ERROR_REGISTRY_BY_CODE.get(expected.code);
 			expect({
 				code: expected.code,
-				...SDK_UPSTREAM_ERROR_CODE_REGISTRY.get(expected.code),
+				status: row?.status,
+				category: row?.category,
+				retryable: row?.retryable,
 			}).toEqual({
 				code: expected.code,
 				status: expected.status,
 				category: expected.category,
+				retryable: expected.retryable,
 			});
+			expect(row?.description.trim().length).toBeGreaterThan(0);
 		}
 	});
 
 	it("feeds each row's status into the status map, so the served status is unchanged", () => {
-		for (const [code, registration] of SDK_UPSTREAM_ERROR_CODE_REGISTRY) {
+		for (const [code, registration] of SDK_ERROR_REGISTRY_BY_CODE) {
 			expect({ code, status: SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(code) }).toEqual({
 				code,
 				status: registration.status,
@@ -175,13 +236,17 @@ describe("registered upstream error code registry", () => {
 		}
 	});
 
-	it("attributes every row to the upstream", () => {
-		// The table is for codes that name what the upstream did. A caller-side
-		// or APIFuse-side code here would be misattributed to the upstream.
-		for (const [code, { category }] of SDK_UPSTREAM_ERROR_CODE_REGISTRY) {
-			expect({ code, source: sourceForCategory(category) }).toEqual({
-				code,
+	it("attributes every upstream row to the upstream and every caller row to the client", () => {
+		for (const expected of EXPECTED_UPSTREAM_CODES) {
+			expect({ code: expected.code, source: sourceForCategory(expected.category) }).toEqual({
+				code: expected.code,
 				source: expect.stringMatching(/^upstream_(rule|failure)$/),
+			});
+		}
+		for (const expected of EXPECTED_CALLER_CODES) {
+			expect({ code: expected.code, source: sourceForCategory(expected.category) }).toEqual({
+				code: expected.code,
+				source: "client",
 			});
 		}
 	});
@@ -192,10 +257,10 @@ describe("registered upstream error code registry", () => {
 			["BLOCKED", "anti_bot_blocked"],
 			["UPSTREAM_AUTH_ERROR", "upstream_auth"],
 		]);
-		for (const [code, registration] of SDK_UPSTREAM_ERROR_CODE_REGISTRY) {
-			expect({ code, category: registration.category }).toEqual({
-				code,
-				category: narrower.get(code) ?? categoryForStatus(registration.status),
+		for (const expected of EXPECTED_UPSTREAM_CODES) {
+			expect({ code: expected.code, category: expected.category }).toEqual({
+				code: expected.code,
+				category: narrower.get(expected.code) ?? categoryForStatus(expected.status),
 			});
 		}
 	});
@@ -210,11 +275,9 @@ describe("serving a registered upstream code thrown without a category", () => {
 				status: expected.status,
 				code: expected.code,
 				source: expected.source,
-				// Retryability does not follow the derived category: an
-				// undeclared throw stays non-retryable, as before.
-				retryable: false,
+				retryable: expected.retryable,
 				category: expected.category,
-				headerRetryable: false,
+				headerRetryable: expected.retryable,
 				loggedCategory: expected.category,
 			});
 		});
@@ -356,11 +419,11 @@ describe("serving an explicit category or an unregistered code", () => {
 		}
 	});
 
-	it("keeps custom and non-upstream registered codes on their existing defaults", async () => {
+	it("serves caller-side registry rows as the caller's, and keeps custom and SDK-owned codes on their defaults", async () => {
 		const cases = [
 			{ code: "SOME_CUSTOM_CODE", status: 500, category: "provider_error", source: "apifuse" },
-			{ code: "INVALID_REQUEST", status: 400, category: "provider_error", source: "apifuse" },
-			{ code: "AUTH_REQUIRED", status: 401, category: "provider_error", source: "apifuse" },
+			{ code: "INVALID_REQUEST", status: 400, category: "input_validation", source: "client" },
+			{ code: "AUTH_REQUIRED", status: 401, category: "credential_unavailable", source: "client" },
 			{
 				code: "MISSING_SECRET",
 				status: 400,

@@ -825,6 +825,11 @@ type ChallengeSolution = {
     readonly expires?: number;
 };
 
+// @public (undocumented)
+type CheckedDefineErrorsInput<T extends DefineErrorsInput> = {
+    readonly [K in keyof T]: K extends SdkErrorCode ? SdkErrorRef<K> | ProviderErrorFactory<K> : K extends string ? ProviderErrorDeclarationInput | ProviderErrorFactory<K> : never;
+};
+
 // @public
 export const CLOUDFLARE_BLOCK_PAGE: ResponseMatcher;
 
@@ -1197,6 +1202,11 @@ export interface DefinedCredentialsAuth {
 }
 
 // @public
+export type DefinedErrors<T extends DefineErrorsInput> = {
+    readonly [K in keyof T & string]: ProviderErrorFactory<K>;
+};
+
+// @public
 export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodType | undefined = undefined, const TName extends string = string>(options: DefineDraftOptions<TSchema, TResultSchema, TName>): DraftKind<TSchema, TResultSchema, TName>;
 
 // @public (undocumented)
@@ -1221,6 +1231,16 @@ export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema exten
         readonly max: ProviderStateDurationString;
     };
 }
+
+// Warning: (ae-forgotten-export) The symbol "CheckedDefineErrorsInput" needs to be exported by the entry point provider.d.ts
+//
+// @public
+export function defineErrors<const T extends DefineErrorsInput>(map: T & CheckedDefineErrorsInput<T>): DefinedErrors<T>;
+
+// @public
+export type DefineErrorsInput = {
+    readonly [code: string]: ProviderErrorDeclarationInput | SdkErrorRef | ProviderErrorFactory;
+};
 
 // @public
 export function defineHealthAccount(declaration: HealthAccountDeclaration): HealthAccountDeclaration;
@@ -3129,8 +3149,9 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     contract?: OperationContractMetadata;
     // (undocumented)
     descriptionKey?: ProviderLocaleKeyInput;
-    // (undocumented)
+    // @deprecated (undocumented)
     errorCodes?: readonly OperationErrorCode[];
+    errors?: readonly ProviderErrorFactory[];
     // (undocumented)
     examples?: readonly OperationExample[];
     // (undocumented)
@@ -4240,11 +4261,11 @@ export class ProviderEngineUnavailableError extends SDKError {
     constructor(message?: string, cause?: Error);
 }
 
-// @public (undocumented)
-export class ProviderError extends Error {
+// @public
+export class ProviderError<TCode extends string = string> extends Error {
     constructor(message: string, options?: ProviderErrorOptions | undefined);
     // (undocumented)
-    get code(): string | undefined;
+    get code(): TCode | undefined;
     // (undocumented)
     get details(): unknown;
     // (undocumented)
@@ -4257,6 +4278,44 @@ export class ProviderError extends Error {
 //
 // @public (undocumented)
 type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
+
+// @public
+export type ProviderErrorDeclaration<TCode extends string = string> = {
+    readonly code: TCode;
+    readonly status: ProviderErrorStatus;
+    readonly category: ProviderErrorCategory;
+    readonly retryable: boolean;
+    readonly description: string;
+    readonly messageKey?: ProviderLocaleKeyInput;
+    readonly fixKey?: ProviderLocaleKeyInput;
+};
+
+// @public
+export type ProviderErrorDeclarationInput = {
+    readonly status: ProviderErrorStatus;
+    readonly category: ProviderErrorCategory;
+    readonly retryable?: boolean;
+    readonly description: string;
+    readonly messageKey?: ProviderLocaleKeyInput;
+    readonly fixKey?: ProviderLocaleKeyInput;
+};
+
+// @public
+export type ProviderErrorFactory<TCode extends string = string> = {
+    (input?: ProviderErrorInput): ProviderError<TCode>;
+    readonly code: TCode;
+    readonly declaration: ProviderErrorDeclaration<TCode>;
+};
+
+// @public
+export type ProviderErrorInput = {
+    readonly message?: string;
+    readonly fix?: string;
+    readonly details?: unknown;
+    readonly cause?: Error;
+    readonly params?: ProviderErrorMessageParams;
+    readonly observability?: ProviderErrorObservability;
+};
 
 // @public
 export type ProviderErrorMessageParams = Readonly<Record<string, string | number>>;
@@ -5695,6 +5754,88 @@ const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
     }>;
 }, z.core.$strict>]>;
 
+// @public (undocumented)
+const SDK_ERROR_REGISTRY: {
+    readonly NOT_FOUND: {
+        readonly status: 404;
+        readonly category: "upstream_http";
+        readonly retryable: false;
+        readonly description: "The upstream has no record for the requested identifier.";
+    };
+    readonly not_found: {
+        readonly status: 404;
+        readonly category: "upstream_http";
+        readonly retryable: false;
+        readonly description: "The upstream has no record for the requested identifier.";
+    };
+    readonly NO_DATA: {
+        readonly status: 404;
+        readonly category: "upstream_http";
+        readonly retryable: false;
+        readonly description: "The upstream returned no data for the request.";
+    };
+    readonly RATE_LIMITED: {
+        readonly status: 429;
+        readonly category: "upstream_rate_limited";
+        readonly retryable: true;
+        readonly description: "The upstream rate-limited the request; retry after a delay.";
+    };
+    readonly UPSTREAM_RATE_LIMIT: {
+        readonly status: 429;
+        readonly category: "upstream_rate_limited";
+        readonly retryable: true;
+        readonly description: "The upstream rate-limited the request; retry after a delay.";
+    };
+    readonly LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR: {
+        readonly status: 429;
+        readonly category: "upstream_rate_limited";
+        readonly retryable: true;
+        readonly description: "The upstream's request quota for the service key is exhausted; retry later.";
+    };
+    readonly UPSTREAM_REJECTED: {
+        readonly status: 409;
+        readonly category: "upstream_rejected";
+        readonly retryable: false;
+        readonly description: "The upstream refused the request under its own rules.";
+    };
+    readonly UPSTREAM_ERROR: {
+        readonly status: 502;
+        readonly category: "upstream_http";
+        readonly retryable: true;
+        readonly description: "The upstream returned an HTTP failure.";
+    };
+    readonly BLOCKED: {
+        readonly status: 502;
+        readonly category: "anti_bot_blocked";
+        readonly retryable: false;
+        readonly description: "The upstream blocked the request with bot or request protection.";
+    };
+    readonly UPSTREAM_AUTH_ERROR: {
+        readonly status: 400;
+        readonly category: "upstream_auth";
+        readonly retryable: false;
+        readonly description: "The upstream refused the platform-managed credential.";
+    };
+    readonly UPSTREAM_SCHEMA_ERROR: {
+        readonly status: 502;
+        readonly category: "upstream_schema_drift";
+        readonly retryable: false;
+        readonly description: "The upstream response could not be normalized.";
+    };
+    readonly AUTH_REQUIRED: {
+        readonly status: 401;
+        readonly category: "credential_unavailable";
+        readonly retryable: false;
+        readonly description: "The request needs a connected account.";
+    };
+    readonly INVALID_REQUEST: {
+        readonly status: 400;
+        readonly category: "input_validation";
+        readonly retryable: false;
+        readonly description: "The upstream rejected the request input.";
+    };
+};
+
 // @public
 export const SDK_OWNED_HEALTH_REASON_COPY: Readonly<Record<string, typeof FRESHNESS_GUARD_REASON_COPY>>;
 
@@ -5705,6 +5846,22 @@ export type SdkCopyLocale = "en" | "ko" | "ja";
 export class SDKError extends ProviderError {
     constructor(message: string, options?: ProviderErrorOptions);
 }
+
+// Warning: (ae-forgotten-export) The symbol "SDK_ERROR_REGISTRY" needs to be exported by the entry point provider.d.ts
+//
+// @public
+export type SdkErrorCode = keyof typeof SDK_ERROR_REGISTRY;
+
+// @public
+export type SdkErrorRef<TCode extends SdkErrorCode = SdkErrorCode> = {
+    readonly sdk: true;
+    readonly code: TCode;
+} & (typeof SDK_ERROR_REGISTRY)[TCode];
+
+// @public
+export const sdkErrors: {
+    readonly [K in SdkErrorCode]: SdkErrorRef<K>;
+};
 
 // @public (undocumented)
 export function sensitive<TSchema extends ZodType>(schema: TSchema, kind?: SensitiveFieldKind): TSchema;
@@ -6485,10 +6642,10 @@ export { z }
 // dist/config/loader.d.ts:151:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/config/loader.d.ts:152:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/config/loader.d.ts:153:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point provider.d.ts
+// dist/define-errors.d.ts:33:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:134:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:166:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
-// dist/errors.d.ts:9:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:57:5 - (ae-forgotten-export) The symbol "NativeTelemetrySink" needs to be exported by the entry point provider.d.ts
@@ -6499,25 +6656,25 @@ export { z }
 // dist/runtime/native-telemetry.d.ts:40:5 - (ae-forgotten-export) The symbol "NativeTelemetryDiagnostics" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-telemetry.d.ts:44:5 - (ae-forgotten-export) The symbol "NativeTelemetryVendorSkipReason" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-telemetry.d.ts:48:5 - (ae-forgotten-export) The symbol "NativeTelemetryLifecycleKind" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:129:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:198:9 - (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:408:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:410:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:734:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:755:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1048:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1741:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1741:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2060:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2066:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2067:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2071:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2078:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2113:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2391:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2397:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2399:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:130:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:199:9 - (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:409:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:411:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:735:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:756:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1036:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1049:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1742:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1742:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2061:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2067:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2068:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2072:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2079:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2114:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2392:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2398:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2400:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

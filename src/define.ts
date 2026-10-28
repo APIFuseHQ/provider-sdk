@@ -4,6 +4,7 @@ import {
 	validateFailClosedOperationDeclaration,
 	validateFailClosedProviderDeclaration,
 } from "./declaration-validation.js";
+import { isProviderErrorFactory } from "./define-errors.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
@@ -1645,7 +1646,35 @@ function validateOperationErrorCodes(
 	operations: Record<string, ProviderOperation>,
 ): void {
 	for (const [operationName, operation] of Object.entries(operations)) {
+		const declaredCodes = new Set<string>();
+		for (const [index, factory] of (operation.errors ?? []).entries()) {
+			const field = `operations.${operationName}.errors[${index}]`;
+			if (!isProviderErrorFactory(factory)) {
+				throw new ValidationError(
+					`Provider "${providerId}" has invalid ${field}: expected a defineErrors factory.`,
+					{
+						fix: `List the factories defineErrors returned, e.g. errors: [errors.ITEM_NOT_FOUND]; a legacy { code, status } row belongs in errorCodes until it is migrated.`,
+					},
+				);
+			}
+			if (declaredCodes.has(factory.code)) {
+				throw new ValidationError(
+					`Provider "${providerId}" has invalid ${field}: error code "${factory.code}" is listed twice.`,
+					{ fix: `List errors.${factory.code} once in operations.${operationName}.errors.` },
+				);
+			}
+			declaredCodes.add(factory.code);
+		}
 		for (const [index, errorCode] of (operation.errorCodes ?? []).entries()) {
+			if (declaredCodes.has(errorCode.code)) {
+				const field = `operations.${operationName}.errorCodes[${index}]`;
+				throw new ValidationError(
+					`Provider "${providerId}" has invalid ${field}: error code "${errorCode.code}" is also declared in operations.${operationName}.errors.`,
+					{
+						fix: `Remove the errorCodes row; the defineErrors declaration is the one source for "${errorCode.code}".`,
+					},
+				);
+			}
 			if (
 				errorCode.status !== undefined &&
 				!VALID_OPERATION_ERROR_STATUSES.some((status) => status === errorCode.status)

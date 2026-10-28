@@ -24,7 +24,7 @@ operations/           # APIFuse operation contracts and handlers
 schemas/              # public input/output schemas near operations
 upstream/             # upstream ceremony: clients, auth, request builders
 mappers/              # upstream-to-APIFuse normalization helpers
-domain/               # shared provider-specific business ceremony
+domain/               # shared provider-specific business ceremony; errors.ts declares every error code once (defineErrors)
 ```
 
 Small providers may stay in one file, but larger providers are easier to

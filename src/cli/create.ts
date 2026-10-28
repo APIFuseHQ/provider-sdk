@@ -503,6 +503,10 @@ export async function buildProviderCreatePlan(
 			content: await renderTemplate("domain/README.md.tpl", {}),
 		},
 		{
+			path: resolve(providerRoot, "domain", "errors.ts"),
+			content: await renderTemplate("domain/errors.ts.tpl", {}),
+		},
+		{
 			path: resolve(providerRoot, "locales", "en.json"),
 			content: renderStarterLocaleCatalog(options.displayName, "en"),
 		},
@@ -702,6 +706,14 @@ function renderStarterLocaleCatalog(displayName: string, locale: "en" | "ko"): s
 					locale === "ko"
 						? "browser 런타임 provider일 때 로드된 페이지의 frame 개수 (해당되지 않으면 생략)"
 						: "Number of frames in the loaded page when the provider uses the browser runtime; omitted otherwise.",
+			},
+		},
+		errors: {
+			valueEmpty: {
+				message:
+					locale === "ko"
+						? "value 가 비어 있습니다. 비어 있지 않은 문자열을 보내세요."
+						: "The value is empty. Send a non-empty string.",
 			},
 		},
 	};

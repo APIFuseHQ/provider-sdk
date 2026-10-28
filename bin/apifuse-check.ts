@@ -19,6 +19,7 @@ import {
 import { redundantDeploymentDefaults } from "../src/cli/deployment-intent.js";
 import { isProviderError } from "../src/errors.js";
 import type { ProviderDefinition } from "../src/index.js";
+import { validateProviderErrorLocaleKeys } from "../src/define-errors.js";
 import { lintProviderWithInformation, type ProviderLintMode } from "../src/lint.js";
 import {
 	formatOutputUrlCoverageWarning,
@@ -155,7 +156,8 @@ export async function runChecks(
 		checkFixtures(provider),
 		checkSchemas(provider),
 		checkOutputUrlCoverage(provider),
-		checkAuthoringLint(provider, providerSourceFiles, localeCatalogEn),
+		checkAuthoringLint(provider, providerSourceFiles),
+		checkErrorLocaleKeys(provider, localeCatalogEn),
 		await checkRuntimeBoundary(providerRoot, indexPath, options.lintMode),
 		checkProviderMetadata(provider),
 		await checkDeploymentIntent(providerRoot, provider),
@@ -209,8 +211,7 @@ function formatDeclarationError(error: unknown): string[] {
 	return [error instanceof Error ? error.message : String(error)];
 }
 
-export const PROMPT_ASSETS_CHECK_MESSAGE =
-	"Agent prompt assets match the installed SDK version";
+export const PROMPT_ASSETS_CHECK_MESSAGE = "Agent prompt assets match the installed SDK version";
 
 function checkPromptAssets(providerRoot: string): CheckResult {
 	const verification = verifyPromptAssets(providerRoot);
@@ -439,10 +440,22 @@ function readEnglishLocaleCatalog(providerRoot: string): Record<string, unknown>
 	}
 }
 
+function checkErrorLocaleKeys(
+	provider: ProviderDefinition | undefined,
+	localeCatalogEn: Record<string, unknown>,
+): CheckResult {
+	const message = "Declared error locale keys resolve in locales/en.json";
+	if (!provider) return { message, passed: false };
+	const details = validateProviderErrorLocaleKeys({
+		operations: provider.operations,
+		catalog: localeCatalogEn,
+	});
+	return { message, passed: details.length === 0, ...(details.length > 0 ? { details } : {}) };
+}
+
 function checkAuthoringLint(
 	provider: ProviderDefinition | undefined,
 	providerSourceFiles: Record<string, string>,
-	localeCatalogEn: Record<string, unknown>,
 ): CheckResult {
 	if (!provider) {
 		return {
@@ -454,7 +467,6 @@ function checkAuthoringLint(
 	const { diagnostics, information } = lintProviderWithInformation({
 		...provider,
 		providerSourceFiles,
-		localeCatalogEn,
 	});
 	const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
 	const details = information.map((entry) => {

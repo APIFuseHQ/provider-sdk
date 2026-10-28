@@ -209,10 +209,16 @@ const errors = errorRefs(weatherAlertsErrorCodes);
   compile errors, so a typo cannot leave a quiet day recorded as `down`.
   Declare the codes `as const` so each one is a literal.
 - Throw the code as the upstream's own envelope: a registered upstream code
-  such as `NO_DATA`, or a provider code thrown with `category:
+  such as `NO_DATA`, or a provider code declared or thrown with `category:
   "upstream_http"`. An envelope attributed elsewhere never matches.
 - The by-code form `{ status, code, attribute }` still parses for one release
   and warns at definition time; `scripts/codemods/health-refs.yml` rewrites it.
+  Until then `apifuse check` lints it: `code` must be a code the operation
+  serves — listed in its `errors` (a `defineErrors` factory), declared in its
+  `errorCodes`, or SDK-registered — with the same status and served as the
+  upstream's own envelope; a mismatched entry never matches and the quiet day
+  stays `down`, and the auth and rate-limit codes, 401/403/429, 409/410/422
+  and every 5xx are rejected as never an absence.
 - The upstream must answer that code for nothing else. If the same status and
   code also mean a real fault, split the codes in the handler first.
 - Keep the row guard (`array_length_gte` on the 2xx body) as well: an
@@ -253,8 +259,9 @@ healthProbe: {
   gone. There is no recurring form: declare each announced window.
 
 ## Fail-closed: envelope level
-- Upstream error headers/codes → structured `ProviderError` with a stable
-  `code` (`UPSTREAM_AUTH_ERROR`, `UPSTREAM_ERROR`, `NO_DATA`, ...).
+- Upstream error headers/codes → a declared error from `domain/errors.ts`
+  (`errors.UPSTREAM_AUTH_ERROR()`, `errors.UPSTREAM_ERROR()`, `errors.NO_DATA()`, ...):
+  the code's status, category and retryability live in that one declaration.
 - Non-JSON body, unexpected content type → `UPSTREAM_SCHEMA_ERROR`.
 - HTTP non-2xx → classified error; never a fake empty success envelope.
   Fixture-based tests cannot catch swallowed errors — write an explicit test:
