@@ -4,6 +4,7 @@ import { createHash, createHmac } from "node:crypto";
 import { providerCacheRedisUrlFromEnv } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
 import type {
+	OperationCachePolicy,
 	ProviderCache,
 	ProviderCacheGetOrSetOptions,
 	ProviderCacheKeyOptions,
@@ -706,6 +707,52 @@ export function createBypassProviderCache(
 	return cache;
 }
 
+/** Operations (`<providerId>.<operationId>`) already warned about a per-call `staleIfErrorMs`. */
+const warnedStaleIfErrorPerCall = new Set<string>();
+
+/**
+ * The cache an operation handler sees: every write takes the operation's
+ * declared stale window ({@link OperationCachePolicy}) unless the call sets
+ * its own. A per-call `staleIfErrorMs` is the deprecated shape; it still wins
+ * when present (the author wrote it, and `0` turns stale serving off for that
+ * key) and warns once per operation, because nothing attaches the health
+ * freshness guard for a window the declaration does not carry.
+ */
+export function withOperationCachePolicy(
+	cache: ProviderCache,
+	operation: { providerId: string; operationId: string },
+	policy: OperationCachePolicy | undefined,
+): ProviderCache {
+	const resolve = (options: ProviderCacheGetOrSetOptions): ProviderCacheGetOrSetOptions => {
+		if (options.staleIfErrorMs !== undefined) {
+			const scope = `${operation.providerId}.${operation.operationId}`;
+			if (!warnedStaleIfErrorPerCall.has(scope)) {
+				warnedStaleIfErrorPerCall.add(scope);
+				console.warn(
+					`[provider-sdk] Operation "${scope}" passes staleIfErrorMs to ctx.cache; declare it once as cache: { staleIfErrorMs: ${options.staleIfErrorMs} } on the operation so the SDK applies it to every cache write and attaches the health freshness guard. The per-call option is removed in the next minor.`,
+				);
+			}
+			return options;
+		}
+		return policy === undefined ? options : { ...options, staleIfErrorMs: policy.staleIfErrorMs };
+	};
+	const scoped: ProviderCache = {
+		key: (namespace, parts, keyOptions) => cache.key(namespace, parts, keyOptions),
+		get: <T = unknown>(key: string) => cache.get<T>(key),
+		set: <T = unknown>(key: string, value: T, options: ProviderCacheGetOrSetOptions) =>
+			cache.set<T>(key, value, resolve(options)),
+		delete: (key) => cache.delete(key),
+		getOrSet: <T = unknown>(
+			key: string,
+			loader: () => Promise<T>,
+			options: ProviderCacheGetOrSetOptions,
+		) => cache.getOrSet<T>(key, loader, resolve(options)),
+		responseMeta: () => cache.responseMeta(),
+	};
+	if (bypassCaches.has(cache)) bypassCaches.add(scoped);
+	return scoped;
+}
+
 export function resetProviderCacheForTests(): void {
 	for (const backend of sharedBackends.values()) {
 		backend.memory.clear();
@@ -714,4 +761,5 @@ export function resetProviderCacheForTests(): void {
 	}
 	sharedBackends.clear();
 	warnedAboutUnpepperedSecretKeys = false;
+	warnedStaleIfErrorPerCall.clear();
 }

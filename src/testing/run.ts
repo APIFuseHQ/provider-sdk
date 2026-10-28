@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { ProviderError } from "../errors.js";
-import { createProviderCache } from "../runtime/cache.js";
+import { createProviderCache, withOperationCachePolicy } from "../runtime/cache.js";
 import { createTestHandleContext } from "../runtime/handle.js";
 
 /**
@@ -527,7 +527,11 @@ function createUpstreamContext(
 				return messages();
 			},
 		},
-		cache: createProviderCache({ providerId: `standard-test-${operationName}` }),
+		cache: withOperationCachePolicy(
+			createProviderCache({ providerId: `standard-test-${operationName}` }),
+			{ providerId: provider.id, operationId: operationName },
+			provider.operations[operationName]?.cache,
+		),
 		state,
 		stealth: {
 			fetch: stealthCall,

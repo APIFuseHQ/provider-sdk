@@ -181,6 +181,7 @@ interface ProviderCache {
 // @public (undocumented)
 interface ProviderCacheGetOrSetOptions {
     jitterPct?: number;
+    // @deprecated
     staleIfErrorMs?: number;
     ttlMs: number;
 }

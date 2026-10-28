@@ -13,6 +13,12 @@ import { ZodString } from 'zod';
 import { ZodType } from 'zod';
 
 // @public
+export type AbsenceErrorRef<T> = T extends {
+    readonly code: infer TCode extends string;
+    readonly status: infer TStatus extends ExpectedAbsenceStatus;
+} ? TCode extends ExpectedErrorRefusalCode ? never : OperationErrorRef<TCode, TStatus> : never;
+
+// @public
 export function acceptLanguageHeaderValue(headers: Readonly<Record<string, unknown>> | undefined): string | undefined;
 
 // @public (undocumented)
@@ -1832,7 +1838,7 @@ export function defineHealthAccount(declaration: HealthAccountDeclaration): Heal
 // @public (undocumented)
 export function defineHealthJourney(config: HealthJourneyDefinition): HealthJourneyDefinition;
 
-// @public (undocumented)
+// @public
 export function defineHealthScenario(input: unknown): HealthScenario;
 
 // Warning: (ae-forgotten-export) The symbol "OperationConfig" needs to be exported by the entry point index.d.ts
@@ -1964,6 +1970,14 @@ export function error(code: string, message: string, options?: Omit<SseErrorData
 // @public
 export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
 
+// @public
+export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[]> = {
+    readonly [TRef in AbsenceErrorRef<T[number]> as TRef["code"]]: TRef;
+};
+
+// @public
+export function errorRefs<const T extends readonly OperationErrorCodeDeclaration[]>(errorCodes: T): ErrorRefs<T>;
+
 // @public (undocumented)
 export type EstablishedConnectionReference = CredentialReference & {
     field: "connection";
@@ -1989,9 +2003,15 @@ export function executeOperation<const TProvider extends ProviderDefinition, con
 }): Promise<unknown>;
 
 // @public
+export const EXPECTED_ERROR_REFUSAL_CODES: readonly ["AUTH_REQUIRED", "reauth_required", "MISSING_SECRET", "UPSTREAM_AUTH_ERROR", "RATE_LIMITED", "UPSTREAM_RATE_LIMIT", "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR"];
+
+// @public
 export type ExpectedAbsenceAttribution = Omit<GuardAttribution, "reasonCode"> & {
     reasonCode: "expected_absence";
 };
+
+// @public
+export type ExpectedAbsenceStatus = 400 | 404;
 
 // @public
 export type ExpectedError = {
@@ -1999,6 +2019,19 @@ export type ExpectedError = {
     code: string;
     attribute: NonEmpty<ExpectedAbsenceAttribution>;
 };
+
+// @public
+export type ExpectedErrorInput = {
+    readonly error: OperationErrorRef;
+    readonly attribute: NonEmpty<ExpectedAbsenceAttribution>;
+} | {
+    readonly status: number;
+    readonly code: string;
+    readonly attribute: NonEmpty<ExpectedAbsenceAttribution>;
+};
+
+// @public (undocumented)
+export type ExpectedErrorRefusalCode = (typeof EXPECTED_ERROR_REFUSAL_CODES)[number];
 
 // @public (undocumented)
 export const ExpectedErrorSchema: z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>;
@@ -2158,6 +2191,15 @@ export class FlowExpiredError extends ProviderError {
 
 // @public
 export function formatBoundaryViolation(violation: BoundaryViolation): string;
+
+// @public
+export const FRESHNESS_GUARD_REASON_COPY: Readonly<Record<SdkCopyLocale, string>>;
+
+// @public
+export const FRESHNESS_GUARD_REASON_KEY = "health.servedStaleCache";
+
+// @public
+export const FRESHNESS_GUARD_SUFFIX = ".freshness";
 
 // @public
 export type GatewayIngestible<T> = 0 extends 1 & T ? never : T extends object ? keyof T extends never ? never : {
@@ -2760,6 +2802,11 @@ export type HealthScenario = {
     steps: NonEmpty<HealthStep>;
 };
 
+// @public
+export type HealthScenarioInput = Omit<HealthScenario, "steps"> & {
+    steps: NonEmpty<HealthStepInput>;
+};
+
 // @public (undocumented)
 export const HealthScenarioSchema: z.ZodType<HealthScenario>;
 
@@ -2774,6 +2821,9 @@ export type HealthScheduleRandomization = {
 
 // @public (undocumented)
 export type HealthStep = OperationStep | ExtractStep | AssertStep | GuardStep;
+
+// @public (undocumented)
+export type HealthStepInput = OperationStepInput | ExtractStep | AssertStep | GuardStep;
 
 // @public (undocumented)
 export const HealthStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
@@ -3288,6 +3338,9 @@ export function isEngineOwnedRuntimeEnvName(name: string): boolean;
 export function isEngineOwnedTelemetryEnvName(name: string): boolean;
 
 // @public
+export function isExpectedErrorByCode(entry: unknown): boolean;
+
+// @public
 export function isHandleError(value: unknown): value is HandleError;
 
 // @public
@@ -3437,6 +3490,7 @@ export function lintProvider(provider: {
         handler?: unknown;
         source?: string;
         healthCheck?: unknown;
+        cache?: unknown;
         errorCodes?: ReadonlyArray<{
             code: string;
             status?: number;
@@ -4269,6 +4323,11 @@ export const OperandSchema: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z
 // @public (undocumented)
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
+// @public
+export interface OperationCachePolicy {
+    readonly staleIfErrorMs: number;
+}
+
 // @public (undocumented)
 type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike, TContext = ProviderContext> = Omit<OperationDefinition<TInput, TOutput, TContext>, "handler"> & {
     handler(ctx: TContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
@@ -4286,6 +4345,7 @@ export interface OperationContractMetadata {
 // @public (undocumented)
 export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike, TContext = ProviderContext> {
     approval?: OperationApprovalPolicy;
+    cache?: OperationCachePolicy;
     connectionExternalRefParam?: string;
     connectionMode?: "none" | "optional" | "required";
     // (undocumented)
@@ -4372,6 +4432,18 @@ export interface OperationErrorCode {
     // (undocumented)
     status?: ProviderErrorStatus;
 }
+
+// @public
+export type OperationErrorCodeDeclaration = {
+    readonly code: string;
+    readonly status?: number;
+};
+
+// @public
+export type OperationErrorRef<TCode extends string = string, TStatus extends ExpectedAbsenceStatus = ExpectedAbsenceStatus> = {
+    readonly code: TCode;
+    readonly status: TStatus;
+};
 
 // @public (undocumented)
 export interface OperationExample {
@@ -4510,6 +4582,11 @@ export type OperationStep = StepBase & {
     candidate?: CandidatePolicy | CandidateBlock;
     journal?: JournalPolicy;
     expectedErrors?: NonEmpty<ExpectedError>;
+};
+
+// @public
+export type OperationStepInput = Omit<OperationStep, "expectedErrors"> & {
+    expectedErrors?: NonEmpty<ExpectedErrorInput>;
 };
 
 // @public (undocumented)
@@ -5044,6 +5121,7 @@ export interface ProviderCache {
 // @public (undocumented)
 export interface ProviderCacheGetOrSetOptions {
     jitterPct?: number;
+    // @deprecated
     staleIfErrorMs?: number;
     ttlMs: number;
 }
@@ -8121,6 +8199,12 @@ const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
 // @public
 export const SDK_BROWSER_RUNTIME_SUBPATH = "@apifuse/provider-sdk/runtime/browser";
 
+// @public
+export const SDK_OWNED_HEALTH_REASON_COPY: Readonly<Record<string, typeof FRESHNESS_GUARD_REASON_COPY>>;
+
+// @public
+export type SdkCopyLocale = "en" | "ko" | "ja";
+
 // @public (undocumented)
 export class SDKError extends ProviderError {
     constructor(message: string, options?: ProviderErrorOptions);
@@ -9496,6 +9580,9 @@ type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaL
     handler(ctx: TContext, input: InferSchemaOutput<TInput>): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
 
+// @public
+export function withFreshnessGuards(scenario: HealthScenario, staleServingOperations: ReadonlySet<string>): HealthScenario;
+
 // @public (undocumented)
 export function wrapWithInstrumentation<T extends Pick<ProviderContext, "trace">>(ctx: T, options?: InstrumentationOptions): InstrumentedProviderContext<T>;
 
@@ -9510,7 +9597,7 @@ export { z }
 // dist/define.d.ts:166:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:5:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:68:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:107:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:109:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:24:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:113:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
@@ -9522,11 +9609,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:316:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:734:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2107:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2195:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2203:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2204:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2391:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2113:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2201:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2209:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2210:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2397:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

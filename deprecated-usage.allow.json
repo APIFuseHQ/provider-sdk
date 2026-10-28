@@ -1,6 +1,11 @@
 {
 	"allow": [
 		{
+			"file": "src/runtime/cache.ts",
+			"symbol": "staleIfErrorMs",
+			"reason": "The cache applies the deprecated per-call staleIfErrorMs for one release and withOperationCachePolicy warns on it while merging in the operation-level declaration that replaces it."
+		},
+		{
 			"file": "src/config/loader.ts",
 			"symbol": "provider",
 			"reason": "resolveVendorChain reads the deprecated singular proxy.provider field to build a single-vendor chain for backwards compatibility."

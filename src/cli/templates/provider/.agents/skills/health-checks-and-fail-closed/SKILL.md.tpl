@@ -86,24 +86,37 @@ healthCheck: {
   well-known entity id). Verify the id still exists when picking it.
 - `scenario.coversOperations` may only name the operation that owns the case.
 
-## Stale-if-error serves must be guarded, or an outage reads green
+## Stale-if-error serves are guarded by default
 
-If the operation reads its upstream through `ctx.cache.getOrSet(..., {
-staleIfErrorMs })`, an upstream outage is answered with HTTP 200 and a
-well-formed, fully schema-valid body for the whole stale window. Every clause
-over `status_code` and `data` still passes, so the probe rolls up `ok` while
-the upstream is down, and only flips to `down` after the window expires — the
-first minutes of every outage are reported as healthy.
+An operation that serves stale declares its window once, on the operation:
+
+```ts
+defineOperation({
+  // ...
+  cache: { staleIfErrorMs: 300_000 },
+  handler: async (ctx, input) =>
+    (await ctx.cache.getOrSet(key, load, { ttlMs: 60_000 })).value,
+})
+```
+
+The SDK applies the window to every `ctx.cache.getOrSet` / `ctx.cache.set`
+the handler makes (the call carries `ttlMs` only; a per-call `staleIfErrorMs`
+is deprecated, warns once, and is removed in the next minor). With the window
+declared, an upstream outage is answered with HTTP 200 and a well-formed,
+fully schema-valid body for the whole stale window. Every clause over
+`status_code` and `data` still passes, so a probe would roll up `ok` while
+the upstream is down.
 
 `served_stale_cache` on the operation step result is the only operand that
-separates a stale serve from a live read. It is always present, so the
-reference resolves to `false` rather than raising `reference_unresolvable`.
-Add ONE guard step per stale-if-error probe:
+separates a stale serve from a live read. `defineProvider` attaches a guard
+on it right after every operation step of an operation that declares
+`cache.staleIfErrorMs` (an operation without the declaration never serves
+stale and gets no guard):
 
 ```ts
 {
-  id: "guard-list-items-freshness",
-  result: "freshness-guarded",
+  id: "read.freshness",
+  result: "response.freshness",
   kind: "guard",
   condition: {
     kind: "predicate",
@@ -113,18 +126,19 @@ Add ONE guard step per stale-if-error probe:
   },
   onFail: {
     attribute: [
-      {
-        operationId: "list-items",
-        status: "degraded",
-        reasonCode: "served_stale_cache",
-        reasonKey: "health.operations.list-items.dense-district.servedStaleCache",
-      },
+      { operationId: "list-items", status: "degraded", reasonCode: "served_stale_cache", reasonKey: "health.servedStaleCache" },
     ],
     stop: "scenario",
   },
 }
 ```
 
+- Nothing to write in the scenario. The stale-serve policy is declared once,
+  on the operation, and the guard follows the declaration.
+- `health.servedStaleCache` is the one locale key the guard attributes. The
+  SDK owns the key and ships its copy (`FRESHNESS_GUARD_REASON_COPY`, en/ko/
+  ja), and the platform resolves the key to that copy when `locales/*.json`
+  carry no value. Add the key to the catalogs only to change the wording.
 - `degraded`, not `down`: the cache policy is behaving as promised and callers
   are still served; it is the upstream that is unavailable, and that has to be
   visible instead of green.
@@ -132,11 +146,12 @@ Add ONE guard step per stale-if-error probe:
   stale serve as `degraded` (an upstream fault that opens incidents), while
   `expected_absence` is published as a non-incident status — neither ok nor
   degraded, excluded from uptime — for an absence the provider declares in
-  advance (no alert today, a closed shelf, a feed outside its hours). The
-  tenant-facing wording lives in the localized `reasonKey`.
-- Place the freshness guard BEFORE any row or emptiness guard. A stale serve
-  that happens to be empty would otherwise be attributed to the emptiness
-  reason, which is a confident answer to the wrong question.
+  advance (no alert today, a closed shelf, a feed outside its hours).
+- To write the guard yourself (a different sentence, or a `down` verdict
+  through an `assert` on the same operand), place it BEFORE any row or
+  emptiness guard and attribute `served_stale_cache`; the SDK then leaves the
+  step alone. A freshness guard after another guard, or one attributing
+  `expected_absence`, is not a verdict and still gets the default in front.
 - Do not change the handler for this. The envelope's `meta.stale` is written
   by the serve layer, so `return result.value` discarding `result.meta` does
   not suppress the signal.
@@ -148,12 +163,21 @@ cannot see that — the monitor ends the attempt the moment an operation step
 answers non-2xx, before any guard runs — so without a declaration every quiet
 day is recorded `down`.
 
-Declare the answer on the operation step itself. The monitor matches the
-provider's own error envelope (`source: "upstream_failure"`) on `status` and
-`code` together, completes the attempt with `attribute` as the guard
-attribution, and never retries it:
+Declare the answer on the operation step itself, by reference to the code the
+operation declares. The monitor matches the provider's own error envelope
+(`source: "upstream_failure"`) on `status` and `code` together, completes the
+attempt with `attribute` as the guard attribution, and never retries it:
 
 ```ts
+// operations/weather-alerts.ts
+export const weatherAlertsErrorCodes = [
+  { code: "NO_DATA", status: 404, description: "No alert is issued today." },
+] as const satisfies readonly OperationErrorCode[];
+
+// health-scenarios.ts
+import { errorRefs } from "@apifuse/provider-sdk/provider";
+const errors = errorRefs(weatherAlertsErrorCodes);
+
 {
   id: "read-weather-alerts",
   result: "response",
@@ -162,8 +186,7 @@ attribution, and never retries it:
   inputTemplate: {},
   expectedErrors: [
     {
-      status: 404,
-      code: "NO_DATA",
+      error: errors.NO_DATA, // serialized as status: 404, code: "NO_DATA"
       attribute: [
         {
           operationId: "weather-alerts",
@@ -179,13 +202,17 @@ attribution, and never retries it:
 
 - Only `expected_absence` is admitted here. A stale-cache serve is a 2xx; a
   non-2xx is either the declared absence or a real failure.
-- `code` must be a code the operation serves — declared in its `errorCodes`
-  or SDK-registered — with the same status, and served as the upstream's own
-  envelope: a registered upstream code such as `NO_DATA`, or a provider code
-  thrown with `category: "upstream_http"` (`apifuse check` fails otherwise: a
-  mismatched entry never matches and the quiet day stays `down`). Auth and
-  rate-limit codes, 401/403/429, 409/410/422 and every 5xx are never an
-  absence and are rejected.
+- `errors.<CODE>` exists only for a code the operation declares in its
+  `errorCodes` with status 400 or 404. An undeclared code, a code declared
+  with another status (409/410/422 are upstream refusals; 401/403/429 and
+  every 5xx are never an absence) and the auth and rate-limit codes are
+  compile errors, so a typo cannot leave a quiet day recorded as `down`.
+  Declare the codes `as const` so each one is a literal.
+- Throw the code as the upstream's own envelope: a registered upstream code
+  such as `NO_DATA`, or a provider code thrown with `category:
+  "upstream_http"`. An envelope attributed elsewhere never matches.
+- The by-code form `{ status, code, attribute }` still parses for one release
+  and warns at definition time; `scripts/codemods/health-refs.yml` rewrites it.
 - The upstream must answer that code for nothing else. If the same status and
   code also mean a real fault, split the codes in the handler first.
 - Keep the row guard (`array_length_gte` on the 2xx body) as well: an
@@ -261,7 +288,7 @@ details/logs only.
 - [ ] Every monitored operation's case carries `scenario` (not only `assertions`)
 - [ ] Every list op probe fails on 0 rows for a dense query
 - [ ] One semantic field asserted on a real row
-- [ ] Every `staleIfErrorMs` read has a `served_stale_cache` guard, placed first
+- [ ] Every operation that reads through `ctx.cache` with a stale window declares `cache: { staleIfErrorMs }` (the SDK attaches the `served_stale_cache` guard from it)
 - [ ] Each announced upstream maintenance is a `maintenanceWindows` entry (UTC, notice URL)
 - [ ] Swallowed-error test exists (non-ok mock → handler rejects)
 - [ ] Non-empty upstream → zero normalized rows throws

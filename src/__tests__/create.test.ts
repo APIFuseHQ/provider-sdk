@@ -154,7 +154,9 @@ describe("provider create planning", () => {
 		// No stray CLAUDE.md file plan entry and no legacy top-level skills/.
 		const relativePaths = plan.files.map((file) => file.path.slice(plan.providerRoot.length + 1));
 		expect(relativePaths.filter((path) => path === "CLAUDE.md")).toHaveLength(1);
-		expect(relativePaths.some((path) => path === "skills" || path.startsWith("skills/"))).toBeFalse();
+		expect(
+			relativePaths.some((path) => path === "skills" || path.startsWith("skills/")),
+		).toBeFalse();
 
 		const sdkVersion = (
 			JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8")) as {

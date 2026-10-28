@@ -11,10 +11,13 @@ import {
  * keeps counters, gauges and histograms in memory and renders them in the
  * Prometheus text exposition format. It is the default emitter of a
  * `StatefulSessionRouter` built without one, and every `serve()` in the
- * process renders it on its metrics listener (`/metrics`). The package
- * exports only its emitter view, `statefulProviderMetricRegistryEmitter`
- * (as `statefulProviderMetricRegistry`); the class, the tables, the
- * class-typed singleton, `render()` and `reset()` stay inside the SDK.
+ * process renders it on its metrics listener (`/metrics`). A `serve()` whose
+ * operations go through the stateful runtime declares their routing counters
+ * here at zero before its listeners open. The package exports only its
+ * emitter view, `statefulProviderMetricRegistryEmitter` (as
+ * `statefulProviderMetricRegistry`); the class, the tables, the class-typed
+ * singleton, `render()`, `reset()` and `declareRoutingSeries()` stay inside
+ * the SDK.
  */
 
 export type StatefulProviderMetricKind = "counter" | "gauge" | "histogram";
@@ -143,6 +146,31 @@ export const STATEFUL_PROVIDER_METRIC_MS_BUCKETS = [
 	5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 15_000, 60_000,
 ] as const;
 
+/**
+ * The routing counters a `StatefulSessionRouter` counts for every operation it
+ * routes, each with the exported labels it carries besides `providerId` and
+ * `operationId`. The router counts the deadline under these labels and
+ * `declareRoutingSeries` starts every one of them at zero, so the series a
+ * declaration creates is the series the router's first increment lands on.
+ */
+export const STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS = {
+	apifuse_stateful_provider_routing_forward_total: {},
+	apifuse_stateful_provider_routing_local_total: {},
+	apifuse_stateful_provider_routing_reacquire_total: {},
+	apifuse_stateful_provider_routing_deadline_expired_total: {
+		redactedErrorCode: "deadline_expired",
+	},
+} as const satisfies Partial<Record<StatefulProviderMetricName, StatefulProviderMetricLabelInput>>;
+
+export type StatefulProviderRoutingCounterName =
+	keyof typeof STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS;
+
+/** The operations of one provider whose routing counters start at zero. */
+export type StatefulProviderRoutingDeclaration = {
+	readonly providerId: string;
+	readonly operationIds: readonly string[];
+};
+
 type ScalarSeries = { value: number };
 
 type HistogramSeries = {
@@ -204,6 +232,37 @@ function sortedSeries<T>(series: ReadonlyMap<string, T> | undefined): [string, T
 export class StatefulProviderMetricRegistry implements StatefulProviderMetricEmitter {
 	readonly #scalars = new Map<StatefulProviderMetricName, Map<string, ScalarSeries>>();
 	readonly #histograms = new Map<StatefulProviderMetricName, Map<string, HistogramSeries>>();
+	/** Rendered label sets of the declared series, per counter name. */
+	readonly #declared = new Map<StatefulProviderRoutingCounterName, Set<string>>();
+
+	/**
+	 * Declares the routing counters of every listed operation: each counter
+	 * of `STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS`, under the provider and
+	 * operation ids and the counter's own labels, gets a series at zero now,
+	 * so a scrape sees it before the first operation is routed and `rate()`
+	 * counts that operation instead of starting from it. A series that
+	 * already exists keeps its value; declaring it again changes nothing.
+	 */
+	declareRoutingSeries(declaration: StatefulProviderRoutingDeclaration): void {
+		for (const operationId of declaration.operationIds) {
+			for (const name of Object.keys(
+				STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS,
+			) as StatefulProviderRoutingCounterName[]) {
+				const key = renderLabels({
+					providerId: declaration.providerId,
+					operationId,
+					...STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS[name],
+				});
+				let keys = this.#declared.get(name);
+				if (!keys) {
+					keys = new Set();
+					this.#declared.set(name, keys);
+				}
+				keys.add(key);
+				this.#scalarAt(name, key);
+			}
+		}
+	}
 
 	/** Adds `value` to a counter. Dropped unless `name` is a counter and `value` finite and not negative. */
 	increment(
@@ -271,17 +330,27 @@ export class StatefulProviderMetricRegistry implements StatefulProviderMetricEmi
 		return `${lines.join("\n")}\n`;
 	}
 
-	/** Forgets every series. For tests that assert counts across pods in one process. */
+	/**
+	 * Forgets every series except the declared ones, which go back to zero.
+	 * For tests that assert counts across pods in one process.
+	 */
 	reset(): void {
 		this.#scalars.clear();
 		this.#histograms.clear();
+		for (const [name, keys] of this.#declared) {
+			for (const key of keys) this.#scalarAt(name, key);
+		}
 	}
 
 	#scalar(
 		name: StatefulProviderMetricName,
 		labels: StatefulProviderMetricLabelInput | undefined,
 	): ScalarSeries {
-		const key = renderLabels(labels);
+		return this.#scalarAt(name, renderLabels(labels));
+	}
+
+	/** The scalar series of `name` whose rendered label set is `key`, created at zero if absent. */
+	#scalarAt(name: StatefulProviderMetricName, key: string): ScalarSeries {
 		let byLabels = this.#scalars.get(name);
 		if (!byLabels) {
 			byLabels = new Map();

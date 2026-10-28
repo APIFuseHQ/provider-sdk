@@ -66,20 +66,23 @@ describe("health-checks-and-fail-closed prompt asset", () => {
 		// The guard cannot see a non-2xx; the declaration lives on the step.
 		expect(section).toContain("before any guard runs");
 		expect(section).toContain("expectedErrors: [");
-		expect(section).toContain("status: 404");
-		expect(section).toContain('code: "NO_DATA"');
+		expect(section).toContain("errorRefs(");
+		expect(section).toContain("error: errors.NO_DATA");
 		expect(section).toContain('reasonCode: "expected_absence"');
 		expect(section).toContain("never retries");
-		// The lint contract the author has to satisfy, and what is never an absence.
+		// What the reference type refuses, and what is never an absence.
 		expect(section).toContain("`errorCodes`");
+		expect(section).toContain("compile errors");
 		expect(section).toContain("401/403/429");
 		expect(section).toContain("Keep the row guard");
 	});
 
-	it("orders the freshness guard before any row or emptiness guard", () => {
-		expect(healthCheckSkill()).toContain(
-			"Place the freshness guard BEFORE any row or emptiness guard",
-		);
+	it("teaches that the freshness guard is attached by default and orders a hand-written one first", () => {
+		const skill = healthCheckSkill();
+		expect(skill).toContain("`defineProvider` attaches a guard");
+		expect(skill).toContain("cache: { staleIfErrorMs: 300_000 }");
+		expect(skill).toContain('reasonKey: "health.servedStaleCache"');
+		expect(skill).toContain("place it BEFORE any row or");
 	});
 
 	it("never presents assertions as the monitored contract", () => {
@@ -97,6 +100,6 @@ describe("health-checks-and-fail-closed prompt asset", () => {
 		const checklist = healthCheckSkill().slice(healthCheckSkill().indexOf("## Checklist"));
 
 		expect(checklist).toContain("carries `scenario` (not only `assertions`)");
-		expect(checklist).toContain("`served_stale_cache` guard");
+		expect(checklist).toContain("declares `cache: { staleIfErrorMs }`");
 	});
 });

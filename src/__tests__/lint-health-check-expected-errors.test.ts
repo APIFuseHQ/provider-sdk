@@ -1,7 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
-import type { ExpectedError, HealthScenario, HealthStep } from "../health-scenario.js";
+import {
+	defineHealthScenario,
+	errorRefs,
+	type ExpectedError,
+	type ExpectedErrorInput,
+	type HealthScenario,
+	type HealthStep,
+	type HealthStepInput,
+	withFreshnessGuards,
+} from "../health-scenario.js";
 import { type LintDiagnostic, lintProvider } from "../lint.js";
 import { describeKey } from "../schema.js";
 
@@ -34,8 +43,12 @@ function operation(
 	};
 }
 
-function probeScenario(steps: [HealthStep, ...HealthStep[]]): HealthScenario {
-	return {
+/**
+ * Authored the way a provider authors it: through `defineHealthScenario`,
+ * which is what tags a by-code entry for these rules.
+ */
+function probeScenario(steps: [HealthStepInput, ...HealthStepInput[]]): HealthScenario {
+	return defineHealthScenario({
 		scenarioVersion: 2,
 		id: `${OPERATION_KEY}.probe`,
 		display: { titleKey: `health.operations.${OPERATION_KEY}.probe.title` },
@@ -44,15 +57,16 @@ function probeScenario(steps: [HealthStep, ...HealthStep[]]): HealthScenario {
 		coversOperations: [OPERATION_KEY],
 		credentialRefs: [],
 		steps,
-	};
+	});
 }
 
 function lint(
-	expectedErrors: readonly [ExpectedError, ...ExpectedError[]],
+	expectedErrors: readonly [ExpectedErrorInput, ...ExpectedErrorInput[]],
 	errorCodes?: readonly ErrorCodeDeclaration[],
 	source?: string,
+	scenario: (steps: [HealthStepInput, ...HealthStepInput[]]) => HealthScenario = probeScenario,
 ): LintDiagnostic[] {
-	const read: HealthStep = {
+	const read: HealthStepInput = {
 		id: "read",
 		result: "response",
 		kind: "operation",
@@ -66,7 +80,7 @@ function lint(
 		reviewed: "2026-10-12",
 		operations: {
 			[OPERATION_KEY]: operation(
-				{ cases: [{ name: "national", scenario: probeScenario([read]) }] },
+				{ cases: [{ name: "national", scenario: scenario([read]) }] },
 				errorCodes,
 				source,
 			),
@@ -91,7 +105,46 @@ function expected(status: number, code: string): ExpectedError {
 
 const FIELD = `operations.${OPERATION_KEY}.healthCheck.cases[0].scenario.steps[0].expectedErrors`;
 
-describe("health-check expectedErrors lint", () => {
+describe("health-check expectedErrors lint (by-code form)", () => {
+	let warn: ReturnType<typeof spyOn>;
+	beforeEach(() => {
+		warn = spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterEach(() => {
+		warn.mockRestore();
+	});
+
+	it("never lints a reference entry", () => {
+		// The reference carries the declaration; what these rules check is
+		// refused by the type. Even the half the type cannot see (the envelope
+		// source, a bare throw) is not a finding on the reference path.
+		const errors = errorRefs([{ code: "NO_FORECAST", status: 404 }] as const);
+		const reference: ExpectedErrorInput = {
+			error: errors.NO_FORECAST,
+			attribute: expected(404, "NO_FORECAST").attribute,
+		};
+		expect(
+			lint([reference], [{ code: "NO_FORECAST", status: 404 }], BARE_THROW("NO_FORECAST")),
+		).toEqual([]);
+		expect(lint([reference])).toEqual([]);
+		// The same entry written by code is the finding.
+		expect(
+			lint(
+				[expected(404, "NO_FORECAST")],
+				[{ code: "NO_FORECAST", status: 404 }],
+				BARE_THROW("NO_FORECAST"),
+			),
+		).toHaveLength(1);
+	});
+
+	it("still finds a by-code entry after defineProvider attached the freshness guard", () => {
+		const guarded = (steps: [HealthStepInput, ...HealthStepInput[]]) =>
+			withFreshnessGuards(probeScenario(steps), new Set([OPERATION_KEY]));
+		const diagnostics = lint([expected(404, "NO_FORECAST")], undefined, undefined, guarded);
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]).toMatchObject({ rule: UNMATCHABLE, field: `${FIELD}[0]` });
+	});
+
 	it("accepts an SDK-registered upstream code at its canonical status", () => {
 		// NO_DATA is registered 404 / upstream_http, so the envelope is the
 		// upstream's (source upstream_failure) however the handler throws it —
