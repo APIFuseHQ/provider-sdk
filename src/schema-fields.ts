@@ -34,7 +34,9 @@ function descriptionOf(schema: SchemaNode): string | undefined {
 /**
  * True when `schema` is a handle field or a `fields.*()` preset (directly or
  * through wrappers) whose description is still the SDK-generated wording, with
- * no wrapper adding its own description.
+ * no wrapper adding its own description. This declares the node itself; the
+ * other stages of a pipe or intersection are still walked, so provider prose on
+ * them is reported at the same path.
  */
 function isSdkOwnedField(schema: SchemaNode, seen = new Set<SchemaNode>()): boolean {
 	if (seen.has(schema)) return false;
@@ -58,9 +60,8 @@ function collectInto(
 ): void {
 	if (!isSchemaNode(schema) || seen.has(schema)) return;
 	seen.add(schema);
-	if (isSdkOwnedField(schema)) return;
 
-	if (descriptionKeyOf(schema) === undefined) {
+	if (!isSdkOwnedField(schema) && descriptionKeyOf(schema) === undefined) {
 		if (descriptionOf(schema) !== undefined) out.push({ path, reason: "raw-prose" });
 		else if (required) out.push({ path, reason: "missing-key" });
 	}

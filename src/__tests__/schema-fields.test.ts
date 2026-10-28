@@ -137,6 +137,25 @@ describe("collectUndeclaredFields", () => {
 		]);
 	});
 
+	it("reports provider prose on the other stage of a pipe or intersection next to a preset", () => {
+		const schema = keyed(
+			z.object({
+				token: fields.token().pipe(z.string().describe("Provider-specific prose")),
+				reversed: z.string().describe("Provider-specific prose").pipe(fields.token()),
+				both: z.intersection(fields.otp(), z.string().describe("Provider-specific prose")),
+				plainPipe: fields.token().pipe(z.string()),
+				plainBoth: z.intersection(fields.otp(), z.string().min(1)),
+			}),
+			"input.root",
+		);
+
+		expect(collectUndeclaredFields(schema, "input")).toEqual([
+			{ path: "input.token", reason: "raw-prose" },
+			{ path: "input.reversed", reason: "raw-prose" },
+			{ path: "input.both", reason: "raw-prose" },
+		]);
+	});
+
 	it("still requires a key on sensitive() and publicField() leaves, which declare privacy only", () => {
 		const schema = keyed(
 			z.object({
