@@ -394,6 +394,12 @@ describe("provider create planning", () => {
 		expect(generatedPaths).toContain(join("upstream", "README.md"));
 		expect(generatedPaths).toContain(join("mappers", "README.md"));
 		expect(generatedPaths).toContain(join("domain", "README.md"));
+		expect(generatedPaths).toContain(join("domain", "errors.ts"));
+		expect(findGeneratedFile(plan, join("domain", "errors.ts"))?.content).toContain(
+			'import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";',
+		);
+		expect(operation?.content).toContain("errors: [errors.VALUE_EMPTY]");
+		expect(operation?.content).toContain("throw errors.VALUE_EMPTY(");
 		expect(index?.content).toContain('import { providerMeta } from "./meta";');
 		expect(index?.content).toContain(
 			'import { defineProvider, type ProviderContextOf } from "@apifuse/provider-sdk/provider";',

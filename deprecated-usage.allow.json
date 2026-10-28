@@ -144,6 +144,51 @@
 			"file": "src/handle.ts",
 			"symbol": "issuedBy",
 			"reason": "defineCursor/defineDraft read the deprecated issuedBy option for one release so an unmigrated provider keeps byte-identical issuer text until scripts/codemods/handles.yml has run."
+		},
+		{
+			"file": "src/contract.ts",
+			"symbol": "errorCodes",
+			"reason": "contractErrorCodes publishes the legacy errorCodes table next to the defineErrors declarations until the table is removed."
+		},
+		{
+			"file": "src/define.ts",
+			"symbol": "errorCodes",
+			"reason": "validateOperationErrorCodes still validates the legacy errorCodes table and rejects a code declared both there and in errors[]."
+		},
+		{
+			"file": "src/server/serve-implementation.ts",
+			"symbol": "errorCodes",
+			"reason": "buildOperationErrorCodeLookup serves the legacy errorCodes table for providers not yet on defineErrors."
+		},
+		{
+			"file": "bin/apifuse-record.ts",
+			"symbol": "retryable",
+			"reason": "The recorder prints the per-throw retryable a legacy provider error still carries, for the diagnostic line only."
+		},
+		{
+			"file": "src/__tests__/errors.test.ts",
+			"symbol": "category",
+			"reason": "Tests the SDK's own SessionExpiredError, which classifies itself through the per-instance category until SDK-owned codes move to the registry."
+		},
+		{
+			"file": "src/__tests__/errors.test.ts",
+			"symbol": "retryable",
+			"reason": "Tests the SDK's own SessionExpiredError, which classifies itself through the per-instance retryable until SDK-owned codes move to the registry."
+		},
+		{
+			"file": "src/__tests__/handle.test.ts",
+			"symbol": "category",
+			"reason": "Tests the SDK's own handle errors (ADR-0012), which classify themselves through the per-instance category until SDK-owned codes move to the registry."
+		},
+		{
+			"file": "src/__tests__/handle.test.ts",
+			"symbol": "retryable",
+			"reason": "Tests the SDK's own handle errors (ADR-0012), which classify themselves through the per-instance retryable until SDK-owned codes move to the registry."
+		},
+		{
+			"file": "src/__tests__/stealth-client.test.ts",
+			"symbol": "retryable",
+			"reason": "Tests the SDK's own TransportError retryability, carried on the instance for SDK-owned transport codes."
 		}
 	]
 }

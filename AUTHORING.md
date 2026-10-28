@@ -960,39 +960,79 @@ header is dropped, and a raw status of 400 or above gets a status-derived one
 Its category, taxonomy version, retryability, and optional upstream status match
 the structured `provider_request_failed` log event.
 
-Declare provider-owned operation failures directly on the operation. The
-server builds a lookup once at startup and applies it to failures from that
-operation:
+Declare every error code once with `defineErrors`, throw its factory, and list
+the factories on the operations that can throw them. The declaration is the
+only place the status, the category and the retryability live; a throw site
+adds `details`, a `cause`, `params`, or a `message` override and nothing else:
 
 ```ts
-errorCodes: [{
-  code: "ITEM_SOLD_OUT",
-  status: 409,
-  retryable: false,
-  description: "The upstream sold the item before checkout completed.",
-}],
+// domain/errors.ts
+import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";
+
+export const errors = defineErrors({
+  UPSTREAM_SCHEMA_ERROR: sdkErrors.UPSTREAM_SCHEMA_ERROR, // registered: the SDK supplies 502, upstream_schema_drift, non-retryable
+  ITEM_SOLD_OUT: {
+    status: 409,
+    category: "upstream_rejected",
+    description: "The upstream sold the item before checkout completed.",
+    messageKey: "errors.itemSoldOut.message",
+  },
+});
+
+// operations/checkout.ts
+errors: [errors.ITEM_SOLD_OUT, errors.UPSTREAM_SCHEMA_ERROR],
 handler: async () => {
-  throw new ProviderError("Item sold out", { code: "ITEM_SOLD_OUT" });
+  throw errors.ITEM_SOLD_OUT({ details: { itemId } });
 },
 ```
 
-Declare only codes the SDK does not already register. `UPSTREAM_SCHEMA_ERROR`,
-`UPSTREAM_AUTH_ERROR`, and `INVALID_REQUEST` are registered below, so throwing
-them needs no declaration at all.
+A key that names an SDK-registered code must hold that `sdkErrors` reference;
+writing a status or retryability for it is a type error, so one code never has
+two answers across the fleet. A provider code states `status`, `category` and
+`description`; `retryable` defaults to the category's answer (`timeout`,
+`network`, `upstream_rate_limited`, `upstream_http` and `proxy_pool` retry,
+nothing else does). `errors.X()` returns a `ProviderError<"X">`, so a helper
+that throws several codes is typed by the union of their names. One map can
+spread another (`defineErrors({ ...commonErrors, ... })`), and
+`Object.values(commonErrors)` lists a whole map on an operation.
 
-`defineProvider` accepts only statuses the server can emit: 400, 401, 404, 429,
-500, 502, 503, and 504. Invalid declared statuses fail provider definition,
-not a live request. Status selection uses this order:
+The legacy shape, `errorCodes: [{ code, status, retryable, description }]` plus
+`new ProviderError("...", { code, category, retryable })`, still serves for one
+more release. `errorCodes` and the per-throw `category` / `retryable` options
+are `@deprecated` (the hover text names the replacement), the server logs one
+`provider_error_options_deprecated` warning per code per process, and
+`apifuse check` reports `legacy-error-options` (warn) on each site.
+`scripts/codemods/errors-factory.yml` (ast-grep) rewrites both shapes.
 
-1. SDK-owned errors retain SDK status semantics. Operation declarations cannot
-   override SDK-owned codes, stateful-forwarding failures, Zod/deadline errors,
-   or `TransportError` values.
-2. A matching operation `errorCodes` entry with `status` supplies the status.
-   This slot applies to `ValidationError` as well as ordinary `ProviderError`.
-3. The registered mappings below apply.
-4. Existing fallbacks apply: `TransportError` 502/504, unregistered input
-   `ValidationError` 400 (output validation 500), and other unregistered
-   `ProviderError` values 500.
+`defineErrors` and `defineProvider` accept only statuses the server can emit:
+400, 401, 404, 409, 410, 422, 429, 500, 502, 503, and 504. An invalid status,
+category or locale key fails at definition, not on a live request. One function,
+`resolveProviderErrorContract`, answers status, category and retryability for
+every served provider error, per field, in this order:
+
+1. SDK-owned errors retain SDK semantics. A declaration cannot override
+   SDK-owned codes, stateful-forwarding failures, Zod/deadline errors, or
+   `TransportError` values.
+2. The deprecated per-throw `category` / `retryable` options (status has no
+   per-throw form). While they exist they are served over the declaration, the
+   order the server always had, so bumping the SDK changes no served verdict.
+3. The declaration: the `defineErrors` declaration a factory-made error
+   carries, or the operation's legacy `errorCodes` entry for the code. This
+   slot applies to `ValidationError` as well as ordinary `ProviderError`, and
+   it answers status first (ahead of the registry).
+4. A declared rejection status (409/410/422) classes the category as
+   `upstream_rejected`.
+5. The registered mappings below (status, category and retryability).
+6. Existing fallbacks: `TransportError` 502/504, unregistered input
+   `ValidationError` 400 (output validation 500), other unregistered
+   `ProviderError` values 500 and non-retryable.
+
+A factory-made error carries no per-throw option, so its declaration is its
+whole contract: a code declared `retryable: false` and thrown as
+`errors.CODE(...)` is served non-retryable. A legacy throw that still sets
+`retryable` is served that value and the server warns, naming both values when
+they differ; the fix is a distinct code for the other condition, not a
+per-throw override.
 
 The registered mappings are:
 
@@ -1007,30 +1047,33 @@ The registered mappings are:
 | Unregistered input `ValidationError` code | 400 |
 | Other unregistered `ProviderError` code | 500 |
 
-A registered code that names an upstream outcome also carries a category. When
-a `ProviderError` (or any subclass, `ValidationError` included) with one of
-these codes sets no `category`, the server reports the code's category in
-`X-ApiFuse-Error-Observability`, and the public `source` follows from it:
+Every code provider code throws that the SDK registers (`sdkErrors`) carries
+its category and retryability with its status. When a `ProviderError` (or any
+subclass, `ValidationError` included) with one of these codes is thrown with
+no declaration and no per-throw option, the server reports the registry's
+category in `X-ApiFuse-Error-Observability`, serves its retryability, and the
+public `source` follows from the category:
 
-| Error code | Category when unset | `source` |
-| --- | --- | --- |
-| `NOT_FOUND`, `not_found`, `NO_DATA` | `upstream_http` | `upstream_failure` |
-| `RATE_LIMITED`, `UPSTREAM_RATE_LIMIT`, `LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR` | `upstream_rate_limited` | `upstream_rule` |
-| `UPSTREAM_REJECTED` | `upstream_rejected` | `upstream_rule` |
-| `UPSTREAM_ERROR` | `upstream_http` | `upstream_failure` |
-| `BLOCKED` | `anti_bot_blocked` | `upstream_failure` |
-| `UPSTREAM_AUTH_ERROR` | `upstream_auth` | `upstream_failure` |
-| `UPSTREAM_SCHEMA_ERROR` | `upstream_schema_drift` | `upstream_failure` |
+| Error code | Category | `source` | `retryable` |
+| --- | --- | --- | --- |
+| `NOT_FOUND`, `not_found`, `NO_DATA` | `upstream_http` | `upstream_failure` | `false` |
+| `RATE_LIMITED`, `UPSTREAM_RATE_LIMIT`, `LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR` | `upstream_rate_limited` | `upstream_rule` | `true` |
+| `UPSTREAM_REJECTED` | `upstream_rejected` | `upstream_rule` | `false` |
+| `UPSTREAM_ERROR` | `upstream_http` | `upstream_failure` | `true` |
+| `BLOCKED` | `anti_bot_blocked` | `upstream_failure` | `false` |
+| `UPSTREAM_AUTH_ERROR` | `upstream_auth` | `upstream_failure` | `false` |
+| `UPSTREAM_SCHEMA_ERROR` | `upstream_schema_drift` | `upstream_failure` | `false` |
+| `AUTH_REQUIRED` | `credential_unavailable` | `client` | `false` |
+| `INVALID_REQUEST` | `input_validation` | `client` | `false` |
 
-So `throw new ProviderError("…", { code: "UPSTREAM_SCHEMA_ERROR" })` is enough
-for the health monitor to grade a drifted upstream `down`; without the
-category it would be served as `source: "apifuse"` and graded unknown. An
-explicit `category` always wins, an operation-declared rejection status
-(409/410/422) still classifies as `upstream_rejected`, and retryability does
-not follow the category: it stays the instance option, then the declaration,
-then `false`. Every other code, including `AUTH_REQUIRED`, `INVALID_REQUEST`,
-and your own codes, is classified as before (`provider_error` unless you set a
-category).
+So `throw errors.UPSTREAM_SCHEMA_ERROR()` (or the legacy
+`new ProviderError("…", { code: "UPSTREAM_SCHEMA_ERROR" })`) is enough for the
+health monitor to grade a drifted upstream `down`; served as `source:
+"apifuse"` it would be graded unknown. `UPSTREAM_ERROR` is retryable because
+the fleet declares it so (350 of 426 declarations on 2026-10-28); a
+deterministic upstream failure needs its own non-retryable code. Your own codes
+are classified by their `defineErrors` declaration, and a legacy code with no
+category anywhere stays `provider_error`.
 
 An unregistered non-validation `ProviderError` code returns HTTP 500 and emits
 the greppable `unregistered_provider_error_code` signal with the code in the
@@ -1088,21 +1131,13 @@ router's deadline timer cancels the read.
   `VALIDATION_ERROR`, and `BAD_REQUEST` are not registered.
 
 Like `UPSTREAM_ERROR` and `BLOCKED`, these are thrown by provider code rather
-than by the SDK, so they are registered mappings and not SDK-owned codes: an
-existing operation declaration still wins at runtime (step 2 above). Registering
-them therefore never rewrites a status you already declared. What it does do is
-let you delete the declaration — and when your declaration disagrees with the
-registered mapping, `apifuse check` reports it rather than leaving the fleet
-answering one code two ways:
-
-- `error-code-status-conflicts-sdk` — declared `status` differs from the
-  registered status.
-- `error-code-retryable-conflicts-sdk` — declared `retryable` differs from the
-  registered retryability.
-
-Both are warnings. Drop the conflicting field so the SDK supplies the value, or,
-if your operation genuinely means something else, throw a distinct code that
-says so.
+than by the SDK, so they are registered mappings and not SDK-owned codes: a
+legacy operation declaration still wins at runtime (step 2 above), so
+registering them never rewrites a status you already declared. With
+`defineErrors` the question does not arise: a registered code is referenced as
+`sdkErrors.X`, and restating or overriding its status or retryability is a type
+error. If your operation genuinely means something else, declare a distinct
+code that says so.
 
 ### Localized error messages (`messageKey` / `fixKey`)
 
@@ -1123,33 +1158,30 @@ Attach locale keys instead of parsing `Accept-Language` yourself:
 ```
 
 ```ts
-throw new ProviderError("The culture data service returned an unexpected response.", {
-  code: "UPSTREAM_SCHEMA_ERROR",
-  messageKey: "errors.upstreamSchema.message",
-  fixKey: "errors.upstreamSchema.fix",
-  params: { provider: "Culture Data" },
+export const errors = defineErrors({
+  SCHEDULE_UNAVAILABLE: {
+    status: 502,
+    category: "upstream_schema_drift",
+    description: "The culture data service returned an unexpected response.",
+    messageKey: "errors.upstreamSchema.message",
+    fixKey: "errors.upstreamSchema.fix",
+  },
 });
+
+throw errors.SCHEDULE_UNAVAILABLE({ params: { provider: "Culture Data" } });
 ```
 
-Keys can also live on the declaration, which localizes **every** site that
-throws that code without touching the throw sites:
-
-```ts
-errorCodes: [{
-  code: "UPSTREAM_SCHEMA_ERROR",
-  description: "The upstream response no longer matches its schema.",
-  messageKey: "errors.upstreamSchema.message",
-  fixKey: "errors.upstreamSchema.fix",
-}],
-```
-
-`status` and `retryable` are omitted because `UPSTREAM_SCHEMA_ERROR` is a
-registered code: the SDK already supplies 502 and non-retryable, and declaring
-a different value trips `error-code-status-conflicts-sdk` /
-`error-code-retryable-conflicts-sdk`. A declaration that carries only keys is
-still worth writing — it localizes every site that throws the code.
+The keys live on the declaration, so every site that throws the code is
+localized. A registered code (`sdkErrors.UPSTREAM_SCHEMA_ERROR`) takes the
+derived `errors.UPSTREAM_SCHEMA_ERROR.message` / `.fix` keys: add those entries
+to the catalogs and nothing else is needed. The legacy throw-site `messageKey`
+/ `fixKey` options and `errorCodes[]` keys keep working for one more release.
 
 Resolution order per field, evaluated at serve time:
+
+1. the throw site's `messageKey` / `fixKey` (legacy);
+2. the declaration's `messageKey` / `fixKey` (`defineErrors`, or a legacy
+   `errorCodes[]` entry);Resolution order per field, evaluated at serve time:
 
 1. the throw site's `messageKey` / `fixKey`;
 2. the matching `errorCodes[]` entry's `messageKey` / `fixKey`;
@@ -1205,16 +1237,11 @@ catalog that exists but cannot be parsed logs one
 `provider_locale_catalogs_unavailable` warn at boot and every field falls back
 to its English literal.
 
-**Lint.** `apifuse check` reports:
-
-- `error-locale-key-missing` / `error-locale-key-malformed` (**error**) — a
-  literal `messageKey`/`fixKey`, on a throw site or on an `errorCodes[]` entry,
-  that `locales/en.json` does not resolve to non-empty text, or that is not a
-  legal locale dot path (see **Key grammar** above).
-- `thrown-error-message-not-localized` (**warn**) — a throw site whose declared
-  code has no key anywhere and no `errors.<code>.message` in `en`, so it is
-  served untranslated. Warning during the migration; promoted to error per
-  provider as each wave lands.
+**Checks.** A malformed key fails `defineErrors` itself (see **Key grammar**
+above). `apifuse check` then verifies, as a build-time check of the
+declarations (not a source scan), that every `messageKey` / `fixKey` on the
+operations' `errors` resolves to non-empty text in `locales/en.json`
+("Declared error locale keys resolve in locales/en.json").
 
 `ko`/`ja` coverage needs no new rule: `en` is the baseline, so the existing
 catalog parity and placeholder checks already fail an `errors.*` key that is

@@ -28,6 +28,18 @@ export type {
 	ProviderDefinitionFor,
 } from "./define.js";
 export {
+	type DefinedErrors,
+	type DefineErrorsInput,
+	defineErrors,
+	type ProviderErrorDeclaration,
+	type ProviderErrorDeclarationInput,
+	type ProviderErrorFactory,
+	type ProviderErrorInput,
+	type SdkErrorRef,
+	sdkErrors,
+} from "./define-errors.js";
+export type { SdkErrorCode } from "./error-resolution.js";
+export {
 	centered,
 	defineHealthAccount,
 	defineHealthJourney,

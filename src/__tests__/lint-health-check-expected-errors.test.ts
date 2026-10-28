@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
+import { defineErrors, type ProviderErrorFactory } from "../define-errors.js";
 import {
 	defineHealthScenario,
 	errorRefs,
@@ -31,6 +32,7 @@ function operation(
 	healthCheck?: unknown,
 	errorCodes?: readonly ErrorCodeDeclaration[],
 	source?: string,
+	errors?: readonly ProviderErrorFactory[],
 ) {
 	return {
 		descriptionKey: `operations.${OPERATION_KEY}.description`,
@@ -38,6 +40,7 @@ function operation(
 		output: describeKey(z.object({}), `operations.${OPERATION_KEY}.output.description`),
 		fixtures: { request: {}, response: {} },
 		...(errorCodes === undefined ? {} : { errorCodes }),
+		...(errors === undefined ? {} : { errors }),
 		...(source === undefined ? {} : { source }),
 		...(healthCheck === undefined ? {} : { healthCheck }),
 	};
@@ -64,6 +67,7 @@ function lint(
 	expectedErrors: readonly [ExpectedErrorInput, ...ExpectedErrorInput[]],
 	errorCodes?: readonly ErrorCodeDeclaration[],
 	source?: string,
+	errors?: readonly ProviderErrorFactory[],
 	scenario: (steps: [HealthStepInput, ...HealthStepInput[]]) => HealthScenario = probeScenario,
 ): LintDiagnostic[] {
 	const read: HealthStepInput = {
@@ -83,6 +87,7 @@ function lint(
 				{ cases: [{ name: "national", scenario: scenario([read]) }] },
 				errorCodes,
 				source,
+				errors,
 			),
 		},
 	}).filter((diagnostic) => diagnostic.rule === UNMATCHABLE || diagnostic.rule === NOT_AN_ABSENCE);
@@ -140,7 +145,7 @@ describe("health-check expectedErrors lint (by-code form)", () => {
 	it("still finds a by-code entry after defineProvider attached the freshness guard", () => {
 		const guarded = (steps: [HealthStepInput, ...HealthStepInput[]]) =>
 			withFreshnessGuards(probeScenario(steps), new Set([OPERATION_KEY]));
-		const diagnostics = lint([expected(404, "NO_FORECAST")], undefined, undefined, guarded);
+		const diagnostics = lint([expected(404, "NO_FORECAST")], undefined, undefined, undefined, guarded);
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]).toMatchObject({ rule: UNMATCHABLE, field: `${FIELD}[0]` });
 	});
@@ -209,6 +214,54 @@ describe("health-check expectedErrors lint (by-code form)", () => {
 		).toEqual([]);
 	});
 
+	it("reads a defineErrors declaration listed in errors the way it reads an errorCodes row", () => {
+		const errors = defineErrors({
+			NO_FORECAST: {
+				status: 404,
+				category: "upstream_http",
+				description: "The service has no forecast for this area.",
+			},
+			FORECAST_GONE: {
+				status: 410,
+				category: "upstream_rejected",
+				description: "The forecast was withdrawn.",
+			},
+			NO_STATION: {
+				status: 404,
+				category: "provider_error",
+				description: "The station table has no row.",
+			},
+		});
+		// Thrown through the factory (no construction site), the declared
+		// category is the envelope's: upstream_http -> upstream_failure.
+		expect(
+			lint([expected(404, "NO_FORECAST")], undefined, undefined, [errors.NO_FORECAST]),
+		).toEqual([]);
+		// The declared status is the served one.
+		const wrongStatus = lint([expected(410, "NO_FORECAST")], undefined, undefined, [
+			errors.NO_FORECAST,
+		]);
+		expect(wrongStatus).toHaveLength(1);
+		expect(wrongStatus[0]?.message).toContain("serves status 404");
+		// A declared rejection category is attributed to the rule, not the upstream.
+		const rejected = lint([expected(410, "FORECAST_GONE")], undefined, undefined, [
+			errors.FORECAST_GONE,
+		]);
+		expect(rejected).toHaveLength(1);
+		expect(rejected[0]?.message).toContain('source "upstream_rule"');
+		// A provider_error declaration is the SDK's envelope, never an absence.
+		const internal = lint([expected(404, "NO_STATION")], undefined, undefined, [errors.NO_STATION]);
+		expect(internal).toHaveLength(1);
+		expect(internal[0]?.message).toContain('source "apifuse"');
+		// A legacy throw site that hand-builds the code beside the factory
+		// adds its own source; the declaration's still counts.
+		expect(
+			lint([expected(404, "NO_FORECAST")], undefined, BARE_THROW("NO_FORECAST"), [
+				errors.NO_FORECAST,
+			]),
+		).toEqual([]);
+	});
+
 	it("rejects a code the operation neither declares nor the SDK registers", () => {
 		const diagnostics = lint([expected(404, "NO_FORECAST")]);
 		expect(diagnostics).toHaveLength(1);
@@ -273,10 +326,10 @@ describe("health-check expectedErrors lint (by-code form)", () => {
 		expect(rejected[0]).toMatchObject({ rule: UNMATCHABLE, level: "error" });
 		expect(rejected[0]?.message).toContain('source "upstream_rule"');
 		expect(rejected[0]?.message).toContain("registered as upstream_rejected");
-		// Status-mapped but not an upstream code: classed provider_error, source apifuse.
+		// Registered as a caller-side code: classed input_validation, source client.
 		const invalid = lint([expected(400, "INVALID_REQUEST")]);
 		expect(invalid).toHaveLength(1);
-		expect(invalid[0]?.message).toContain('source "apifuse"');
+		expect(invalid[0]?.message).toContain('source "client"');
 		// A declared rejection status classes a provider code as a refusal.
 		const rejectionStatus = lint(
 			[expected(410, "GONE_TODAY")],

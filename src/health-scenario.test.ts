@@ -24,8 +24,8 @@ import {
 import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
 import { PROVIDER_ERROR_LOCALES } from "./i18n/error-messages.js";
 import {
+	SDK_ERROR_REGISTRY_BY_CODE,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
-	SDK_UPSTREAM_ERROR_CODE_REGISTRY,
 } from "./error-resolution.js";
 
 const PING_FRESHNESS_GUARD: HealthStep = {
@@ -1052,7 +1052,7 @@ describe("declarative health scenarios", () => {
 
 	it("pins the refusal codes the reference type excludes to the SDK registries", () => {
 		const registered = [
-			...Array.from(SDK_UPSTREAM_ERROR_CODE_REGISTRY)
+			...Array.from(SDK_ERROR_REGISTRY_BY_CODE)
 				.filter(
 					([, registration]) =>
 						registration.category === "upstream_auth" ||

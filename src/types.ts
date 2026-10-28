@@ -1,4 +1,5 @@
 import type ms from "ms";
+import type { ProviderErrorFactory } from "./define-errors.js";
 import type { HandleContext, HandleKind } from "./handle.js";
 import type { HealthScenario, NonEmpty, SafeRegex } from "./health-scenario.js";
 import type { UpstreamMaintenanceWindow } from "./upstream-maintenance.js";
@@ -2817,7 +2818,18 @@ export interface OperationDefinition<
 	whenToUseKeys?: readonly ProviderLocaleKeyInput[];
 	whenNotToUseKeys?: readonly ProviderLocaleKeyInput[];
 	normalizationNotesKeys?: readonly ProviderLocaleKeyInput[];
+	/**
+	 * @deprecated Declare each code once with `defineErrors(...)` and list the
+	 * factories in `errors: [errors.CODE, ...]`; status, retryable and the locale
+	 * keys then come from that declaration. Still served for one more release.
+	 */
 	errorCodes?: readonly OperationErrorCode[];
+	/**
+	 * The errors this operation can throw, as `defineErrors` factories. Published
+	 * in the contract as `errorCodes`; the served status and retryability are
+	 * read from each factory's declaration.
+	 */
+	errors?: readonly ProviderErrorFactory[];
 	examples?: readonly OperationExample[];
 	contract?: OperationContractMetadata;
 	tags?: readonly string[];

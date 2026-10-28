@@ -1,0 +1,589 @@
+# errors-factory: migrate the pre-defineErrors error path to the factory.
+#
+# Preview (read-only):   ast-grep scan --rule scripts/codemods/errors-factory.yml <provider-dir>
+# Apply:                 ast-grep scan --rule scripts/codemods/errors-factory.yml --update-all <provider-dir>
+# Then: add `import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider"` where a
+# table became a defineErrors map, import that map where a throw site or operation uses it,
+# run `biome format`, and let `tsc` name what the codemod cannot know:
+#   - a provider-owned code's `category` (the old table never stated one; only a 409/410/422
+#     status implies `upstream_rejected`, which is filled in);
+#   - a legacy `...SPREAD` of category/retryable constants left inside a factory call
+#     (ignored at serve time; delete it);
+#   - a table row keyed under an SDK-registered name whose `status` or `retryable` differs from
+#     the registry is NOT rewritten to `sdkErrors.X`: it keeps its own values under that key (which
+#     `defineErrors` refuses, so it cannot ship silently) and rule 4 reports it. Two choices: accept
+#     the SDK value (replace the row with `X: sdkErrors.X`) or declare a distinct provider code for
+#     that condition (`UPSTREAM_REJECTED: sdkErrors.UPSTREAM_REJECTED` for a deterministic 4xx
+#     refusal, or a provider code with its own status/retryable) and throw it at those sites;
+#   - rows written inline in an operation's `errorCodes` (no shared table) become `errors.X`
+#     references and their status/description are not carried anywhere: hoist them into a
+#     `const T = [...] as const` table first so rule 3 turns them into the defineErrors map;
+#   - a throw site whose `code` is not a string literal (`code: flag ? "A" : "B"`) is left as is.
+#
+# Rules, in order:
+#   1. throw-site          new ProviderError(msg, { code: "X", ...rest })  -> errors.X({ message: msg, ...rest })
+#                          (per-throw category/retryable are dropped: the declaration owns them)
+#   2. operation-list      errorCodes: [ { code: "X", ... }, ...TABLE ]     -> errors: [ errors.X, ...Object.values(TABLE) ]
+#   3. declaration-table   const T = [ { code: "X", status, description, retryable }, ... ] as const
+#                          -> const T = defineErrors({ X: sdkErrors.X | { status, description, retryable, category? } })
+#                          (a registered code becomes `sdkErrors.X` only when the row's status and
+#                          retryable equal the registry's; otherwise the row keeps its values)
+#   4. sdk-row-conflict    diagnostic only (no fix): a registered-code row whose status or retryable
+#                          differs from the registry, with the two choices
+id: errors-factory-throw-site
+language: typescript
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  has:
+    pattern:
+      context: '{ code: $CODE }'
+      selector: pair
+    stopBy: end
+constraints:
+  CODE:
+    kind: string
+rewriters:
+  - id: keep-throw-props
+    rule:
+      pattern: $PROP
+      any:
+        - kind: pair
+          not:
+            any:
+              - pattern:
+                  context: '{ code: $_ }'
+                  selector: pair
+              - pattern:
+                  context: '{ category: $_ }'
+                  selector: pair
+              - pattern:
+                  context: '{ retryable: $_ }'
+                  selector: pair
+        - kind: spread_element
+        - kind: shorthand_property_identifier
+    fix: $PROP
+transform:
+  CODE_NAME:
+    substring:
+      source: $CODE
+      startChar: 1
+      endChar: -1
+  REST:
+    rewrite:
+      source: $$$PROPS
+      rewriters: [keep-throw-props]
+      joinBy: ', '
+  INPUT:
+    replace:
+      source: $REST
+      replace: '^(.+)$'
+      by: ', $1'
+fix: 'errors.$CODE_NAME({ message: $MSG$INPUT })'
+---
+id: errors-factory-operation-list
+language: typescript
+rule:
+  any:
+    - pattern:
+        context: '{ errorCodes: [ $$$ENTRIES ] }'
+        selector: pair
+    - pattern:
+        context: '{ errorCodes: [ $$$ENTRIES ] as const }'
+        selector: pair
+rewriters:
+  - id: entry-to-factory
+    rule:
+      kind: object
+      has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+    constraints:
+      CODE:
+        kind: string
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: errors.$CODE_NAME
+  - id: spread-to-factories
+    rule:
+      pattern:
+        context: '[...$TABLE]'
+        selector: spread_element
+    fix: '...Object.values($TABLE)'
+transform:
+  FACTORIES:
+    rewrite:
+      source: $$$ENTRIES
+      rewriters: [entry-to-factory, spread-to-factories]
+      joinBy: ', '
+fix: 'errors: [$FACTORIES]'
+---
+id: errors-factory-declaration-table
+language: typescript
+rule:
+  any:
+    - pattern: const $NAME = [ $$$ENTRIES ] as const
+    - pattern: const $NAME = [ $$$ENTRIES ]
+    - pattern: 'const $NAME: $TYPE = [ $$$ENTRIES ]'
+  has:
+    kind: object
+    has:
+      pattern:
+        context: '{ code: $_, status: $_ }'
+        selector: pair
+    stopBy: end
+rewriters:
+  - id: keep-row-fields
+    rule:
+      kind: pair
+      pattern: $FIELD
+      not:
+        pattern:
+          context: '{ code: $_ }'
+          selector: pair
+    fix: $FIELD
+  # One sdk-row rewriter per (status, retryable) group of the SDK registry
+  # (src/error-resolution.ts SDK_ERROR_REGISTRY). A row is rewritten to the
+  # reference only when every status/retryable it states equals the registry's;
+  # a differing row falls through to rejection-row/provider-row, keeps its
+  # values under the registered key, and the sdk-row-conflict rule reports it.
+  - id: sdk-row-404-non-retryable
+    rule:
+      kind: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^status$' }
+                - not: { has: { field: value, regex: '^404$' } }
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^retryable$' }
+                - not: { has: { field: value, regex: '^false$' } }
+    constraints:
+      CODE:
+        regex: "^[\"'](NOT_FOUND|not_found|NO_DATA)[\"']$"
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: '$CODE_NAME: sdkErrors.$CODE_NAME'
+  - id: sdk-row-429-retryable
+    rule:
+      kind: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^status$' }
+                - not: { has: { field: value, regex: '^429$' } }
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^retryable$' }
+                - not: { has: { field: value, regex: '^true$' } }
+    constraints:
+      CODE:
+        regex: "^[\"'](RATE_LIMITED|UPSTREAM_RATE_LIMIT|LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR)[\"']$"
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: '$CODE_NAME: sdkErrors.$CODE_NAME'
+  - id: sdk-row-409-non-retryable
+    rule:
+      kind: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^status$' }
+                - not: { has: { field: value, regex: '^409$' } }
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^retryable$' }
+                - not: { has: { field: value, regex: '^false$' } }
+    constraints:
+      CODE:
+        regex: "^[\"']UPSTREAM_REJECTED[\"']$"
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: '$CODE_NAME: sdkErrors.$CODE_NAME'
+  - id: sdk-row-502-retryable
+    rule:
+      kind: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^status$' }
+                - not: { has: { field: value, regex: '^502$' } }
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^retryable$' }
+                - not: { has: { field: value, regex: '^true$' } }
+    constraints:
+      CODE:
+        regex: "^[\"']UPSTREAM_ERROR[\"']$"
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: '$CODE_NAME: sdkErrors.$CODE_NAME'
+  - id: sdk-row-502-non-retryable
+    rule:
+      kind: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^status$' }
+                - not: { has: { field: value, regex: '^502$' } }
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^retryable$' }
+                - not: { has: { field: value, regex: '^false$' } }
+    constraints:
+      CODE:
+        regex: "^[\"'](BLOCKED|UPSTREAM_SCHEMA_ERROR)[\"']$"
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: '$CODE_NAME: sdkErrors.$CODE_NAME'
+  - id: sdk-row-400-non-retryable
+    rule:
+      kind: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^status$' }
+                - not: { has: { field: value, regex: '^400$' } }
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^retryable$' }
+                - not: { has: { field: value, regex: '^false$' } }
+    constraints:
+      CODE:
+        regex: "^[\"'](UPSTREAM_AUTH_ERROR|INVALID_REQUEST)[\"']$"
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: '$CODE_NAME: sdkErrors.$CODE_NAME'
+  - id: sdk-row-401-non-retryable
+    rule:
+      kind: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^status$' }
+                - not: { has: { field: value, regex: '^401$' } }
+        - not:
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^retryable$' }
+                - not: { has: { field: value, regex: '^false$' } }
+    constraints:
+      CODE:
+        regex: "^[\"']AUTH_REQUIRED[\"']$"
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+    fix: '$CODE_NAME: sdkErrors.$CODE_NAME'
+  - id: rejection-row
+    rule:
+      pattern:
+        context: 'const _ = { $$$FIELDS }'
+        selector: object
+      all:
+        - has:
+            pattern:
+              context: '{ code: $CODE }'
+              selector: pair
+        - has:
+            pattern:
+              context: '{ status: $STATUS }'
+              selector: pair
+    constraints:
+      CODE:
+        kind: string
+      STATUS:
+        regex: '^(409|410|422)$'
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+      REST:
+        rewrite:
+          source: $$$FIELDS
+          rewriters: [keep-row-fields]
+          joinBy: ', '
+    fix: '$CODE_NAME: { category: "upstream_rejected", $REST }'
+  - id: provider-row
+    rule:
+      pattern:
+        context: 'const _ = { $$$FIELDS }'
+        selector: object
+      has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+    constraints:
+      CODE:
+        kind: string
+    transform:
+      CODE_NAME:
+        substring:
+          source: $CODE
+          startChar: 1
+          endChar: -1
+      REST:
+        rewrite:
+          source: $$$FIELDS
+          rewriters: [keep-row-fields]
+          joinBy: ', '
+    fix: '$CODE_NAME: { $REST }'
+  - id: table-spread
+    rule:
+      kind: spread_element
+      pattern: $SPREAD
+    fix: $SPREAD
+transform:
+  ROWS:
+    rewrite:
+      source: $$$ENTRIES
+      rewriters:
+        - sdk-row-404-non-retryable
+        - sdk-row-429-retryable
+        - sdk-row-409-non-retryable
+        - sdk-row-502-retryable
+        - sdk-row-502-non-retryable
+        - sdk-row-400-non-retryable
+        - sdk-row-401-non-retryable
+        - rejection-row
+        - provider-row
+        - table-spread
+      joinBy: ', '
+fix: 'const $NAME = defineErrors({ $ROWS })'
+---
+# Residue, not a rewrite: a table row keyed under an SDK-registered code whose
+# status or retryable differs from the registry. The row keeps its own values
+# (rule 3 leaves it a provider-row under the registered key, which defineErrors
+# refuses at the type and at runtime), so the provider's contract is not
+# flipped by the migration; the author chooses.
+id: errors-factory-sdk-row-conflict
+language: typescript
+severity: warning
+message: 'Row $CODE states a status or retryable that differs from the SDK registry (sdkErrors.$CODE_NAME); it is left with its own values, which defineErrors refuses under a registered key.'
+note: 'Two choices: (a) accept the SDK value and replace the row with `X: sdkErrors.X`; or (b) declare a distinct provider code for this condition (a deterministic refusal is `UPSTREAM_REJECTED: sdkErrors.UPSTREAM_REJECTED`, 409 non-retryable; otherwise a provider code with its own status, category and retryable) and throw it at the sites that meant this row.'
+rule:
+  kind: object
+  inside:
+    kind: array
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+    - any:
+        - all:
+            - has:
+                kind: pair
+                all:
+                  - has: { field: key, regex: '^code$' }
+                  - has: { field: value, regex: "^[\"'](NOT_FOUND|not_found|NO_DATA)[\"']$" }
+            - any:
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^status$' }
+                      - not: { has: { field: value, regex: '^404$' } }
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^retryable$' }
+                      - not: { has: { field: value, regex: '^false$' } }
+        - all:
+            - has:
+                kind: pair
+                all:
+                  - has: { field: key, regex: '^code$' }
+                  - has: { field: value, regex: "^[\"'](RATE_LIMITED|UPSTREAM_RATE_LIMIT|LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR)[\"']$" }
+            - any:
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^status$' }
+                      - not: { has: { field: value, regex: '^429$' } }
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^retryable$' }
+                      - not: { has: { field: value, regex: '^true$' } }
+        - all:
+            - has:
+                kind: pair
+                all:
+                  - has: { field: key, regex: '^code$' }
+                  - has: { field: value, regex: "^[\"']UPSTREAM_REJECTED[\"']$" }
+            - any:
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^status$' }
+                      - not: { has: { field: value, regex: '^409$' } }
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^retryable$' }
+                      - not: { has: { field: value, regex: '^false$' } }
+        - all:
+            - has:
+                kind: pair
+                all:
+                  - has: { field: key, regex: '^code$' }
+                  - has: { field: value, regex: "^[\"']UPSTREAM_ERROR[\"']$" }
+            - any:
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^status$' }
+                      - not: { has: { field: value, regex: '^502$' } }
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^retryable$' }
+                      - not: { has: { field: value, regex: '^true$' } }
+        - all:
+            - has:
+                kind: pair
+                all:
+                  - has: { field: key, regex: '^code$' }
+                  - has: { field: value, regex: "^[\"'](BLOCKED|UPSTREAM_SCHEMA_ERROR)[\"']$" }
+            - any:
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^status$' }
+                      - not: { has: { field: value, regex: '^502$' } }
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^retryable$' }
+                      - not: { has: { field: value, regex: '^false$' } }
+        - all:
+            - has:
+                kind: pair
+                all:
+                  - has: { field: key, regex: '^code$' }
+                  - has: { field: value, regex: "^[\"'](UPSTREAM_AUTH_ERROR|INVALID_REQUEST)[\"']$" }
+            - any:
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^status$' }
+                      - not: { has: { field: value, regex: '^400$' } }
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^retryable$' }
+                      - not: { has: { field: value, regex: '^false$' } }
+        - all:
+            - has:
+                kind: pair
+                all:
+                  - has: { field: key, regex: '^code$' }
+                  - has: { field: value, regex: "^[\"']AUTH_REQUIRED[\"']$" }
+            - any:
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^status$' }
+                      - not: { has: { field: value, regex: '^401$' } }
+                - has:
+                    kind: pair
+                    all:
+                      - has: { field: key, regex: '^retryable$' }
+                      - not: { has: { field: value, regex: '^false$' } }
+constraints:
+  CODE:
+    regex: "^[\"'](NOT_FOUND|not_found|NO_DATA|RATE_LIMITED|UPSTREAM_RATE_LIMIT|LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR|UPSTREAM_REJECTED|UPSTREAM_ERROR|BLOCKED|UPSTREAM_AUTH_ERROR|UPSTREAM_SCHEMA_ERROR|AUTH_REQUIRED|INVALID_REQUEST)[\"']$"
+transform:
+  CODE_NAME:
+    substring:
+      source: $CODE
+      startChar: 1
+      endChar: -1

@@ -1,10 +1,9 @@
 import type { ZodType } from "zod";
 
 import {
-	SDK_CANONICAL_ERROR_CODE_RETRYABILITY,
+	SDK_ERROR_REGISTRY_BY_CODE,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
-	SDK_UPSTREAM_ERROR_CODE_REGISTRY,
 } from "./error-resolution.js";
 import { legacyHandleOptionsOf } from "./handle/contract.js";
 import {
@@ -13,12 +12,6 @@ import {
 	handleFieldDescription,
 	isHandleFieldMeta,
 } from "./handle-meta.js";
-import { PROVIDER_ERROR_CATALOG_NAMESPACE } from "./i18n/error-messages.js";
-import {
-	getProviderLocaleSegments,
-	isProviderLocaleKey,
-	type ProviderLocaleCatalog,
-} from "./i18n/keys.js";
 import { isExpectedErrorByCode } from "./health-scenario.js";
 import {
 	PROVIDER_ERROR_CATEGORIES,
@@ -1617,24 +1610,16 @@ function collectThrowSiteLintSources(provider: {
 }
 
 /**
- * Static counterpart of the runtime `unregistered_provider_error_code`
- * signal (honest-provider-error-contract Phase 3.5.5): flags
- * `new ProviderError(...)` / `new ValidationError(...)` constructions whose
- * literal `code` is neither SDK-registered (SDK_RUNTIME_OWNED_ERROR_CODES
- * plus the canonical status-mapped codes shared with serve.ts toStatusCode)
- * nor declared in any operation's errorCodes. At runtime such a code
- * serves HTTP 500 and emits the signal; this rule surfaces it at check time.
- *
- * A throw site cannot be attributed to a specific operation statically —
- * providers routinely throw from helpers shared across operations — so this
- * rule matches against the provider-level union of declared codes. That is
- * the honest scope: it will not catch a code declared only on the "wrong"
- * operation, and it never claims per-operation attribution it cannot prove.
- * Only literal string codes are checked; computed/dynamic codes and test
- * sources are skipped silently. Warning level: the long tail of existing
- * providers converges gradually, so this must not fail `apifuse check`.
+ * The one rule for the pre-`defineErrors` error path, kept until that path is
+ * removed. Reports, with the migration, each throw site that still sets the
+ * deprecated per-throw `category` / `retryable` options and each operation
+ * that still declares its codes in the deprecated `errorCodes` table. A
+ * provider on `defineErrors` + `errors: [...]` never trips it: the factory
+ * sets no per-throw option and the table is gone. Warning level: the existing
+ * fleet migrates on its own schedule, so this must not fail `apifuse check`.
  */
-function lintUndeclaredThrownErrorCodes(provider: {
+function lintLegacyErrorOptions(provider: {
+	id?: string;
 	authFlowSource?: string;
 	providerSourceFiles?: Record<string, string>;
 	operations?: Record<
@@ -1646,360 +1631,42 @@ function lintUndeclaredThrownErrorCodes(provider: {
 		}
 	>;
 }): LintDiagnostic[] {
-	const knownCodes = new Set<string>([
-		...SDK_RUNTIME_OWNED_ERROR_CODES,
-		...SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.keys(),
-	]);
-	for (const operation of Object.values(provider.operations ?? {})) {
-		for (const entry of operation.errorCodes ?? []) {
-			if (typeof entry?.code === "string") {
-				knownCodes.add(entry.code);
-			}
-		}
-	}
-
-	const sources = collectThrowSiteLintSources(provider);
-
-	const diagnostics: LintDiagnostic[] = [];
-	for (const { field, source } of sources) {
-		const undeclaredCodes = new Set(
-			collectThrownErrorConstructionSites(source)
-				.filter((site) => UNDECLARED_CODE_ERROR_CLASSES.has(site.errorClass))
-				.flatMap((site) => (site.code === undefined ? [] : [site.code]))
-				.filter((code) => !knownCodes.has(code)),
-		);
-		for (const code of undeclaredCodes) {
-			diagnostics.push({
-				rule: "thrown-error-code-undeclared",
-				level: "warn",
-				field,
-				message: `Thrown error code "${code}" (${field}) is neither SDK-registered nor declared in any operation's errorCodes; at runtime it serves HTTP 500 and emits the unregistered_provider_error_code signal. Declare it in the owning operation's errorCodes with status and retryable.`,
-			});
-		}
-	}
-	return diagnostics;
-}
-
-/**
- * Flags a `new ProviderError|AuthError|ValidationError(...)` site whose literal
- * `retryable` contradicts what the provider declares for that code.
- *
- * Runtime retryability resolves as `instance option ?? declared ?? false`, so
- * the throw site wins: a provider that declares `UPSTREAM_ERROR` with
- * `retryable: false` and then throws it with `retryable: true` serves a
- * retryable error whose published contract says the opposite. Callers and the
- * Gateway retry policy read the declaration; the served envelope disagrees.
- * `error-code-retryable-conflicts-sdk` catches the declaration against the SDK
- * canonical value; this rule catches the throw site against the declaration.
- *
- * Attribution follows `thrown-error-code-undeclared`: throw sites cannot be
- * tied to one operation, so the expected value is the provider-level
- * declaration for the code. When operations declare the same code with
- * different `retryable` values the rule stays silent (it cannot know which
- * operation the site serves); when no operation declares `retryable` for the
- * code, the SDK canonical value applies for registered codes, and the rule
- * stays silent otherwise. Only literal codes and literal booleans are read.
- *
- * Error level: this is a contract lie that `apifuse check` must stop, and the
- * fix is local (drop the literal, or throw the code the declaration describes).
- */
-function lintThrownErrorRetryableConflicts(provider: {
-	id?: string;
-	authFlowSource?: string;
-	providerSourceFiles?: Record<string, string>;
-	operations?: Record<
-		string,
-		{
-			handler?: unknown;
-			source?: string;
-			errorCodes?: ReadonlyArray<{ code: string; retryable?: boolean }>;
-		}
-	>;
-}): LintDiagnostic[] {
 	const providerId = provider.id ?? "unknown";
-	// code -> declared retryable, or null when operations disagree.
-	const declared = new Map<string, boolean | null>();
-	for (const operation of Object.values(provider.operations ?? {})) {
-		for (const entry of operation.errorCodes ?? []) {
-			if (typeof entry?.code !== "string" || typeof entry.retryable !== "boolean") continue;
-			const previous = declared.get(entry.code);
-			if (previous === undefined) {
-				declared.set(entry.code, entry.retryable);
-			} else if (previous !== null && previous !== entry.retryable) {
-				declared.set(entry.code, null);
-			}
-		}
-	}
-	const expectedRetryable = (code: string): { value: boolean; origin: string } | undefined => {
-		const fromDeclaration = declared.get(code);
-		if (fromDeclaration === null) return undefined;
-		if (fromDeclaration !== undefined) {
-			return { value: fromDeclaration, origin: "the operation errorCodes declaration" };
-		}
-		const canonical = SDK_CANONICAL_ERROR_CODE_RETRYABILITY.get(code);
-		if (canonical === undefined) return undefined;
-		return { value: canonical, origin: "the SDK canonical registration" };
-	};
-
 	const diagnostics: LintDiagnostic[] = [];
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const codes = (operation.errorCodes ?? []).flatMap((entry) =>
+			typeof entry?.code === "string" ? [entry.code] : [],
+		);
+		if (codes.length === 0) continue;
+		diagnostics.push({
+			rule: "legacy-error-options",
+			level: "warn",
+			field: `operations.${operationKey}.errorCodes`,
+			message: `Provider "${providerId}" operation "${operationKey}" declares ${codes.join(", ")} in the deprecated errorCodes table. Declare each code once with defineErrors({ ${codes[0]}: { status, category, description } }) (an SDK-registered code is sdkErrors.${codes[0]}) and list the factories as errors: [errors.${codes[0]}, ...]; status, retryable and the locale keys then come from that declaration.`,
+		});
+	}
 	for (const { field, source } of collectThrowSiteLintSources(provider)) {
 		const reported = new Set<string>();
 		for (const site of collectThrownErrorConstructionSites(source)) {
 			if (!UNDECLARED_CODE_ERROR_CLASSES.has(site.errorClass)) continue;
-			if (site.code === undefined || site.retryable === undefined) continue;
-			const expected = expectedRetryable(site.code);
-			if (expected === undefined || expected.value === site.retryable) continue;
-			const key = `${site.code}:${site.retryable}`;
+			const options = [
+				...(site.category !== undefined || site.nonLiteralCategory ? ["category"] : []),
+				...(site.retryable !== undefined ? ["retryable"] : []),
+			];
+			if (options.length === 0) continue;
+			const code = site.code ?? "CODE";
+			const key = `${code}:${options.join(",")}`;
 			if (reported.has(key)) continue;
 			reported.add(key);
 			diagnostics.push({
-				rule: "thrown-error-retryable-conflicts-declaration",
-				level: "error",
-				field,
-				message: `Provider "${providerId}" throws error code "${site.code}" with retryable ${site.retryable} (${field}), but ${expected.origin} says retryable ${expected.value}. The thrown value wins at runtime, so callers and the Gateway retry policy read a contract the served error contradicts. Drop the retryable literal at the throw site (the declaration supplies ${expected.value}) or throw a distinct code declared with retryable ${site.retryable}.`,
-			});
-		}
-	}
-	return diagnostics;
-}
-
-/**
- * Flags an operation `errorCodes` entry whose declared `status` or `retryable`
- * contradicts the SDK's canonical resolution for that code.
- *
- * For a code the SDK status-maps but does not runtime-own (UPSTREAM_ERROR,
- * BLOCKED, and the fleet-consensus codes registered alongside them), the
- * declaration still wins at runtime — `toStatusCode` reads the declaration
- * before the canonical map. So registering a code never silently rewrites an
- * existing declaration's status, and it must not: that would change a served
- * status behind the author's back. What it does create is a fleet that answers
- * one code two ways. This rule is where that divergence surfaces, by name, with
- * the canonical value to converge on.
- *
- * Codes the SDK runtime-owns are handled separately: `defineProvider` already
- * warns there, because for those the declaration really is ignored.
- *
- * Warning level, deliberately: the divergent providers are live and converge on
- * their own schedule, so this must not fail `apifuse check`.
- */
-function lintErrorCodeDeclarationConflicts(provider: {
-	id?: string;
-	operations?: Record<
-		string,
-		{
-			errorCodes?: ReadonlyArray<{ code: string; status?: number; retryable?: boolean }>;
-		}
-	>;
-}): LintDiagnostic[] {
-	const diagnostics: LintDiagnostic[] = [];
-	const providerId = provider.id ?? "unknown";
-	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-		for (const [index, entry] of (operation.errorCodes ?? []).entries()) {
-			if (typeof entry?.code !== "string") continue;
-			// SDK-owned codes ignore the declaration outright; defineProvider owns
-			// that message so authors are not told two different things.
-			if (SDK_RUNTIME_OWNED_ERROR_CODES.has(entry.code)) continue;
-
-			const field = `operations.${operationKey}.errorCodes[${index}]`;
-			const canonicalStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(entry.code);
-			if (canonicalStatus !== undefined && entry.status !== undefined) {
-				if (entry.status !== canonicalStatus) {
-					diagnostics.push({
-						rule: "error-code-status-conflicts-sdk",
-						level: "warn",
-						field: `${field}.status`,
-						message: `Provider "${providerId}" operation "${operationKey}" declares status ${entry.status} for SDK-registered error code "${entry.code}", whose canonical status is ${canonicalStatus}. The declaration still wins at runtime, so this operation serves ${entry.status} while the rest of the fleet serves ${canonicalStatus} for the same code. Drop the status (the SDK supplies ${canonicalStatus}) or, if ${entry.status} is genuinely the right answer here, throw a distinct code that means that.`,
-					});
-				}
-			}
-
-			const canonicalRetryable = SDK_CANONICAL_ERROR_CODE_RETRYABILITY.get(entry.code);
-			if (
-				canonicalRetryable !== undefined &&
-				entry.retryable !== undefined &&
-				entry.retryable !== canonicalRetryable
-			) {
-				diagnostics.push({
-					rule: "error-code-retryable-conflicts-sdk",
-					level: "warn",
-					field: `${field}.retryable`,
-					message: `Provider "${providerId}" operation "${operationKey}" declares retryable ${entry.retryable} for SDK-registered error code "${entry.code}", whose canonical retryability is ${canonicalRetryable}. The declaration still wins at runtime, so callers and the Gateway retry policy get a different answer here than everywhere else the same code is thrown. Drop the retryable (the SDK supplies ${canonicalRetryable}) or throw a distinct code for the retryable condition.`,
-				});
-			}
-		}
-	}
-	return diagnostics;
-}
-
-/** Declared `errorCodes[]` entry shape the localization rules read. */
-type OperationErrorCodeLike = {
-	code: string;
-	messageKey?: string;
-	fixKey?: string;
-};
-
-type ErrorLocaleKeyStatus = "ok" | "missing" | "malformed";
-
-function errorLocaleKeyStatus(catalog: ProviderLocaleCatalog, key: string): ErrorLocaleKeyStatus {
-	if (!isProviderLocaleKey(key)) return "malformed";
-	const value = getProviderLocaleSegments(catalog, key.split("."));
-	return typeof value === "string" && value.trim().length > 0 ? "ok" : "missing";
-}
-
-function hasDerivedErrorCatalogText(
-	catalog: ProviderLocaleCatalog,
-	code: string,
-	field: "message" | "fix",
-): boolean {
-	const value = getProviderLocaleSegments(catalog, [PROVIDER_ERROR_CATALOG_NAMESPACE, code, field]);
-	return typeof value === "string" && value.trim().length > 0;
-}
-
-/**
- * True when a thrown code reaches the caller as a real provider error whose
- * text the declared/derived catalog path can actually reach.
- *
- * A code qualifies either because the provider declares it in an operation's
- * `errorCodes`, or because the SDK registers a canonical status for it. The
- * second arm matters because registering a code is precisely what lets a
- * provider *delete* the declaration — AUTHORING tells it to for
- * `UPSTREAM_AUTH_ERROR`, `UPSTREAM_SCHEMA_ERROR` and `INVALID_REQUEST` — and an
- * undeclared throw of a registered code is no longer the HTTP 500 that
- * `thrown-error-code-undeclared` reports. Without this arm the two rules leave
- * a silent hole exactly where the fleet is being told to converge: a 502
- * `UPSTREAM_SCHEMA_ERROR` served untranslated with nothing warning about it.
- *
- * Codes the SDK runtime-owns are excluded: `sdkOwnsErrorResolution` skips the
- * declaration and derived candidates for them at serve time, so the catalog
- * entry this rule asks for would never take effect.
- */
-function isCatalogReachableThrownCode(code: string, declaredCodes: ReadonlySet<string>): boolean {
-	if (declaredCodes.has(code)) return true;
-	return (
-		!SDK_RUNTIME_OWNED_ERROR_CODES.has(code) && SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.has(code)
-	);
-}
-
-/**
- * Authoring rules for localized provider error text (see
- * `ProviderErrorOptions.messageKey`).
- *
- * - `error-locale-key-missing` / `error-locale-key-malformed` (**error**): a
- *   literal `messageKey`/`fixKey`, whether on a throw site or on an
- *   `errorCodes[]` declaration, that the provider's `en` catalog does not
- *   resolve to non-empty text, or that is not a legal locale dot path. At
- *   runtime such a key is silently skipped and the caller gets the English
- *   literal, so nothing fails loudly without this rule.
- * - `thrown-error-message-not-localized` (**warn**): a throw site whose literal
- *   `code` is declared in the provider's `errorCodes` — or SDK-registered, and
- *   so servable without a declaration — but that carries no `messageKey`, no
- *   declaration-level `messageKey`, and no derived `errors.<code>.message` in
- *   `en`. Such an error is served untranslated to every caller. Warning while
- *   the ~2,000 existing sites migrate; it is promoted to error per provider as
- *   each migration wave lands.
- *
- * Both rules are skipped entirely when the caller did not supply
- * `localeCatalogEn`: without the catalog they could only guess.
- */
-function lintErrorMessageLocalization(provider: {
-	authFlowSource?: string;
-	providerSourceFiles?: Record<string, string>;
-	localeCatalogEn?: ProviderLocaleCatalog;
-	operations?: Record<
-		string,
-		{
-			handler?: unknown;
-			source?: string;
-			errorCodes?: ReadonlyArray<OperationErrorCodeLike>;
-		}
-	>;
-}): LintDiagnostic[] {
-	const catalog = provider.localeCatalogEn;
-	if (!catalog) return [];
-
-	const diagnostics: LintDiagnostic[] = [];
-	const declaredCodes = new Set<string>();
-	const codesWithDeclaredMessageKey = new Set<string>();
-
-	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-		for (const entry of operation.errorCodes ?? []) {
-			if (typeof entry?.code !== "string") continue;
-			declaredCodes.add(entry.code);
-			for (const keyField of ["messageKey", "fixKey"] as const) {
-				const key = entry[keyField];
-				if (typeof key !== "string") continue;
-				if (keyField === "messageKey") codesWithDeclaredMessageKey.add(entry.code);
-				const status = errorLocaleKeyStatus(catalog, key);
-				if (status === "ok") continue;
-				diagnostics.push(
-					errorLocaleKeyDiagnostic(
-						status,
-						`operations.${operationKey}.errorCodes`,
-						key,
-						`errorCodes entry "${entry.code}" of operation "${operationKey}"`,
-					),
-				);
-			}
-		}
-	}
-
-	for (const { field, source } of collectThrowSiteLintSources(provider)) {
-		const reportedKeys = new Set<string>();
-		const reportedCodes = new Set<string>();
-		for (const site of collectThrownErrorConstructionSites(source)) {
-			for (const key of [site.messageKey, site.fixKey]) {
-				if (key === undefined || reportedKeys.has(key)) continue;
-				const status = errorLocaleKeyStatus(catalog, key);
-				if (status === "ok") continue;
-				reportedKeys.add(key);
-				diagnostics.push(
-					errorLocaleKeyDiagnostic(status, field, key, `a thrown error in ${field}`),
-				);
-			}
-			const code = site.code;
-			if (code === undefined || reportedCodes.has(code)) continue;
-			if (site.messageKey !== undefined) continue;
-			if (!isCatalogReachableThrownCode(code, declaredCodes)) continue;
-			if (codesWithDeclaredMessageKey.has(code)) continue;
-			if (hasDerivedErrorCatalogText(catalog, code, "message")) continue;
-			reportedCodes.add(code);
-			const origin = declaredCodes.has(code)
-				? `declared code "${code}"`
-				: `SDK-registered code "${code}"`;
-			const declarationClause = declaredCodes.has(code)
-				? "its errorCodes declaration has none, and"
-				: "no errorCodes declaration supplies one, and";
-			diagnostics.push({
-				rule: "thrown-error-message-not-localized",
+				rule: "legacy-error-options",
 				level: "warn",
 				field,
-				message: `${site.errorClass} with ${origin} (${field}) has no messageKey, ${declarationClause} locales/en.json has no "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message"; this error is served untranslated to ko and ja callers. Add messageKey (or "${PROVIDER_ERROR_CATALOG_NAMESPACE}.${code}.message" to every locale catalog).`,
+				message: `${site.errorClass} with code "${code}" (${field}) sets ${options.join(" and ")} per throw; these options are deprecated (still served over the declaration for one release, then removed). Declare the code once with defineErrors({ ${code}: { status, category, description } }) and throw errors.${code}({ details, cause }).`,
 			});
 		}
 	}
-
 	return diagnostics;
-}
-
-function errorLocaleKeyDiagnostic(
-	status: Exclude<ErrorLocaleKeyStatus, "ok">,
-	field: string,
-	key: string,
-	owner: string,
-): LintDiagnostic {
-	return status === "malformed"
-		? {
-				rule: "error-locale-key-malformed",
-				level: "error",
-				field,
-				message: `Locale key ${JSON.stringify(key)} on ${owner} is not a locale dot path such as "errors.upstreamSchema.message" or "errors.UPSTREAM_SCHEMA_ERROR.message"; segments are camelCase, an array index, or — directly under "errors" — the error code itself; the SDK skips a malformed key at serve time and the caller gets the English literal instead.`,
-			}
-		: {
-				rule: "error-locale-key-missing",
-				level: "error",
-				field,
-				message: `Locale key ${JSON.stringify(key)} on ${owner} is missing from locales/en.json (or resolves to a non-string/empty value); the SDK falls back to the English literal at serve time, so the key never takes effect.`,
-			};
 }
 
 /**
@@ -3329,7 +2996,7 @@ const EXPECTED_ERROR_FORBIDDEN_CODES: ReadonlySet<string> = new Set([
 	"AUTH_REQUIRED",
 	"reauth_required",
 	"MISSING_SECRET",
-	...Array.from(SDK_UPSTREAM_ERROR_CODE_REGISTRY)
+	...Array.from(SDK_ERROR_REGISTRY_BY_CODE)
 		.filter(
 			([, registration]) =>
 				registration.category === "upstream_auth" ||
@@ -3385,18 +3052,52 @@ function lastErrorCodeDeclaration<T extends { code: string }>(
 	return undefined;
 }
 
+/** What an operation declares for a code, from either declaration shape. */
+type ExpectedErrorDeclaration = {
+	readonly status?: number;
+	readonly category?: ProviderErrorCategory;
+};
+
+/**
+ * The declaration the runtime reads for a code on an operation: a listed
+ * `defineErrors` factory's declaration (the one `buildOperationErrorCodeLookup`
+ * keeps when both shapes name the code, since factories are added after the
+ * table) or the last legacy `errorCodes` row.
+ */
+function expectedErrorDeclaration(
+	operation:
+		| {
+				errorCodes?: ReadonlyArray<{ code: string; status?: number }>;
+				errors?: ReadonlyArray<{ declaration: ExpectedErrorDeclaration & { code: string } }>;
+		  }
+		| undefined,
+	code: string,
+): ExpectedErrorDeclaration | undefined {
+	if (operation === undefined) return undefined;
+	const factory = lastErrorCodeDeclaration(
+		operation.errors?.map((entry) => entry.declaration),
+		code,
+	);
+	if (factory !== undefined) return factory;
+	return lastErrorCodeDeclaration(operation.errorCodes, code);
+}
+
 /**
  * The category the serve layer derives for a code when the throw site sets
- * none (`derivedErrorCategory`): a declared rejection status first, then the
- * registered upstream code's category. `undefined` leaves the class default.
+ * none (`resolveProviderErrorContract`): the declaration's own category (a
+ * `defineErrors` declaration always carries one), then a declared rejection
+ * status, then the registered code's category. `undefined` leaves the class
+ * default.
  */
 function derivedExpectedErrorCategory(
 	code: string,
-	declaredStatus: number | undefined,
+	declared: ExpectedErrorDeclaration | undefined,
 ): ProviderErrorCategory | undefined {
+	if (declared?.category !== undefined) return declared.category;
+	const declaredStatus = declared?.status;
 	if (declaredStatus === 409 || declaredStatus === 410 || declaredStatus === 422)
 		return "upstream_rejected";
-	return SDK_UPSTREAM_ERROR_CODE_REGISTRY.get(code)?.category;
+	return SDK_ERROR_REGISTRY_BY_CODE.get(code)?.category;
 }
 
 /**
@@ -3415,20 +3116,26 @@ function derivedExpectedErrorCategory(
  * upstream category, so it counts as possibly `upstream_failure` beside its
  * literal/derived resolution — the same reading as a non-literal `code`. With
  * no candidate site at all the derived resolution is the answer, which for a
- * provider code that nothing registers is `apifuse`.
+ * provider code that nothing registers is `apifuse`. A `defineErrors`
+ * declaration is thrown through its factory (`errors.X(...)`), which is not a
+ * construction site, so its own category always counts beside any legacy site
+ * that still hand-builds the code.
  */
 function expectedErrorEnvelopeSources(
 	code: string,
-	declaredStatus: number | undefined,
+	declared: ExpectedErrorDeclaration | undefined,
 	sites: readonly ThrownErrorConstructionSite[],
 ): ReadonlySet<ProviderErrorSource> {
 	if (code === "MISSING_SECRET") return new Set(["apifuse"]);
 	if (code === "UPSTREAM_ERROR" || code === "BLOCKED") return new Set(["upstream_failure"]);
-	const derived = derivedExpectedErrorCategory(code, declaredStatus);
+	const derived = derivedExpectedErrorCategory(code, declared);
 	const candidates = sites.filter((site) => site.code === code || site.code === undefined);
 	if (candidates.length === 0) return new Set([sourceForCategory(derived ?? "provider_error")]);
-	return new Set(
-		candidates.flatMap((site): ProviderErrorSource[] => {
+	const declaredSource: ProviderErrorSource[] =
+		declared?.category === undefined ? [] : [sourceForCategory(declared.category)];
+	return new Set([
+		...declaredSource,
+		...candidates.flatMap((site): ProviderErrorSource[] => {
 			const literal =
 				site.category !== undefined && isProviderErrorCategory(site.category)
 					? site.category
@@ -3438,7 +3145,7 @@ function expectedErrorEnvelopeSources(
 			const resolved = sourceForCategory(literal ?? derived ?? fallback);
 			return site.nonLiteralCategory === true ? [resolved, "upstream_failure"] : [resolved];
 		}),
-	);
+	]);
 }
 
 /**
@@ -3457,8 +3164,9 @@ function expectedErrorEnvelopeSources(
  * upstream `category`) is silently dead: the quiet day stays recorded as
  * `down`, which is the defect the clause exists to fix. The served status and
  * source are the ones `toStatusCode` / `publicErrorSource` resolve, read the
- * way the runtime reads them (a duplicate `errorCodes` entry resolves to its
- * last declaration).
+ * way the runtime reads them: a listed `defineErrors` factory (`errors:
+ * [errors.X]`) or the legacy `errorCodes` row (a duplicate entry resolves to
+ * its last declaration).
  *
  * Error level: a dead or dangerous entry has no partial value.
  *
@@ -3478,6 +3186,9 @@ function lintHealthCheckExpectedErrors(provider: {
 			source?: string;
 			healthCheck?: unknown;
 			errorCodes?: ReadonlyArray<{ code: string; status?: number }>;
+			errors?: ReadonlyArray<{
+				declaration: { code: string; status?: number; category?: ProviderErrorCategory };
+			}>;
 		}
 	>;
 }): LintDiagnostic[] {
@@ -3505,7 +3216,7 @@ function lintHealthCheckExpectedErrors(provider: {
 				for (const [entryIndex, entry] of entries.entries()) {
 					const field = `operations.${operationKey}.healthCheck.cases[${caseIndex}].scenario.steps[${stepIndex}].expectedErrors[${entryIndex}]`;
 					const label = `${providerLabel} operation "${operationKey}" health-check case [${caseIndex}] step "${typeof step.id === "string" ? step.id : stepIndex}" declares expectedErrors ${entry.status} "${entry.code}" for operation "${stepOperationId}"`;
-					const declared = lastErrorCodeDeclaration(owning?.errorCodes, entry.code);
+					const declared = expectedErrorDeclaration(owning, entry.code);
 					const canonicalStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(entry.code);
 					// Mirrors toStatusCode: an SDK-owned code ignores the declaration,
 					// any other declared status wins over the canonical mapping.
@@ -3528,7 +3239,7 @@ function lintHealthCheckExpectedErrors(provider: {
 							rule: "health-check-expected-error-unmatchable",
 							level: "error",
 							field,
-							message: `${label}, which neither declares that code in its errorCodes nor is it SDK-registered; the runtime serves HTTP 500 for it, so this entry can never match and the absence it describes is recorded as down. Declare the code in the owning operation's errorCodes with status ${entry.status}, or name the registered code the handler actually throws.`,
+							message: `${label}, which neither declares that code (a defineErrors factory in errors, or an errorCodes row) nor is it SDK-registered; the runtime serves HTTP 500 for it, so this entry can never match and the absence it describes is recorded as down. Declare the code with status ${entry.status} and list it in the owning operation's errors, or name the registered code the handler actually throws.`,
 						});
 						continue;
 					}
@@ -3546,17 +3257,17 @@ function lintHealthCheckExpectedErrors(provider: {
 							rule: "health-check-expected-error-unmatchable",
 							level: "error",
 							field,
-							message: `${label}, but the runtime serves status ${servedStatus} for that code (${declared?.status !== undefined && !sdkOwned ? "declared in errorCodes" : "the SDK's canonical status"}); the monitor matches status and code together, so this entry can never match. Use status ${servedStatus}.`,
+							message: `${label}, but the runtime serves status ${servedStatus} for that code (${declared?.status !== undefined && !sdkOwned ? "its declaration" : "the SDK's canonical status"}); the monitor matches status and code together, so this entry can never match. Use status ${servedStatus}.`,
 						});
 						continue;
 					}
 					const sources = expectedErrorEnvelopeSources(
 						entry.code,
-						sdkOwned ? undefined : declared?.status,
+						sdkOwned ? undefined : declared,
 						throwSites(),
 					);
 					if (sources.has("upstream_failure")) continue;
-					const registered = SDK_UPSTREAM_ERROR_CODE_REGISTRY.get(entry.code);
+					const registered = SDK_ERROR_REGISTRY_BY_CODE.get(entry.code);
 					const hint =
 						registered !== undefined
 							? `A code registered as ${registered.category} is an upstream refusal, not an absence; throw the registered code the upstream answer means (NO_DATA for an empty result).`
@@ -3708,11 +3419,6 @@ export function lintProvider(
 		};
 		authFlowSource?: string;
 		providerSourceFiles?: Record<string, string>;
-		/**
-		 * The provider's `locales/en.json`, injected by `apifuse check`. Error
-		 * message localization rules are skipped when it is absent.
-		 */
-		localeCatalogEn?: ProviderLocaleCatalog;
 		operations?: Record<
 			string,
 			{
@@ -3737,6 +3443,10 @@ export function lintProvider(
 					retryable?: boolean;
 					messageKey?: string;
 					fixKey?: string;
+				}>;
+				/** `defineErrors` factories the operation lists; read by the health-check expectedErrors rule. */
+				errors?: ReadonlyArray<{
+					declaration: { code: string; status?: number; category?: ProviderErrorCategory };
 				}>;
 			}
 		>;
@@ -3768,10 +3478,7 @@ export function lintProviderWithInformation(
 		...lintStealthTransportUsage(provider),
 		...lintCredentialWriteUsage(provider),
 		...lintBrowserVersionLiterals(provider),
-		...lintUndeclaredThrownErrorCodes(provider),
-		...lintThrownErrorRetryableConflicts(provider),
-		...lintErrorCodeDeclarationConflicts(provider),
-		...lintErrorMessageLocalization(provider),
+		...lintLegacyErrorOptions(provider),
 		...lintLegacyChoiceUsage(provider),
 		...lintProviderMetaNarrowing(provider),
 		...lintLegacyHandleDeclarations(provider),

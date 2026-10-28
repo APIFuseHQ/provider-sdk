@@ -121,92 +121,166 @@ export const SDK_RUNTIME_OWNED_ERROR_CODES = new Set([
 	"not_found",
 ]);
 
-/** One registered upstream code: the status the SDK serves and who failed. */
-export type SdkUpstreamErrorCodeRegistration = {
+/**
+ * One SDK-registered provider error code: the status the SDK serves, who
+ * failed, whether a retry can help, and the prose the contract publishes.
+ */
+export type SdkErrorRegistration = {
 	readonly status: ProviderErrorStatus;
 	readonly category: ProviderErrorCategory;
+	readonly retryable: boolean;
+	/** Developer-facing English prose published as the contract `errorCodes[].description`. */
+	readonly description: string;
 };
 
-// Registered codes that name an upstream outcome. A row states the status the
-// SDK serves and the observability category together, so an upstream code
-// cannot be registered without saying who failed. Serve reads the category
-// for a `ProviderError` that carries one of these codes and no explicit
-// `category`, and the public `source` follows from it (`sourceForCategory`).
-// Without a row the category defaults to `provider_error` → `source:
-// "apifuse"`, and the health monitor cannot tie a real upstream failure to the
-// upstream: it publishes `monitoring_unavailable` instead of `down`.
+// The codes provider code throws that the SDK registers. A row is the whole
+// contract for its code: status, category, retryability and description, so
+// a provider references the row by value (`sdkErrors.UPSTREAM_ERROR` in
+// `defineErrors`) instead of restating any of it. Serve reads the row for a
+// `ProviderError` carrying the code, and the public `source` follows from the
+// category (`sourceForCategory`). Without a row the category defaults to
+// `provider_error` → `source: "apifuse"`, and the health monitor cannot tie a
+// real upstream failure to the upstream: it publishes `monitoring_unavailable`
+// instead of `down`.
 //
 // The category is `categoryForStatus(status)` unless the code names a
 // narrower class than its status can: a schema change, a bot wall, an
 // upstream refusal of the platform-managed key (served 400, see below).
-// Every row is a code the fleet throws for something the upstream did or
-// said; caller-side and SDK-internal codes stay in the table below.
-export const SDK_UPSTREAM_ERROR_CODE_REGISTRY: ReadonlyMap<
-	string,
-	SdkUpstreamErrorCodeRegistration
-> = new Map<string, SdkUpstreamErrorCodeRegistration>([
+// Retryability is the category's (`isRetryableCategory`) unless the row says
+// why not. Codes the SDK runtime itself throws stay in the sets above.
+export const SDK_ERROR_REGISTRY = {
 	// The SDK's own unknown-operation and unknown-route throws reuse the
 	// not-found spellings; they set an explicit category and stay APIFuse's.
-	["NOT_FOUND", { status: 404, category: "upstream_http" }],
-	["not_found", { status: 404, category: "upstream_http" }],
-	["NO_DATA", { status: 404, category: "upstream_http" }],
-	["RATE_LIMITED", { status: 429, category: "upstream_rate_limited" }],
-	["UPSTREAM_RATE_LIMIT", { status: 429, category: "upstream_rate_limited" }],
-	[
-		"LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR",
-		{ status: 429, category: "upstream_rate_limited" },
-	],
+	// A retry of the same lookup returns the same 404.
+	NOT_FOUND: {
+		status: 404,
+		category: "upstream_http",
+		retryable: false,
+		description: "The upstream has no record for the requested identifier.",
+	},
+	not_found: {
+		status: 404,
+		category: "upstream_http",
+		retryable: false,
+		description: "The upstream has no record for the requested identifier.",
+	},
+	NO_DATA: {
+		status: 404,
+		category: "upstream_http",
+		retryable: false,
+		description: "The upstream returned no data for the request.",
+	},
+	RATE_LIMITED: {
+		status: 429,
+		category: "upstream_rate_limited",
+		retryable: true,
+		description: "The upstream rate-limited the request; retry after a delay.",
+	},
+	UPSTREAM_RATE_LIMIT: {
+		status: 429,
+		category: "upstream_rate_limited",
+		retryable: true,
+		description: "The upstream rate-limited the request; retry after a delay.",
+	},
+	LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR: {
+		status: 429,
+		category: "upstream_rate_limited",
+		retryable: true,
+		description: "The upstream's request quota for the service key is exhausted; retry later.",
+	},
 	// Deterministic upstream business refusal (honest-provider-error-
 	// contract): the upstream evaluated the request and said no under its
 	// own rules — a conflict with upstream state, never a 5xx.
-	["UPSTREAM_REJECTED", { status: 409, category: "upstream_rejected" }],
-	["UPSTREAM_ERROR", { status: 502, category: "upstream_http" }],
+	UPSTREAM_REJECTED: {
+		status: 409,
+		category: "upstream_rejected",
+		retryable: false,
+		description: "The upstream refused the request under its own rules.",
+	},
+	// An upstream HTTP failure the provider cannot classify further. The
+	// fleet declares it retryable (upstream_http), so a deterministic
+	// upstream failure needs its own non-retryable code.
+	UPSTREAM_ERROR: {
+		status: 502,
+		category: "upstream_http",
+		retryable: true,
+		description: "The upstream returned an HTTP failure.",
+	},
 	// The upstream's bot wall or request protection refused the request. The
 	// status says only "upstream"; the code says which kind.
-	["BLOCKED", { status: 502, category: "anti_bot_blocked" }],
-	// Fleet-consensus provider codes. These are thrown by provider code, not
-	// by the SDK, so they are registered here (status mapping) and not in
-	// SDK_RUNTIME_OWNED_ERROR_CODES: an operation-declared status still wins,
-	// exactly as it does for UPSTREAM_ERROR and BLOCKED above. Registering
-	// them stops the fleet from re-declaring the same rows on every
-	// operation, and stops an undeclared throw from being served as 500.
-	//
+	BLOCKED: {
+		status: 502,
+		category: "anti_bot_blocked",
+		retryable: false,
+		description: "The upstream blocked the request with bot or request protection.",
+	},
 	// A platform-managed upstream service key the upstream refuses. With
 	// `auth.mode: "platform-managed"` the caller holds no credential, so 401
 	// ("re-authenticate") tells the caller to do something it cannot do, and
 	// 502 ("upstream is sick") promises a recovery that will never come. It is
-	// a deployment/config defect — the same class as MISSING_SECRET below,
-	// which is already an explicit 400 for that reason. The upstream is still
-	// the one refusing, so the category is `upstream_auth`; the gateway
-	// records it as `provider_error` for every non-`required` connection mode
-	// so the refusal stays provider-alertable.
-	["UPSTREAM_AUTH_ERROR", { status: 400, category: "upstream_auth" }],
+	// a deployment/config defect — the same class as MISSING_SECRET, which is
+	// already an explicit 400 for that reason. The upstream is still the one
+	// refusing, so the category is `upstream_auth`; the gateway records it as
+	// `provider_error` for every non-`required` connection mode so the
+	// refusal stays provider-alertable.
+	UPSTREAM_AUTH_ERROR: {
+		status: 400,
+		category: "upstream_auth",
+		retryable: false,
+		description: "The upstream refused the platform-managed credential.",
+	},
 	// The upstream changed its response shape and the provider cannot
 	// normalize it. 502 because the fault is upstream of us, non-retryable
 	// because a retry returns the same broken payload.
-	["UPSTREAM_SCHEMA_ERROR", { status: 502, category: "upstream_schema_drift" }],
-]);
+	UPSTREAM_SCHEMA_ERROR: {
+		status: 502,
+		category: "upstream_schema_drift",
+		retryable: false,
+		description: "The upstream response could not be normalized.",
+	},
+	// Caller-side codes, categorized as the fleet throws them (2026-10-28:
+	// AUTH_REQUIRED credential_unavailable 28 of 38 sites, INVALID_REQUEST
+	// input_validation 118 of 118). The minority spellings (INVALID_INPUT /
+	// VALIDATION_ERROR / BAD_REQUEST) are deliberately not registered: they
+	// migrate to INVALID_REQUEST on the contract track, and registering them
+	// here would freeze the divergence.
+	AUTH_REQUIRED: {
+		status: 401,
+		category: "credential_unavailable",
+		retryable: false,
+		description: "The request needs a connected account.",
+	},
+	INVALID_REQUEST: {
+		status: 400,
+		category: "input_validation",
+		retryable: false,
+		description: "The upstream rejected the request input.",
+	},
+} as const satisfies Record<string, SdkErrorRegistration>;
+
+/** A code `SDK_ERROR_REGISTRY` registers. */
+export type SdkErrorCode = keyof typeof SDK_ERROR_REGISTRY;
+
+/** `SDK_ERROR_REGISTRY` as a map, for lookups by an untyped code. */
+export const SDK_ERROR_REGISTRY_BY_CODE: ReadonlyMap<string, SdkErrorRegistration> = new Map(
+	Object.entries(SDK_ERROR_REGISTRY),
+);
 
 /**
- * The category a registered upstream code carries when its `ProviderError`
- * sets none. `undefined` for every other code, which keeps its existing
- * default.
+ * The registry row for a code, or `undefined` for a code the SDK does not
+ * register (a provider-declared or SDK-runtime code).
  */
-export function registeredUpstreamErrorCategory(
-	code: string | undefined,
-): ProviderErrorCategory | undefined {
-	return code === undefined ? undefined : SDK_UPSTREAM_ERROR_CODE_REGISTRY.get(code)?.category;
+export function sdkErrorRegistration(code: string | undefined): SdkErrorRegistration | undefined {
+	return code === undefined ? undefined : SDK_ERROR_REGISTRY_BY_CODE.get(code);
 }
 
 // Canonical SDK status mapping for recognized provider-thrown error codes.
-// serve.ts toStatusCode consults this map (after operation-declared overrides
-// for non-SDK-owned codes), and the authoring lint treats these codes as
-// SDK-registered. Add new codes here instead of duplicating literals in
-// either consumer — an upstream-attributed code goes in
-// SDK_UPSTREAM_ERROR_CODE_REGISTRY above, which feeds this map.
+// `resolveProviderErrorContract` reads it for every code the registry above
+// does not cover (SDK-runtime codes whose status the SDK fixes). Add new
+// codes here instead of duplicating literals in a consumer — a code provider
+// code throws goes in SDK_ERROR_REGISTRY above, which feeds this map.
 export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, ProviderErrorStatus> =
 	new Map<string, ProviderErrorStatus>([
-		["AUTH_REQUIRED", 401],
 		["reauth_required", 401],
 		// Unprovisioned declared secret: a deployment/config defect, never an
 		// upstream failure — explicit 400.
@@ -226,12 +300,6 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		["HANDLE_EXPIRED", 410],
 		["HANDLE_COMMITTED", 409],
 		["HANDLE_BUSY", 409],
-		// Caller-side bad input rejected by the provider (fleet consensus, like
-		// UPSTREAM_AUTH_ERROR and UPSTREAM_SCHEMA_ERROR above). The minority
-		// spellings (INVALID_INPUT / VALIDATION_ERROR / BAD_REQUEST) are
-		// deliberately not registered: they migrate to this spelling on the
-		// contract track, and registering them here would freeze the divergence.
-		["INVALID_REQUEST", 400],
 		["OCR_UNAVAILABLE", 503],
 		["UNSUPPORTED_OCR_BACKEND", 503],
 		["STT_UNAVAILABLE", 503],
@@ -245,25 +313,87 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		// into gateway-driven load.
 		["PROVIDER_ENGINE_UNAVAILABLE", 503],
 		...Array.from(
-			SDK_UPSTREAM_ERROR_CODE_REGISTRY,
+			SDK_ERROR_REGISTRY_BY_CODE,
 			([code, registration]) => [code, registration.status] as const,
 		),
 	]);
 
-// Canonical retryability for the fleet-consensus codes registered above.
-//
-// Runtime retryability still resolves as `instance option ?? declared ??
-// false`, so this map changes no served response: an undeclared throw already
-// defaults to false, which is what every entry here says. It exists so the
-// authoring lint can tell a provider that its declared `retryable` contradicts
-// the registered meaning of the code, instead of the fleet quietly shipping two
-// answers for the same code. Only codes whose retryability was fixed as part of
-// registration belong here — do not backfill opinions the SDK never made.
-export const SDK_CANONICAL_ERROR_CODE_RETRYABILITY: ReadonlyMap<string, boolean> = new Map<
-	string,
-	boolean
->([
-	["UPSTREAM_AUTH_ERROR", false],
-	["UPSTREAM_SCHEMA_ERROR", false],
-	["INVALID_REQUEST", false],
-]);
+/**
+ * What a declaration says about a code: a `defineErrors` declaration (every
+ * field present) or a legacy `errorCodes[]` entry (status and retryable
+ * optional, no category).
+ */
+export type ProviderErrorDeclarationLike = {
+	readonly status?: ProviderErrorStatus;
+	readonly category?: ProviderErrorCategory;
+	readonly retryable?: boolean;
+};
+
+/**
+ * The deprecated per-throw options a legacy `new ProviderError(message, {
+ * category, retryable })` site still carries, read safely by the caller.
+ */
+export type LegacyProviderErrorOptions = {
+	readonly category?: ProviderErrorCategory;
+	readonly retryable?: boolean;
+};
+
+/** The served status, category and retryability a provider error resolves to. */
+export type ProviderErrorContract = {
+	/** `undefined` when nothing declares one; the serving branch supplies its default. */
+	readonly status: ProviderErrorStatus | undefined;
+	/** `undefined` when nothing declares one; the serving branch supplies its default. */
+	readonly category: ProviderErrorCategory | undefined;
+	/** `undefined` when nothing declares one; the serving branch supplies its default. */
+	readonly retryable: boolean | undefined;
+};
+
+function isRejectionStatus(status: ProviderErrorStatus | undefined): boolean {
+	return status === 409 || status === 410 || status === 422;
+}
+
+/**
+ * The one place a provider error's status, category and retryability are
+ * resolved. Precedence, per field:
+ *
+ * - `status`: the declaration (a `defineErrors` declaration carried by the
+ *   thrown error, or the operation's legacy `errorCodes[]` entry for the
+ *   code), then the SDK registry row (`SDK_ERROR_REGISTRY`, then the
+ *   status-only map for SDK-runtime codes). A throw site never set a status.
+ * - `category` and `retryable`: the deprecated per-throw option first, then
+ *   the declaration, then (category only) a declared rejection status
+ *   (409/410/422) → `upstream_rejected`, then the SDK registry row.
+ *
+ * A field nothing answers is `undefined`, and the serving branch (transport,
+ * validation, session expiry, plain provider error) applies its own default.
+ *
+ * The per-throw option keeps winning for the one release it is kept: that is
+ * the order the server always had (`instance ?? declared ?? default`), so a
+ * provider that bumps the SDK without touching its throw sites serves the
+ * same `retryable` as before — a deterministic refusal thrown `retryable:
+ * false` under a table row that says `true` stays non-retryable, and the
+ * gateway and bori keep reading the verdict they read today. The server logs
+ * one warning per code naming both values when they differ; the fix is a
+ * distinct code for the other condition, not a per-throw override. A
+ * factory-made error (`errors.X(...)`) carries no per-throw option, so for it
+ * the declaration is the whole answer.
+ */
+export function resolveProviderErrorContract(input: {
+	readonly code: string | undefined;
+	readonly declaration: ProviderErrorDeclarationLike | undefined;
+	readonly legacyOptions: LegacyProviderErrorOptions;
+}): ProviderErrorContract {
+	const { code, declaration, legacyOptions } = input;
+	const registration = sdkErrorRegistration(code);
+	const status =
+		declaration?.status ??
+		registration?.status ??
+		(code === undefined ? undefined : SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(code));
+	const category =
+		legacyOptions.category ??
+		declaration?.category ??
+		(isRejectionStatus(declaration?.status) ? "upstream_rejected" : undefined) ??
+		registration?.category;
+	const retryable = legacyOptions.retryable ?? declaration?.retryable ?? registration?.retryable;
+	return { status, category, retryable };
+}

@@ -31,11 +31,13 @@ import { resolveResolverDeadlineAtMs } from "./resolver-deadline.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
-	registeredUpstreamErrorCategory,
+	type LegacyProviderErrorOptions,
+	type ProviderErrorContract,
+	resolveProviderErrorContract,
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
-	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 } from "../error-resolution.js";
+import { defineErrors, providerErrorDeclaration } from "../define-errors.js";
 import {
 	AuthError,
 	isProviderError,
@@ -222,7 +224,7 @@ import type {
 	HttpClient,
 	OcrContext,
 	OperationDefinition,
-	OperationErrorCode,
+	OperationErrorCode as DeclaredErrorCodeRow,
 	OperationHttpStreamTransport,
 	OperationSseTransport,
 	ProviderCacheResponseMeta,
@@ -1542,6 +1544,21 @@ export type ProviderServerLogEvent =
 			event: "provider_handle";
 	  } & HandleTelemetryEvent)
 	| {
+			/** Emitted once per error code (and per conflict shape) per process when a provider throw site still sets the deprecated per-throw category/retryable options. */
+			level: "warn";
+			event: "provider_error_options_deprecated";
+			providerId: string;
+			code: string;
+			options: string[];
+			/** The per-throw values that differ from the declaration; the per-throw value is the served one until the option is removed. */
+			conflicts?: Array<{
+				option: "category" | "retryable";
+				thrown: string | boolean;
+				declared: string | boolean;
+			}>;
+			fix: string;
+	  }
+	| {
 			level: "warn";
 			event: "provider_cleanup_failed";
 			providerId: string;
@@ -1787,7 +1804,7 @@ function publicErrorSource(error: unknown, category: ProviderErrorCategory): Pro
 type ErrorEnvelopeLocalization = {
 	readonly catalogs?: ProviderLocaleCatalogMap;
 	readonly locale: ProviderLocale;
-	readonly declaredErrorCode?: OperationErrorCode;
+	readonly declaredErrorCode?: DeclaredErrorCode;
 };
 
 function localeKeyOption(error: unknown, key: "messageKey" | "fixKey"): string | undefined {
@@ -1796,7 +1813,7 @@ function localeKeyOption(error: unknown, key: "messageKey" | "fixKey"): string |
 }
 
 function declaredLocaleKey(
-	declaration: OperationErrorCode | undefined,
+	declaration: DeclaredErrorCode | undefined,
 	key: "messageKey" | "fixKey",
 ): string | undefined {
 	const value = declaration?.[key];
@@ -1869,7 +1886,7 @@ function errorEnvelopeLocalization(options: {
 	readonly catalogs: ProviderLocaleCatalogMap | undefined;
 	readonly requestHeaders?: Headers;
 	readonly rawBody?: unknown;
-	readonly declaredErrorCode?: OperationErrorCode;
+	readonly declaredErrorCode?: DeclaredErrorCode;
 }): ErrorEnvelopeLocalization {
 	return {
 		...(options.catalogs ? { catalogs: options.catalogs } : {}),
@@ -2072,19 +2089,17 @@ function isProviderTimeoutAbortTransportError(
 
 function providerObservabilityDetails(
 	error: unknown,
-	declaredErrorCode?: OperationErrorCode,
+	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails | undefined {
-	const declaredRetryable = sdkOwnsErrorResolution(error)
-		? undefined
-		: declaredErrorCode?.retryable;
+	const contract = providerErrorContract(error, declaredErrorCode);
 	// Session-expiry surfaces the credential_expired category so Gateway and
 	// Credential Service can distinguish an expired credential from other 401s.
 	if (isSessionExpiredError(error)) {
 		return {
-			category: providerErrorOption(error, "category") ?? "credential_expired",
+			category: contract.category ?? "credential_expired",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: providerErrorOption(error, "retryable") ?? declaredRetryable ?? false,
+			retryable: contract.retryable ?? false,
 		};
 	}
 	// Missing-secret errors carry the canonical credential_unavailable category
@@ -2094,9 +2109,9 @@ function providerObservabilityDetails(
 	// serialize identically, including across duplicate SDK module instances.
 	if (isProviderError(error) && providerErrorCode(error) === MISSING_SECRET_CODE) {
 		return {
-			category: providerErrorOption(error, "category") ?? "credential_unavailable",
+			category: contract.category ?? "credential_unavailable",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: providerErrorOption(error, "retryable") ?? declaredRetryable ?? false,
+			retryable: contract.retryable ?? false,
 		};
 	}
 	// Native proxy resolution throws ProxyResolutionError directly, while HTTP
@@ -2122,7 +2137,7 @@ function providerObservabilityDetails(
 		errorCode === "native_proxy_expired" ||
 		errorCode === "native_proxy_invalid";
 	const category =
-		providerErrorOption(error, "category") ??
+		contract.category ??
 		(isProxyPoolCode
 			? "proxy_pool"
 			: errorCode === PROXY_AUTH_IP_DENIED_CODE
@@ -2148,7 +2163,7 @@ function providerObservabilityDetails(
 		// retryable: false; their timeout form is retryable like transport_timeout.
 		retryable: isProviderTimeoutAbort
 			? true
-			: (providerErrorOption(error, "retryable") ??
+			: (contract.retryable ??
 				(category === "upstream_http" && error.upstreamStatus
 					? error.upstreamStatus >= 500
 					: isRetryableCategory(category))),
@@ -2156,47 +2171,25 @@ function providerObservabilityDetails(
 	};
 }
 
-// The category a `ProviderError` (validation errors included) gets when its
-// author set none, ahead of the branch's own default: an operation-declared
-// rejection status (409/410/422) → upstream_rejected, then the registered
-// upstream code's category (UPSTREAM_SCHEMA_ERROR → upstream_schema_drift,
-// NOT_FOUND → upstream_http, ...). `undefined` leaves the branch default.
-function derivedErrorCategory(
-	error: unknown,
-	declaredStatus: unknown,
-): ProviderErrorCategory | undefined {
-	if (
-		isEmittableErrorStatus(declaredStatus) &&
-		categoryForStatus(declaredStatus) === "upstream_rejected"
-	) {
-		return "upstream_rejected";
-	}
-	return registeredUpstreamErrorCategory(providerErrorCode(error));
-}
-
 function classifiedErrorObservabilityDetails(
 	error: unknown,
-	declaredErrorCode?: OperationErrorCode,
+	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails {
-	const effectiveDeclaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
-	const providerDetails = providerObservabilityDetails(error, effectiveDeclaration, inboundSignal);
+	const providerDetails = providerObservabilityDetails(error, declaredErrorCode, inboundSignal);
 	if (providerDetails) return providerDetails;
+	const contract = providerErrorContract(error, declaredErrorCode);
 
 	if (error instanceof z.ZodError || isValidationError(error)) {
-		const declaredStatus = effectiveDeclaration?.status;
-		const providerCategory = providerErrorOption(error, "category");
+		const declaredStatus = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode?.status;
 		return {
-			category: providerCategory
-				? providerCategory
-				: (derivedErrorCategory(error, declaredStatus) ??
-					(isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
-						? "provider_error"
-						: "input_validation")),
+			category:
+				contract.category ??
+				(isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
+					? "provider_error"
+					: "input_validation"),
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: isProviderError(error)
-				? (providerErrorOption(error, "retryable") ?? effectiveDeclaration?.retryable ?? false)
-				: false,
+			retryable: contract.retryable ?? false,
 		};
 	}
 
@@ -2209,16 +2202,10 @@ function classifiedErrorObservabilityDetails(
 	}
 
 	if (isProviderError(error)) {
-		// Retryability does not follow the derived category: it stays
-		// instance ?? declared ?? false below.
 		return {
-			category:
-				providerErrorOption(error, "category") ??
-				derivedErrorCategory(error, effectiveDeclaration?.status) ??
-				"provider_error",
+			category: contract.category ?? "provider_error",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable:
-				providerErrorOption(error, "retryable") ?? effectiveDeclaration?.retryable ?? false,
+			retryable: contract.retryable ?? false,
 		};
 	}
 
@@ -2236,7 +2223,7 @@ function classifiedErrorObservabilityDetails(
  */
 function errorObservabilityDetails(
 	error: unknown,
-	declaredErrorCode?: OperationErrorCode,
+	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails {
 	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode, inboundSignal);
@@ -2316,7 +2303,7 @@ function isEmittableErrorStatus(value: unknown): value is ProviderErrorStatus {
 
 function toStatusCode(
 	error: unknown,
-	declaredErrorCode?: OperationErrorCode,
+	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
 ): ProviderErrorStatus {
 	if (error instanceof z.ZodError) {
@@ -2326,24 +2313,16 @@ function toStatusCode(
 		return 504;
 	}
 	if (isProviderError(error)) {
-		if (!sdkOwnsErrorResolution(error) && isEmittableErrorStatus(declaredErrorCode?.status)) {
-			return declaredErrorCode.status;
-		}
-		// Canonical SDK code → status mapping lives in error-resolution.ts so
-		// the authoring lint and this runtime path share one source of truth.
-		const code = providerErrorCode(error);
-		if (typeof code === "string") {
-			const mappedStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(code);
-			if (mappedStatus !== undefined) {
-				return mappedStatus;
-			}
+		const contract = providerErrorContract(error, declaredErrorCode);
+		if (isEmittableErrorStatus(contract.status)) {
+			return contract.status;
 		}
 		if (isTransportError(error)) {
 			if (isClientCancelledTransportError(error, inboundSignal)) return CLIENT_CANCELLED_STATUS;
 			return isServedAsTransportTimeout(error, inboundSignal) ? 504 : 502;
 		}
 		if (isValidationError(error)) {
-			return providerErrorOption(error, "category") === "output_validation" ? 500 : 400;
+			return contract.category === "output_validation" ? 500 : 400;
 		}
 
 		return 500;
@@ -2362,27 +2341,133 @@ function sdkOwnsErrorResolution(error: unknown): boolean {
 	return typeof code === "string" && SDK_RUNTIME_OWNED_ERROR_CODES.has(code);
 }
 
-type OperationErrorCodeLookup = ReadonlyMap<string, ReadonlyMap<string, OperationErrorCode>>;
+// What an operation declares for a code: a `defineErrors` declaration (listed
+// in `errors`) carries a category; a legacy `errorCodes` row does not.
+type DeclaredErrorCode = DeclaredErrorCodeRow & { readonly category?: ProviderErrorCategory };
+
+type OperationErrorCodeLookup = ReadonlyMap<string, ReadonlyMap<string, DeclaredErrorCode>>;
 
 function buildOperationErrorCodeLookup(provider: ProviderDefinition): OperationErrorCodeLookup {
 	return new Map(
 		Object.entries(provider.operations).flatMap(([operationId, operation]) => {
-			const errorCodes = operation.errorCodes;
-			return errorCodes?.length
-				? [[operationId, new Map(errorCodes.map((entry) => [entry.code, entry]))] as const]
+			const entries: DeclaredErrorCode[] = [
+				...(operation.errorCodes ?? []),
+				...(operation.errors ?? []).map((factory) => factory.declaration),
+			];
+			return entries.length > 0
+				? [[operationId, new Map(entries.map((entry) => [entry.code, entry]))] as const]
 				: [];
 		}),
 	);
 }
 
+// A factory-made error carries its own declaration; a hand-constructed one is
+// looked up in the operation's table by code.
 function declaredErrorCodeFor(
 	error: unknown,
 	operationId: string | undefined,
 	lookup: OperationErrorCodeLookup,
-): OperationErrorCode | undefined {
+): DeclaredErrorCode | undefined {
+	const own = providerErrorDeclaration(error);
+	if (own) return own;
 	const code = providerErrorCode(error);
 	if (!operationId || !code) return undefined;
 	return lookup.get(operationId)?.get(code);
+}
+
+// The deprecated per-throw options, read without trusting provider accessors.
+function legacyProviderErrorOptions(error: unknown): LegacyProviderErrorOptions {
+	const category = providerErrorOption(error, "category");
+	const retryable = providerErrorOption(error, "retryable");
+	return {
+		...(category === undefined ? {} : { category }),
+		...(retryable === undefined ? {} : { retryable }),
+	};
+}
+
+// The one serve-side call into the resolution; SDK-owned failures ignore the
+// operation's declaration because their contract is the SDK's.
+function providerErrorContract(
+	error: unknown,
+	declaredErrorCode: DeclaredErrorCode | undefined,
+): ProviderErrorContract {
+	return resolveProviderErrorContract({
+		code: providerErrorCode(error),
+		declaration: sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode,
+		legacyOptions: legacyProviderErrorOptions(error),
+	});
+}
+
+const legacyErrorOptionsWarned = new Set<string>();
+
+type LegacyErrorOptionConflict = {
+	option: "category" | "retryable";
+	thrown: string | boolean;
+	declared: string | boolean;
+};
+
+// One warning per provider, code and conflict shape per process while the
+// deprecated per-throw options are still honored. A per-throw value that
+// differs from the declaration is named with both values: the per-throw one
+// is what is served (resolveProviderErrorContract), and the fix is a distinct
+// code for that condition rather than a per-throw override.
+function warnLegacyErrorOptionsOnce(
+	emit: ProviderServerLogger,
+	provider: ProviderDefinition,
+	error: unknown,
+	declaredErrorCode: DeclaredErrorCode | undefined,
+	redact?: DiagnosticRedactor,
+): void {
+	if (!isProviderError(error) || sdkOwnsErrorResolution(error)) return;
+	const legacy = legacyProviderErrorOptions(error);
+	const options = Object.keys(legacy);
+	if (options.length === 0) return;
+	const code = providerErrorCode(error) ?? "";
+	const conflicts: LegacyErrorOptionConflict[] = [];
+	if (
+		legacy.category !== undefined &&
+		declaredErrorCode?.category !== undefined &&
+		legacy.category !== declaredErrorCode.category
+	) {
+		conflicts.push({
+			option: "category",
+			thrown: legacy.category,
+			declared: declaredErrorCode.category,
+		});
+	}
+	if (
+		legacy.retryable !== undefined &&
+		declaredErrorCode?.retryable !== undefined &&
+		legacy.retryable !== declaredErrorCode.retryable
+	) {
+		conflicts.push({
+			option: "retryable",
+			thrown: legacy.retryable,
+			declared: declaredErrorCode.retryable,
+		});
+	}
+	const key = `${provider.id}\u0000${code}\u0000${conflicts.map((conflict) => conflict.option).join(",")}`;
+	if (legacyErrorOptionsWarned.has(key)) return;
+	legacyErrorOptionsWarned.add(key);
+	const name = code || "CODE";
+	const conflictText = conflicts
+		.map(
+			(conflict) =>
+				`${conflict.option} is thrown as ${String(conflict.thrown)} but declared as ${String(conflict.declared)}`,
+		)
+		.join("; ");
+	emit({
+		level: "warn",
+		event: "provider_error_options_deprecated",
+		providerId: redactDiagnosticText(provider.id, redact),
+		code: redactCriticalDiagnosticText(code, redact),
+		options,
+		...(conflicts.length > 0 ? { conflicts } : {}),
+		fix:
+			conflicts.length > 0
+				? `${name}: ${conflictText}; the thrown value is served until the per-throw option is removed. Declare a distinct code for the ${conflicts.some((conflict) => conflict.option === "retryable" && conflict.thrown === false) ? "non-retryable" : "other"} condition with defineErrors (an SDK-registered code is sdkErrors.X) and throw errors.X({ details, cause }) there; the per-throw ${options.join(" and ")} option is deprecated.`
+				: `Declare the code once with defineErrors({ ${name}: { status, category, description } }) and throw errors.${name}({ details, cause }); the per-throw ${options.join(" and ")} option is deprecated and the declaration will be the only source after it is removed.`,
+	});
 }
 
 function extractRequestId(raw: unknown): string | undefined {
@@ -2455,7 +2540,7 @@ function logProviderError(
 	error: unknown,
 	status: number,
 	cost: ProviderRequestCost,
-	declaredErrorCode: OperationErrorCode | undefined,
+	declaredErrorCode: DeclaredErrorCode | undefined,
 	telemetry: RequestTelemetry | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
 	correlation: RequestCorrelationIds = {},
@@ -2529,11 +2614,18 @@ function logProviderError(
 			? {
 					signal: "unregistered_provider_error_code" as const,
 					signalFix:
-						"Declare this code (with status and retryable) in the operation's errorCodes so it serves its intended status instead of 500.",
+						"Declare this code once with defineErrors({ CODE: { status, category, description } }) and throw errors.CODE(...) so it serves its intended status instead of 500.",
 				}
 			: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error, redact) } : {}),
 	});
+	warnLegacyErrorOptionsOnce(
+		emit as ProviderServerLogger,
+		provider,
+		error,
+		sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode,
+		redact,
+	);
 }
 
 function logProviderCleanupError(
@@ -2630,12 +2722,20 @@ type RequestScope = RequestScopeContext & {
 
 const STREAM_CLEANUP_TIMEOUT_MS = 100;
 
-function clientCancelledError(): ProviderError {
-	return new ProviderError("Request stream was cancelled by the client.", {
-		code: "client_cancelled",
+// The server's own terminal error for a stream the caller stopped reading.
+// Declared like a provider error so it carries its contract: nothing on it is
+// a deprecated per-throw option, and the deprecation warning never names it.
+const serverErrors = defineErrors({
+	client_cancelled: {
+		status: CLIENT_CANCELLED_STATUS,
 		category: "client_cancelled",
 		retryable: false,
-	});
+		description: "Request stream was cancelled by the client.",
+	},
+});
+
+function clientCancelledError(): ProviderError {
+	return serverErrors.client_cancelled();
 }
 
 async function runBestEffortWithTimeout(cleanup: () => void | Promise<void>): Promise<void> {
@@ -2774,7 +2874,7 @@ function createRequestScope(input: {
 	correlation?: RequestCorrelationIds;
 	logger?: ProviderServerLogger;
 	setHeader?: (name: string, value: string) => void;
-	declaredErrorCode?: (error: unknown) => OperationErrorCode | undefined;
+	declaredErrorCode?: (error: unknown) => DeclaredErrorCode | undefined;
 	/** The served request's signal; see `errorObservabilityDetails`. */
 	inboundSignal?: AbortSignal;
 }): RequestScope {
@@ -4489,6 +4589,9 @@ function createServerAppWithCapabilityModules(
 				headers: Object.fromEntries(c.req.raw.headers.entries()),
 				logger,
 				setHeader: (name, value) => c.header(name, value),
+				// No operation table on an auth flow: the declaration is the one a
+				// factory-made error carries.
+				declaredErrorCode: providerErrorDeclaration,
 				inboundSignal: c.req.raw.signal,
 			});
 			try {
@@ -4538,17 +4641,25 @@ function createServerAppWithCapabilityModules(
 					status: response.status,
 				});
 			} catch (error) {
-				const status = toStatusCode(error, undefined, c.req.raw.signal);
+				// An auth flow has no operation table; the only declaration is the
+				// one a factory-made error carries, and it is served like an
+				// operation's.
+				const declaredErrorCode = providerErrorDeclaration(error);
+				const status = toStatusCode(error, declaredErrorCode, c.req.raw.signal);
 				const requestId = extractRequestId(rawBody);
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
-				const observabilityDetails = errorObservabilityDetails(error, undefined, c.req.raw.signal);
+				const observabilityDetails = errorObservabilityDetails(
+					error,
+					declaredErrorCode,
+					c.req.raw.signal,
+				);
 				const response = c.json(
 					toErrorResponse(
 						error,
 						requestId,
 						observabilityDetails,
 						requestScope.redact,
-						localization,
+						declaredErrorCode ? { ...localization, declaredErrorCode } : localization,
 						c.req.raw.signal,
 					),
 					status,
