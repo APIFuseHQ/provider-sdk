@@ -10,10 +10,10 @@ import {
  * The process-wide metric registry: a `StatefulProviderMetricEmitter` that
  * keeps counters, gauges and histograms in memory and renders them in the
  * Prometheus text exposition format. It is the default emitter of a
- * `StatefulSessionRouter` built without one, and every `serve()` in the
- * process renders it on its metrics listener (`/metrics`). Not re-exported
- * from the package entry points: providers reach it only through the router
- * default and the listener.
+ * `StatefulSessionRouter` or a `StatefulProviderSessionManager` built without
+ * one, and every `serve()` in the process renders it on its metrics listener
+ * (`/metrics`). Not re-exported from the package entry points: providers reach
+ * it only through the router and session manager defaults and the listener.
  */
 
 export type StatefulProviderMetricKind = "counter" | "gauge" | "histogram";
