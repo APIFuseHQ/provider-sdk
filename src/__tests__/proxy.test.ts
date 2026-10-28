@@ -356,13 +356,14 @@ describe("proxy integration", () => {
 			{
 				n: 1,
 				a: 1,
+				v: "smartproxy",
 				h: "abcdef123456",
 				o: "error",
 				c: "PROXY_EDGE_AUTH_REJECTED",
 				s: 512,
 				d: 37,
 			},
-			{ n: 2, a: 2, h: "123456abcdef", o: "ok", s: 200, d: 42 },
+			{ n: 2, a: 2, v: "smartproxy", h: "123456abcdef", o: "ok", s: 200, d: 42 },
 		]);
 		expect(JSON.stringify(decoded)).not.toContain(SMARTPROXY_TEST_PASSWORD);
 	});
@@ -402,7 +403,7 @@ describe("proxy integration", () => {
 				{ v: "nodemaven", p: "resolution", r: "protocol_unsupported" },
 				{ v: "smartproxy", p: "transport", r: "pool_exhausted", a: 2 },
 			],
-			attemptSamples: [{ n: 1, a: 2, o: "error", c: "PROXY_EDGE_AUTH_REJECTED" }],
+			attemptSamples: [{ n: 1, a: 2, v: "smartproxy", o: "error", c: "PROXY_EDGE_AUTH_REJECTED" }],
 		});
 		const header = telemetry.toHeaderValue();
 		expect(header).toBeTruthy();
