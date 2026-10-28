@@ -4,6 +4,7 @@ import {
 	getProxyVendorSelector,
 	type ProxyAttemptOutcome,
 	type ProxyAttemptRecord,
+	type ProxyVendorDirective,
 	type ProxyVendorSelector,
 	setProxyVendorSelector,
 	staticOrderProxyVendorSelector,
@@ -267,6 +268,8 @@ type VendorRecord = {
 	ejections: number;
 	openUntil: number | undefined;
 	probeIssuedAt: number | undefined;
+	/** `requestId` of the request that carries the probe, when the caller gave one. */
+	probeRequestId: string | undefined;
 	/** Last instant the multiplier decayed while closed. */
 	decayedAt: number | undefined;
 };
@@ -284,6 +287,11 @@ function vendorFailedLastAttempt(
 	}) === "vendor_failure"
 		? last.vendor
 		: undefined;
+}
+
+function clearProbe(entry: VendorRecord): void {
+	entry.probeIssuedAt = undefined;
+	entry.probeRequestId = undefined;
 }
 
 function positive(value: number | undefined, fallback: number): number {
@@ -330,6 +338,7 @@ export function createAdaptiveProxyVendorSelector(
 				ejections: 0,
 				openUntil: undefined,
 				probeIssuedAt: undefined,
+				probeRequestId: undefined,
 				decayedAt: undefined,
 			};
 			records.set(vendor, entry);
@@ -371,7 +380,7 @@ export function createAdaptiveProxyVendorSelector(
 			entry.probeIssuedAt !== undefined &&
 			now - entry.probeIssuedAt >= probeTimeoutMs
 		) {
-			entry.probeIssuedAt = undefined;
+			clearProbe(entry);
 			transition(vendor, entry, "half_open", "probe_timed_out", now);
 		}
 		if (entry.state === "closed" && entry.ejections > 0) {
@@ -390,7 +399,7 @@ export function createAdaptiveProxyVendorSelector(
 		const from = entry.state;
 		entry.ejections += 1;
 		entry.openUntil = now + Math.min(maxOpenMs, baseOpenMs * entry.ejections);
-		entry.probeIssuedAt = undefined;
+		clearProbe(entry);
 		entry.decayedAt = undefined;
 		transition(
 			vendor,
@@ -411,6 +420,25 @@ export function createAdaptiveProxyVendorSelector(
 		return (
 			entry.state === "closed" || (entry.state === "half_open" && entry.probeIssuedAt === undefined)
 		);
+	};
+
+	/**
+	 * Directives after the attempt's vendor, which the resolver walks only when
+	 * that vendor cannot synthesize a proxy (no credentials, unsupported
+	 * protocol, adapter error). Usable vendors come first; unusable ones (open,
+	 * or probing) follow in declared order as a last resort, so a vendor that
+	 * cannot synthesize never leaves the request without a vendor the static
+	 * order would have used.
+	 */
+	const resolutionFallbacks = (
+		baseline: readonly ProxyVendorDirective[],
+		served: ProxyVendorName,
+	): ProxyVendorDirective[] => {
+		const rest = baseline.filter((directive) => directive.vendor !== served);
+		return [
+			...rest.filter((directive) => available(directive.vendor)),
+			...rest.filter((directive) => !available(directive.vendor)),
+		];
 	};
 
 	const publish = (reason: ProxyVendorSelectionReason, chain: readonly ProxyVendorName[]): void => {
@@ -463,9 +491,7 @@ export function createAdaptiveProxyVendorSelector(
 							vendorAttempt: request.attemptCap + request.attempt,
 							session: head.session,
 						},
-						...baseline.filter(
-							(directive) => directive.vendor !== alternate && available(directive.vendor),
-						),
+						...resolutionFallbacks(baseline, alternate),
 					];
 				}
 			}
@@ -478,13 +504,12 @@ export function createAdaptiveProxyVendorSelector(
 			if (headEntry.state === "half_open") {
 				// This attempt is the probe; a second probe waits for its report.
 				headEntry.probeIssuedAt = now;
+				headEntry.probeRequestId = request.requestId;
 				probing = true;
 			}
 			lastReason = probing ? "half_open_probe" : aheadUnavailable ? "vendor_open" : "chain_order";
 			publish(lastReason, request.chain);
-			const tail = baseline.filter(
-				(directive) => directive.vendor !== head.vendor && available(directive.vendor),
-			);
+			const tail = resolutionFallbacks(baseline, head.vendor);
 			return [
 				{
 					vendor: head.vendor,
@@ -501,10 +526,22 @@ export function createAdaptiveProxyVendorSelector(
 			const entry = record(outcome.vendor);
 			const now = outcome.now;
 			advance(outcome.vendor, entry, now);
+			// While half-open, only the probe's own outcome decides. An outcome that
+			// names another request (one that went to the vendor because every
+			// vendor was unavailable, or an attempt that left before the vendor
+			// opened) says nothing about the probe.
+			if (
+				entry.state === "half_open" &&
+				outcome.requestId !== undefined &&
+				(entry.probeIssuedAt === undefined ||
+					(entry.probeRequestId !== undefined && entry.probeRequestId !== outcome.requestId))
+			) {
+				return;
+			}
 			const learned = classifyProxyVendorAttemptOutcome(outcome);
 			if (learned === "other_failure") {
 				// Inconclusive for the vendor; a probe may be issued again.
-				if (entry.state === "half_open") entry.probeIssuedAt = undefined;
+				if (entry.state === "half_open") clearProbe(entry);
 				return;
 			}
 			if (learned === "ok") {
@@ -514,7 +551,7 @@ export function createAdaptiveProxyVendorSelector(
 				if (outcome.phase === "resolution") return;
 				entry.consecutiveFailures = 0;
 				if (entry.state === "half_open") {
-					entry.probeIssuedAt = undefined;
+					clearProbe(entry);
 					entry.decayedAt = now;
 					transition(outcome.vendor, entry, "closed", "probe_succeeded", now);
 				}

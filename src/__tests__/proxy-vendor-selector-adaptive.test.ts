@@ -101,7 +101,7 @@ describe("adaptive proxy vendor selector", () => {
 			},
 		]);
 		const directives = selector.select(request(0, T0 + 11));
-		expect(directives.map((directive) => directive.vendor)).toEqual(["nodemaven"]);
+		expect(directives.map((directive) => directive.vendor)).toEqual(["nodemaven", "smartproxy"]);
 		// The fallback vendor takes the whole budget from its first attempt.
 		expect(directives[0]?.vendorAttempt).toBe(0);
 		expect(selector.select(request(4, T0 + 12))[0]?.vendorAttempt).toBe(4);
@@ -119,11 +119,11 @@ describe("adaptive proxy vendor selector", () => {
 			selector.report(failure("smartproxy", T0));
 		}
 		const probeAt = T0 + baseOpenMs;
-		expect(vendorsOf(selector, 0, probeAt - 1)).toEqual(["nodemaven"]);
+		expect(vendorsOf(selector, 0, probeAt - 1)).toEqual(["nodemaven", "smartproxy"]);
 		expect(vendorsOf(selector, 0, probeAt)).toEqual(["smartproxy", "nodemaven"]);
 		expect(selector.lastSelectionReason()).toBe("half_open_probe");
 		// A second request while the probe is in flight does not probe again.
-		expect(vendorsOf(selector, 0, probeAt + 1)).toEqual(["nodemaven"]);
+		expect(vendorsOf(selector, 0, probeAt + 1)).toEqual(["nodemaven", "smartproxy"]);
 		expect(selector.lastSelectionReason()).toBe("vendor_open");
 
 		selector.report(failure("smartproxy", probeAt + 2));
@@ -146,6 +146,38 @@ describe("adaptive proxy vendor selector", () => {
 		});
 		expect(vendorsOf(selector, 0, secondProbeAt + 2)).toEqual(["smartproxy", "nodemaven"]);
 		expect(selector.lastSelectionReason()).toBe("chain_order");
+	});
+
+	it("settles a half-open vendor only on the outcome of the request that carries the probe", () => {
+		const transitions: ProxyVendorStateTransition[] = [];
+		const selector = createAdaptiveProxyVendorSelector({
+			onTransition: (event) => transitions.push(event),
+		});
+		for (let i = 0; i < consecutiveFailureThreshold; i += 1) {
+			selector.report(failure("smartproxy", T0));
+		}
+		for (let i = 0; i < consecutiveFailureThreshold; i += 1) {
+			selector.report(failure("nodemaven", T0 + 1_000));
+		}
+		// smartproxy's open period ends first; nodemaven is still open.
+		const probeAt = T0 + baseOpenMs;
+		selector.select({ ...request(0, probeAt), requestId: "probe" });
+		expect(selector.lastSelectionReason()).toBe("half_open_probe");
+		// Another request finds nothing usable and fails open onto smartproxy.
+		selector.select({ ...request(0, probeAt + 1), requestId: "other" });
+		expect(selector.lastSelectionReason()).toBe("all_open");
+		selector.report({ ...failure("smartproxy", probeAt + 2), requestId: "other" });
+		selector.report({ ...success("smartproxy", probeAt + 3), requestId: "other" });
+		expect(selector.snapshot(probeAt + 3)[0]).toMatchObject({
+			state: "half_open",
+			ejections: 1,
+			probeIssuedAt: probeAt,
+		});
+		selector.report({ ...success("smartproxy", probeAt + 4), requestId: "probe" });
+		expect(selector.snapshot(probeAt + 4)[0]).toMatchObject({ state: "closed", ejections: 1 });
+		expect(
+			transitions.filter((event) => event.vendor === "smartproxy").map((event) => event.reason),
+		).toEqual(["failure_threshold", "open_elapsed", "probe_succeeded"]);
 	});
 
 	it("caps the open period and lets the multiplier decay while closed", () => {
@@ -315,7 +347,8 @@ describe("adaptive selector within one request", () => {
 				{ vendor: "smartproxy", outcome: "error", errorCode: "transport_network_error" },
 			]),
 		);
-		expect(directives.map((directive) => directive.vendor)).toEqual(["smartproxy"]);
+		// The open vendor stays reachable as a last-resort resolution fallback.
+		expect(directives.map((directive) => directive.vendor)).toEqual(["smartproxy", "nodemaven"]);
 		expect(selector.lastSelectionReason()).toBe("chain_order");
 	});
 
@@ -439,6 +472,28 @@ describe("adaptive selector through the resolver", () => {
 			{ vendor: "smartproxy", state: "open" },
 			{ vendor: "nodemaven", state: "closed", consecutiveFailures: 0 },
 		]);
+	});
+
+	it("keeps an open vendor as the last resolution fallback when the serving vendor cannot synthesize", async () => {
+		// Only nodemaven has credentials in this process, and nodemaven is open.
+		delete process.env[SMARTPROXY_USERNAME_ENV];
+		delete process.env[SMARTPROXY_PASSWORD_ENV];
+		const selector = createAdaptiveProxyVendorSelector();
+		for (let i = 0; i < consecutiveFailureThreshold; i += 1) {
+			selector.report(failure("nodemaven", T0));
+		}
+		const options = { proxyPolicy: policy, affinityKey: "af_con_1", proxyAttempt: 0, now: T0 + 1 };
+		const ordered = await resolveProxyConfigAsync({
+			...options,
+			vendorSelector: staticOrderProxyVendorSelector,
+		});
+		const adaptive = await resolveProxyConfigAsync({ ...options, vendorSelector: selector });
+		expect(ordered.source).toBe("nodemaven-gateway");
+		// smartproxy cannot synthesize, so the open nodemaven is used as the static order would.
+		expect(adaptive.source).toBe("nodemaven-gateway");
+		expect(selector.snapshot(T0 + 1).find((entry) => entry.vendor === "nodemaven")).toMatchObject({
+			state: "open",
+		});
 	});
 
 	it("learns from the transport attempt, not from the synthesis the resolver reports before it", async () => {

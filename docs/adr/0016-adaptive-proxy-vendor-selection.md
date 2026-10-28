@@ -38,8 +38,12 @@ observed incident shape.
    attempts whose failure is attributable to it, is skipped while open, is
    *probed* by exactly one attempt once its open period elapses, and is
    *closed* again when the probe succeeds or opened for longer when it
-   fails. When every vendor is open the selector fails open and the declared
-   order is used as is. Within one request, an attempt whose predecessor
+   fails; only the outcome of the request that carries the probe (its
+   `requestId`) settles it. When every vendor is open the selector fails open
+   and the declared order is used as is, and an open or probing vendor stays
+   at the end of the directive list as a last-resort resolution fallback, so
+   a vendor that cannot synthesize a proxy never leaves a request without a
+   vendor the static order would have used. Within one request, an attempt whose predecessor
    failed because of its vendor moves to another closed vendor instead of
    repeating that vendor below the threshold (the retry host predicate shape
    of Envoy, which reattempts host selection when an already attempted host

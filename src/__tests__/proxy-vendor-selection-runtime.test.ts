@@ -372,9 +372,10 @@ describe("served process", () => {
 
 			const warm = await call(handle.port, "req_after_open");
 			expect(warm.status).toBe(200);
+			// nodemaven serves; the open smartproxy stays the last resolution fallback.
 			expect(proxyOf(events, "req_after_open")).toMatchObject({
 				kind: "unresolved",
-				vendors: ["nodemaven"],
+				vendors: ["nodemaven", "smartproxy"],
 				selection: { kind: "adaptive", reason: "vendor_open" },
 				vendorStates: [
 					{ v: "smartproxy", s: "open", e: 1 },
@@ -387,7 +388,7 @@ describe("served process", () => {
 		expect(getProxyVendorSelector()).toBe(staticOrderProxyVendorSelector);
 	});
 
-	it("keeps the static order and the unchanged proxy payload when the environment says ordered", async () => {
+	it("keeps the static order and adds no selection fields when the environment says ordered", async () => {
 		for (const name of ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES) setEnv(name, undefined);
 		setEnv(PROXY_VENDOR_SELECTION_ENV, "ordered");
 		globalThis.fetch = Object.assign(
