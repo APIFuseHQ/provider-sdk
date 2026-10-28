@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import type { ProxyResolutionOptions, ResolvedProxyConfig } from "../config/loader.js";
 import {
-	policyRotatesTransportVendorChain,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 	vendorFromResolvedSource,
@@ -146,16 +145,6 @@ type HttpStatusOutcome = {
 	proxyUsed: boolean;
 };
 
-/**
- * Sentinel returned when a policy-managed attempt resolved an endpoint that a
- * prior attempt already tried (every gateway attempt mints its own session, so
- * this only happens when an endpoint repeats). The retry loop advances to the
- * next attempt rather than re-issuing the request, and does NOT treat it as
- * chain exhaustion, so the attempt index still walks into the fallback vendor's
- * share of the budget.
- */
-type NativeHttpSkipOutcome = { kind: "dedupe-skip" };
-
 /** One request's vendor selection state, shared by every attempt of its retry loop. */
 type HttpProxyAttemptContext = {
 	readonly attemptCap?: number;
@@ -178,16 +167,12 @@ function createHttpProxyAttemptContext(
 	};
 }
 
-type NativeHttpAttemptOutcome = HttpResponse | HttpStatusOutcome | NativeHttpSkipOutcome;
+type NativeHttpAttemptOutcome = HttpResponse | HttpStatusOutcome;
 
 type NativeHttpAttemptError = TransportError & { proxyUsed?: boolean };
 
 function isHttpStatusOutcome(outcome: NativeHttpAttemptOutcome): outcome is HttpStatusOutcome {
 	return "kind" in outcome && outcome.kind === "http-status";
-}
-
-function isDedupeSkipOutcome(outcome: NativeHttpAttemptOutcome): outcome is NativeHttpSkipOutcome {
-	return "kind" in outcome && outcome.kind === "dedupe-skip";
 }
 
 function toAmbientCancellationError(
@@ -921,7 +906,6 @@ async function fetchNativeHttp(
 	warn: (message: string) => void,
 	statusRetryCodes?: readonly number[],
 	proxyAttemptOffset = 0,
-	dedupe?: { attempted: Set<string> },
 	observeProxy?: (used: boolean, status?: number) => void,
 	nextHeaderAttempt: () => number = () => 1,
 	proxyAttemptContext: HttpProxyAttemptContext = createHttpProxyAttemptContext(clientOptions),
@@ -957,17 +941,9 @@ async function fetchNativeHttp(
 		proxy = resolvedProxy.url;
 		observeProxy?.(Boolean(proxy));
 		throwIfAmbientAborted(options.signal);
-		// Every attempt on a gateway vendor resolves its own session, so a repeated
-		// URL only appears when a caller pins one. Skip it rather than re-issuing.
-		if (dedupe && proxy) {
-			if (dedupe.attempted.has(proxy)) {
-				return { kind: "dedupe-skip" };
-			}
-			dedupe.attempted.add(proxy);
-		}
-		// Resolve after the dedupe check so a skipped duplicate offset never burns
-		// a single-use proof, and with the serialized URL so URL-bound proofs
-		// match what is actually issued.
+		// Resolve after the proxy so a failed proxy resolution never burns a
+		// single-use proof, and with the serialized URL so URL-bound proofs match
+		// what is actually issued.
 		const requestHeaders = await resolveAttemptHeaders(
 			options,
 			clientOptions,
@@ -1372,32 +1348,17 @@ export function createHttpClient(
 					})
 				: 1;
 
-			// Track resolved endpoints across a policy-managed vendor chain. Every
-			// gateway attempt mints its own session, so an endpoint repeats only when a
-			// pinned one comes back; rather than re-hammering it under backoff,
-			// fetchNativeHttp returns a skip sentinel for a duplicate and the loop
-			// advances the attempt without issuing the request, so it keeps walking
-			// toward the fallback vendor's share instead of stalling on the primary.
-			// De-duplication is gated on the SAME predicate that widens the attempt cap
-			// (implicit, safe-method, registry-chain rotation). It must NOT engage for
-			// an explicit retry policy: there the caller's `attempts` count is the
-			// contract and each attempt must issue against whatever endpoint it
-			// resolves, even a repeat, instead of being silently skipped.
-			const dedupeProxyEndpoints = policyRotatesTransportVendorChain({
-				policy: policyProxy,
-				usesPolicyProxy,
-				explicitRetry,
-				method: methodName,
-			});
-			const dedupeContext = dedupeProxyEndpoints ? { attempted: new Set<string>() } : undefined;
+			// Every attempt resolves its own vendor session (ctx.http has no pinned or
+			// ceremony-bound egress), so there is no repeated endpoint to skip; a
+			// selector that names the same session twice gets it re-sent as chosen.
 			// One selector serves the whole request: it names each attempt's vendor and
 			// receives each attempt's outcome, and sees the request's own history.
 			const proxyAttemptContext = createHttpProxyAttemptContext(clientOptions, transportAttemptCap);
 
 			// Numbers the attempts a header factory sees: only requests that reached
-			// header resolution count, so a failed proxy allocation (which increments
-			// the telemetry `issued` count below) or a dedupe-skipped offset does not
-			// make the first request that is actually built report `attempt: 2`.
+			// header resolution count, so a failed proxy resolution (which increments
+			// the telemetry `issued` count below) does not make the first request that
+			// is actually built report `attempt: 2`.
 			let headerAttempts = 0;
 			const nextHeaderAttempt = () => {
 				headerAttempts += 1;
@@ -1421,7 +1382,6 @@ export function createHttpClient(
 						warnOnce,
 						statusRetryEnabled ? retryOptions?.statusCodes : undefined,
 						proxyAttemptOffset,
-						dedupeContext,
 						(used, status) => {
 							proxyUsed = used;
 							observedStatus = status;
@@ -1429,13 +1389,12 @@ export function createHttpClient(
 						nextHeaderAttempt,
 						proxyAttemptContext,
 					);
-					if (!isDedupeSkipOutcome(outcome))
-						record({
-							status: outcome.status,
-							...(isHttpStatusOutcome(outcome)
-								? { e: "upstream_http_error", statusRetry: true }
-								: {}),
-						});
+					record({
+						status: outcome.status,
+						...(isHttpStatusOutcome(outcome)
+							? { e: "upstream_http_error", statusRetry: true }
+							: {}),
+					});
 					return outcome;
 				} catch (error) {
 					// Record before the retry loop can catch/rethrow a terminal status.
@@ -1447,13 +1406,6 @@ export function createHttpClient(
 			if (!retryEnabled || !retryOptions) {
 				throwIfAmbientAborted(headersOptions.signal);
 				const outcome = await executeOnce();
-				if (isDedupeSkipOutcome(outcome)) {
-					// Single-shot path never de-duplicates (dedupeContext is undefined),
-					// but keep the union total.
-					throw new TransportError("HTTP request produced no terminal result", {
-						code: "retry_exhausted",
-					});
-				}
 				if (isHttpStatusOutcome(outcome)) {
 					throw toUpstreamHttpError(outcome.status);
 				}
@@ -1461,27 +1413,18 @@ export function createHttpClient(
 			}
 
 			let lastError: unknown;
-			// `attempt` walks the flat proxy offset across the full chain span; `issued`
-			// counts requests that were actually sent (skipped duplicate offsets do not
-			// increment it). Retry summaries and the status-retry budget must reflect
-			// issued requests, not the raw offset, so they stay accurate when partial
-			// allocations skip offsets.
+			// `attempt` walks the proxy attempt across the full chain span; `issued`
+			// counts the attempts that reached a terminal outcome or failed, once each.
+			// Retry summaries and the status-retry budget read issued requests.
 			let issued = 0;
 			for (let attempt = 1; attempt <= transportAttemptCap; attempt += 1) {
 				throwIfAmbientAborted(headersOptions.signal);
-				// Whether this offset actually issued a request (vs. a skipped duplicate),
-				// so the catch counts a thrown *transport* failure once without
-				// double-counting a status outcome that already incremented before it
-				// re-threw as an upstream HTTP error.
+				// Whether this attempt already counted itself, so the catch counts a thrown
+				// *transport* failure once without double-counting a status outcome that
+				// already incremented before it re-threw as an upstream HTTP error.
 				let issuedThisAttempt = false;
 				try {
 					const outcome = await executeOnce(attempt - 1);
-					if (isDedupeSkipOutcome(outcome)) {
-						// Duplicate endpoint from a partial allocation: advance the flat
-						// offset without issuing the request (no backoff, not a failure) so
-						// the loop keeps rotating toward the fallback vendor.
-						continue;
-					}
 					issued += 1;
 					issuedThisAttempt = true;
 					if (isHttpStatusOutcome(outcome)) {
@@ -1530,10 +1473,9 @@ export function createHttpClient(
 				}
 			}
 
-			// Reached when the attempt cap is consumed without a terminal outcome —
-			// e.g. the final offsets of a partial allocation all resolved to
-			// already-tried endpoints and were skipped. Surface the last real transport
-			// failure rather than a synthetic exhaustion error.
+			// Reached only if the attempt cap is consumed without a terminal outcome.
+			// Surface the last real transport failure rather than a synthetic
+			// exhaustion error.
 			if (lastError !== undefined) {
 				throw lastError;
 			}

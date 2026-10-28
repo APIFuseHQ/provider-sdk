@@ -100,6 +100,44 @@ describe("proxy vendor fallback", () => {
 			]);
 		});
 
+		it("reaches every vendor of a longer chain whenever the budget is at least its length", () => {
+			const firstAttempts = (chainLength: number, cap: number) => {
+				const starts = new Map<number, number>();
+				for (let attempt = 0; attempt < cap; attempt += 1) {
+					const { vendorIndex } = mapAttemptToVendor(attempt, chainLength, cap);
+					if (!starts.has(vendorIndex)) starts.set(vendorIndex, attempt);
+				}
+				return [...starts.entries()];
+			};
+			expect(firstAttempts(3, 4)).toEqual([
+				[0, 0],
+				[1, 2],
+				[2, 3],
+			]);
+			expect(firstAttempts(4, 5)).toEqual([
+				[0, 0],
+				[1, 2],
+				[2, 3],
+				[3, 4],
+			]);
+			expect(firstAttempts(4, 6)).toEqual([
+				[0, 0],
+				[1, 2],
+				[2, 3],
+				[3, 5],
+			]);
+			// A budget below the chain length gives each vendor one attempt in order.
+			expect([0, 1, 2].map((attempt) => mapAttemptToVendor(attempt, 3, 1).vendorIndex)).toEqual([
+				0, 1, 2,
+			]);
+			// Two vendors keep the share of ceil(cap / 2) for every budget.
+			for (const cap of [1, 2, 3, 5, 6, 8]) {
+				const share = Math.max(1, Math.ceil(cap / 2));
+				expect(mapAttemptToVendor(share - 1, 2, cap).vendorIndex).toBe(0);
+				expect(mapAttemptToVendor(share, 2, cap)).toEqual({ vendorIndex: 1, vendorAttempt: 0 });
+			}
+		});
+
 		it("keeps attempts past the cap on the last vendor and every attempt on a single vendor", () => {
 			expect(mapAttemptToVendor(9, 2, 6)).toEqual({ vendorIndex: 1, vendorAttempt: 6 });
 			for (const attempt of [0, 1, 7, 20]) {

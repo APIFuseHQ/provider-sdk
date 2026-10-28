@@ -702,8 +702,6 @@ export interface StealthTelemetrySink {
     // (undocumented)
     recordAttempt(event: StealthTelemetryAttemptEvent): void;
     // (undocumented)
-    recordPoolRefresh(): void;
-    // (undocumented)
     recordRedirectHop(): void;
     // (undocumented)
     recordSafeRefetch(): void;

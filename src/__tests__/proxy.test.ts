@@ -24,6 +24,7 @@ import {
 	SMARTPROXY_MIN_LIFETIME_MINUTES,
 } from "../runtime/proxy-smartproxy.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
+import { SESSION_STATE_PINNED_EGRESS } from "../runtime/session-state.js";
 import { HttpRetryUnsafeMethodPolicy } from "../types.js";
 
 // Fake gateway sub-account credentials; no test reaches a real vendor.
@@ -1297,6 +1298,117 @@ describe("proxy integration", () => {
 		expect(proxies).toHaveLength(PROXY_ATTEMPTS_PER_VENDOR + 1);
 		expectDistinctSmartproxySessions(proxies.slice(0, PROXY_ATTEMPTS_PER_VENDOR), 3);
 		expect(proxies[PROXY_ATTEMPTS_PER_VENDOR]).toMatch(NODEMAVEN_URL_PATTERN);
+	});
+
+	it("splits an explicit stealth retry budget across the chain like ctx.http", async () => {
+		// `retry.attempts: 2` on a two-vendor chain is the budget the selector splits:
+		// the second attempt is the fallback vendor's, as on ctx.http, rather than a
+		// second smartproxy session inside a chain-span budget the retry never reaches.
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
+		stealthState.queuedResponses.push(new Error("socket hang up"), {
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+		const selector = createRecordingSelector();
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+				},
+			},
+			vendorSelector: selector,
+		});
+
+		const response = await client.fetch("/health", { retry: { attempts: 2, baseDelayMs: 0 } });
+
+		expect(response.status).toBe(200);
+		const proxies = stealthProxyCalls();
+		expect(proxies).toHaveLength(2);
+		expect(proxies[0]).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(proxies[1]).toMatch(NODEMAVEN_URL_PATTERN);
+		expect(selector.requests.map(({ attempt, attemptCap }) => [attempt, attemptCap])).toEqual([
+			[0, 2],
+			[1, 2],
+		]);
+	});
+
+	it("runs edge refusals past an explicit budget on the last vendor of the chain", async () => {
+		// Vendor edge refusals may use the whole rotation span; the attempts past the
+		// explicit budget stay on the fallback vendor instead of returning to the first.
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
+		stealthState.queuedResponses.push(
+			{ status: 512, body: "proxy pool unavailable", headers: { "content-type": "text/plain" } },
+			{ status: 512, body: "proxy pool unavailable", headers: { "content-type": "text/plain" } },
+			{
+				status: 200,
+				body: JSON.stringify({ ok: true }),
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection" },
+				},
+			},
+			affinityKey: "af_con_explicit_budget",
+		});
+
+		const response = await client.fetch("/health", { retry: { attempts: 2, baseDelayMs: 0 } });
+
+		expect(response.status).toBe(200);
+		const proxies = stealthProxyCalls();
+		expect(proxies).toHaveLength(3);
+		expect(proxies[0]).toMatch(SMARTPROXY_URL_PATTERN);
+		expect(proxies[1]).toMatch(NODEMAVEN_URL_PATTERN);
+		expect(proxies[2]).toMatch(NODEMAVEN_URL_PATTERN);
+		expect(proxies[2]).not.toBe(proxies[1]);
+	});
+
+	it("does not re-send a session-state pinned egress within one stealth request", async () => {
+		// The one place a gateway URL repeats inside a request is a state pinned to the
+		// egress it was acquired on: every attempt resolves that same URL, and a retry
+		// would re-hammer the exit that just failed, so the repeat is skipped.
+		useSmartproxyCredentials();
+		stealthState.queuedResponses.push(new Error("socket hang up"), {
+			status: 200,
+			body: "must not be reached",
+			headers: { "content-type": "text/plain" },
+		});
+		const pinnedUrl = `http://${SMARTPROXY_TEST_USERNAME}_area-KR_life-30_session-0123456789:${SMARTPROXY_TEST_PASSWORD}@proxy.smartproxy.net:3120`;
+		const pinnedFetch = {
+			method: "GET" as const,
+			[SESSION_STATE_PINNED_EGRESS]: {
+				url: pinnedUrl,
+				vendor: "smartproxy",
+				sessionId: "0123456789",
+			},
+		};
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: { mode: "required", providers: ["smartproxy"], geo: { country: "KR" } },
+			},
+		});
+
+		await expect(client.fetch("/state", pinnedFetch)).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(stealthProxyCalls()).toEqual([pinnedUrl]);
+		expect(stealthState.queuedResponses).toHaveLength(1);
 	});
 
 	it("throws only after attempting every vendor in the chain on persistent transport failure", async () => {

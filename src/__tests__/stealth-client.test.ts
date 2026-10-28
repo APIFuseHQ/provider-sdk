@@ -8281,8 +8281,6 @@ describe("stealth telemetry managed proxy observations", () => {
 				if (recording) {
 					expect(collector.toLogPayload()).toMatchObject({
 						attempts: diagnostic ? 4 : 2,
-						// The field stays on the wire; gateway sessions have no pool to refresh.
-						poolRefreshes: 0,
 						proxyUsed: true,
 					});
 					expect(collector.toLogPayload()?.attemptSamples).toHaveLength(calls.length);

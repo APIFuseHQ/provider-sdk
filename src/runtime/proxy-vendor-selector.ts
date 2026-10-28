@@ -109,11 +109,13 @@ function normalizeIndex(value: number): number {
 
 /**
  * Split an attempt budget evenly across a vendor chain, in declaration order:
- * vendor `i` serves attempts `[i × share, (i + 1) × share)` with
- * `share = ceil(attemptCap / chainLength)`, and the last vendor takes the
- * remainder (including attempts past the cap, which a released ceremony
- * binding can produce). Every vendor is reached whenever the cap is at least
- * the chain length; with one vendor every attempt stays on it.
+ * vendor `i` starts at attempt `ceil(i × cap / chainLength)` and serves until
+ * the next vendor's start; the last vendor takes the remainder (including
+ * attempts past the cap, which a released ceremony binding can produce). With
+ * two vendors this is a share of `ceil(cap / 2)` attempts for the first. Every
+ * vendor is reached whenever the cap is at least the chain length (a smaller
+ * cap counts as the chain length, one attempt per vendor); with one vendor
+ * every attempt stays on it.
  */
 export function mapAttemptToVendor(
 	attempt: number,
@@ -123,10 +125,12 @@ export function mapAttemptToVendor(
 	const flat = normalizeIndex(attempt);
 	const vendors = Math.max(1, Math.floor(chainLength));
 	if (vendors === 1) return { vendorIndex: 0, vendorAttempt: flat };
-	const cap = Math.max(1, Math.floor(attemptCap));
-	const share = Math.max(1, Math.ceil(cap / vendors));
-	const vendorIndex = Math.min(vendors - 1, Math.floor(flat / share));
-	return { vendorIndex, vendorAttempt: flat - vendorIndex * share };
+	const cap = Number.isFinite(attemptCap) ? Math.floor(attemptCap) : vendors;
+	const budget = Math.max(vendors, cap);
+	const start = (index: number) => Math.ceil((index * budget) / vendors);
+	let vendorIndex = 0;
+	while (vendorIndex + 1 < vendors && start(vendorIndex + 1) <= flat) vendorIndex += 1;
+	return { vendorIndex, vendorAttempt: flat - start(vendorIndex) };
 }
 
 /**

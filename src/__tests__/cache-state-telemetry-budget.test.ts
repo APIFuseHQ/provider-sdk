@@ -40,7 +40,6 @@ const siblings = {
 	},
 	stealth: {
 		attempts: 24,
-		poolRefreshes: 1,
 		redirectHops: 2,
 		proxyUsed: true,
 		safeRefetch: 1,

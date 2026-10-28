@@ -1976,11 +1976,34 @@ function createSessionFetcher(
 			// A bound ceremony has exactly one endpoint to try; releasing the binding after a
 			// transport failure widens the budget back to the ordinary rotation span.
 			let maxAttempts = ceremonyEgressLease?.binding ? 1 : unboundMaxAttempts;
+			// Gateway attempts mint their own sessions, so the same URL comes back only
+			// from a session-state pinned egress or when a released ceremony binding is
+			// the session the next attempt derives. Such a repeat is skipped, not re-sent.
 			const dedupeProxyEndpoints = rotatesRegistryChain;
+			// Cap the number of transport retries. For a registry vendor chain every
+			// attempt resolves a *different* vendor session, and past a vendor's share
+			// of the attempt budget the next vendor, so a transport failure is a signal
+			// to advance to the next session, not to retry the same one. Truncating at
+			// the per-endpoint retry budget would strand the request on the primary
+			// vendor. resolvePolicyTransportAttemptCap widens to the full chain span
+			// only for implicit, safe-method policy requests; explicit retry policies
+			// (their documented `attempts` ceiling), unsafe methods, and
+			// static/non-registry vendors keep the per-endpoint retry budget. It is also
+			// the budget the vendor selector splits across the chain, as on ctx.http, so
+			// an explicit `attempts: 2` on a two-vendor chain reaches the second vendor
+			// on its second attempt. Vendor edge refusals may run on to `maxAttempts`;
+			// attempts past this budget stay on the last vendor.
+			const transportRetryCap = resolvePolicyTransportAttemptCap({
+				policy: policyProxy,
+				usesPolicyProxy,
+				retryAttempts: stealthRetryOptions?.attempts ?? 1,
+				explicitRetry: hasExplicitRetryPolicy,
+				method,
+			});
 			// One selector serves the whole request: it names each attempt's vendor and
 			// receives each attempt's outcome, and sees the request's own history.
 			const proxyAttemptContext: StealthProxyAttemptContext = {
-				attemptCap: unboundMaxAttempts,
+				attemptCap: transportRetryCap,
 				vendorSelector: clientOptions.vendorSelector ?? getProxyVendorSelector(),
 				requestId: randomUUID(),
 				history: [],
@@ -2137,10 +2160,9 @@ function createSessionFetcher(
 					throwIfAmbientAborted(clientOptions.signal);
 					proxy = attemptProxy.url;
 					if (proxy && dedupeProxyEndpoints) {
-						// Every attempt on a gateway vendor resolves its own session, so a
-						// repeated URL only appears when a pinned or released endpoint comes
-						// back. Skip it and advance the attempt rather than breaking, which
-						// would strand the request before the fallback vendor's share.
+						// A pinned egress or a released binding came back (see
+						// dedupeProxyEndpoints). Skip it and advance the attempt rather than
+						// breaking, which would strand the request before the fallback share.
 						if (attemptedProxies.has(proxy)) {
 							continue;
 						}
@@ -2614,22 +2636,6 @@ function createSessionFetcher(
 						// method-aware retry decision below with the binding already released.
 						continue;
 					}
-					// Cap the number of transport retries. For a registry vendor chain every
-					// attempt resolves a *different* vendor session, and past a vendor's share
-					// of the attempt budget the next vendor, so a transport failure is a signal
-					// to advance to the next session, not to retry the same one. Truncating at
-					// the per-endpoint retry budget would strand the request on the primary
-					// vendor. resolvePolicyTransportAttemptCap widens to the full chain span
-					// only for implicit, safe-method policy requests; explicit retry policies
-					// (their documented `attempts` ceiling), unsafe methods, and
-					// static/non-registry vendors keep the per-endpoint retry budget.
-					const transportRetryCap = resolvePolicyTransportAttemptCap({
-						policy: policyProxy,
-						usesPolicyProxy,
-						retryAttempts: stealthRetryOptions?.attempts ?? 1,
-						explicitRetry: hasExplicitRetryPolicy,
-						method,
-					});
 					if (
 						attempt + 1 < transportRetryCap &&
 						shouldRetryProxyTransportAttempt({

@@ -5944,8 +5944,6 @@ export class StealthTelemetryCollector implements StealthTelemetrySink, Telemetr
     // (undocumented)
     recordAttempt(event: StealthTelemetryAttemptEvent): void;
     // (undocumented)
-    recordPoolRefresh(): void;
-    // (undocumented)
     recordRedirectHop(): void;
     // (undocumented)
     recordSafeRefetch(): void;
@@ -5971,7 +5969,6 @@ export type StealthTelemetryErrorCode = "transport_network_error" | "transport_t
 // @public (undocumented)
 export type StealthTelemetryHeaderPayload = {
     attempts: number;
-    poolRefreshes: number;
     redirectHops: number;
     profileId?: {
         browser: ClosedEnum<StealthBrowser>;
@@ -6004,7 +6001,6 @@ export type StealthTelemetryHeaderPayload = {
 // @public (undocumented)
 export type StealthTelemetryLogPayload = {
     attempts: number;
-    poolRefreshes: number;
     redirectHops: number;
     profileId?: StealthProfileDescriptor;
     proxyUsed: boolean;
@@ -6042,8 +6038,6 @@ export type StealthTelemetrySbsdOutcome = StealthChallengeClassification["outcom
 export interface StealthTelemetrySink {
     // (undocumented)
     recordAttempt(event: StealthTelemetryAttemptEvent): void;
-    // (undocumented)
-    recordPoolRefresh(): void;
     // (undocumented)
     recordRedirectHop(): void;
     // (undocumented)
