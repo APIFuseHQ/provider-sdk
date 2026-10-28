@@ -10,6 +10,7 @@ export * from "./session-key.js";
 export * from "./stateful-provider-adapter-context.js";
 export * from "./stateful-provider-adapter-metrics.js";
 export * from "./stateful-provider-adapter.js";
+export { statefulProviderMetricRegistryEmitter as statefulProviderMetricRegistry } from "./stateful-provider-metric-registry.js";
 export * from "./stateful-provider-observability.js";
 export * from "./stateful-provider-owner-forwarder.js";
 export * from "./stateful-provider-runtime-context.js";

@@ -1,0 +1,5 @@
+---
+"@apifuse/provider-sdk": minor
+---
+
+Export the process metric registry from `@apifuse/provider-sdk/stateful` as `statefulProviderMetricRegistry`, typed as a `StatefulProviderMetricEmitter`. It is the registry a `StatefulSessionRouter` built without a `metricEmitter` counts into and the metrics listener of `serve()` renders on `GET /metrics`, so provider code can pass it as the `metricEmitter` of its own components (for example a write ledger counting `apifuse_stateful_provider_write_ledger_*_total`) and have those series scraped next to the routing counters, without wiring a second channel. The same rules apply as for the router's counts: only names in the closed stateful metric set are stored, each through the method of its kind; only the `providerId`, `operationId`, `redactedErrorCode`, `eventType`, `subjectKind`, `capacityClass`, `ledgerState` and `healthStatus` labels are kept; and a call outside that contract is dropped instead of thrown. The exported value exposes only `increment`, `gauge` and `observe`: rendering and resetting the registry, the registry class and its tables stay internal.
