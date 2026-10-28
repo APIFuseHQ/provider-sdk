@@ -156,8 +156,23 @@ export {
 	lintOperation,
 	lintProvider,
 	type ProviderLintInformation,
+	type ProviderLintMode,
 	type ProviderLintResult,
 } from "./lint.js";
+export {
+	BOOTSTRAP_ENV_NAME_PREFIX,
+	type BoundaryViolation,
+	type BoundaryViolationKind,
+	BROWSER_DRIVER_PACKAGES,
+	BUN_MEMBER_ALLOWLIST,
+	type BundleProviderOptions,
+	bundleProvider,
+	formatBoundaryViolation,
+	PROCESS_MEMBER_ALLOWLIST,
+	type ProviderBundle,
+	RUNTIME_MODULE_ALLOWLIST,
+	SDK_BROWSER_RUNTIME_SUBPATH,
+} from "./cli/bundle.js";
 export {
 	type LintRuntimeBoundarySourcesOptions,
 	lintRuntimeBoundarySources,

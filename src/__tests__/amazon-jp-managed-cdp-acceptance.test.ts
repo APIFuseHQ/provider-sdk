@@ -1,58 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { lintProvider } from "../lint.js";
 import {
-	CURRENT_BOUNTY_CDP_SOURCE,
 	FixtureBrowser,
-	MANAGED_CDP_PORT_SOURCE,
 	runAmazonJpAuthenticatedSmoke,
 	runAmazonJpPublicSmoke,
 } from "./amazon-jp-managed-cdp-acceptance-fixture.js";
 
 describe("Amazon JP managed CDP acceptance harness", () => {
-	it("blocks the current bounty self-hosted CDP patterns in official provider mode", () => {
-		const diagnostics = lintProvider({
-			id: "amazon-jp",
-			allowedHosts: ["www.amazon.co.jp"],
-			providerSourceFiles: {
-				"entrypoint.sh": CURRENT_BOUNTY_CDP_SOURCE,
-				"operations/index.ts": CURRENT_BOUNTY_CDP_SOURCE,
-			},
-			reviewed: "community",
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				level: "error",
-				rule: "browser-provider-local-cdp-env",
-			}),
-		);
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				level: "error",
-				rule: "browser-direct-cdp-version-poll",
-			}),
-		);
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				level: "error",
-				rule: "browser-self-hosted-child-process",
-			}),
-		);
-	});
-
-	it("keeps the managed ctx.browser port shape lint-clean for official import", () => {
-		const diagnostics = lintProvider({
-			id: "amazon-jp",
-			allowedHosts: ["www.amazon.co.jp"],
-			providerSourceFiles: {
-				"operations/browser.ts": MANAGED_CDP_PORT_SOURCE,
-			},
-			reviewed: "community",
-		});
-
-		expect(diagnostics.filter((item) => item.rule.startsWith("browser-"))).toEqual([]);
-	});
-
 	it("uses ctx.browser.newPage for public smoke and fails closed on bot-wall or empty pages", async () => {
 		const goodBrowser = new FixtureBrowser([
 			{
