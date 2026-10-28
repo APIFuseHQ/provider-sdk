@@ -430,7 +430,12 @@ export type ProviderChallengeKind = ProviderChallenge["kind"];
  * only the next protected GET can verify it (the safe refetch is Phase 2).
  */
 export type ChallengeSolution =
-	| { readonly form: "token"; readonly token: string }
+	| {
+			readonly form: "token";
+			readonly token: string;
+			/** Epoch seconds reported by the vendor when the token carries its own expiry. */
+			readonly expires?: number;
+	  }
 	| {
 			readonly form: "cookies";
 			readonly cookies: Readonly<Record<string, string>>;
@@ -1784,6 +1789,22 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 		 * instead of tunneling the origin certificate chain.
 		 */
 		insecureSkipVerify?: boolean;
+		/**
+		 * Opt-in exit rotation for origins whose admission layer refuses an egress
+		 * IP outright. When the first attempt of a policy-managed proxied request
+		 * returns a headerless 403 (no challenge marker in headers or body) or any
+		 * 5xx, the request is sent exactly once more on the next attempt's vendor
+		 * session (a new session id, so a new exit), and the call keeps that offset. The second answer is final: a refusal
+		 * there is returned or thrown as usual. The refused attempt is recorded in
+		 * proxy telemetry as outcome `error` with `errorCode: "PROXY_EXIT_REFUSED"`,
+		 * the exit hash and status, so an exit refusal and an upstream 5xx are
+		 * distinct classes. Default off. A classified challenge is never rotated:
+		 * it is solvable where it was served. Rotation follows the transport-retry
+		 * method policy: safe methods (GET, HEAD, OPTIONS) with no body by default;
+		 * an unsafe method only when `retry.methods` lists it together with
+		 * `retry.unsafeMethodPolicy: "allow_explicit_unsafe"`, and never with a body.
+		 */
+		rotateExitOnAdmissionRefusal?: boolean;
 	};
 }
 

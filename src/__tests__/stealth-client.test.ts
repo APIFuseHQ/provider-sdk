@@ -8304,6 +8304,295 @@ describe("stealth telemetry managed proxy observations", () => {
 	}
 });
 
+describe("stealth.rotateExitOnAdmissionRefusal", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	type RecordedProxyAttempt = {
+		attempt: number;
+		proxyHash?: string;
+		outcome: string;
+		errorCode?: string;
+		status?: number;
+	};
+
+	async function createSessionClient(fixture: string) {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const { ProxyTelemetryCollector } = await import("../runtime/proxy-telemetry.js");
+		const { NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const attempts: RecordedProxyAttempt[] = [];
+		const collector = new ProxyTelemetryCollector();
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["nodemaven"],
+					session: { affinity: "connection", lifetimeMinutes: 30 },
+				},
+			},
+			affinityKey: `exit-rotation-fixture-${fixture}`,
+			engineCredentials: {
+				[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+				[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+			},
+			telemetry: {
+				recordProxyResolution(event) {
+					collector.recordProxyResolution(event);
+				},
+				recordProxyAttempt(event) {
+					attempts.push(event);
+					collector.recordProxyAttempt(event);
+				},
+			},
+		});
+		return { client, attempts, collector };
+	}
+
+	const usedProxies = () => mockStealthState.clients.map((client) => client.options?.proxy);
+
+	it("rotates once to the next vendor session on a headerless first-attempt 403 and returns the second answer", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 403, body: "<html><body>Forbidden</body></html>", headers: {} },
+			{ status: 200, body: "admitted", headers: {} },
+		);
+		const { client, attempts, collector } = await createSessionClient("1");
+
+		const response = await client.fetch("/gated", {
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 200, body: "admitted" });
+		expect(allWreqCalls()).toHaveLength(2);
+		const [first, second] = usedProxies();
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(second).not.toBe(first);
+		expect(
+			attempts.map(({ attempt, outcome, errorCode, status }) => [
+				attempt,
+				outcome,
+				errorCode,
+				status,
+			]),
+		).toEqual([
+			[1, "error", "PROXY_EXIT_REFUSED", 403],
+			[2, "ok", undefined, 200],
+		]);
+		expect(attempts[0]?.proxyHash).toEqual(expect.any(String));
+		expect(attempts[1]?.proxyHash).toEqual(expect.any(String));
+		expect(attempts[0]?.proxyHash).not.toBe(attempts[1]?.proxyHash);
+		expect(
+			collector.toLogPayload()?.attemptSamples?.map(({ a, h, o, c, s }) => ({ a, h, o, c, s })),
+		).toEqual([
+			{ a: 1, h: attempts[0]?.proxyHash, o: "error", c: "PROXY_EXIT_REFUSED", s: 403 },
+			{ a: 2, h: attempts[1]?.proxyHash, o: "ok", c: undefined, s: 200 },
+		]);
+		client.close?.();
+	});
+
+	it("rotates exactly once: a refusal on the next session too is terminal", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 503, body: "still down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("2");
+
+		await expect(
+			client.fetch("/gated", { stealth: { rotateExitOnAdmissionRefusal: true } }),
+		).rejects.toMatchObject({ code: "upstream_http_error", status: 503 });
+
+		expect(allWreqCalls()).toHaveLength(2);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 503, "PROXY_EXIT_REFUSED"],
+			["error", 503, "upstream_http_error"],
+		]);
+		client.close?.();
+	});
+
+	it("returns the second refusal to a throwOnHttpError: false caller instead of throwing", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
+			{ status: 403, body: "<html>Forbidden again</html>", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("3");
+
+		const response = await client.fetch("/gated", {
+			throwOnHttpError: false,
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 403, body: "<html>Forbidden again</html>" });
+		expect(allWreqCalls()).toHaveLength(2);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 403, "PROXY_EXIT_REFUSED"],
+			["ok", 403, undefined],
+		]);
+		client.close?.();
+	});
+
+	it("does not rotate when the option is off", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 403, body: "<html>Forbidden</html>", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("4");
+
+		await expect(client.fetch("/gated")).rejects.toMatchObject({
+			code: "upstream_http_error",
+			status: 403,
+		});
+
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 403, "upstream_http_error"],
+		]);
+		client.close?.();
+	});
+
+	it("does not rotate on a 403 that carries a challenge marker", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: '<html><script>window.gokuProps = {"key":"k"};</script></html>',
+				headers: {},
+			},
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("5");
+
+		const response = await client.fetch("/gated", {
+			throwOnHttpError: false,
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response.status).toBe(403);
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([["ok", 403]]);
+		client.close?.();
+	});
+
+	it("does not rotate a POST with a body: the 503 is thrown after exactly one request", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("6");
+
+		await expect(
+			client.fetch("/orders", {
+				method: "POST",
+				body: JSON.stringify({ sku: "a-1", qty: 1 }),
+				headers: { "content-type": "application/json" },
+				stealth: { rotateExitOnAdmissionRefusal: true },
+			}),
+		).rejects.toMatchObject({ code: "upstream_http_error", status: 503 });
+
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 503, "upstream_http_error"],
+		]);
+		client.close?.();
+	});
+
+	it("returns the 503 of a POST with a body to a throwOnHttpError: false caller without rotating", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("7");
+
+		const response = await client.fetch("/orders", {
+			method: "POST",
+			body: JSON.stringify({ sku: "a-1", qty: 1 }),
+			headers: { "content-type": "application/json" },
+			throwOnHttpError: false,
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 503, body: "upstream down" });
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([["ok", 503]]);
+		client.close?.();
+	});
+
+	it("does not rotate a bodiless POST unless the caller opted the method into retry", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client } = await createSessionClient("8");
+
+		await expect(
+			client.fetch("/orders", {
+				method: "POST",
+				stealth: { rotateExitOnAdmissionRefusal: true },
+			}),
+		).rejects.toMatchObject({ code: "upstream_http_error", status: 503 });
+
+		expect(allWreqCalls()).toHaveLength(1);
+		client.close?.();
+	});
+
+	it("rotates a bodiless POST when retry.methods and unsafeMethodPolicy opt it in", async () => {
+		const { HttpRetryUnsafeMethodPolicy } = await import("../types.js");
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "admitted", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("9");
+
+		const response = await client.fetch("/orders", {
+			method: "POST",
+			retry: {
+				methods: ["POST"],
+				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.AllowExplicitUnsafe,
+			},
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 200, body: "admitted" });
+		expect(allWreqCalls()).toHaveLength(2);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 503, "PROXY_EXIT_REFUSED"],
+			["ok", 200, undefined],
+		]);
+		client.close?.();
+	});
+
+	it("still rotates a GET on a first-attempt 503", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "admitted", headers: {} },
+		);
+		const { client, attempts } = await createSessionClient("10");
+
+		const response = await client.fetch("/gated", {
+			method: "GET",
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 200, body: "admitted" });
+		expect(allWreqCalls()).toHaveLength(2);
+		const [first, second] = usedProxies();
+		expect(second).not.toBe(first);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 503, "PROXY_EXIT_REFUSED"],
+			["ok", 200, undefined],
+		]);
+		client.close?.();
+	});
+});
+
 describe("stealth redirect hop credentials and redirectPolicy", () => {
 	beforeEach(() => {
 		mockStealthState.clients.length = 0;

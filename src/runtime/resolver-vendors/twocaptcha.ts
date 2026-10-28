@@ -7,6 +7,7 @@ import {
 	type ResolverIdentity,
 	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
+	type ResolverVendorBalance,
 	type ResolverVendorTransport,
 	ResolverChallengeVerdictError,
 	ResolverVendorUnavailableError,
@@ -21,6 +22,7 @@ const DEFAULT_TIMEOUT_MS = 180_000;
 
 type Delay = (ms: number, signal: AbortSignal) => Promise<void>;
 type TwoCaptchaOperationPhase = "create_task" | "poll_result";
+type TwoCaptchaRequestPhase = TwoCaptchaOperationPhase | "get_balance";
 
 export interface TwoCaptchaResolverVendorOptions {
 	readonly apiKey?: string;
@@ -117,7 +119,7 @@ function safeCauseOptions(
 function raceWithAbort<T>(
 	operation: () => Promise<T>,
 	signal: AbortSignal,
-	phase?: TwoCaptchaOperationPhase,
+	phase?: TwoCaptchaRequestPhase,
 	sensitiveValues: readonly string[] = [],
 ): Promise<T> {
 	if (signal.aborted) return Promise.reject(abortReason(signal));
@@ -215,7 +217,7 @@ function isNegativeVerdict(payload: JsonRecord): boolean {
 
 function unavailableForPayload(
 	payload: JsonRecord,
-	phase: TwoCaptchaOperationPhase,
+	phase: TwoCaptchaRequestPhase,
 ): ResolverVendorUnavailableError | ResolverChallengeVerdictError {
 	if (isNegativeVerdict(payload)) {
 		return new ResolverChallengeVerdictError(TWOCAPTCHA_VENDOR_ID, "solve_failed");
@@ -232,7 +234,7 @@ async function postJson(
 	url: string,
 	body: JsonRecord,
 	signal: AbortSignal,
-	phase: TwoCaptchaOperationPhase,
+	phase: TwoCaptchaRequestPhase,
 	sensitiveValues: readonly string[],
 ): Promise<{ readonly ok: boolean; readonly payload: JsonRecord }> {
 	const response = await raceWithAbort(
@@ -333,6 +335,33 @@ export function createTwoCaptchaResolverVendorAdapter(
 
 		supports(kind) {
 			return resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, kind);
+		},
+
+		async getBalance(signal): Promise<ResolverVendorBalance> {
+			const apiKey = options.apiKey?.trim();
+			if (!apiKey) {
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_credentials", {
+					phase: "get_balance",
+				});
+			}
+			const result = await postJson(
+				fetchImpl,
+				endpoint(baseUrl, "getBalance"),
+				{ clientKey: apiKey },
+				signal,
+				"get_balance",
+				[apiKey],
+			);
+			const balance = result.payload.balance;
+			if (
+				!result.ok ||
+				result.payload.errorId !== 0 ||
+				typeof balance !== "number" ||
+				!Number.isFinite(balance)
+			) {
+				throw unavailableForPayload(result.payload, "get_balance");
+			}
+			return { balance };
 		},
 
 		async solve(challenge, identity, callerSignal, traceRecorder, _transport, usage) {

@@ -61,15 +61,26 @@ import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
+	APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS,
+	RESOLVER_BUDGET_MARGIN_MS,
 	kindRequiresClientProfile,
+	resolverTokenSolutionTtlMs,
 } from "./resolver-config.js";
+import {
+	createResolverVendorHealthRegistry,
+	type ResolverVendorHealthRegistry,
+	type ResolverVendorHealthSnapshot,
+	resolverVendorHealthForEnv,
+} from "./resolver-vendor-health.js";
 import { resolverSpanAttributes } from "./resolver-span-attributes.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
 import type { BrowserTelemetrySink } from "./browser-telemetry.js";
 import type {
 	ResolverTelemetryErrorClass,
+	ResolverTelemetryOutcome,
 	ResolverTelemetryPhase,
 	ResolverTelemetrySink,
 } from "./resolver-telemetry.js";
@@ -85,8 +96,21 @@ export {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
+	APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS,
+	RESOLVER_BUDGET_MARGIN_MS,
+	RESOLVER_TOKEN_SOLUTION_TTL_MS_BY_KIND,
 } from "./resolver-config.js";
+export {
+	createResolverVendorHealthRegistry,
+	getResolverVendorHealthSnapshot,
+	type ResolverVendorBalanceRecord,
+	type ResolverVendorCooldownReason,
+	type ResolverVendorHealthRegistry,
+	type ResolverVendorHealthSnapshot,
+	type ResolverVendorSolveStats,
+} from "./resolver-vendor-health.js";
 export {
 	DEFAULT_RESOLVER_VENDOR_PREFERENCE,
 	resolveProviderResolverVendors,
@@ -144,6 +168,14 @@ export interface ResolverRuntimeOptions {
 	};
 	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
 	readonly identityScope?: string;
+	/**
+	 * Epoch ms at which the calling operation itself times out. The chain solves within
+	 * `min(vendor timeout, deadline - RESOLVER_BUDGET_MARGIN_MS)` and skips a vendor whose
+	 * measured median solve cannot finish in the time left.
+	 */
+	readonly deadlineAtMs?: number;
+	/** Vendor cooldown, solve statistics and balances; defaults to the registry bound to the env. */
+	readonly vendorHealth?: ResolverVendorHealthRegistry;
 	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
 	readonly transport?: ResolverVendorTransport;
 	/** Creates an SDK-owned transport bound to the declared profile and server-owned scope. */
@@ -179,7 +211,72 @@ type ResolverSolutionInvalidationOutcome =
 
 const RESOLVER_SOLUTION_CACHE_NAMESPACE = "resolver-solution";
 const RESOLVER_SOLUTION_INDEX_CACHE_NAMESPACE = "resolver-solution-index";
+const RESOLVER_SOLUTION_IN_FLIGHT_NAMESPACE = "resolver-solution-in-flight";
 const MIN_RESOLVER_CACHE_TTL_MS = 1_000;
+const DEFAULT_RESOLVER_BALANCE_TIMEOUT_MS = 10_000;
+
+type InFlightResolverSolve = {
+	readonly vendor: ProviderResolverVendor;
+	readonly settled: Promise<ChallengeSolution>;
+};
+
+// One vendor solve per challenge key per process: a caller that leaves mid-poll detaches
+// the solve here, and a caller arriving for the same challenge joins it instead of paying
+// for a second task.
+const inFlightResolverSolves = new Map<string, InFlightResolverSolve>();
+
+class ResolverBudgetExceededError extends Error {
+	constructor() {
+		super("Resolver solve budget elapsed");
+		this.name = "ResolverBudgetExceededError";
+	}
+}
+
+class ResolverVendorBoundElapsedError extends Error {
+	constructor(vendor: ProviderResolverVendor) {
+		super(`Resolver vendor ${vendor} solve bound elapsed`);
+		this.name = "ResolverVendorBoundElapsedError";
+	}
+}
+
+function createResolverBudget(remainingMs: number): {
+	readonly signal: AbortSignal;
+	release(): void;
+} {
+	const controller = new AbortController();
+	if (remainingMs <= 0) {
+		controller.abort(new ResolverBudgetExceededError());
+		return { signal: controller.signal, release() {} };
+	}
+	const timer = setTimeout(
+		() => controller.abort(new ResolverBudgetExceededError()),
+		remainingMs,
+	);
+	return { signal: controller.signal, release: () => clearTimeout(timer) };
+}
+
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) return Promise.reject(signal.reason);
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error: unknown) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
+/** Internal test seam; deliberately not re-exported from the package root. */
+export function resetResolverInFlightSolvesForTests(): void {
+	inFlightResolverSolves.clear();
+}
 const resolverCaches = new WeakMap<object, ProviderCache | null>();
 const solutionIssuerDigests = new WeakMap<object, string>();
 const resolverSolutionSources = new WeakMap<object, ResolverSolutionSource>();
@@ -723,7 +820,8 @@ function resolverAttemptErrorClass(
 	signal: AbortSignal,
 ): ResolverTelemetryErrorClass {
 	if (signal.aborted) return "aborted";
-	return error instanceof ResolverVendorUnavailableError ? error.reason : "unexpected";
+	if (error instanceof ResolverVendorUnavailableError) return error.reason;
+	return error instanceof ResolverBudgetExceededError ? "budget_exceeded" : "unexpected";
 }
 
 function challengeOrigin(challenge: ProviderChallenge): string {
@@ -772,7 +870,14 @@ function isCachedResolverSolution(value: unknown): value is CachedResolverSoluti
 			typeof candidate.expiresAtMs !== "number" ||
 			typeof candidate.issuerDigest !== "string" ||
 			candidate.solution === null ||
-			typeof candidate.solution !== "object" ||
+			typeof candidate.solution !== "object"
+		) {
+			return false;
+		}
+		if (candidate.solution.form === "token") {
+			return typeof candidate.solution.token === "string" && candidate.solution.token.length > 0;
+		}
+		if (
 			candidate.solution.form !== "cookies" ||
 			typeof candidate.solution.userAgent !== "string"
 		) {
@@ -807,11 +912,38 @@ function isResolverCacheIndex(value: unknown): value is ResolverCacheIndex {
 	);
 }
 
-function solutionExpiryMs(solution: ChallengeSolution): number | undefined {
-	if (solution.form !== "cookies") return undefined;
-	const expires = solution.expires ?? solution.sdkEstimatedExpires;
-	if (typeof expires !== "number" || !Number.isFinite(expires)) return undefined;
-	return expires * 1_000;
+function solutionExpiryMs(
+	solution: ChallengeSolution,
+	challenge: ProviderChallenge,
+	nowMs: number,
+): number | undefined {
+	if (solution.form === "cookies") {
+		const expires = solution.expires ?? solution.sdkEstimatedExpires;
+		if (typeof expires !== "number" || !Number.isFinite(expires)) return undefined;
+		return expires * 1_000;
+	}
+	if (solution.form === "token") {
+		if (typeof solution.expires === "number" && Number.isFinite(solution.expires)) {
+			return solution.expires * 1_000;
+		}
+		const ttlMs = resolverTokenSolutionTtlMs(challenge.kind);
+		return ttlMs === undefined ? undefined : nowMs + ttlMs;
+	}
+	return undefined;
+}
+
+function copyCachedSolution(solution: CachedResolverSolution["solution"]): ChallengeSolution {
+	if (solution.form === "token") {
+		return {
+			form: "token",
+			token: solution.token,
+			...(solution.expires === undefined ? {} : { expires: solution.expires }),
+		};
+	}
+	if (solution.form === "cookies") {
+		return { ...solution, cookies: { ...solution.cookies } };
+	}
+	return { ...solution };
 }
 
 function rememberSolutionIssuer(solution: ChallengeSolution, issuerDigest: string): void {
@@ -846,11 +978,8 @@ async function readCachedSolution(
 	if (!cached || !isCachedResolverSolution(cached.value)) return undefined;
 	if (cached.value.issuerDigest !== issuerDigest || cached.value.expiresAtMs <= now)
 		return undefined;
-	if (cached.value.solution.form !== "cookies") return undefined;
-	const solution = {
-		...cached.value.solution,
-		cookies: { ...cached.value.solution.cookies },
-	};
+	if (cached.value.solution.form === "cookie_state") return undefined;
+	const solution = copyCachedSolution(cached.value.solution);
 	rememberSolutionIssuer(solution, issuerDigest);
 	rememberSolutionSource(solution, "cache");
 	return solution;
@@ -886,6 +1015,25 @@ async function findCachedSolution(
 	return undefined;
 }
 
+function resolverInFlightSolveKey(
+	cache: ProviderCache,
+	challenge: ProviderChallenge,
+	identity: ResolverIssuingIdentity | undefined,
+	identityScope: string | undefined,
+): string {
+	const issuerDigest =
+		identityScope !== undefined && resolverChallengeIsIdentityScoped(challenge)
+			? resolverIdentityScopeDigest(identityScope)
+			: identity
+				? resolverIdentityDigest(resolverChallengeIssuingIdentity(challenge, identity))
+				: "direct";
+	return cache.key(RESOLVER_SOLUTION_IN_FLIGHT_NAMESPACE, {
+		kind: challenge.kind,
+		origin: challengeOrigin(challenge),
+		issuerDigest,
+	});
+}
+
 async function writeResolverCacheIndex(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
@@ -910,13 +1058,12 @@ async function cacheResolverSolution(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
 	solution: ChallengeSolution,
+	expiresAtMs: number,
 	identity: ResolverIssuingIdentity,
 	identityScope: string | undefined,
 ): Promise<{ written: boolean; reason?: "no_expires" | "not_cacheable" }> {
 	if (!resolverChallengeIsCacheable(challenge)) return { written: false, reason: "not_cacheable" };
-	const expiresAtMs = solutionExpiryMs(solution);
 	const now = Date.now();
-	if (expiresAtMs === undefined) return { written: false, reason: "no_expires" };
 	const ttlMs = Math.floor(expiresAtMs - now);
 	if (ttlMs <= MIN_RESOLVER_CACHE_TTL_MS) return { written: false, reason: "no_expires" };
 
@@ -967,7 +1114,7 @@ async function invalidateResolverSolutionWithOutcome(
 	)[RESOLVER_INSTRUMENTATION_METADATA];
 	const cacheOwner = metadata?.target ?? resolver;
 	const invalidate = async (): Promise<ResolverSolutionInvalidationOutcome> => {
-		if (solution.form !== "cookies") return "not_cookie_solution";
+		if (solution.form === "cookie_state") return "not_cookie_solution";
 		if (!resolverCaches.has(cacheOwner)) {
 			throw new Error("Resolver cache registration lookup failed during solution invalidation");
 		}
@@ -1089,18 +1236,45 @@ function createResolverChainClient(options: {
 	readonly allowedHosts?: readonly string[];
 	readonly telemetry?: ResolverTelemetrySink;
 	readonly browserTelemetry?: BrowserTelemetrySink;
+	readonly timeoutMs?: number;
+	readonly deadlineAtMs?: number;
+	readonly cooldownMs?: number;
+	readonly vendorHealth?: ResolverVendorHealthRegistry;
+	/** Test-only clock override for budget and health measurements. */
+	readonly now?: () => number;
 }): ResolverChainClient {
 	assertClientProfileTransportContract(options.clientProfile, options.transport);
 	const cache =
 		options.cache && !isProviderCacheBypassed(options.cache) ? options.cache : undefined;
+	const timeoutMs = options.timeoutMs ?? DEFAULT_RESOLVER_TIMEOUT_MS;
+	const cooldownMs = options.cooldownMs ?? DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS;
+	const now = options.now ?? Date.now;
+	const vendorHealth = options.vendorHealth ?? createResolverVendorHealthRegistry();
+	const defaultUserAgent = (): string | undefined => {
+		try {
+			return resolveDefaultResolverUserAgent();
+		} catch {
+			return undefined;
+		}
+	};
 	const client: ResolverChainClient = {
 		async solve(
 			challenge: ProviderChallenge,
 			signal: AbortSignal = new AbortController().signal,
 			traceRecorder?: TraceRecorder,
 		) {
-			const solveStartedAt = Date.now();
-			let terminalOutcome: "solved" | "cached" | "exhausted" | "aborted" | "error" = "error";
+			const solveStartedAt = now();
+			const budgetDeadlineAtMs =
+				options.deadlineAtMs === undefined
+					? undefined
+					: options.deadlineAtMs - RESOLVER_BUDGET_MARGIN_MS;
+			const budget =
+				budgetDeadlineAtMs === undefined
+					? undefined
+					: createResolverBudget(budgetDeadlineAtMs - now());
+			// What the caller can still wait for: its own signal plus the operation budget.
+			const callerFacingSignal = budget ? AbortSignal.any([signal, budget.signal]) : signal;
+			let terminalOutcome: ResolverTelemetryOutcome = "error";
 			try {
 				assertDeclaredKind(challenge.kind, options.kinds);
 				if (options.unavailableReason) {
@@ -1172,6 +1346,12 @@ function createResolverChainClient(options: {
 						})),
 					);
 				}
+				const attempts: ResolverChainAttempt[] = [];
+				const throwCallerFacingAbort = (): never => {
+					signal.throwIfAborted();
+					throwExhausted(challenge.kind, attempts);
+				};
+				let inFlightKey: string | undefined;
 				if (!cache) {
 					options.telemetry?.recordCacheRead({ status: "disabled", challengeKind: challenge.kind });
 				} else if (!resolverChallengeIsCacheable(challenge)) {
@@ -1186,93 +1366,325 @@ function createResolverChainClient(options: {
 						identity,
 						options.identityScope,
 					);
+					inFlightKey = resolverInFlightSolveKey(cache, challenge, identity, options.identityScope);
+					const inFlight = cached ? undefined : inFlightResolverSolves.get(inFlightKey);
 					options.telemetry?.recordCacheRead({
-						status: cached ? "hit" : "miss",
+						status: cached ? "hit" : inFlight ? "in_flight" : "miss",
 						challengeKind: challenge.kind,
 					});
 					if (cached) {
 						terminalOutcome = "cached";
 						return cached;
 					}
+					if (inFlight) {
+						let joined: ChallengeSolution | undefined;
+						try {
+							joined = await raceWithSignal(inFlight.settled, callerFacingSignal);
+						} catch {
+							if (callerFacingSignal.aborted) {
+								attempts.push({ vendor: inFlight.vendor, reason: "budget_exceeded" });
+								throwCallerFacingAbort();
+							}
+							// The solve this caller joined failed; run the chain for itself.
+						}
+						if (joined) {
+							terminalOutcome = "solved";
+							return joined;
+						}
+					}
 				}
-				const attempts: ResolverChainAttempt[] = [];
+				const detachable = cache !== undefined && inFlightKey !== undefined;
 				for (const [entryIndex, entry] of supportingEntries.entries()) {
+					const attemptIndex = entryIndex + 1;
+					const next = supportingEntries[entryIndex + 1];
+					const skipVendor = (reason: "cooldown" | "budget_exceeded") => {
+						options.telemetry?.recordVendorAttempt({
+							vendor: entry.id,
+							phase: "create_task",
+							diagnostics: { attemptIndex },
+							outcome: "error",
+							ms: 0,
+							errorClass: reason,
+						});
+						attempts.push({ vendor: entry.id, reason });
+						if (next) options.telemetry?.recordFailover({ from: entry.id, to: next.id, reason });
+					};
+					signal.throwIfAborted();
+					const loopNowMs = now();
+					if (vendorHealth.cooldownUntilMs(entry.id, loopNowMs) !== undefined) {
+						skipVendor("cooldown");
+						continue;
+					}
+					if (budgetDeadlineAtMs !== undefined) {
+						const remainingMs = budgetDeadlineAtMs - loopNowMs;
+						if (budget?.signal.aborted || remainingMs <= 0) {
+							skipVendor("budget_exceeded");
+							continue;
+						}
+						// The measured median only moves when an attempt runs, so a vendor skipped on
+						// its p50 can never recover unless something else gets tried. The p50 skip
+						// therefore applies only while a later vendor would still be tried; otherwise
+						// the attempt runs under the deadline, which still cuts it.
+						const overBudget = (vendor: ProviderResolverVendor) => {
+							const p50Ms = vendorHealth.solveP50Ms(vendor, challenge.kind);
+							return p50Ms !== undefined && p50Ms > remainingMs;
+						};
+						const laterVendorEligible = supportingEntries
+							.slice(entryIndex + 1)
+							.some(
+								(later) =>
+									vendorHealth.cooldownUntilMs(later.id, loopNowMs) === undefined &&
+									!overBudget(later.id),
+							);
+						if (laterVendorEligible && overBudget(entry.id)) {
+							skipVendor("budget_exceeded");
+							continue;
+						}
+					}
 					const adapter = entry.createAdapter(options.browserTelemetry);
-					const attemptStartedAt = Date.now();
+					const attemptStartedAt = now();
 					const diagnostics: ResolverAttemptDiagnostics = {};
 					const telemetryTraceRecorder = createResolverTelemetryTraceRecorder({
 						base: traceRecorder,
 						vendor: adapter.id,
-						attemptIndex: entryIndex + 1,
+						attemptIndex,
 						telemetry: options.telemetry,
 						diagnostics,
 					});
+					// The vendor bound outlives the caller only for a detachable solve; otherwise the
+					// adapter stops with the caller as before.
+					const attemptController = new AbortController();
+					const vendorBoundTimer = setTimeout(
+						() => attemptController.abort(new ResolverVendorBoundElapsedError(adapter.id)),
+						timeoutMs,
+					);
+					const adapterSignal = detachable
+						? attemptController.signal
+						: AbortSignal.any([callerFacingSignal, attemptController.signal]);
+					let attemptSettled = false;
+					const solveAttempt = async () => {
+						// Boundary first: an overreaching declaration is a caller fault even when no
+						// transport is configured, not a "missing_transport" vendor unavailability.
+						const adapterHosts = adapter.transportAllowedHosts ?? [];
+						assertResolverVendorTransportHosts(adapter.id, adapterHosts);
+						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
+						const unrestrictedTransport =
+							options.transport ??
+							(requiresTransport
+								? options.createTransport?.({
+										clientProfile: options.clientProfile,
+										identityScope: options.identityScope,
+									})
+								: undefined);
+						if (requiresTransport && unrestrictedTransport === undefined) {
+							throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
+						}
+						const boundTransport = unrestrictedTransport
+							? restrictResolverTransport(unrestrictedTransport, [
+									...(options.allowedHosts ?? []),
+									...adapterHosts,
+								])
+							: undefined;
+						const usage: ResolverPaidUsageContext = {
+							// Position in the declared chain, not in the kind-filtered list.
+							vendorIndex: options.entries.indexOf(entry) + 1,
+							...(options.identityScope
+								? {
+										resolverIdentityScope: createHash("sha256")
+											.update(options.identityScope, "utf8")
+											.digest("hex"),
+									}
+								: {}),
+						};
+						try {
+							return await adapter.solve(
+								challenge,
+								identity,
+								adapterSignal,
+								telemetryTraceRecorder,
+								boundTransport?.transport,
+								usage,
+							);
+						} catch (error) {
+							if (
+								attemptController.signal.reason instanceof ResolverVendorBoundElapsedError &&
+								!(error instanceof ResolverVendorUnavailableError)
+							) {
+								throw new ResolverVendorUnavailableError(adapter.id, "timeout", { cause: error });
+							}
+							throw error;
+						} finally {
+							boundTransport?.revoke();
+						}
+					};
+					const runAttempt = async (): Promise<ChallengeSolution> => {
+						try {
+							const solved = traceRecorder
+								? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
+										attributes: resolverSpanAttributes({
+											vendor: adapter.id,
+											challenge_kind: challenge.kind,
+											client_profile: options.clientProfile,
+											resolver_identity_source: identityResolution.userAgentSource,
+										}),
+										onError(error) {
+											return error instanceof ResolverVendorUnavailableError
+												? unavailableSpanAttributes(error)
+												: undefined;
+										},
+									})
+								: await solveAttempt();
+							vendorHealth.recordSolveSample(adapter.id, challenge.kind, {
+								ms: now() - attemptStartedAt,
+								ok: true,
+							});
+							return solved;
+						} catch (error) {
+							if (error instanceof ResolverVendorUnavailableError) {
+								if (error.reason === "allocation_exhausted") {
+									const exhaustedAt = now();
+									vendorHealth.startCooldown(
+										adapter.id,
+										"allocation_exhausted",
+										exhaustedAt,
+										exhaustedAt + cooldownMs,
+									);
+								}
+								vendorHealth.recordSolveSample(adapter.id, challenge.kind, {
+									ms: now() - attemptStartedAt,
+									ok: false,
+								});
+							}
+							throw error;
+						} finally {
+							attemptSettled = true;
+							clearTimeout(vendorBoundTimer);
+						}
+					};
+					const writeSolutionToCache = async (
+						solutionCache: ProviderCache,
+						solved: ChallengeSolution,
+					) => {
+						try {
+							let cacheWrite: { written: boolean; reason?: "no_expires" | "not_cacheable" };
+							const expiresAtMs = solutionExpiryMs(solved, challenge, now());
+							if (!resolverChallengeIsCacheable(challenge)) {
+								cacheWrite = { written: false, reason: "not_cacheable" };
+							} else if (expiresAtMs === undefined) {
+								cacheWrite = { written: false, reason: "no_expires" };
+							} else {
+								const solutionUserAgent =
+									solved.form === "cookies"
+										? solved.userAgent
+										: (identity?.userAgent ?? defaultUserAgent());
+								const issuingIdentity =
+									adapter.getIssuingIdentity?.(solved, identity, challenge) ??
+									(solutionUserAgent === undefined
+										? undefined
+										: resolverChallengeIssuingIdentity(challenge, {
+												...(identity ? { proxyUrl: identity.proxyUrl } : {}),
+												userAgent: solutionUserAgent,
+											}));
+								cacheWrite = issuingIdentity
+									? await cacheResolverSolution(
+											solutionCache,
+											challenge,
+											solved,
+											expiresAtMs,
+											issuingIdentity,
+											options.identityScope,
+										)
+									: { written: false, reason: "not_cacheable" };
+							}
+							options.telemetry?.recordCacheWrite(cacheWrite);
+						} catch (error) {
+							options.telemetry?.recordCacheWrite({ written: false, reason: "error" });
+							throw error;
+						}
+					};
+					let vendorSolution: ChallengeSolution | undefined;
+					const settled = runAttempt().then(async (solved) => {
+						vendorSolution = solved;
+						if (cache) await writeSolutionToCache(cache, solved);
+						rememberSolutionSource(solved, "vendor");
+						return solved;
+					});
+					if (detachable && inFlightKey !== undefined) {
+						const key = inFlightKey;
+						const record: InFlightResolverSolve = { vendor: adapter.id, settled };
+						inFlightResolverSolves.set(key, record);
+						const release = () => {
+							if (inFlightResolverSolves.get(key) === record) inFlightResolverSolves.delete(key);
+						};
+						settled.then(release, release);
+					}
 					let solution: ChallengeSolution;
 					try {
-						const solveAttempt = async () => {
-							// Boundary first: an overreaching declaration is a caller fault even when no
-							// transport is configured, not a "missing_transport" vendor unavailability.
-							const adapterHosts = adapter.transportAllowedHosts ?? [];
-							assertResolverVendorTransportHosts(adapter.id, adapterHosts);
-							const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
-							const unrestrictedTransport =
-								options.transport ??
-								(requiresTransport
-									? options.createTransport?.({
-											clientProfile: options.clientProfile,
-											identityScope: options.identityScope,
-										})
-									: undefined);
-							if (requiresTransport && unrestrictedTransport === undefined) {
-								throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
-							}
-							const boundTransport = unrestrictedTransport
-								? restrictResolverTransport(unrestrictedTransport, [
-										...(options.allowedHosts ?? []),
-										...adapterHosts,
-									])
-								: undefined;
-							const usage: ResolverPaidUsageContext = {
-								// Position in the declared chain, not in the kind-filtered list.
-								vendorIndex: options.entries.indexOf(entry) + 1,
-								...(options.identityScope
-									? {
-											resolverIdentityScope: createHash("sha256")
-												.update(options.identityScope, "utf8")
-												.digest("hex"),
-										}
-									: {}),
-							};
-							try {
-								return await adapter.solve(
-									challenge,
-									identity,
-									signal,
-									telemetryTraceRecorder,
-									boundTransport?.transport,
-									usage,
-								);
-							} finally {
-								boundTransport?.revoke();
-							}
-						};
-						solution = traceRecorder
-							? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
-									attributes: resolverSpanAttributes({
-										vendor: adapter.id,
-										challenge_kind: challenge.kind,
-										client_profile: options.clientProfile,
-										resolver_identity_source: identityResolution.userAgentSource,
-									}),
-									onError(error) {
-										return error instanceof ResolverVendorUnavailableError
-											? unavailableSpanAttributes(error)
-											: undefined;
-									},
-								})
-							: await solveAttempt();
+						solution = detachable ? await raceWithSignal(settled, callerFacingSignal) : await settled;
 					} catch (error) {
-						const unavailable = error instanceof ResolverVendorUnavailableError ? error : undefined;
+						if (detachable && callerFacingSignal.aborted && !attemptSettled) {
+							const detachedVendor = adapter.id;
+							settled.then(
+								() => {
+									vendorHealth.recordDetachedOutcome(detachedVendor, "completed");
+									options.telemetry?.recordOutcome({
+										outcome: "detached_completed",
+										solveMs: now() - solveStartedAt,
+										challengeKind: challenge.kind,
+									});
+								},
+								() => {
+									vendorHealth.recordDetachedOutcome(detachedVendor, "failed");
+									options.telemetry?.recordOutcome({
+										outcome: "detached_failed",
+										solveMs: now() - solveStartedAt,
+										challengeKind: challenge.kind,
+									});
+								},
+							);
+							const errorClass: ResolverTelemetryErrorClass = signal.aborted
+								? "aborted"
+								: "budget_exceeded";
+							options.telemetry?.recordVendorAttempt({
+								vendor: adapter.id,
+								phase: resolverTelemetryPhase(diagnostics.phase) ?? "poll_result",
+								diagnostics: { attemptIndex, phase: diagnostics.phase },
+								outcome: "error",
+								ms: now() - attemptStartedAt,
+								errorClass,
+								...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
+							});
+							signal.throwIfAborted();
+							attempts.push({ vendor: adapter.id, reason: "budget_exceeded" });
+							if (next) {
+								options.telemetry?.recordFailover({
+									from: adapter.id,
+									to: next.id,
+									reason: "budget_exceeded",
+								});
+							}
+							continue;
+						}
+						if (vendorSolution !== undefined) {
+							// The vendor solved; the cache write failed. The attempt stays a success.
+							options.telemetry?.recordVendorAttempt({
+								vendor: adapter.id,
+								phase: resolverTelemetryPhase(diagnostics.phase) ?? "poll_result",
+								diagnostics: { attemptIndex, phase: diagnostics.phase },
+								outcome: "ok",
+								ms: now() - attemptStartedAt,
+								...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
+							});
+							throw error;
+						}
+						const unavailable =
+							error instanceof ResolverVendorUnavailableError
+								? error
+								: budget?.signal.aborted && !signal.aborted
+									? new ResolverVendorUnavailableError(adapter.id, "budget_exceeded", {
+											cause: error,
+										})
+									: undefined;
 						const attempt = unavailable ? unavailableAttempt(unavailable, true) : undefined;
 						options.telemetry?.recordVendorAttempt({
 							vendor: adapter.id,
@@ -1282,11 +1694,11 @@ function createResolverChainClient(options: {
 								"create_task",
 							diagnostics: {
 								...attempt,
-								attemptIndex: entryIndex + 1,
+								attemptIndex,
 								phase: attempt?.phase ?? diagnostics.phase,
 							},
 							outcome: "error",
-							ms: Date.now() - attemptStartedAt,
+							ms: now() - attemptStartedAt,
 							errorClass: resolverAttemptErrorClass(error, signal),
 							...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
 							...(diagnostics.vendorErrorCode
@@ -1299,7 +1711,6 @@ function createResolverChainClient(options: {
 						signal.throwIfAborted();
 						if (!unavailable || !attempt) throw error;
 						attempts.push(attempt);
-						const next = supportingEntries[entryIndex + 1];
 						if (next) {
 							options.telemetry?.recordFailover({
 								from: adapter.id,
@@ -1312,42 +1723,11 @@ function createResolverChainClient(options: {
 					options.telemetry?.recordVendorAttempt({
 						vendor: adapter.id,
 						phase: resolverTelemetryPhase(diagnostics.phase) ?? "poll_result",
-						diagnostics: { attemptIndex: entryIndex + 1, phase: diagnostics.phase },
+						diagnostics: { attemptIndex, phase: diagnostics.phase },
 						outcome: "ok",
-						ms: Date.now() - attemptStartedAt,
+						ms: now() - attemptStartedAt,
 						...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
 					});
-					if (cache) {
-						try {
-							let cacheWrite: { written: boolean; reason?: "no_expires" | "not_cacheable" };
-							if (!resolverChallengeIsCacheable(challenge)) {
-								cacheWrite = { written: false, reason: "not_cacheable" };
-							} else if (solution.form !== "cookies" || solutionExpiryMs(solution) === undefined) {
-								cacheWrite = { written: false, reason: "no_expires" };
-							} else {
-								const issuingIdentity =
-									adapter.getIssuingIdentity?.(solution, identity, challenge) ??
-									resolverChallengeIssuingIdentity(challenge, {
-										...(identity ? { proxyUrl: identity.proxyUrl } : {}),
-										userAgent: solution.userAgent,
-									});
-								cacheWrite = issuingIdentity
-									? await cacheResolverSolution(
-											cache,
-											challenge,
-											solution,
-											issuingIdentity,
-											options.identityScope,
-										)
-									: { written: false, reason: "not_cacheable" };
-							}
-							options.telemetry?.recordCacheWrite(cacheWrite);
-						} catch (error) {
-							options.telemetry?.recordCacheWrite({ written: false, reason: "error" });
-							throw error;
-						}
-					}
-					rememberSolutionSource(solution, "vendor");
 					// Adapter success includes SBSD payload acceptance with verified:false.
 					// The caller reports protected-refetch verification separately.
 					terminalOutcome = "solved";
@@ -1363,9 +1743,10 @@ function createResolverChainClient(options: {
 						: "error";
 				throw error;
 			} finally {
+				budget?.release();
 				options.telemetry?.recordOutcome({
 					outcome: terminalOutcome,
-					solveMs: Date.now() - solveStartedAt,
+					solveMs: now() - solveStartedAt,
 					challengeKind: challenge.kind,
 				});
 			}
@@ -1389,6 +1770,14 @@ export function createResolverClient(options: {
 	readonly clientProfile?: string;
 	readonly allowedHosts?: readonly string[];
 	readonly telemetry?: ResolverTelemetrySink;
+	/** Per-vendor solve bound; defaults to `DEFAULT_RESOLVER_TIMEOUT_MS`. */
+	readonly timeoutMs?: number;
+	readonly deadlineAtMs?: number;
+	readonly cooldownMs?: number;
+	/** Shared vendor health; omitted means this chain keeps its own cooldowns and statistics. */
+	readonly vendorHealth?: ResolverVendorHealthRegistry;
+	/** Test-only clock override for budget and health measurements. */
+	readonly now?: () => number;
 }): ResolverChainClient {
 	for (const adapter of options.adapters) {
 		// Fail at construction, not on the first solve, when a supplied adapter oversteps its vendor.
@@ -1410,6 +1799,11 @@ export function createResolverClient(options: {
 		clientProfile: options.clientProfile,
 		allowedHosts: options.allowedHosts,
 		telemetry: options.telemetry,
+		timeoutMs: options.timeoutMs,
+		deadlineAtMs: options.deadlineAtMs,
+		cooldownMs: options.cooldownMs,
+		vendorHealth: options.vendorHealth,
+		now: options.now,
 	});
 }
 
@@ -1491,6 +1885,9 @@ function createResolverClientFromEnvInternal(
 
 	const timeoutValue = readPositiveIntegerEnv(env, APIFUSE__RESOLVER__TIMEOUT_MS);
 	const timeoutMs = timeoutValue === undefined ? DEFAULT_RESOLVER_TIMEOUT_MS : Number(timeoutValue);
+	const cooldownValue = readPositiveIntegerEnv(env, APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS);
+	const cooldownMs =
+		cooldownValue === undefined ? DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS : Number(cooldownValue);
 	const allowedHosts = [...(options.allowedHosts ?? [])];
 
 	return createResolverChainClient({
@@ -1521,7 +1918,87 @@ function createResolverClientFromEnvInternal(
 		allowedHosts,
 		telemetry: options.telemetry,
 		browserTelemetry: options.browserTelemetry,
+		timeoutMs,
+		deadlineAtMs: options.deadlineAtMs,
+		cooldownMs,
+		vendorHealth: options.vendorHealth ?? resolverVendorHealthForEnv(env),
 	});
+}
+
+async function refreshResolverVendorBalancesInternal(
+	config: ProviderResolverConfig | undefined,
+	env: EnvLike,
+	options: {
+		readonly signal?: AbortSignal;
+		readonly timeoutMs?: number;
+		readonly vendorHealth?: ResolverVendorHealthRegistry;
+	},
+	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
+): Promise<readonly ResolverVendorHealthSnapshot[]> {
+	const vendorHealth = options.vendorHealth ?? resolverVendorHealthForEnv(env);
+	if (config && (config.vendors === undefined || config.vendors.length > 0)) {
+		const timeoutMs = options.timeoutMs ?? DEFAULT_RESOLVER_BALANCE_TIMEOUT_MS;
+		await Promise.all(
+			resolveProviderResolverVendors(config).map(async (configuredVendor) => {
+				assertKnownResolverVendor(configuredVendor);
+				const resolved = resolveVendorAvailability(configuredVendor, env);
+				if (!resolved.available) return;
+				const adapter = createAdapter(resolved, timeoutMs, [], adapterFactories);
+				if (!adapter.getBalance) return;
+				const checkedAtMs = Date.now();
+				const boundSignal = AbortSignal.timeout(timeoutMs);
+				const signal = options.signal
+					? AbortSignal.any([options.signal, boundSignal])
+					: boundSignal;
+				try {
+					const { balance } = await adapter.getBalance(signal);
+					vendorHealth.recordBalance(adapter.id, { balance, checkedAtMs });
+				} catch (error) {
+					vendorHealth.recordBalance(adapter.id, {
+						error:
+							error instanceof ResolverVendorUnavailableError
+								? error.reason
+								: signal.aborted
+									? "timeout"
+									: "unexpected",
+						checkedAtMs,
+					});
+				}
+			}),
+		);
+	}
+	return vendorHealth.snapshot();
+}
+
+/**
+ * Polls each configured vendor's balance endpoint once and returns the vendor health snapshot
+ * of the registry bound to `env` (the process-wide one for `process.env`). Never called by the
+ * solve path: a host (health monitor) runs it on its own cadence.
+ */
+export function refreshResolverVendorBalances(
+	config: ProviderResolverConfig | undefined,
+	env: EnvLike = process.env,
+	options: {
+		readonly signal?: AbortSignal;
+		readonly timeoutMs?: number;
+		readonly vendorHealth?: ResolverVendorHealthRegistry;
+	} = {},
+): Promise<readonly ResolverVendorHealthSnapshot[]> {
+	return refreshResolverVendorBalancesInternal(config, env, options, RESOLVER_ADAPTER_REGISTRY);
+}
+
+/** Internal test seam; deliberately not re-exported from the package root. */
+export function refreshResolverVendorBalancesForTests(
+	config: ProviderResolverConfig | undefined,
+	env: EnvLike,
+	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
+	options: {
+		readonly signal?: AbortSignal;
+		readonly timeoutMs?: number;
+		readonly vendorHealth?: ResolverVendorHealthRegistry;
+	} = {},
+): Promise<readonly ResolverVendorHealthSnapshot[]> {
+	return refreshResolverVendorBalancesInternal(config, env, options, adapterFactories);
 }
 
 export function createResolverClientFromEnv(

@@ -550,6 +550,7 @@ interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "h
         requestClass?: "navigation" | "form-post" | "xhr" | "post";
         userActivation?: boolean;
         insecureSkipVerify?: boolean;
+        rotateExitOnAdmissionRefusal?: boolean;
     };
     throwOnHttpError?: boolean;
 }
@@ -748,20 +749,20 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:96:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:113:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:115:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:145:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:146:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:147:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:151:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:152:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:153:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/proxy-vendor-selector.d.ts:28:5 - (ae-forgotten-export) The symbol "ProxySessionDirective" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/proxy-vendor-selector.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/proxy-vendor-selector.d.ts:57:5 - (ae-forgotten-export) The symbol "ProxyAttemptRecord" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/proxy-vendor-selector.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:49:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:51:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1033:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1046:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1673:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1723:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1723:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1048:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1691:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1741:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1741:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

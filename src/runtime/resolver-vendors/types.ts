@@ -153,6 +153,11 @@ export type ResolverPaidUsageContext = {
 	readonly resolverIdentityScope?: string;
 };
 
+/** Prepaid vendor balance in the vendor's own account currency. */
+export type ResolverVendorBalance = {
+	readonly balance: number;
+};
+
 export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
 	readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
@@ -179,6 +184,11 @@ export interface ResolverVendorAdapter {
 		transport?: ResolverVendorTransport,
 		usage?: ResolverPaidUsageContext,
 	): Promise<ChallengeSolution>;
+	/**
+	 * Reads the vendor's prepaid balance. Never called on the solve path; the host polls it on
+	 * its own cadence through `refreshResolverVendorBalances`.
+	 */
+	getBalance?(signal: AbortSignal): Promise<ResolverVendorBalance>;
 }
 
 export type ResolverVendorUnavailableReason =
@@ -190,7 +200,11 @@ export type ResolverVendorUnavailableReason =
 	| "allocation_exhausted"
 	| "transport_failure"
 	| "timeout"
-	| "not_implemented";
+	| "not_implemented"
+	/** Skipped without a network call while its allocation-exhausted cooldown is active. */
+	| "cooldown"
+	/** Skipped or cut short because the caller's remaining budget cannot cover the solve. */
+	| "budget_exceeded";
 
 export type ResolverChallengeVerdictReason = "human_puzzle" | "solve_failed";
 

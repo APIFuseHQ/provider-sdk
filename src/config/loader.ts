@@ -178,6 +178,12 @@ export type ProxyAttemptTelemetryEvent = {
 	attempt: number;
 	/** Bounded hash of the resolved proxy URL; differs per vendor session, so it identifies the attempt's egress. */
 	proxyHash?: string;
+	/**
+	 * An attempt whose exit the origin's admission layer refused (headerless 403
+	 * or 5xx, `stealth.rotateExitOnAdmissionRefusal`) is `error` with
+	 * `errorCode: "PROXY_EXIT_REFUSED"`; the request is then sent once more
+	 * on the next attempt's vendor session.
+	 */
 	outcome: "ok" | "error";
 	errorCode?: string;
 	status?: number;
