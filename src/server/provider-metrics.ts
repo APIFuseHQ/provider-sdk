@@ -1,4 +1,4 @@
-import { statefulProviderMetricRegistry } from "../stateful/stateful-provider-metric-registry.js";
+import { processStatefulProviderMetricRegistry } from "../stateful/stateful-provider-metric-registry.js";
 
 /**
  * The provider's metrics listener: a SEPARATE socket next to the primary
@@ -28,7 +28,7 @@ export function resolveProviderMetricsPort(
 /** The metrics listener's fetch handler: `GET /metrics`, everything else 404. */
 export function providerMetricsFetch(request: Request): Response {
 	if (request.method === "GET" && new URL(request.url).pathname === PROVIDER_METRICS_ROUTE) {
-		return new Response(statefulProviderMetricRegistry.render(), {
+		return new Response(processStatefulProviderMetricRegistry.render(), {
 			headers: { "content-type": PROVIDER_METRICS_CONTENT_TYPE, "cache-control": "no-store" },
 		});
 	}
