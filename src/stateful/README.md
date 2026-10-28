@@ -36,7 +36,11 @@ the following compatibility-sensitive behavior:
   the bound one. Expose it to Prometheus as a Service port named `metrics`, so the primary port can
   keep admitting the gateway only. The listener renders one process-wide registry, which a
   `StatefulSessionRouter` built without a `metricEmitter` counts into, so the routing counters
-  (`apifuse_stateful_provider_routing_*_total`) come out without wiring. Only the labels
+  (`apifuse_stateful_provider_routing_*_total`) come out without wiring. A `serve()` given an
+  `operationExecutor` or `internalOperationExecutor` starts the four routing counters of every
+  declared operation at `0` before its listeners open, so the first scrape already has the series
+  and Prometheus `rate()` counts the first routed operation; a server that runs its declared
+  handlers itself declares none. Only the labels
   `providerId`, `operationId`, `redactedErrorCode`, `eventType`, `subjectKind`, `capacityClass`,
   `ledgerState` and `healthStatus` are exported; request, session, tenant, owner-pod and generation
   identifiers are dropped before storage, and Prometheus adds `pod` and `instance`. A process that

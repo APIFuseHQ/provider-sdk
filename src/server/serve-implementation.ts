@@ -193,6 +193,7 @@ import {
 	statefulDeadlineAbortReason,
 	statefulRoutingDeadlineErrorCausedBy,
 } from "../stateful/deadline-expiry.js";
+import { statefulProviderMetricRegistry } from "../stateful/stateful-provider-metric-registry.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
@@ -4688,6 +4689,19 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 			allowMemoryFallback: options.allowMemoryStateFallback === true,
 		}),
 	);
+
+	// A server that hands its operations to an executor runs them through the
+	// stateful runtime, whose router counts every one it routes. Their routing
+	// counters start at zero before any listener opens: the first scrape then
+	// has the series, and rate() counts the first routed operation instead of
+	// starting from it. A server that runs the declared handlers itself routes
+	// nothing and declares nothing.
+	if (options.operationExecutor || options.internalOperationExecutor) {
+		statefulProviderMetricRegistry.declareRoutingSeries({
+			providerId: provider.id,
+			operationIds: Object.keys(provider.operations),
+		});
+	}
 
 	const servers: BunServerHandle[] = [];
 	let metricsServer: BunServerHandle | undefined;
