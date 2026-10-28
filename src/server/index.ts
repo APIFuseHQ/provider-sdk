@@ -7,12 +7,22 @@ export type {
 	ProxyVendorName,
 } from "../config/loader.js";
 export type {
+	ProxyTelemetryAttemptSample,
 	ProxyTelemetryHeaderPayload,
 	ProxyHash,
 	ProxyTelemetryLogPayload,
 	ProxyTelemetryResolvedPayload,
+	ProxyTelemetrySelection,
 	ProxyTelemetryUnresolvedPayload,
+	ProxyTelemetryVendorState,
 } from "../runtime/proxy-telemetry.js";
+export type {
+	ProxyVendorSelectionObservation,
+	ProxyVendorSelectionReason,
+	ProxyVendorSelectionVendorState,
+	ProxyVendorState,
+	ProxyVendorStateTransition,
+} from "../runtime/proxy-vendor-selector-adaptive.js";
 export {
 	RequestTelemetry,
 	closedEnum,
@@ -111,6 +121,7 @@ export {
 	type ProviderServerOperationExecutorInput,
 	type ProviderServerOptions,
 	type ProviderServerStatefulForwardEnvelope,
+	type ProxyVendorStateLogEvent,
 	type ServeOptions,
 	serve,
 } from "./serve.js";
