@@ -1,0 +1,16 @@
+# Removes `// @apifuse-allow <rule>: <reason>` acknowledgements for the three
+# runtime boundary rules retired in favour of the build-time check
+# (bundleProvider). The comment no longer acknowledges anything; the finding
+# it covered is now a build error that must be fixed, not suppressed.
+#
+# Run (read-only preview, then apply):
+#   ast-grep scan --rule scripts/codemods/runtime-boundary-allow-comments.yml <provider-root>
+#   ast-grep scan --rule scripts/codemods/runtime-boundary-allow-comments.yml --update-all <provider-root>
+id: runtime-boundary-allow-comments
+language: TypeScript
+severity: warning
+message: "@apifuse-allow for a retired runtime boundary rule; the build-time boundary has no comment escape hatch"
+rule:
+  kind: comment
+  regex: '@apifuse-allow\s+(process-env-direct-read|node-runtime-module-import|direct-fetch-call)\b'
+fix: ''

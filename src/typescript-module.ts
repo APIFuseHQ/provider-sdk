@@ -36,8 +36,7 @@ export const TYPESCRIPT_COMPILER_MODULE_SPECIFIERS = [
 /**
  * True when `candidate` is a loaded module that exposes the parser the lint
  * rules need. Internal (narrows to the `typescript` module type, which is not
- * part of the package surface); `lintRuntimeBoundarySources` applies it to the
- * caller-supplied option.
+ * part of the package surface).
  */
 export function isTypeScriptCompilerModule(candidate: unknown): candidate is TypeScriptModule {
 	return (
@@ -97,4 +96,22 @@ let typeScriptModule: TypeScriptModule | undefined;
 export function getTypeScript(): TypeScriptModule {
 	typeScriptModule ??= loadTypeScriptModule(requireModule);
 	return typeScriptModule;
+}
+
+/**
+ * Script kind for a provider source file, from its extension. `.tsx`/`.jsx`
+ * enable JSX; everything else (`.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`,
+ * and the synthetic names used for in-memory sources) does not, so a generic
+ * arrow or `<T>value` assertion in a `.ts` file parses as TypeScript instead
+ * of swallowing the rest of the file as unterminated JSX.
+ */
+export function scriptKindForSourceFile(
+	ts: TypeScriptModule,
+	fileName: string,
+): import("typescript").ScriptKind {
+	const lower = fileName.toLowerCase();
+	if (lower.endsWith(".tsx")) return ts.ScriptKind.TSX;
+	if (lower.endsWith(".jsx")) return ts.ScriptKind.JSX;
+	if (/\.[cm]?js$/.test(lower)) return ts.ScriptKind.JS;
+	return ts.ScriptKind.TS;
 }

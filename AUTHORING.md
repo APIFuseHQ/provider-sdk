@@ -748,7 +748,7 @@ async start(ctx) {
 
 Do not re-implement the predicate by reading `APIFUSE__OCR__*` or
 `APIFUSE__CLOUDFLARE__ACCOUNT_ID`: those names are engine-owned, the
-runtime-boundary lint reports the read, and a drift between the copy and the
+runtime boundary check reports the read, and a drift between the copy and the
 SDK's own selection logic downgrades every login to the manual path silently.
 
 A custom `OcrContext` override (`serve({ ocr })`, `createFlowContext({ ocr })`,
@@ -1265,50 +1265,85 @@ Provider runtime code reaches the outside world through the context only:
 `ctx.env.get()` / `ctx.credential` for configuration and secrets, `ctx.files` /
 `ctx.cache` / `ctx.state` for data that must outlive a request. Ambient Node
 and Bun globals bypass `allowedHosts`, proxy policy, retries, redaction, the
-secret presence gate, and telemetry. `apifuse check` reports them at **error**
-level — a finding fails `apifuse check` and `apifuse submit-check`, in the
-official and the bounty `standalone` mode alike (the level was `warn` for one
-release as a migration window; the window closed once the fleet's request-path
-hits were fixed or acknowledged — a provider that still carries one sees
-`apifuse check` fail on its next SDK bump and fixes or acknowledges it in that
-same PR):
+secret presence gate, and telemetry.
 
-- `process-env-direct-read` — `process.env.X`, `process.env["X"]`, a bare
-  `process.env` object use, `Bun.env`. The `APIFUSE__RUNTIME__*` bootstrap
-  family (`APIFUSE__RUNTIME__PORT`, `…POD_ID`, `…POD_ENDPOINT`) is exempt
-  everywhere; every other value is declared in `defineProvider` under
-  `secrets: [{ name, required }]` and read with `ctx.env.get(name)`. The names
-  visible to `ctx.env.get` are exactly the declared `secrets[].name` (minus
-  engine-owned names; an `oauth2_proxied` auth flow additionally sees
-  `APIFUSE__AUTH_PROXY__URL`). `env: true` (or `env: {}`) is the capability
-  declaration that turns the `ctx.env` binding on — a type *and* runtime gate,
-  since touching `ctx.env` without it throws `PROVIDER_CAPABILITY_UNDECLARED`
-  — and does not widen the readable names. Test/E2E toggles are not secrets
-  and cannot move to `ctx.env`: replace them with test doubles (inject
-  `ctx.env` / `ctx.http`) or recorded fixtures.
-- `node-runtime-module-import` — value imports of `fs`, `fs/promises`, `net`,
-  `tls`, `dgram`, `http`, `https`, `http2`, `child_process` (with or without
-  `node:`), and `Bun.spawn` / `Bun.spawnSync` / ``Bun.$` ` `` / `Bun.file` /
-  `Bun.write`. Type-only imports (`import type`, or every binding inline `type`) are ignored; `node:path`, `node:crypto`,
-  `node:url` are fine.
-- `direct-fetch-call` — the global `fetch()` (also `globalThis.fetch`).
-  `ctx.stealth.fetch()` never matches, nor does a call to a `fetch` binding
-  declared in an enclosing scope (parameter, variable, import, catch clause).
-  The check is lexical: a wrapper that takes `fetch` as a parameter does not
-  hide a global `fetch()` in another function of the same file.
+The boundary is enforced at build time, not by grepping source. `apifuse check`
+bundles `index.ts` and `start.ts` (what the pod runs) with Bun's bundler and
+judges what the bundles reach
+(`bundleProvider` in the SDK, exported for the central contract check to call
+at the `ready` level). A finding is an error that fails `apifuse check`
+and `apifuse submit-check` alike and names the file, line and column:
 
-Scope is runtime source only: tests, recorded fixtures, `.d.ts`, the root
-`dev.ts` / `start.ts` / `deploy.ts` entrypoints, and the `scripts/`, `tools/`,
-`bin/` directories at the provider root are not scanned. Keep fixture
-recorders, smoke scripts, and other operator tooling under `scripts/`, and do
-not import from there in request-path modules. `apifuse check` also leaves out
-any directory that is itself a git checkout (a linked worktree such as
-`.worktree/<branch>/`, a nested clone, an initialised submodule): its files are
-another revision, checked in that checkout, not this provider's runtime source.
+```
+✗ Runtime sources reach the outside world through the SDK context only
+  - ERROR global upstream/session.ts:2:22: process.env.EXAMPLE_SESSION_TOKEN — process.env.EXAMPLE_SESSION_TOKEN is read outside the provider runtime boundary. Declare the name under secrets: [{ name, required }] in defineProvider and read it with ctx.env.get(name); …
+  - ERROR module upstream/tap.ts:1:1: node:fs/promises — "node:fs/promises" is outside the provider runtime boundary. Use the SDK context instead: … Allowed node built-ins: assert, …, zlib.
+```
 
-Acknowledge a deliberate exception on the finding line or the comment-only
-line above it with `// @apifuse-allow <rule>: <reason>`; the finding then
-appears as an `INFO` audit line instead of an error, and the check passes.
+What is judged:
+
+- **Modules.** Every import the module graph resolves: static `import`,
+  `export … from`, `require()`, and `import()` with a literal specifier, through
+  re-exports and tsconfig `paths` aliases. Node built-ins are an allowlist of
+  pure helpers (`node:crypto`, `node:path`, `node:url`, `node:util`,
+  `node:buffer`, `node:events`, `node:stream`, `node:zlib`, `node:timers`,
+  `node:string_decoder`, `node:querystring`, `node:assert`, `node:perf_hooks`,
+  `node:async_hooks`, `node:diagnostics_channel`, `node:punycode`; see
+  `RUNTIME_MODULE_ALLOWLIST`). Everything else under `node:` and all of
+  `bun` / `bun:*` is outside the boundary, with or without the prefix. The
+  browser drivers (`playwright`, `playwright-core`, `playwright-extra`,
+  `puppeteer`, `puppeteer-core`, `puppeteer-extra`) and the SDK's own
+  `@apifuse/provider-sdk/runtime/browser` subpath (which can open a CDP
+  connection to any endpoint) are outside it too: use `ctx.browser`. Those two
+  are warnings in the bounty `standalone` mode and errors otherwise. Type-only
+  imports are erased before resolution and never count. An `import()` or
+  `require()` whose specifier is not a literal cannot be resolved at build
+  time and is a finding on its own, and so is `require` held as a value
+  (`const r = require`, `require.main.require(...)`).
+- **Globals.** `process`, `Bun`, `globalThis`, `global`, `self`, `fetch`,
+  `WebSocket`, `Worker`, `import.meta.env` and `import.meta.require` are
+  rewritten by the bundler, so the bundler's own scope analysis decides what is
+  a free reference: a parameter or local named `fetch` is left alone, and
+  `const p = process; p.env.X`, `globalThis.process.env.X` or
+  `self.fetch(...)` are caught the same as `process.env.X` and `fetch(...)`,
+  through any chain of the three global-object names (`globalThis.self.fetch`).
+  Allowed by member: `process.env.APIFUSE__RUNTIME__*`
+  (the bootstrap family read before a context exists), `process.platform` /
+  `arch` / `version` / `versions` / `hrtime` / `nextTick`, `typeof process`,
+  `Bun` helpers that touch neither the filesystem, the network nor processes
+  (`Bun.CryptoHasher`, `Bun.hash`, `Bun.sleep`, `Bun.gzipSync`, …; see
+  `BUN_MEMBER_ALLOWLIST`), and `globalThis.<name>` for any name not on the
+  list above (`globalThis.crypto` is fine). A computed global lookup
+  (`globalThis[name]`) is a finding.
+
+Every other value a provider needs is declared in `defineProvider` under
+`secrets: [{ name, required }]` and read with `ctx.env.get(name)`. The names
+visible to `ctx.env.get` are exactly the declared `secrets[].name` (minus
+engine-owned names; an `oauth2_proxied` auth flow additionally sees
+`APIFUSE__AUTH_PROXY__URL`). `env: true` (or `env: {}`) is the capability
+declaration that turns the `ctx.env` binding on — a type *and* runtime gate,
+since touching `ctx.env` without it throws `PROVIDER_CAPABILITY_UNDECLARED`
+— and does not widen the readable names. Test/E2E toggles are not secrets
+and cannot move to `ctx.env`: replace them with test doubles (inject
+`ctx.env` / `ctx.http`) or recorded fixtures.
+
+Scope is what the pod executes: the module graph reachable from `index.ts`
+(the provider definition) and from `start.ts` (`bun run start`, the pod's
+entry) when it exists, with bindings the bundler keeps. A module only
+`start.ts` imports is judged like any other source. Findings inside the root
+`dev.ts` / `start.ts` / `deploy.ts` files themselves are dropped: they read
+the port and pod identity before a context exists. Tests, recorded fixtures,
+`.d.ts` files and the `scripts/`, `tools/`, `bin/` directories are outside
+the graph by construction unless a request-path module imports them, in which
+case they are judged like any other source. A file nobody imports, an import
+nobody uses, and a nested git checkout are not runtime code and are not
+reported.
+
+There is no in-code escape hatch: a `// @apifuse-allow` comment does not
+acknowledge a boundary finding (the former `process-env-direct-read`,
+`node-runtime-module-import` and `direct-fetch-call` rules accepted one; no
+fleet provider used it). A capability the context does not offer is an SDK
+change, not a provider-local exception.
 
 ```ts
 // Before: request-path module reads the ambient environment and the disk

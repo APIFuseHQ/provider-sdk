@@ -655,6 +655,23 @@ export function bindSttTelemetry(context: SttContext, sink: SttTelemetrySink, op
     model?: string;
 }): SttContext;
 
+// @public
+export const BOOTSTRAP_ENV_NAME_PREFIX = "APIFUSE__RUNTIME__";
+
+// @public (undocumented)
+export type BoundaryViolation = {
+    kind: BoundaryViolationKind;
+    level: "error" | "warn";
+    subject: string;
+    file: string;
+    line: number;
+    column: number;
+    message: string;
+};
+
+// @public (undocumented)
+export type BoundaryViolationKind = "module" | "global" | "dynamic-import" | "build";
+
 // @public (undocumented)
 export type BoundedJsonPath = z.infer<typeof BoundedJsonPathSchema>;
 
@@ -672,6 +689,9 @@ export const BoundedJsonPathSchema: z.ZodObject<{
 
 // @public
 export function brandHandleError(target: object): void;
+
+// @public
+export const BROWSER_DRIVER_PACKAGES: readonly string[];
 
 // @public (undocumented)
 type BrowserChallengeRequest = {
@@ -974,6 +994,17 @@ export interface BrowserTelemetrySink {
     // (undocumented)
     recordProxyAuthChallenge(): void;
 }
+
+// @public
+export const BUN_MEMBER_ALLOWLIST: readonly string[];
+
+// @public
+export function bundleProvider(providerRoot: string, options?: BundleProviderOptions): Promise<ProviderBundle>;
+
+// @public (undocumented)
+export type BundleProviderOptions = {
+    mode?: ProviderLintMode;
+};
 
 // @public (undocumented)
 export class CacheTelemetryCollector implements TelemetryContributor<CacheTelemetryLogPayload, CacheTelemetryHeaderPayload>, CacheTelemetrySink {
@@ -2082,6 +2113,9 @@ export type FlowContextStore = ContextScratchpad;
 export class FlowExpiredError extends ProviderError {
     constructor(message: string, options?: ProviderErrorOptions);
 }
+
+// @public
+export function formatBoundaryViolation(violation: BoundaryViolation): string;
 
 // @public
 export type GatewayIngestible<T> = 0 extends 1 & T ? never : T extends object ? keyof T extends never ? never : {
@@ -3350,12 +3384,13 @@ export function lintProvider(provider: {
     reviewed?: string;
     handle?: unknown;
     state?: unknown;
-}, options?: ProviderLintOptions): LintDiagnostic[];
+},
+options?: ProviderLintOptions): LintDiagnostic[];
 
-// @public
+// @public @deprecated
 export function lintRuntimeBoundarySources(files: Record<string, string>, options?: LintRuntimeBoundarySourcesOptions): ProviderLintResult;
 
-// @public (undocumented)
+// @public @deprecated (undocumented)
 export type LintRuntimeBoundarySourcesOptions = {
     typescript?: TypeScriptCompilerModuleLike;
 };
@@ -4859,6 +4894,9 @@ export const PROBE_INTERVALS: readonly ProbeInterval[];
 // @public
 export type ProbeInterval = ms.StringValue;
 
+// @public
+export const PROCESS_MEMBER_ALLOWLIST: readonly string[];
+
 // @public (undocumented)
 export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "handle"];
 
@@ -4912,6 +4950,12 @@ export type ProviderBuilder<TConfig extends ProviderDeclaration> = <TOperations 
     operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 }) => Omit<ProviderDefinition, "operations"> & {
     operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
+};
+
+// @public (undocumented)
+export type ProviderBundle = {
+    ok: boolean;
+    violations: BoundaryViolation[];
 };
 
 // @public (undocumented)
@@ -5642,10 +5686,10 @@ export interface ProviderLintInformation {
     rule: string;
 }
 
-// @public (undocumented)
-type ProviderLintMode = "official" | "standalone";
+// @public
+export type ProviderLintMode = "official" | "standalone";
 
-// @public (undocumented)
+// @public @deprecated (undocumented)
 type ProviderLintOptions = {
     mode?: ProviderLintMode;
 };
@@ -7077,10 +7121,13 @@ export const RetryPolicySchema: z.ZodType<RetryPolicy, unknown, z.core.$ZodTypeI
 // @public (undocumented)
 export type Rfc3339Instant = string;
 
-// @public (undocumented)
+// @public @deprecated (undocumented)
 export const RUNTIME_BOUNDARY_RULES: readonly ["process-env-direct-read", "node-runtime-module-import", "direct-fetch-call"];
 
-// @public (undocumented)
+// @public
+export const RUNTIME_MODULE_ALLOWLIST: readonly string[];
+
+// @public @deprecated (undocumented)
 export type RuntimeBoundaryRule = (typeof RUNTIME_BOUNDARY_RULES)[number];
 
 // @public (undocumented)
@@ -7885,6 +7932,9 @@ const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
         array: "array";
     }>;
 }, z.core.$strict>]>;
+
+// @public
+export const SDK_BROWSER_RUNTIME_SUBPATH = "@apifuse/provider-sdk/runtime/browser";
 
 // @public (undocumented)
 export class SDKError extends ProviderError {
@@ -9274,9 +9324,8 @@ export { z }
 // dist/define.d.ts:117:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:149:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:5:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:30:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:58:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:97:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:68:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:107:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:91:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:100:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts

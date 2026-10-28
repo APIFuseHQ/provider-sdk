@@ -59,6 +59,76 @@
 			"file": "src/i18n/catalog.test.ts",
 			"symbol": "hint",
 			"reason": "Tests the compatibility-only materialized hint field that server boundaries emit for legacy clients."
+		},
+		{
+			"file": "src/index.ts",
+			"symbol": "lintRuntimeBoundarySources",
+			"reason": "Re-exports the one-release runtime boundary shim so the platform contract check keeps compiling until it calls bundleProvider."
+		},
+		{
+			"file": "src/index.ts",
+			"symbol": "RUNTIME_BOUNDARY_RULES",
+			"reason": "Re-exports the one-release runtime boundary shim so the platform contract check keeps compiling until it calls bundleProvider."
+		},
+		{
+			"file": "src/index.ts",
+			"symbol": "RuntimeBoundaryRule",
+			"reason": "Re-exports the one-release runtime boundary shim so the platform contract check keeps compiling until it calls bundleProvider."
+		},
+		{
+			"file": "src/index.ts",
+			"symbol": "LintRuntimeBoundarySourcesOptions",
+			"reason": "Re-exports the one-release runtime boundary shim so the platform contract check keeps compiling until it calls bundleProvider."
+		},
+		{
+			"file": "src/runtime-boundary-lint.ts",
+			"symbol": "RUNTIME_BOUNDARY_RULES",
+			"reason": "The shim derives its own RuntimeBoundaryRule type from the deprecated rule list it keeps alive."
+		},
+		{
+			"file": "src/runtime-boundary-lint.ts",
+			"symbol": "RuntimeBoundaryRule",
+			"reason": "The shim maps build-time violations to the deprecated rule ids it keeps alive."
+		},
+		{
+			"file": "src/runtime-boundary-lint.ts",
+			"symbol": "PROCESS_ENV_DIRECT_READ_RULE",
+			"reason": "The shim maps build-time violations to the deprecated rule ids it keeps alive."
+		},
+		{
+			"file": "src/runtime-boundary-lint.ts",
+			"symbol": "NODE_RUNTIME_MODULE_IMPORT_RULE",
+			"reason": "The shim maps build-time violations to the deprecated rule ids it keeps alive."
+		},
+		{
+			"file": "src/runtime-boundary-lint.ts",
+			"symbol": "DIRECT_FETCH_CALL_RULE",
+			"reason": "The shim maps build-time violations to the deprecated rule ids it keeps alive."
+		},
+		{
+			"file": "src/runtime-boundary-lint.ts",
+			"symbol": "LintRuntimeBoundarySourcesOptions",
+			"reason": "The shim keeps the deprecated options parameter so existing calls type-check for one release."
+		},
+		{
+			"file": "src/lint.ts",
+			"symbol": "ProviderLintOptions",
+			"reason": "lintProvider keeps accepting and ignoring the deprecated options argument for one release."
+		},
+		{
+			"file": "src/lint.ts",
+			"symbol": "options",
+			"reason": "lintProvider forwards the deprecated options argument so the one-release warning is emitted from a single site."
+		},
+		{
+			"file": "src/__tests__/runtime-boundary-lint.test.ts",
+			"symbol": "lintRuntimeBoundarySources",
+			"reason": "Tests the one-release shim maps bundleProvider findings to the old diagnostic shape."
+		},
+		{
+			"file": "src/__tests__/runtime-boundary-lint.test.ts",
+			"symbol": "RUNTIME_BOUNDARY_RULES",
+			"reason": "Tests the one-release shim maps bundleProvider findings to the old diagnostic shape."
 		}
 	]
 }
