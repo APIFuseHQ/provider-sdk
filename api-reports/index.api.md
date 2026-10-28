@@ -1715,6 +1715,9 @@ export const DEFAULT_OPERATION_TRANSPORT: OperationJsonTransport;
 export const DEFAULT_PROVIDER_ERROR_LOCALE = "en";
 
 // @public
+export const DEFAULT_PROXY_VENDOR_SELECTION_MODE: ProxyVendorSelectionMode;
+
+// @public
 export const DEFAULT_RESOLVER_TIMEOUT_MS = 45000;
 
 // @public
@@ -6124,7 +6127,7 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     event: "provider_metrics_listener";
     providerId: string;
     port: number;
-} | ProviderStateBackendLogEvent | SelfTestCancellationLogEvent;
+} | ProviderStateBackendLogEvent | SelfTestCancellationLogEvent | ProxyVendorStateLogEvent;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderRequestCost" needs to be exported by the entry point index.d.ts
 //
@@ -6480,6 +6483,18 @@ export type ProxySessionDirective = {
 };
 
 // @public
+export type ProxyTelemetryAttemptSample = {
+    n: number;
+    a: number;
+    v?: ProxyVendorName;
+    h?: string;
+    o: ProxyAttemptTelemetryEvent["outcome"];
+    c?: string;
+    s?: number;
+    d?: number;
+};
+
+// @public
 export type ProxyTelemetryHeaderPayload = {
     kind: ClosedEnum<"resolved" | "unresolved">;
     provider?: ClosedEnum<ProxyVendorName>;
@@ -6492,6 +6507,7 @@ export type ProxyTelemetryHeaderPayload = {
     attemptSamples?: {
         n: number;
         a: number;
+        v?: ClosedEnum<ProxyVendorName>;
         h?: ProxyHash;
         o: ClosedEnum<ProxyAttemptTelemetryEvent["outcome"]>;
         c?: ClosedEnum<string>;
@@ -6505,6 +6521,15 @@ export type ProxyTelemetryHeaderPayload = {
         p: ClosedEnum<ProxyVendorFailoverTelemetryEvent["phase"]>;
         r: ClosedEnum<ProxyVendorFailoverTelemetryEvent["reason"]>;
         a?: number;
+    }[];
+    selection?: {
+        kind: ClosedEnum<ProxyTelemetrySelection["kind"]>;
+        reason: ClosedEnum<ProxyVendorSelectionReason>;
+    };
+    vendorStates?: {
+        v: ClosedEnum<ProxyVendorName>;
+        s: ClosedEnum<ProxyVendorState>;
+        e: number;
     }[];
 };
 
@@ -6521,15 +6546,7 @@ export type ProxyTelemetryResolvedPayload = {
     cacheHit: boolean;
     resolutionMs: number;
     attempts: number;
-    attemptSamples?: {
-        n: number;
-        a: number;
-        h?: string;
-        o: ProxyAttemptTelemetryEvent["outcome"];
-        c?: string;
-        s?: number;
-        d?: number;
-    }[];
+    attemptSamples?: ProxyTelemetryAttemptSample[];
     vendors?: ProxyVendorName[];
     failovers?: {
         v: ProxyVendorName;
@@ -6538,6 +6555,14 @@ export type ProxyTelemetryResolvedPayload = {
         r: ProxyVendorFailoverTelemetryEvent["reason"];
         a?: number;
     }[];
+    selection?: ProxyTelemetrySelection;
+    vendorStates?: ProxyTelemetryVendorState[];
+};
+
+// @public (undocumented)
+export type ProxyTelemetrySelection = {
+    kind: ProxyVendorSelectionObservation["kind"];
+    reason: ProxyVendorSelectionReason;
 };
 
 // @public (undocumented)
@@ -6562,15 +6587,16 @@ export type ProxyTelemetryUnresolvedPayload = {
         r: ProxyVendorFailoverTelemetryEvent["reason"];
         a?: number;
     }[];
-    attemptSamples?: {
-        n: number;
-        a: number;
-        h?: string;
-        o: ProxyAttemptTelemetryEvent["outcome"];
-        c?: string;
-        s?: number;
-        d?: number;
-    }[];
+    attemptSamples?: ProxyTelemetryAttemptSample[];
+    selection?: ProxyTelemetrySelection;
+    vendorStates?: ProxyTelemetryVendorState[];
+};
+
+// @public
+export type ProxyTelemetryVendorState = {
+    v: ProxyVendorName;
+    s: ProxyVendorState;
+    e: number;
 };
 
 // @public (undocumented)
@@ -6611,6 +6637,13 @@ export type ProxyVendorName = "smartproxy" | "nodemaven";
 // @public
 export type ProxyVendorSelectionMode = "ordered" | "adaptive";
 
+// @public
+export type ProxyVendorSelectionObservation = {
+    readonly kind: "adaptive";
+    readonly reason: ProxyVendorSelectionReason;
+    readonly vendorStates: readonly ProxyVendorSelectionVendorState[];
+};
+
 // @public (undocumented)
 export type ProxyVendorSelectionReason =
 /** Every vendor ahead in the chain is closed (or the selector is cold). */
@@ -6622,6 +6655,19 @@ export type ProxyVendorSelectionReason =
 /** Every vendor is open or probing; the chain order is used as is (fail open). */
 | "all_open";
 
+// @public
+export interface ProxyVendorSelectionSink {
+    // (undocumented)
+    recordProxyVendorSelection(observation: ProxyVendorSelectionObservation): void;
+}
+
+// @public
+export type ProxyVendorSelectionVendorState = {
+    readonly vendor: ProxyVendorName;
+    readonly state: ProxyVendorState;
+    readonly ejections: number;
+};
+
 // @public (undocumented)
 export interface ProxyVendorSelector {
     report(outcome: ProxyAttemptOutcome): void;
@@ -6630,6 +6676,21 @@ export interface ProxyVendorSelector {
 
 // @public (undocumented)
 export type ProxyVendorState = "closed" | "open" | "half_open";
+
+// @public
+export type ProxyVendorStateLogEvent = {
+    level: "info" | "warn";
+    event: "proxy_vendor_state";
+    providerId: string;
+    vendor: ProxyVendorStateTransition["vendor"];
+    from: ProxyVendorStateTransition["from"];
+    to: ProxyVendorStateTransition["to"];
+    reason: ProxyVendorStateTransition["reason"];
+    consecutiveFailures: number;
+    ejections: number;
+    openUntil?: string;
+    errorCode?: string;
+};
 
 // @public (undocumented)
 export type ProxyVendorStateTransition = {
@@ -9410,14 +9471,14 @@ export { z }
 // dist/lint.d.ts:68:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:107:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:91:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:100:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:67:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:71:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:195:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:212:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:220:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:295:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:24:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:113:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:68:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:72:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:216:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:233:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:241:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:316:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:734:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:2107:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts

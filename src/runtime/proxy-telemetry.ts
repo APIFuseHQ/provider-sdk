@@ -10,6 +10,12 @@ import type {
 	ProxyVendorFailoverTelemetryEvent,
 	ProxyVendorName,
 } from "../config/loader.js";
+import type {
+	ProxyVendorSelectionObservation,
+	ProxyVendorSelectionReason,
+	ProxyVendorSelectionSink,
+	ProxyVendorState,
+} from "./proxy-vendor-selector-adaptive.js";
 import {
 	closedEnum,
 	RequestTelemetry,
@@ -49,6 +55,30 @@ declare const PROXY_HASH: unique symbol;
 /** Bounded hexadecimal host hash used in proxy attempt samples. */
 export type ProxyHash = ClosedEnum<string> & { readonly [PROXY_HASH]: true };
 
+/** One transport attempt; `v` is the vendor that carried it. */
+export type ProxyTelemetryAttemptSample = {
+	n: number;
+	a: number;
+	v?: ProxyVendorName;
+	h?: string;
+	o: ProxyAttemptTelemetryEvent["outcome"];
+	c?: string;
+	s?: number;
+	d?: number;
+};
+
+export type ProxyTelemetrySelection = {
+	kind: ProxyVendorSelectionObservation["kind"];
+	reason: ProxyVendorSelectionReason;
+};
+
+/** `s`: breaker state, `e`: consecutive ejections. */
+export type ProxyTelemetryVendorState = {
+	v: ProxyVendorName;
+	s: ProxyVendorState;
+	e: number;
+};
+
 export type ProxyTelemetryResolvedPayload = {
 	kind: "resolved";
 	provider: ProxyVendorName;
@@ -58,15 +88,7 @@ export type ProxyTelemetryResolvedPayload = {
 	cacheHit: boolean;
 	resolutionMs: number;
 	attempts: number;
-	attemptSamples?: {
-		n: number;
-		a: number;
-		h?: string;
-		o: ProxyAttemptTelemetryEvent["outcome"];
-		c?: string;
-		s?: number;
-		d?: number;
-	}[];
+	attemptSamples?: ProxyTelemetryAttemptSample[];
 	/** Distinct vendors attempted across the resolution chain, in order seen. */
 	vendors?: ProxyVendorName[];
 	/** Cross-vendor failover events (bounded). */
@@ -77,6 +99,10 @@ export type ProxyTelemetryResolvedPayload = {
 		r: ProxyVendorFailoverTelemetryEvent["reason"];
 		a?: number;
 	}[];
+	/** Why the adaptive selector routed the request's last attempt where it did. */
+	selection?: ProxyTelemetrySelection;
+	/** Adaptive selector state of every vendor in the chain at that selection. */
+	vendorStates?: ProxyTelemetryVendorState[];
 };
 
 export type ProxyTelemetryUnresolvedPayload = {
@@ -94,15 +120,9 @@ export type ProxyTelemetryUnresolvedPayload = {
 		r: ProxyVendorFailoverTelemetryEvent["reason"];
 		a?: number;
 	}[];
-	attemptSamples?: {
-		n: number;
-		a: number;
-		h?: string;
-		o: ProxyAttemptTelemetryEvent["outcome"];
-		c?: string;
-		s?: number;
-		d?: number;
-	}[];
+	attemptSamples?: ProxyTelemetryAttemptSample[];
+	selection?: ProxyTelemetrySelection;
+	vendorStates?: ProxyTelemetryVendorState[];
 };
 
 export type ProxyTelemetryLogPayload =
@@ -127,6 +147,7 @@ export type ProxyTelemetryHeaderPayload = {
 	attemptSamples?: {
 		n: number;
 		a: number;
+		v?: ClosedEnum<ProxyVendorName>;
 		h?: ProxyHash;
 		o: ClosedEnum<ProxyAttemptTelemetryEvent["outcome"]>;
 		c?: ClosedEnum<string>;
@@ -141,11 +162,22 @@ export type ProxyTelemetryHeaderPayload = {
 		r: ClosedEnum<ProxyVendorFailoverTelemetryEvent["reason"]>;
 		a?: number;
 	}[];
+	selection?: {
+		kind: ClosedEnum<ProxyTelemetrySelection["kind"]>;
+		reason: ClosedEnum<ProxyVendorSelectionReason>;
+	};
+	vendorStates?: {
+		v: ClosedEnum<ProxyVendorName>;
+		s: ClosedEnum<ProxyVendorState>;
+		e: number;
+	}[];
 };
 
 const MAX_PROXY_ATTEMPT_SAMPLES = 24;
 const MAX_PROXY_FAILOVER_SAMPLES = 12;
 const MAX_RETAINED_PROXY_RESOLUTIONS = 64;
+/** The registry has two vendors; the bound only guards against a malformed chain. */
+const MAX_PROXY_VENDOR_STATES = 8;
 const PROXY_HEADER_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 const PROXY_HEADER_HASH = /^[0-9a-f]{1,16}$/;
 
@@ -166,6 +198,7 @@ function aggregateResolution(
 export class ProxyTelemetryCollector
 	implements
 		ProxyTelemetrySink,
+		ProxyVendorSelectionSink,
 		TelemetryContributor<ProxyTelemetryLogPayload, ProxyTelemetryHeaderPayload>
 {
 	readonly key = "proxy" as const;
@@ -177,6 +210,8 @@ export class ProxyTelemetryCollector
 	#attempts: ProxyAttemptTelemetryEvent[] = [];
 	#failovers: ProxyVendorFailoverTelemetryEvent[] = [];
 	#unresolvedVendors: ProxyVendorName[] = [];
+	#selection: ProxyTelemetrySelection | undefined;
+	#vendorStates: ProxyTelemetryVendorState[] | undefined;
 
 	recordProxyResolution(event: ProxyResolutionTelemetryEvent): void {
 		const outcome = event.outcome === "error" ? "error" : "ok";
@@ -241,11 +276,24 @@ export class ProxyTelemetryCollector
 		});
 	}
 
+	/** The last selection of the request wins: it routed the attempt that decided the outcome. */
+	recordProxyVendorSelection(observation: ProxyVendorSelectionObservation): void {
+		this.#selection = { kind: observation.kind, reason: observation.reason };
+		this.#vendorStates = observation.vendorStates
+			.slice(0, MAX_PROXY_VENDOR_STATES)
+			.map((entry) => ({
+				v: entry.vendor,
+				s: entry.state,
+				e: Math.max(0, Math.floor(entry.ejections)),
+			}));
+	}
+
 	toLogPayload(): ProxyTelemetryLogPayload | undefined {
 		const aggregate = this.#aggregateResolution;
 		const attemptSamples = this.#attempts.map((attempt, index) => ({
 			n: index + 1,
 			a: attempt.attempt,
+			v: attempt.provider,
 			...(attempt.proxyHash ? { h: attempt.proxyHash } : {}),
 			o: attempt.outcome,
 			...(attempt.errorCode ? { c: attempt.errorCode } : {}),
@@ -259,6 +307,14 @@ export class ProxyTelemetryCollector
 			r: failover.reason,
 			...(failover.attempt === undefined ? {} : { a: failover.attempt }),
 		}));
+		const selection = this.#selection
+			? {
+					selection: { ...this.#selection },
+					...(this.#vendorStates && this.#vendorStates.length > 0
+						? { vendorStates: this.#vendorStates.map((entry) => ({ ...entry })) }
+						: {}),
+				}
+			: {};
 
 		if (!this.#lastSuccessfulResolution) {
 			if (!aggregate && failovers.length === 0) return undefined;
@@ -275,6 +331,7 @@ export class ProxyTelemetryCollector
 					: {}),
 				...(failovers.length > 0 ? { failovers } : {}),
 				...(attemptSamples.length > 0 ? { attemptSamples } : {}),
+				...selection,
 			};
 		}
 
@@ -293,6 +350,7 @@ export class ProxyTelemetryCollector
 			...(attemptSamples.length > 0 ? { attemptSamples } : {}),
 			...(this.#vendors.length > 1 ? { vendors: [...this.#vendors] } : {}),
 			...(failovers.length > 0 ? { failovers } : {}),
+			...selection,
 		};
 	}
 
@@ -300,6 +358,7 @@ export class ProxyTelemetryCollector
 		const attemptSamples = log.attemptSamples?.map((sample) => ({
 			n: sample.n,
 			a: sample.a,
+			...(sample.v ? { v: closedEnum(sample.v) } : {}),
 			...(sample.h && PROXY_HEADER_HASH.test(sample.h)
 				? { h: closedEnum(sample.h) as ProxyHash }
 				: {}),
@@ -315,6 +374,23 @@ export class ProxyTelemetryCollector
 			p: closedEnum(failover.p),
 			r: closedEnum(failover.r),
 		}));
+		const selection = log.selection
+			? {
+					selection: {
+						kind: closedEnum(log.selection.kind),
+						reason: closedEnum(log.selection.reason),
+					},
+				}
+			: {};
+		const vendorStates = log.vendorStates
+			? {
+					vendorStates: log.vendorStates.map((entry) => ({
+						v: closedEnum(entry.v),
+						s: closedEnum(entry.s),
+						e: entry.e,
+					})),
+				}
+			: {};
 		if (log.kind === "resolved") {
 			return {
 				...log,
@@ -326,6 +402,8 @@ export class ProxyTelemetryCollector
 				...(attemptSamples ? { attemptSamples } : {}),
 				...(log.vendors ? { vendors: log.vendors.map((vendor) => closedEnum(vendor)) } : {}),
 				...(failovers ? { failovers } : {}),
+				...selection,
+				...vendorStates,
 			} as ProxyTelemetryHeaderPayload;
 		}
 		return {
@@ -335,6 +413,8 @@ export class ProxyTelemetryCollector
 			...(log.cacheStatus ? { cacheStatus: closedEnum(log.cacheStatus) } : {}),
 			...(failovers ? { failovers } : {}),
 			...(attemptSamples ? { attemptSamples } : {}),
+			...selection,
+			...vendorStates,
 		} as ProxyTelemetryHeaderPayload;
 	}
 

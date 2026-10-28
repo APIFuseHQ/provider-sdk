@@ -39,7 +39,10 @@ export type {
 	ProxyVendorAttemptOutcome,
 	ProxyVendorHealthSnapshot,
 	ProxyVendorSelectionMode,
+	ProxyVendorSelectionObservation,
 	ProxyVendorSelectionReason,
+	ProxyVendorSelectionSink,
+	ProxyVendorSelectionVendorState,
 	ProxyVendorState,
 	ProxyVendorStateTransition,
 } from "./runtime/proxy-vendor-selector-adaptive.js";
@@ -47,6 +50,7 @@ export {
 	ADAPTIVE_PROXY_VENDOR_SELECTOR_DEFAULTS,
 	classifyProxyVendorAttemptOutcome,
 	createAdaptiveProxyVendorSelector,
+	DEFAULT_PROXY_VENDOR_SELECTION_MODE,
 	PROXY_VENDOR_AMBIGUOUS_ERROR_CODES,
 	PROXY_VENDOR_FAILURE_ERROR_CODES,
 	PROXY_VENDOR_SELECTION_ENV,
@@ -279,11 +283,14 @@ export {
 export type { PrevalidateResult } from "./runtime/prevalidate.js";
 export { getProviderBaseUrl } from "./runtime/provider.js";
 export type {
+	ProxyTelemetryAttemptSample,
 	ProxyTelemetryHeaderPayload,
 	ProxyHash,
 	ProxyTelemetryLogPayload,
 	ProxyTelemetryResolvedPayload,
+	ProxyTelemetrySelection,
 	ProxyTelemetryUnresolvedPayload,
+	ProxyTelemetryVendorState,
 } from "./runtime/proxy-telemetry.js";
 export {
 	RequestTelemetry,
@@ -476,6 +483,7 @@ export {
 	createServerAppAsync,
 	ERROR_OBSERVABILITY_HEADER,
 	type ProviderErrorCauseFrame,
+	type ProxyVendorStateLogEvent,
 	type ServeOptions,
 	serve,
 } from "./server/serve.js";

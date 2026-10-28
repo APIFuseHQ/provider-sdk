@@ -1,7 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ProxyVendorName } from "../config/loader.js";
 import {
+	getProxyVendorSelector,
 	type ProxyAttemptOutcome,
 	type ProxyVendorSelector,
+	setProxyVendorSelector,
 	staticOrderProxyVendorSelector,
 } from "./proxy-vendor-selector.js";
 
@@ -21,14 +24,18 @@ import {
  * only, like every library this follows. It starts closed (chain order) and
  * learns from the reports the resolver and the transports already send.
  *
- * Registering it for the process (`setProxyVendorSelector`) is a separate,
- * explicitly gated step; this module only provides the implementation.
+ * `serve()` registers it for the process through
+ * `installProcessProxyVendorSelector` unless `PROXY_VENDOR_SELECTION_ENV` says
+ * `ordered`, which keeps the static declaration order.
  */
 
 /** Which selector a process runs; read from `PROXY_VENDOR_SELECTION_ENV`. */
 export type ProxyVendorSelectionMode = "ordered" | "adaptive";
 
 export const PROXY_VENDOR_SELECTION_ENV = "APIFUSE__PROXY__VENDOR_SELECTION";
+
+/** Selection a served process runs when `PROXY_VENDOR_SELECTION_ENV` is unset or unrecognised. */
+export const DEFAULT_PROXY_VENDOR_SELECTION_MODE: ProxyVendorSelectionMode = "adaptive";
 
 /**
  * Parse the selection mode from an environment value. Unset, empty and
@@ -202,6 +209,52 @@ export interface AdaptiveProxyVendorSelector extends ProxyVendorSelector {
 	reset(): void;
 }
 
+/** One vendor's state as the selector saw it when it routed an attempt. */
+export type ProxyVendorSelectionVendorState = {
+	readonly vendor: ProxyVendorName;
+	readonly state: ProxyVendorState;
+	/** Consecutive ejections; the open-duration multiplier. */
+	readonly ejections: number;
+};
+
+/** What one `select` call decided, for the proxy telemetry of the request that made it. */
+export type ProxyVendorSelectionObservation = {
+	readonly kind: "adaptive";
+	readonly reason: ProxyVendorSelectionReason;
+	/** The request's chain, in declaration order. */
+	readonly vendorStates: readonly ProxyVendorSelectionVendorState[];
+};
+
+/** Receives the selections made while one request runs. */
+export interface ProxyVendorSelectionSink {
+	recordProxyVendorSelection(observation: ProxyVendorSelectionObservation): void;
+}
+
+const selectionScopes = new AsyncLocalStorage<ProxyVendorSelectionSink>();
+
+/**
+ * Runs `fn` with `sink` receiving every adaptive selection made inside it. The
+ * selector is process-wide, so its own `lastSelectionReason()` can belong to a
+ * concurrent request; the scope ties each selection to the request that asked.
+ */
+export function observeProxyVendorSelections<T>(
+	sink: ProxyVendorSelectionSink | undefined,
+	fn: () => T,
+): T {
+	return sink ? selectionScopes.run(sink, fn) : fn();
+}
+
+/** Observation never fails the attempt it describes. */
+function publishSelection(build: () => ProxyVendorSelectionObservation): void {
+	const sink = selectionScopes.getStore();
+	if (!sink) return;
+	try {
+		sink.recordProxyVendorSelection(build());
+	} catch {
+		// A telemetry sink is an observer.
+	}
+}
+
 type VendorRecord = {
 	state: ProxyVendorState;
 	consecutiveFailures: number;
@@ -339,6 +392,17 @@ export function createAdaptiveProxyVendorSelector(
 		);
 	};
 
+	const publish = (reason: ProxyVendorSelectionReason, chain: readonly ProxyVendorName[]): void => {
+		publishSelection(() => ({
+			kind: "adaptive",
+			reason,
+			vendorStates: chain.map((vendor) => {
+				const entry = record(vendor);
+				return { vendor, state: entry.state, ejections: entry.ejections };
+			}),
+		}));
+	};
+
 	return {
 		kind: "adaptive",
 		select(request) {
@@ -356,6 +420,7 @@ export function createAdaptiveProxyVendorSelector(
 			if (!head) {
 				// Fail open: nothing is known to be healthy, so the declared order stands.
 				lastReason = "all_open";
+				publish("all_open", request.chain);
 				return baseline;
 			}
 			const headEntry = record(head.vendor);
@@ -370,6 +435,7 @@ export function createAdaptiveProxyVendorSelector(
 				probing = true;
 			}
 			lastReason = probing ? "half_open_probe" : aheadUnavailable ? "vendor_open" : "chain_order";
+			publish(lastReason, request.chain);
 			const tail = baseline.filter(
 				(directive) => directive.vendor !== head.vendor && available(directive.vendor),
 			);
@@ -429,6 +495,98 @@ export function createAdaptiveProxyVendorSelector(
 		reset() {
 			records.clear();
 			lastReason = "chain_order";
+		},
+	};
+}
+
+/** The selector a served process installed, shared by every server that installed it. */
+type ProcessAdaptiveInstallation = {
+	readonly selector: AdaptiveProxyVendorSelector;
+	readonly transitionListeners: Set<(event: ProxyVendorStateTransition) => void>;
+	holders: number;
+};
+
+let processInstallation: ProcessAdaptiveInstallation | undefined;
+
+export type ProcessProxyVendorSelection = {
+	/** Mode read from the environment (`DEFAULT_PROXY_VENDOR_SELECTION_MODE` when unset). */
+	readonly mode: ProxyVendorSelectionMode;
+	/** Selector in force for the process after the call. */
+	readonly selector: ProxyVendorSelector;
+	/**
+	 * Undo this installation. The static order returns once every server that
+	 * installed the adaptive selector released it; a selector registered by
+	 * someone else meanwhile is left alone.
+	 */
+	release(): void;
+};
+
+export type InstallProcessProxyVendorSelectorOptions = {
+	/** Defaults to `process.env`. */
+	readonly env?: Readonly<Record<string, string | undefined>>;
+	/** Receives every state transition of the process selector while installed. */
+	readonly onTransition?: (event: ProxyVendorStateTransition) => void;
+};
+
+/**
+ * Register the selector named by `PROXY_VENDOR_SELECTION_ENV` for this process.
+ * `adaptive` (the default) installs one adaptive selector shared by every
+ * server in the process; `ordered` leaves the static declaration order. A
+ * selector that the host registered itself (anything other than the static
+ * one) is never replaced.
+ */
+export function installProcessProxyVendorSelector(
+	options: InstallProcessProxyVendorSelectorOptions = {},
+): ProcessProxyVendorSelection {
+	const env = options.env ?? process.env;
+	const mode = resolveProxyVendorSelectionMode(
+		env[PROXY_VENDOR_SELECTION_ENV],
+		DEFAULT_PROXY_VENDOR_SELECTION_MODE,
+	);
+	const current = getProxyVendorSelector();
+	if (processInstallation && current !== processInstallation.selector) {
+		// Replaced after it was installed: the replacement owns the process now.
+		processInstallation = undefined;
+	}
+	if (mode === "ordered" || (!processInstallation && current !== staticOrderProxyVendorSelector)) {
+		return { mode, selector: current, release: () => {} };
+	}
+	if (!processInstallation) {
+		const transitionListeners = new Set<(event: ProxyVendorStateTransition) => void>();
+		const selector = createAdaptiveProxyVendorSelector({
+			onTransition(event) {
+				for (const listener of transitionListeners) {
+					try {
+						listener(event);
+					} catch {
+						// A transition log line is an observer.
+					}
+				}
+			},
+		});
+		processInstallation = { selector, transitionListeners, holders: 0 };
+		setProxyVendorSelector(selector);
+	}
+	const installation = processInstallation;
+	installation.holders += 1;
+	const onTransition = options.onTransition;
+	// One entry per installation, even when two servers share a logger.
+	const listener = onTransition
+		? (event: ProxyVendorStateTransition) => onTransition(event)
+		: undefined;
+	if (listener) installation.transitionListeners.add(listener);
+	let released = false;
+	return {
+		mode,
+		selector: installation.selector,
+		release() {
+			if (released) return;
+			released = true;
+			if (listener) installation.transitionListeners.delete(listener);
+			installation.holders -= 1;
+			if (installation.holders > 0 || processInstallation !== installation) return;
+			processInstallation = undefined;
+			if (getProxyVendorSelector() === installation.selector) setProxyVendorSelector(undefined);
 		},
 	};
 }
