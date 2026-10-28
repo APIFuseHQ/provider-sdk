@@ -536,6 +536,7 @@ const DEADLINE_EXPIRED_BODY = (requestId: string) => ({
 	},
 });
 const DEADLINE_EXPIRED_OBSERVABILITY = {
+	origin: "platform",
 	category: "stateful_forwarding_deadline",
 	taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	retryable: false,
@@ -724,6 +725,7 @@ describe("stateful requests waiting in the owner pod's session queue", () => {
 				const ownerAnswer = await world.ownerServedWithin("queued-owner-moved", ANSWER_WAIT_MS);
 				expect(ownerAnswer?.status).toBe(500);
 				expect(ownerAnswer?.observability).toEqual({
+					origin: "platform",
 					category: "internal_error",
 					taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 					retryable: false,

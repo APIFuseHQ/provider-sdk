@@ -1,4 +1,4 @@
-import type { ProviderErrorCategory } from "./observability.js";
+import type { ProviderErrorCategory, ProviderFailureCategory } from "./observability.js";
 import type { ProviderErrorStatus } from "./types.js";
 
 // This set suppresses the unregistered-provider-error-code signal for codes
@@ -123,11 +123,13 @@ export const SDK_RUNTIME_OWNED_ERROR_CODES = new Set([
 
 /**
  * One SDK-registered provider error code: the status the SDK serves, who
- * failed, whether a retry can help, and the prose the contract publishes.
+ * failed, whether a retry can help, and the prose the contract publishes. The
+ * category is a provider failure: serve reads it for an error a provider
+ * threw, in place of the `category` the provider did not set.
  */
 export type SdkErrorRegistration = {
 	readonly status: ProviderErrorStatus;
-	readonly category: ProviderErrorCategory;
+	readonly category: ProviderFailureCategory;
 	readonly retryable: boolean;
 	/** Developer-facing English prose published as the contract `errorCodes[].description`. */
 	readonly description: string;
