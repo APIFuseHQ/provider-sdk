@@ -12,8 +12,9 @@ import {
  * Prometheus text exposition format. It is the default emitter of a
  * `StatefulSessionRouter` built without one, and every `serve()` in the
  * process renders it on its metrics listener (`/metrics`). The package
- * exports only its emitter view, `statefulProviderMetricRegistry`; the class,
- * the tables, `render()` and `reset()` stay inside the SDK.
+ * exports only its emitter view, `statefulProviderMetricRegistryEmitter`
+ * (as `statefulProviderMetricRegistry`); the class, the tables, the
+ * class-typed singleton, `render()` and `reset()` stay inside the SDK.
  */
 
 export type StatefulProviderMetricKind = "counter" | "gauge" | "histogram";
@@ -316,10 +317,8 @@ export class StatefulProviderMetricRegistry implements StatefulProviderMetricEmi
 /**
  * One registry per process. A router built without a `metricEmitter` counts
  * into it, and every `serve()` metrics listener in the process renders it.
- * Typed as the class for the SDK code that renders it (the metrics listener)
- * and resets it (tests); the package exports only the emitter view below.
  */
-export const processStatefulProviderMetricRegistry = new StatefulProviderMetricRegistry();
+export const statefulProviderMetricRegistry = new StatefulProviderMetricRegistry();
 
 /**
  * The process's stateful metric registry, as the `metricEmitter` a provider
@@ -338,13 +337,14 @@ export const processStatefulProviderMetricRegistry = new StatefulProviderMetricR
  * value that is not finite, or a negative count or observation is dropped.
  * Only the three emitter methods are reachable, so provider code cannot
  * render or reset the pod's metrics.
+ *
+ * The stateful entry point exports it as `statefulProviderMetricRegistry`;
+ * inside the SDK that name is the class-typed registry above.
  */
-export const statefulProviderMetricRegistry: StatefulProviderMetricEmitter =
+export const statefulProviderMetricRegistryEmitter: StatefulProviderMetricEmitter =
 	Object.freeze<StatefulProviderMetricEmitter>({
 		increment: (name, labels, value) =>
-			processStatefulProviderMetricRegistry.increment(name, labels, value),
-		gauge: (name, labels, value) =>
-			processStatefulProviderMetricRegistry.gauge(name, labels, value),
-		observe: (name, labels, value) =>
-			processStatefulProviderMetricRegistry.observe(name, labels, value),
+			statefulProviderMetricRegistry.increment(name, labels, value),
+		gauge: (name, labels, value) => statefulProviderMetricRegistry.gauge(name, labels, value),
+		observe: (name, labels, value) => statefulProviderMetricRegistry.observe(name, labels, value),
 	});

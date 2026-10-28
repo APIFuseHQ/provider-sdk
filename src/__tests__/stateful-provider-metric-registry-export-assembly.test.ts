@@ -240,10 +240,11 @@ describe("the process metric registry exported from the stateful entry point", (
 		expect((await scrape()).body).toContain(
 			`apifuse_stateful_provider_write_ledger_failed_total{providerId="${PROVIDER_ID}",operationId="kept-across-reset-attempt",ledgerState="not_found"} 1\n`,
 		);
-		// The class, its tables and the class-typed singleton stay inside the SDK.
+		// The class, its tables and the name the view has inside the SDK are not
+		// exports of the entry point.
 		for (const internal of [
 			"StatefulProviderMetricRegistry",
-			"processStatefulProviderMetricRegistry",
+			"statefulProviderMetricRegistryEmitter",
 			"STATEFUL_PROVIDER_METRIC_KINDS",
 			"STATEFUL_PROVIDER_METRIC_HELP",
 			"STATEFUL_PROVIDER_METRIC_EXPORTED_LABELS",

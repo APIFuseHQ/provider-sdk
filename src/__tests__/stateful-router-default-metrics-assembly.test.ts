@@ -27,8 +27,8 @@ import {
 	withStatefulLocalProviderContext,
 } from "../stateful/index.js";
 import {
-	processStatefulProviderMetricRegistry,
 	STATEFUL_PROVIDER_METRIC_KINDS,
+	statefulProviderMetricRegistry,
 } from "../stateful/stateful-provider-metric-registry.js";
 import type { ProviderDefinition } from "../types.js";
 
@@ -285,7 +285,7 @@ describe("stateful router metrics exported by default on the pod's metrics liste
 	it(
 		"exports the deadline the owner pod's router counted, from the registry both pods share",
 		async () => {
-			processStatefulProviderMetricRegistry.reset();
+			statefulProviderMetricRegistry.reset();
 			const requestId = "owner-deadline-cancels-read";
 			// The source pod's caller receives the deadline (serve classifies it,
 			// stateful-owner-pod-local-deadline-assembly.test.ts).
@@ -318,7 +318,7 @@ describe("stateful router metrics exported by default on the pod's metrics liste
 	);
 
 	it("keeps a router given an explicit emitter out of the process registry", async () => {
-		const before = processStatefulProviderMetricRegistry.render();
+		const before = statefulProviderMetricRegistry.render();
 		const recording = new RecordingStatefulProviderMetricEmitter();
 		const router = new StatefulSessionRouter({
 			currentPod: { podId: "pod-explicit", endpoint: "http://127.0.0.1:1" },
@@ -348,7 +348,7 @@ describe("stateful router metrics exported by default on the pod's metrics liste
 			await router.release();
 		}
 		expect(recording.metrics).toEqual([expect.objectContaining({ name: DEADLINE_METRIC })]);
-		expect(processStatefulProviderMetricRegistry.render()).toBe(before);
+		expect(statefulProviderMetricRegistry.render()).toBe(before);
 	});
 
 	it("serves /metrics on the metrics listener only, declaring every name in the closed set", async () => {
