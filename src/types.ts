@@ -13,9 +13,7 @@ export interface StandardSchemaV1<Input = unknown, Output = Input> {
 		readonly vendor: string;
 		readonly validate: (
 			value: unknown,
-		) =>
-			| StandardSchemaV1.Result<Output>
-			| Promise<StandardSchemaV1.Result<Output>>;
+		) => StandardSchemaV1.Result<Output> | Promise<StandardSchemaV1.Result<Output>>;
 		readonly types?: { readonly input: Input; readonly output: Output };
 	};
 }
@@ -38,12 +36,11 @@ export namespace StandardSchemaV1 {
 /** Schema formats supported by provider operations. */
 export type SchemaLike = ZodType | StandardSchemaV1;
 /** Infer the validated output type produced by a Zod or Standard Schema. */
-export type InferSchemaOutput<TSchema extends SchemaLike> =
-	TSchema extends ZodType
-		? ZodInfer<TSchema>
-		: TSchema extends StandardSchemaV1<unknown, infer Output>
-			? Output
-			: unknown;
+export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType
+	? ZodInfer<TSchema>
+	: TSchema extends StandardSchemaV1<unknown, infer Output>
+		? Output
+		: unknown;
 
 export interface OperationExample {
 	scenarioKey: ProviderLocaleKeyInput;
@@ -51,11 +48,7 @@ export interface OperationExample {
 	rationaleKey?: ProviderLocaleKeyInput;
 }
 
-export type OperationRiskClass =
-	| "read"
-	| "write"
-	| "destructive"
-	| "external-send";
+export type OperationRiskClass = "read" | "write" | "destructive" | "external-send";
 
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
@@ -95,11 +88,7 @@ export const STREAM_MAX_DURATION_MS_MAX = 1_800_000;
 export const STREAM_CHUNK_BYTES_MIN = 1;
 export const STREAM_CHUNK_BYTES_MAX = 1_048_576;
 
-export type OperationTransportKind =
-	| "json"
-	| "sse"
-	| "http-stream"
-	| "websocket";
+export type OperationTransportKind = "json" | "sse" | "http-stream" | "websocket";
 
 export interface OperationJsonTransport {
 	kind: "json";
@@ -169,14 +158,14 @@ export type SmsOrigin =
 			kind: "e164";
 			value: E164PhoneNumber;
 			display?: string;
-		}
+	  }
 	| {
 			/** Country-local service sender, for example KR 1661-5270. */
 			kind: "nationalServiceCode";
 			country: Iso3166Alpha2CountryCode;
 			value: string;
 			display?: string;
-		};
+	  };
 
 export interface SmsOtpExtractionPattern {
 	/** RegExp or source string containing exactly one usable OTP capture. */
@@ -315,10 +304,7 @@ export interface OcrContext {
 	 */
 	readonly available: boolean;
 	recognize(request: OcrRecognizeRequest): Promise<OcrResult>;
-	extractCaptchaText(
-		image: OcrImageInput,
-		options?: OcrCaptchaOptions,
-	): Promise<OcrCaptchaResult>;
+	extractCaptchaText(image: OcrImageInput, options?: OcrCaptchaOptions): Promise<OcrCaptchaResult>;
 }
 
 export type SttTranscribeMode = "general" | "otp";
@@ -364,29 +350,29 @@ export type ProviderChallenge =
 			readonly pageUrl: string;
 			readonly action?: string;
 			readonly cdata?: string;
-		}
+	  }
 	| {
 			readonly kind: "recaptcha_v2";
 			readonly siteKey: string;
 			readonly pageUrl: string;
-		}
+	  }
 	| {
 			readonly kind: "recaptcha_v3";
 			readonly siteKey: string;
 			readonly pageUrl: string;
 			readonly action: string;
 			readonly minScore?: number;
-		}
+	  }
 	| {
 			readonly kind: "hcaptcha";
 			readonly siteKey: string;
 			readonly pageUrl: string;
-		}
+	  }
 	| {
 			readonly kind: "cloudflare_interstitial";
 			readonly pageUrl: string;
 			readonly blockedHtml?: string;
-		}
+	  }
 	| {
 			readonly kind: "aws_waf";
 			readonly pageUrl: string;
@@ -395,13 +381,13 @@ export type ProviderChallenge =
 			readonly captchaScript?: string;
 			readonly context?: string;
 			readonly iv?: string;
-		}
+	  }
 	| {
 			readonly kind: "akamai_sec_cpt";
 			readonly pageUrl: string;
 			/** The admitted challenge document, needed for tile/context extraction. */
 			readonly challengeHtml?: string;
-		}
+	  }
 	| {
 			readonly kind: "akamai_sensor";
 			readonly pageUrl: string;
@@ -413,7 +399,7 @@ export type ProviderChallenge =
 			readonly bmsz?: string;
 			/** Bot Manager major version when known ("3" measured on zozo.jp). */
 			readonly version?: string;
-		}
+	  }
 	| {
 			readonly kind: "akamai_sbsd";
 			readonly pageUrl: string;
@@ -430,7 +416,7 @@ export type ProviderChallenge =
 			 * the payload POST URL.
 			 */
 			readonly challengeToken?: string;
-		};
+	  };
 
 export type ProviderChallengeKind = ProviderChallenge["kind"];
 
@@ -456,7 +442,7 @@ export type ChallengeSolution =
 			 * the upstream cookie's expiry. `expires` takes precedence when both are present.
 			 */
 			readonly sdkEstimatedExpires?: number;
-		}
+	  }
 	| {
 			readonly form: "cookie_state";
 			readonly kind: "akamai_sbsd";
@@ -467,7 +453,7 @@ export type ChallengeSolution =
 			readonly stateCookieName: "sbsd_o" | "bm_so";
 			/** Epoch seconds observed on the updated state cookie, when supplied upstream. */
 			readonly expires?: number;
-		};
+	  };
 
 /**
  * `akamai_sbsd` declarations require a transport-owned client profile because the
@@ -480,7 +466,7 @@ export type ProviderResolverConfig =
 			/** Challenge kinds this provider is permitted to request. */
 			readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sbsd">[];
 			readonly clientProfile?: string;
-		}
+	  }
 	| {
 			/** Optional ordered override for the SDK-owned vendor fallback chain. */
 			readonly vendors?: readonly ProviderResolverVendor[];
@@ -493,7 +479,7 @@ export type ProviderResolverConfig =
 			 * because only the provider knows its upstream's admission rule.
 			 */
 			readonly clientProfile: string;
-		};
+	  };
 
 export type SttAudioInput = {
 	kind: "base64";
@@ -547,10 +533,7 @@ export interface SttTranscript {
 	verificationCode?: VerificationCodeExtractionResult;
 }
 
-export type VerificationCodeCandidateSource =
-	| "digits"
-	| "spoken_words"
-	| "mixed";
+export type VerificationCodeCandidateSource = "digits" | "spoken_words" | "mixed";
 
 export interface VerificationCodeCandidate {
 	code: string;
@@ -589,11 +572,11 @@ export type HealthScheduleRandomization =
 	| {
 			mode: "centered";
 			maxOffset: Iso8601Duration;
-		}
+	  }
 	| {
 			mode: "delayed";
 			maxDelay: Iso8601Duration;
-		};
+	  };
 
 export interface HealthJourneyStep {
 	id: string;
@@ -613,10 +596,7 @@ export interface HealthJourneyGatewayContext {
 		input?: Record<string, unknown>;
 		metadata?: Record<string, unknown>;
 	}): Promise<{ connectionId: string; rowVersion: number }>;
-	disconnect?(connection: {
-		connectionId: string;
-		rowVersion: number;
-	}): Promise<void>;
+	disconnect?(connection: { connectionId: string; rowVersion: number }): Promise<void>;
 	execute(
 		providerId: string,
 		operationId: string,
@@ -708,7 +688,7 @@ export type HealthJourneyManualTriggerPolicy =
 			/** ISO 8601 duration. Minimum time between manual executions. */
 			minManualInterval: Iso8601Duration;
 			publicRationale: string;
-		};
+	  };
 
 export interface HealthJourneyRunResult {
 	status?: "ok" | "degraded" | "down" | "unknown";
@@ -734,8 +714,8 @@ export type HealthJourneyDefinition = HealthJourneyDefinitionBase &
 	(
 		| {
 				run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
-			scenario?: never;
-		}
+				scenario?: never;
+		  }
 		| { scenario: HealthScenario; run?: never }
 	);
 
@@ -852,9 +832,7 @@ export type HealthCheckCase<TInput = unknown, TOutput = unknown> = {
 			 * the durable probe input must be derived from a live read-only operation
 			 * immediately before the checked operation executes.
 			 */
-			prepareInput?: (
-				ctx: HealthCheckInputPreparationContext<TInput>,
-			) => TInput | Promise<TInput>;
+			prepareInput?: (ctx: HealthCheckInputPreparationContext<TInput>) => TInput | Promise<TInput>;
 			/**
 			 * Assertion executed against the operation's response and timing.
 			 *
@@ -877,11 +855,7 @@ export type HealthCheckCase<TInput = unknown, TOutput = unknown> = {
 			 */
 			assertions: (
 				ctx: HealthCheckAssertionContext<TOutput>,
-			) =>
-				| void
-				| Promise<void>
-				| HealthCheckCaseResult
-				| Promise<HealthCheckCaseResult>;
+			) => void | Promise<void> | HealthCheckCaseResult | Promise<HealthCheckCaseResult>;
 			/** Declarative scenarios replace the imperative preparation and assertion hooks. */
 			scenario?: never;
 	  }
@@ -908,10 +882,7 @@ export interface HealthCheckSuite<TInput = unknown, TOutput = unknown> {
 	/** Default degradation threshold for cases in this suite. Default: runtime threshold. */
 	degradedThresholdMs?: number;
 	/** Non-empty list of cases. Empty arrays are rejected at definition time. */
-	cases: [
-		HealthCheckCase<TInput, TOutput>,
-		...HealthCheckCase<TInput, TOutput>[],
-	];
+	cases: [HealthCheckCase<TInput, TOutput>, ...HealthCheckCase<TInput, TOutput>[]];
 	/**
 	 * If true, the runtime SHALL invoke `connect()` before `execute()` and
 	 * `disconnect()` after, using the service-account token. The provider
@@ -1017,7 +988,9 @@ export interface HealthMonitorProbeOverride {
 	degradedThresholdMs?: number;
 }
 
-export const VALID_OPERATION_ERROR_STATUSES = [400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504] as const;
+export const VALID_OPERATION_ERROR_STATUSES = [
+	400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504,
+] as const;
 
 export type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number];
 
@@ -1085,12 +1058,7 @@ export type StealthProfile = StealthProfileDescriptor & {
 	headerOrder?: string[];
 };
 
-export type AuthMode =
-	| "none"
-	| "platform-managed"
-	| "credentials"
-	| "oauth2"
-	| "oauth2_proxied";
+export type AuthMode = "none" | "platform-managed" | "credentials" | "oauth2" | "oauth2_proxied";
 
 export type ConnectionMode = AuthMode;
 
@@ -1122,11 +1090,7 @@ export type ProviderProxyMode = "disabled" | "optional" | "required";
  */
 export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
-export type ProviderProxySessionAffinity =
-	| "request"
-	| "operation"
-	| "auth-flow"
-	| "connection";
+export type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "connection";
 
 /**
  * NodeMaven connection type. `"mobile"` adds the `-type-mobile` username token
@@ -1458,12 +1422,12 @@ export type ProviderLogoProfile =
 			 */
 			url?: string;
 			background?: string;
-		}
+	  }
 	| {
 			source: "monogram" | "none";
 			background?: string;
 			fallbackReason: string;
-		};
+	  };
 
 export type ProviderPublicConnectionMode =
 	| "apifuse_managed"
@@ -1524,15 +1488,8 @@ export interface ProviderMeta {
 	};
 }
 
-export type RequestParamPrimitive =
-	| string
-	| number
-	| boolean
-	| null
-	| undefined;
-export type RequestParamValue =
-	| RequestParamPrimitive
-	| readonly RequestParamPrimitive[];
+export type RequestParamPrimitive = string | number | boolean | null | undefined;
+export type RequestParamValue = RequestParamPrimitive | readonly RequestParamPrimitive[];
 export type RequestParams = Record<string, RequestParamValue>;
 
 export const HttpRetryPreset = {
@@ -1542,16 +1499,14 @@ export const HttpRetryPreset = {
 	AggressiveRead: "aggressive_read",
 	RateLimitAware: "rate_limit_aware",
 } as const;
-export type HttpRetryPreset =
-	(typeof HttpRetryPreset)[keyof typeof HttpRetryPreset];
+export type HttpRetryPreset = (typeof HttpRetryPreset)[keyof typeof HttpRetryPreset];
 
 export const HttpRetryJitter = {
 	None: "none",
 	Full: "full",
 	Equal: "equal",
 } as const;
-export type HttpRetryJitter =
-	(typeof HttpRetryJitter)[keyof typeof HttpRetryJitter];
+export type HttpRetryJitter = (typeof HttpRetryJitter)[keyof typeof HttpRetryJitter];
 
 export const HttpRetryDelayStrategy = {
 	Fixed: "fixed",
@@ -1567,8 +1522,7 @@ export const HttpRetryAfterPolicy = {
 	/** Honor Retry-After but also cap it to the SDK-computed backoff delay. */
 	Cap: "cap",
 } as const;
-export type HttpRetryAfterPolicy =
-	(typeof HttpRetryAfterPolicy)[keyof typeof HttpRetryAfterPolicy];
+export type HttpRetryAfterPolicy = (typeof HttpRetryAfterPolicy)[keyof typeof HttpRetryAfterPolicy];
 
 export const HttpRetryUnsafeMethodPolicy = {
 	Reject: "reject",
@@ -1688,12 +1642,7 @@ export interface RequestOptions {
 	sessionState?: string | readonly string[] | false;
 }
 
-export type RedirectRunReason =
-	| "completed"
-	| "stopped"
-	| "max_hops"
-	| "missing_location"
-	| "loop";
+export type RedirectRunReason = "completed" | "stopped" | "max_hops" | "missing_location" | "loop";
 
 export type HttpRedirectPolicyMode = "same-origin";
 
@@ -1819,6 +1768,22 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 		 * instead of tunneling the origin certificate chain.
 		 */
 		insecureSkipVerify?: boolean;
+		/**
+		 * Opt-in exit rotation for origins whose admission layer refuses an egress
+		 * IP outright. When the first attempt of a policy-managed proxied request
+		 * returns a headerless 403 (no challenge marker in headers or body) or any
+		 * 5xx, the request is sent exactly once more through the next pool entry,
+		 * and the call keeps that offset. The second answer is final: a refusal
+		 * there is returned or thrown as usual. The refused attempt is recorded in
+		 * proxy telemetry as outcome `error` with `errorCode: "PROXY_EXIT_REFUSED"`,
+		 * the exit hash and status, so an exit refusal and an upstream 5xx are
+		 * distinct classes. Default off. A classified challenge is never rotated:
+		 * it is solvable where it was served. Rotation follows the transport-retry
+		 * method policy: safe methods (GET, HEAD, OPTIONS) with no body by default;
+		 * an unsafe method only when `retry.methods` lists it together with
+		 * `retry.unsafeMethodPolicy: "allow_explicit_unsafe"`, and never with a body.
+		 */
+		rotateExitOnAdmissionRefusal?: boolean;
 	};
 }
 
@@ -2019,25 +1984,11 @@ export type OperationHandlerResult<TOutput> =
 export interface HttpClient {
 	request(url: string, opts?: RequestWithMethodOptions): Promise<HttpResponse>;
 	get(url: string, options?: RequestOptions): Promise<HttpResponse>;
-	post(
-		url: string,
-		body: unknown,
-		options?: RequestOptions,
-	): Promise<HttpResponse>;
-	put(
-		url: string,
-		body: unknown,
-		options?: RequestOptions,
-	): Promise<HttpResponse>;
+	post(url: string, body: unknown, options?: RequestOptions): Promise<HttpResponse>;
+	put(url: string, body: unknown, options?: RequestOptions): Promise<HttpResponse>;
 	delete(url: string, options?: RequestOptions): Promise<HttpResponse>;
-	stream(
-		url: string,
-		options?: RequestWithMethodOptions,
-	): Promise<HttpStreamResponse>;
-	sse(
-		url: string,
-		options?: RequestWithMethodOptions,
-	): Promise<AsyncIterable<SseMessage>>;
+	stream(url: string, options?: RequestWithMethodOptions): Promise<HttpStreamResponse>;
+	sse(url: string, options?: RequestWithMethodOptions): Promise<AsyncIterable<SseMessage>>;
 }
 
 /** Request-scoped file reference accepted by provider operation inputs. */
@@ -2176,9 +2127,7 @@ export interface NativeProxyExpiringEvent {
  * Cooperative drain handler. The SDK awaits this before closing a socket whose
  * sticky proxy binding is about to expire, then force-closes at hard expiry.
  */
-export type NativeProxyDrainHandler = (
-	event: NativeProxyExpiringEvent,
-) => void | Promise<void>;
+export type NativeProxyDrainHandler = (event: NativeProxyExpiringEvent) => void | Promise<void>;
 
 /** Typed reason recorded when the SDK closes a native connection intentionally. */
 export interface NativeNetworkCloseReason {
@@ -2200,13 +2149,9 @@ export interface NativeNetworkConnection {
 }
 
 export interface NativeNetworkClient {
-	connectTcp(
-		input: NativeNetworkConnectOptions,
-	): Promise<NativeNetworkConnection>;
+	connectTcp(input: NativeNetworkConnectOptions): Promise<NativeNetworkConnection>;
 	connectTls(input: NativeTlsConnectOptions): Promise<NativeNetworkConnection>;
-	grantTcpEgress(
-		input: NativeNetworkDynamicGrantOptions,
-	): NativeNetworkEgressGrant;
+	grantTcpEgress(input: NativeNetworkDynamicGrantOptions): NativeNetworkEgressGrant;
 }
 
 export interface NativeContext {
@@ -2262,17 +2207,9 @@ export interface ProviderCacheResponseMeta {
 }
 
 export interface ProviderCache {
-	key(
-		namespace: string,
-		parts: unknown,
-		options?: ProviderCacheKeyOptions,
-	): string;
+	key(namespace: string, parts: unknown, options?: ProviderCacheKeyOptions): string;
 	get<T = unknown>(key: string): Promise<ProviderCacheResult<T> | null>;
-	set<T = unknown>(
-		key: string,
-		value: T,
-		options: ProviderCacheGetOrSetOptions,
-	): Promise<void>;
+	set<T = unknown>(key: string, value: T, options: ProviderCacheGetOrSetOptions): Promise<void>;
 	delete(key: string): Promise<void>;
 	getOrSet<T = unknown>(
 		key: string,
@@ -2293,12 +2230,8 @@ export interface BrowserClient {
 	close?(): Promise<void>;
 	newPage(): Promise<BrowserPage>;
 	rawPage(): Promise<BrowserPage>;
-	withIsolatedContext<T>(
-		handler: (page: BrowserPage) => Promise<T>,
-	): Promise<T>;
-	solveChallenge(
-		request: BrowserChallengeRequest,
-	): Promise<BrowserChallengeResult>;
+	withIsolatedContext<T>(handler: (page: BrowserPage) => Promise<T>): Promise<T>;
+	solveChallenge(request: BrowserChallengeRequest): Promise<BrowserChallengeResult>;
 }
 
 export interface BrowserLocator {
@@ -2345,23 +2278,20 @@ export type BrowserResourceBody = Buffer | Uint8Array | ArrayBuffer | string;
 export type BrowserResourceDecision =
 	| {
 			readonly action: "continue";
-		}
+	  }
 	| {
 			readonly action: "fulfill";
 			readonly status?: number;
 			readonly headers?: Readonly<Record<string, string>>;
 			readonly body?: BrowserResourceBody;
-		}
+	  }
 	| {
 			readonly action: "block";
 			readonly reason?: string;
-		};
+	  };
 
 export type BrowserResourceRoute = {
-	readonly match:
-		| string
-		| RegExp
-		| ((request: BrowserResourceRequest) => boolean);
+	readonly match: string | RegExp | ((request: BrowserResourceRequest) => boolean);
 	readonly handle: (
 		request: BrowserResourceRequest,
 	) => Promise<BrowserResourceDecision> | BrowserResourceDecision;
@@ -2398,15 +2328,9 @@ export interface BrowserPage extends BrowserFrame {
 	screenshot(options?: { fullPage?: boolean }): Promise<Buffer>;
 	click(selector: string): Promise<void>;
 	type(selector: string, text: string): Promise<void>;
-	waitForSelector(
-		selector: string,
-		options?: { timeout?: number },
-	): Promise<void>;
+	waitForSelector(selector: string, options?: { timeout?: number }): Promise<void>;
 	frames(): Promise<BrowserFrame[]>;
-	withResourcePolicy<T>(
-		policy: BrowserResourcePolicy,
-		run: () => Promise<T>,
-	): Promise<T>;
+	withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T>;
 }
 
 export type BrowserChallengeRequest = {
@@ -2453,10 +2377,7 @@ export interface TraceContext {
 }
 
 export interface AuthContext {
-	requestField(
-		name: string,
-		options?: { type?: "otp" | "text" },
-	): Promise<string>;
+	requestField(name: string, options?: { type?: "otp" | "text" }): Promise<string>;
 }
 
 export interface EnvContext {
@@ -2556,11 +2477,11 @@ export interface AuthFlowTerminalContext {
 						}
 					>;
 					readonly expectedInput?: never;
-				}
+			  }
 			| {
 					readonly expectedInput: Record<string, unknown>;
 					readonly fields?: never;
-				}
+			  }
 		),
 	): AuthTurn;
 	nextPoll(options?: {
@@ -2686,11 +2607,7 @@ export interface ProviderStateNamespace {
 		prefix?: string;
 	}): Promise<StateValue<T>[]>;
 	get<T = unknown>(key: string): Promise<StateValue<T> | null>;
-	set<T = unknown>(
-		key: string,
-		value: T,
-		options?: StateWriteOptions,
-	): Promise<StateValue<T>>;
+	set<T = unknown>(key: string, value: T, options?: StateWriteOptions): Promise<StateValue<T>>;
 	patch<T extends Record<string, unknown>>(
 		key: string,
 		partial: Partial<T>,
@@ -2717,10 +2634,7 @@ export interface ProviderRuntimeState {
 	 * connection uses an isolated reserved sentinel, never the provider-global scope.
 	 */
 	forConnection(connectionId: string | undefined): ProviderRuntimeState;
-	namespace(
-		name: string,
-		options: StateNamespaceOptions,
-	): ProviderStateNamespace;
+	namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace;
 }
 
 /**
@@ -2733,33 +2647,28 @@ export interface ProviderRuntimeState {
 export type ProviderContext<TConfig = Record<string, unknown>> = {
 	request?: ProviderRequestContext;
 	trace: TraceContext;
-}
-	& ("env" extends keyof TConfig ? { env: EnvContext } : Record<never, never>)
-	& ("credential" extends keyof TConfig
+} & ("env" extends keyof TConfig ? { env: EnvContext } : Record<never, never>) &
+	("credential" extends keyof TConfig
 		? { credential: CredentialContext }
 		: TConfig extends { auth: { mode: "platform-managed" } }
 			? { credential: CredentialContext }
-			: Record<never, never>)
-	& ("http" extends keyof TConfig ? { http: HttpClient } : Record<never, never>)
-	& ("files" extends keyof TConfig
+			: Record<never, never>) &
+	("http" extends keyof TConfig ? { http: HttpClient } : Record<never, never>) &
+	("files" extends keyof TConfig
 		? string extends keyof TConfig
 			? { readonly files?: ProviderFilesContext }
 			: { readonly files: ProviderFilesContext }
-		: Record<never, never>)
-	& ("native" extends keyof TConfig
-		? { readonly native: NativeContext }
-		: Record<never, never>)
-	& ("cache" extends keyof TConfig ? { cache: ProviderCache } : Record<never, never>)
-	& ("state" extends keyof TConfig ? { state: ProviderRuntimeState } : Record<never, never>)
-	& ("stealth" extends keyof TConfig ? { stealth: StealthClient } : Record<never, never>)
-	& ("browser" extends keyof TConfig ? { browser: BrowserClient } : Record<never, never>)
-	& ("auth" extends keyof TConfig ? { auth: AuthContext } : Record<never, never>)
-	& ("ocr" extends keyof TConfig ? { ocr: OcrContext } : Record<never, never>)
-	& ("stt" extends keyof TConfig ? { stt: SttContext } : Record<never, never>)
-	& ("resolver" extends keyof TConfig ? { resolver: ResolverContext } : Record<never, never>)
-	& ("handle" extends keyof TConfig
-		? { handle: HandleContext }
-		: Record<never, never>);
+		: Record<never, never>) &
+	("native" extends keyof TConfig ? { readonly native: NativeContext } : Record<never, never>) &
+	("cache" extends keyof TConfig ? { cache: ProviderCache } : Record<never, never>) &
+	("state" extends keyof TConfig ? { state: ProviderRuntimeState } : Record<never, never>) &
+	("stealth" extends keyof TConfig ? { stealth: StealthClient } : Record<never, never>) &
+	("browser" extends keyof TConfig ? { browser: BrowserClient } : Record<never, never>) &
+	("auth" extends keyof TConfig ? { auth: AuthContext } : Record<never, never>) &
+	("ocr" extends keyof TConfig ? { ocr: OcrContext } : Record<never, never>) &
+	("stt" extends keyof TConfig ? { stt: SttContext } : Record<never, never>) &
+	("resolver" extends keyof TConfig ? { resolver: ResolverContext } : Record<never, never>) &
+	("handle" extends keyof TConfig ? { handle: HandleContext } : Record<never, never>);
 
 /** Backwards-compatible name for a declaration-derived provider context. */
 export type ProviderContextFor<TConfig> = ProviderContext<TConfig>;
@@ -2875,10 +2784,7 @@ export interface OperationDefinition<
 		proxy?: boolean | ProviderProxyPolicy;
 	};
 	hints?: Record<string, string>;
-	healthCheck?: HealthCheckSuite<
-		InferSchemaOutput<TInput>,
-		InferSchemaOutput<TOutput>
-	>;
+	healthCheck?: HealthCheckSuite<InferSchemaOutput<TInput>, InferSchemaOutput<TOutput>>;
 	healthCheckUnsupported?: HealthCheckUnsupported;
 	/** The operation's items have no picture and no own page upstream; see `noMedia()`. */
 	noMedia?: NoMediaDeclaration;
