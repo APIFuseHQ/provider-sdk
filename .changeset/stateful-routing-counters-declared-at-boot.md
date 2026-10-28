@@ -1,0 +1,5 @@
+---
+"@apifuse/provider-sdk": patch
+---
+
+Start the stateful routing counters at zero when `serve()` boots. A `serve()` given an `operationExecutor` or `internalOperationExecutor` (the entry point of the stateful runtime, whose `StatefulSessionRouter` routes every operation it receives) now declares `apifuse_stateful_provider_routing_forward_total`, `apifuse_stateful_provider_routing_local_total`, `apifuse_stateful_provider_routing_reacquire_total` and `apifuse_stateful_provider_routing_deadline_expired_total` for every declared operation, labelled with the provider and operation ids (the deadline counter also with `redactedErrorCode="deadline_expired"`), at `0` before its listeners open. Until now a routing counter had no series until its first increment, so `/metrics` carried only its `# HELP` and `# TYPE` lines, and Prometheus `rate()` saw the series from its second scrape on and missed that first increment. The router's first increment now lands on the declared series; no second series appears. A server that runs its declared handlers itself declares nothing. `ServeOptions` and `ProviderServerHandle` are unchanged.

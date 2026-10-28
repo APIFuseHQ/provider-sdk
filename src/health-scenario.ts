@@ -616,18 +616,162 @@ export type ExpectedAbsenceAttribution = Omit<GuardAttribution, "reasonCode"> & 
  * failure, and is never retried. Anything else (another code, another status,
  * an envelope the SDK did not tie to the upstream) stays the failure it is.
  *
- * `status` is a 4xx that is neither a retry class (429) nor a credential
- * refusal (401, 403): those are never an absence, and the retry policy and
- * the connection gates are what answer them. `code` must be a code this
- * operation serves — declared in its `errorCodes` or registered by the SDK —
- * with the same status; the authoring lint checks that, so a typo cannot
- * leave a quiet day recorded as `down`.
+ * This is the serialized shape the monitor matches on. Author it as
+ * `{ error: errorRefs(errorCodes).<CODE>, attribute }`: the reference carries
+ * the declared `code` and `status` by value, so the step cannot name a code
+ * the operation does not declare, a status the runtime does not serve for it,
+ * or a credential or rate-limit refusal ({@link errorRefs}).
  */
 export type ExpectedError = {
 	status: number;
 	code: string;
 	attribute: NonEmpty<ExpectedAbsenceAttribution>;
 };
+
+/**
+ * The served statuses an expected absence can carry. The schema admitted any
+ * 4xx but 401/403/429; the serve layer classes a declared 409/410/422 as an
+ * upstream refusal (`upstream_rejected`, source `upstream_rule`), which the
+ * monitor never matches as an absence, so those are not offered either.
+ */
+export type ExpectedAbsenceStatus = 400 | 404;
+
+/**
+ * Codes an expected absence can never reference, whatever status they are
+ * declared with: the upstream refusing the platform-managed key, the caller
+ * needing to re-authenticate, an unprovisioned secret, and every registered
+ * rate-limit code. Each is a measured fault the platform publishes as such.
+ *
+ * Mirrors `SDK_UPSTREAM_ERROR_CODE_REGISTRY` (categories `upstream_auth` and
+ * `upstream_rate_limited`) and the 401-mapped and MISSING_SECRET rows of
+ * `SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES` as a literal tuple, because a
+ * `Map<string, ...>` cannot feed a type; `health-scenario.test.ts` pins the
+ * two against each other.
+ */
+export const EXPECTED_ERROR_REFUSAL_CODES = [
+	"AUTH_REQUIRED",
+	"reauth_required",
+	"MISSING_SECRET",
+	"UPSTREAM_AUTH_ERROR",
+	"RATE_LIMITED",
+	"UPSTREAM_RATE_LIMIT",
+	"LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR",
+] as const;
+export type ExpectedErrorRefusalCode = (typeof EXPECTED_ERROR_REFUSAL_CODES)[number];
+const EXPECTED_ERROR_REFUSAL_CODE_SET: ReadonlySet<string> = new Set(EXPECTED_ERROR_REFUSAL_CODES);
+
+/**
+ * A reference to one declared operation error, by value: the `code` and the
+ * `status` the runtime serves for it, read from the operation's `errorCodes`
+ * declaration through {@link errorRefs}.
+ *
+ * Structural on purpose. TODO(lane A `defineErrors`): the factory's entries
+ * (`errors.NO_DATA`) plug in here by exposing the same two fields; once the
+ * declaration carries `category`, narrow this type to the upstream-envelope
+ * categories (`sourceForCategory(category) === "upstream_failure"`) so the
+ * monitor's source match is refused by the type as well.
+ */
+export type OperationErrorRef<
+	TCode extends string = string,
+	TStatus extends ExpectedAbsenceStatus = ExpectedAbsenceStatus,
+> = {
+	readonly code: TCode;
+	readonly status: TStatus;
+};
+
+/** The slice of an `errorCodes` entry {@link errorRefs} reads. */
+export type OperationErrorCodeDeclaration = {
+	readonly code: string;
+	readonly status?: number;
+};
+
+/** The {@link OperationErrorRef} one `errorCodes` entry yields, or `never` when it may not be an absence. */
+export type AbsenceErrorRef<T> = T extends {
+	readonly code: infer TCode extends string;
+	readonly status: infer TStatus extends ExpectedAbsenceStatus;
+}
+	? TCode extends ExpectedErrorRefusalCode
+		? never
+		: OperationErrorRef<TCode, TStatus>
+	: never;
+
+/**
+ * One {@link OperationErrorRef} per `errorCodes` entry an expected absence
+ * may name, keyed by code. An entry without a status, with a status outside
+ * {@link ExpectedAbsenceStatus}, or whose code is a refusal
+ * ({@link EXPECTED_ERROR_REFUSAL_CODES}) has no key, so referencing it is a
+ * compile error. A widened declaration (`status: number`) yields no keys at
+ * all: declare `errorCodes` as a literal (`as const`) so each code is one.
+ */
+export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[]> = {
+	readonly [TRef in AbsenceErrorRef<T[number]> as TRef["code"]]: TRef;
+};
+
+/**
+ * Typed references to the error codes an operation declares, for
+ * `expectedErrors`. Declare the codes once, reference them by value:
+ *
+ * ```ts
+ * export const weatherAlertsErrorCodes = [
+ *   { code: "NO_DATA", status: 404, description: "No alert is issued today." },
+ * ] as const satisfies readonly OperationErrorCode[];
+ * const errors = errorRefs(weatherAlertsErrorCodes);
+ *
+ * // in the scenario's operation step
+ * expectedErrors: [{ error: errors.NO_DATA, attribute: [...] }]
+ * ```
+ *
+ * `errors.TYPO` and `errors.RATE_LIMITED` do not exist on the returned type.
+ * The runtime object carries exactly the keys the type does, so a reference
+ * built from a widened declaration fails at `defineHealthScenario` instead of
+ * silently never matching.
+ */
+export function errorRefs<const T extends readonly OperationErrorCodeDeclaration[]>(
+	errorCodes: T,
+): ErrorRefs<T> {
+	// `buildOperationErrorCodeLookup` resolves a duplicate code to its LAST
+	// declaration, so the reference follows the same reading: resolve first,
+	// then decide whether the resolved declaration names an absence. Filtering
+	// per row would keep an earlier absence row that the server never serves.
+	const resolved = new Map<string, OperationErrorCodeDeclaration>();
+	for (const declaration of errorCodes) resolved.set(declaration.code, declaration);
+	const refs: Record<string, OperationErrorRef> = {};
+	for (const { code, status } of resolved.values()) {
+		if (!isExpectedAbsenceStatus(status) || EXPECTED_ERROR_REFUSAL_CODE_SET.has(code)) continue;
+		refs[code] = Object.freeze({ code, status });
+	}
+	return Object.freeze(refs) as ErrorRefs<T>;
+}
+
+function isExpectedAbsenceStatus(status: number | undefined): status is ExpectedAbsenceStatus {
+	return status === 400 || status === 404;
+}
+
+/**
+ * What an operation step's `expectedErrors` entry looks like when authored.
+ * The reference form is the one to write; the by-code form is accepted one
+ * more release and warns at definition time.
+ */
+export type ExpectedErrorInput =
+	| {
+			readonly error: OperationErrorRef;
+			readonly attribute: NonEmpty<ExpectedAbsenceAttribution>;
+	  }
+	| {
+			/**
+			 * @deprecated Reference the declared code instead:
+			 * `{ error: errorRefs(errorCodes).<CODE>, attribute }`. The by-code
+			 * form is removed in the next minor.
+			 */
+			readonly status: number;
+			/**
+			 * @deprecated Reference the declared code instead:
+			 * `{ error: errorRefs(errorCodes).<CODE>, attribute }`. The by-code
+			 * form is removed in the next minor.
+			 */
+			readonly code: string;
+			readonly attribute: NonEmpty<ExpectedAbsenceAttribution>;
+	  };
 export type OperationResult = {
 	kind: "operation_result";
 	status_code: number;
@@ -639,22 +783,23 @@ export type OperationResult = {
 	 * cache serve — the runtime's projection of the response envelope's
 	 * `meta.stale`.
 	 *
-	 * An operation that reads its upstream through `ctx.cache.getOrSet(...,
-	 * { staleIfErrorMs })` answers an upstream outage with HTTP 200 and a
-	 * well-formed, fully schema-valid body for the whole stale window. Every
-	 * assertion over `status_code` and `data` therefore passes, and the probe
-	 * rolls up `ok` while the upstream is down. This boolean is the only thing
-	 * in the step result that separates that from a live read.
+	 * An operation that declares `cache: { staleIfErrorMs }` answers an
+	 * upstream outage with HTTP 200 and a well-formed, fully schema-valid body
+	 * for the whole stale window. Every assertion over `status_code` and `data`
+	 * therefore passes, and the probe rolls up `ok` while the upstream is down.
+	 * This boolean is the only thing in the step result that separates that
+	 * from a live read.
 	 *
 	 * Always present, so a reference to it resolves to `false` rather than
 	 * raising `reference_unresolvable`; a response whose `meta` is malformed
 	 * fails the step rather than projecting as fresh.
 	 *
-	 * Providers that serve stale-if-error should guard on it, so an outage the
-	 * cache is absorbing stops reading as green. Attribute it
-	 * `served_stale_cache`, not `expected_absence`: a stale serve is an upstream
-	 * fault the platform publishes as `degraded`, while an expected absence is
-	 * published as a non-incident status.
+	 * `defineProvider` guards on it for every operation that declares the
+	 * stale window, so an outage the cache is absorbing stops reading as green.
+	 * A hand-written guard attributes it `served_stale_cache`, not
+	 * `expected_absence`: a stale serve is an upstream fault the platform
+	 * publishes as `degraded`, while an expected absence is published as a
+	 * non-incident status.
 	 *
 	 * ```ts
 	 * {
@@ -706,7 +851,7 @@ const expectedAbsenceAttributionSchema = attributionSchema
  * them, so the schema does not admit them.
  */
 const EXPECTED_ERROR_EXCLUDED_STATUSES: ReadonlySet<number> = new Set([401, 403, 429]);
-const expectedErrorSchema: z.ZodType<ExpectedError> = z
+const expectedErrorByCodeSchema = z
 	.object({
 		status: finiteInt(400, 499).refine(
 			(status) => !EXPECTED_ERROR_EXCLUDED_STATUSES.has(status),
@@ -716,6 +861,40 @@ const expectedErrorSchema: z.ZodType<ExpectedError> = z
 		attribute: nonEmptyArray(expectedAbsenceAttributionSchema),
 	})
 	.strict();
+/**
+ * The reference form normalizes to the serialized `{ status, code, attribute }`
+ * the monitor matches on; a reference to a code the accessor did not offer
+ * (a refusal, a status outside the absence class) is refused here as well, so
+ * a hand-built reference cannot widen what the type refuses.
+ */
+const expectedErrorByRefSchema = z
+	.object({
+		error: z
+			.object({
+				code: z
+					.string()
+					.min(1)
+					.refine((code) => !EXPECTED_ERROR_REFUSAL_CODE_SET.has(code), {
+						message:
+							"expected error references a credential or rate-limit refusal, never an absence",
+					}),
+				status: z.union([z.literal(400), z.literal(404)]),
+			})
+			.strict(),
+		attribute: nonEmptyArray(expectedAbsenceAttributionSchema),
+	})
+	.strict()
+	.transform(
+		({ error, attribute }): ExpectedError => ({
+			status: error.status,
+			code: error.code,
+			attribute,
+		}),
+	);
+const expectedErrorSchema: z.ZodType<ExpectedError> = z.union([
+	expectedErrorByRefSchema,
+	expectedErrorByCodeSchema,
+]);
 export const ExpectedErrorSchema = expectedErrorSchema;
 
 export type FindFirst = {
@@ -763,6 +942,15 @@ export type GuardStep = StepBase & {
 	onFail: { attribute: NonEmpty<GuardAttribution>; stop: "scenario" };
 };
 export type HealthStep = OperationStep | ExtractStep | AssertStep | GuardStep;
+/** {@link OperationStep} as authored: `expectedErrors` takes {@link ExpectedErrorInput}. */
+export type OperationStepInput = Omit<OperationStep, "expectedErrors"> & {
+	expectedErrors?: NonEmpty<ExpectedErrorInput>;
+};
+export type HealthStepInput = OperationStepInput | ExtractStep | AssertStep | GuardStep;
+/** {@link HealthScenario} as authored; `defineHealthScenario` returns the serialized form. */
+export type HealthScenarioInput = Omit<HealthScenario, "steps"> & {
+	steps: NonEmpty<HealthStepInput>;
+};
 
 const operationStepSchema = stepBaseSchema
 	.extend({
@@ -1039,6 +1227,297 @@ function walkExpression(
 		ctx.addIssue({ code: "custom", path, message: "expression contains more than 64 leaves" });
 }
 
+/** The step id and result-binding suffix of a freshness guard the SDK attaches. */
+export const FRESHNESS_GUARD_SUFFIX = ".freshness";
+/** The locales SDK-owned copy is shipped in: the ones the SDK negotiates for client-facing provider text (`PROVIDER_ERROR_LOCALES`). */
+export type SdkCopyLocale = "en" | "ko" | "ja";
+/**
+ * The locale key every SDK-attached freshness guard attributes. SDK-owned:
+ * the sentence is the same for every operation of every provider ("answered
+ * from the cache while the upstream was unavailable"), so the SDK ships the
+ * copy ({@link FRESHNESS_GUARD_REASON_COPY}) and the platform resolves the
+ * key to it when the provider's own `locales/*.json` carry no value. A
+ * provider that wants other wording adds the key to its catalogs; that value
+ * wins.
+ */
+export const FRESHNESS_GUARD_REASON_KEY = "health.servedStaleCache";
+/**
+ * The built-in copy for {@link FRESHNESS_GUARD_REASON_KEY}, one sentence per
+ * locale the SDK negotiates for client-facing provider text (`en`, `ko`,
+ * `ja`, the `PROVIDER_ERROR_LOCALES`). The platform's contract check and
+ * registry projection fall back to it for a provider catalog that lacks the
+ * key.
+ */
+export const FRESHNESS_GUARD_REASON_COPY: Readonly<Record<SdkCopyLocale, string>> = Object.freeze({
+	en: "Answered from the cache while the upstream was unavailable.",
+	ko: "업스트림에 연결할 수 없어 캐시된 응답으로 답했습니다.",
+	ja: "アップストリームに接続できなかったため、キャッシュされた応答で回答しました。",
+});
+/** Locale keys the SDK owns the copy of, with that copy; reason keys only, so far. */
+export const SDK_OWNED_HEALTH_REASON_COPY: Readonly<
+	Record<string, typeof FRESHNESS_GUARD_REASON_COPY>
+> = Object.freeze({ [FRESHNESS_GUARD_REASON_KEY]: FRESHNESS_GUARD_REASON_COPY });
+
+const SERVED_STALE_CACHE_FIELD: keyof OperationResult = "served_stale_cache";
+
+/** Whether an operand is `served_stale_cache` on the step result bound to `binding`. */
+function isStaleServeOperand(operand: unknown, binding: string): boolean {
+	if (operand === null || typeof operand !== "object" || !("ref" in operand)) return false;
+	const reference = (operand as { ref: Reference }).ref;
+	return (
+		reference.namespace === "steps" &&
+		reference.binding === binding &&
+		reference.path.length === 1 &&
+		reference.path[0] === SERVED_STALE_CACHE_FIELD
+	);
+}
+
+/**
+ * Whether a predicate over `binding`'s `served_stale_cache` is FALSE for a
+ * stale serve, under `negated` negation depth. The field is always present
+ * and always a boolean, so `exists` and `type_is` hold for a stale serve too:
+ * reading the operand is not rejecting it.
+ */
+function predicateRejectsStaleServe(
+	predicate: AssertionPredicate,
+	binding: string,
+	negated: boolean,
+): boolean {
+	const onActual = isStaleServeOperand(predicate.actual, binding);
+	const onExpected = "expected" in predicate && isStaleServeOperand(predicate.expected, binding);
+	if (!onActual && !onExpected) return false;
+	const literal = onActual
+		? "expected" in predicate
+			? predicate.expected
+			: undefined
+		: predicate.actual;
+	const { operator } = predicate;
+	const failsWhenStale =
+		(operator === "not_equals" && literal === true) || (operator === "equals" && literal === false);
+	const holdsWhenStale =
+		(operator === "is_true" && onActual) ||
+		(operator === "equals" && literal === true) ||
+		(operator === "not_equals" && literal === false);
+	return negated ? holdsWhenStale : failsWhenStale;
+}
+
+/**
+ * Whether an expression evaluates FALSE when the step bound to `binding` was
+ * answered from a stale cache. A clause under `any` counts only if every
+ * sibling branch rejects the stale serve too, because `any` is satisfied by
+ * the branch that still passes (`status_2xx` on a stale 200).
+ */
+function rejectsStaleServe(
+	expression: AssertionExpression,
+	binding: string,
+	negated = false,
+): boolean {
+	if (expression.kind === "not") return rejectsStaleServe(expression.clause, binding, !negated);
+	if (expression.kind === "all" || expression.kind === "any") {
+		const conjunctive = negated ? expression.kind === "any" : expression.kind === "all";
+		return conjunctive
+			? expression.clauses.some((clause) => rejectsStaleServe(clause, binding, negated))
+			: expression.clauses.every((clause) => rejectsStaleServe(clause, binding, negated));
+	}
+	if (expression.kind === "predicate")
+		return predicateRejectsStaleServe(expression, binding, negated);
+	return false;
+}
+
+/** Whether a guard degrades `operationId` as a stale serve, not as an absence. */
+function attributesStaleServe(step: GuardStep, operationId: string): boolean {
+	return step.onFail.attribute.some(
+		(entry) => entry.operationId === operationId && entry.reasonCode === "served_stale_cache",
+	);
+}
+
+/**
+ * Whether the author already reaches a freshness verdict on the operation
+ * step at `index`: an `assert` covering the operation that rejects the stale
+ * serve (a `down` verdict, harsher than the default and honoured as the
+ * author's choice), or a `guard` that rejects it and attributes
+ * `served_stale_cache` to the operation, BEFORE any other guard. Every guard
+ * stops the scenario, so a row or emptiness guard placed first would answer a
+ * stale, empty serve with its own reason and the freshness guard would never
+ * run; a guard that attributes `expected_absence` is not a verdict either,
+ * because the platform publishes that as a non-incident status.
+ */
+function authorsFreshnessVerdict(steps: readonly HealthStep[], index: number): boolean {
+	const operation = steps[index];
+	if (operation?.kind !== "operation") return false;
+	const { result: binding, operationId } = operation;
+	for (const step of steps.slice(index + 1)) {
+		if (
+			step.kind === "assert" &&
+			step.coversOperations.includes(operationId) &&
+			rejectsStaleServe(step.expression, binding)
+		)
+			return true;
+		if (step.kind !== "guard") continue;
+		if (rejectsStaleServe(step.condition, binding)) return attributesStaleServe(step, operationId);
+		// A freshness guard for ANOTHER read of the same operation degrades on
+		// exactly this concern, so `read A, read B, guard A, guard B` covers both.
+		const siblingFreshnessGuard = steps.some(
+			(sibling) =>
+				sibling.kind === "operation" &&
+				sibling.result !== binding &&
+				rejectsStaleServe(step.condition, sibling.result) &&
+				attributesStaleServe(step, sibling.operationId),
+		);
+		if (!siblingFreshnessGuard) return false;
+	}
+	return false;
+}
+
+/** The freshness guard the SDK attaches right after an operation step. */
+function freshnessGuard(operation: OperationStep): GuardStep {
+	return {
+		id: `${operation.id}${FRESHNESS_GUARD_SUFFIX}`,
+		result: `${operation.result}${FRESHNESS_GUARD_SUFFIX}`,
+		kind: "guard",
+		condition: {
+			kind: "predicate",
+			operator: "not_equals",
+			actual: {
+				ref: { namespace: "steps", binding: operation.result, path: [SERVED_STALE_CACHE_FIELD] },
+			},
+			expected: true,
+		},
+		onFail: {
+			attribute: [
+				{
+					operationId: operation.operationId,
+					status: "degraded",
+					reasonCode: "served_stale_cache",
+					reasonKey: FRESHNESS_GUARD_REASON_KEY,
+				},
+			],
+			stop: "scenario",
+		},
+	};
+}
+
+/**
+ * The scenario with a freshness guard after every operation step the
+ * scenario covers, for an operation in `staleServingOperations`, that the
+ * author left unguarded. Idempotent: a guard this function attached is an
+ * authored verdict on the next pass.
+ *
+ * An operation that declares `cache: { staleIfErrorMs }` answers an upstream
+ * outage with HTTP 200 and a schema-valid body for the whole stale window, so
+ * every clause over `status_code` and `data` passes and the probe would roll
+ * up `ok` through the outage; `served_stale_cache` on the step result is the
+ * only operand that tells the two apart. The stale-serve policy stays
+ * declared once, on the operation, and `defineProvider` calls this with the
+ * operations that declare it. Steps for an operation outside
+ * `coversOperations` (a preparatory read for another operation) are not this
+ * probe's verdict and are left alone, as are steps for an operation that
+ * never serves stale.
+ *
+ * A `step_block` candidate's members must stay contiguous and may not contain
+ * a guard, so the guards for its member steps follow the block's last member.
+ */
+export function withFreshnessGuards(
+	scenario: HealthScenario,
+	staleServingOperations: ReadonlySet<string>,
+): HealthScenario {
+	const blockEndByMember = new Map<string, string>();
+	for (const step of scenario.steps) {
+		if (step.kind !== "operation" || step.candidate === undefined || !("scope" in step.candidate))
+			continue;
+		const last = step.candidate.members[step.candidate.members.length - 1];
+		if (last !== undefined)
+			for (const member of step.candidate.members) blockEndByMember.set(member, last);
+	}
+	const deferred = new Map<string, GuardStep[]>();
+	const steps: HealthStep[] = [];
+	for (const [index, step] of scenario.steps.entries()) {
+		steps.push(step);
+		if (
+			step.kind === "operation" &&
+			staleServingOperations.has(step.operationId) &&
+			scenario.coversOperations.includes(step.operationId) &&
+			!authorsFreshnessVerdict(scenario.steps, index)
+		) {
+			const blockEnd = blockEndByMember.get(step.id);
+			if (blockEnd === undefined || blockEnd === step.id) steps.push(freshnessGuard(step));
+			else deferred.set(blockEnd, [...(deferred.get(blockEnd) ?? []), freshnessGuard(step)]);
+		}
+		steps.push(...(deferred.get(step.id) ?? []));
+	}
+	return { ...scenario, steps: steps as [HealthStep, ...HealthStep[]] };
+}
+
+/**
+ * Marks a serialized `expectedErrors` entry that was authored by code string
+ * (`{ status, code, attribute }`) rather than by reference. Non-enumerable and
+ * symbol-keyed, so the wire shape, JSON serialization and equality are
+ * unchanged; registered globally so a provider built with one copy of the SDK
+ * is read correctly by the lint in another (`apifuse check` lints the
+ * provider's definition object in-process). The by-code form is the
+ * deprecated authoring shape, and this is what lets its lint rules
+ * (`health-check-expected-error-not-an-absence`, `-unmatchable`) skip every
+ * reference entry: a reference is declared, status-bound and refusal-free by
+ * construction, so there is nothing for them to check.
+ */
+const EXPECTED_ERROR_BY_CODE = Symbol.for("@apifuse/provider-sdk/health/expectedErrorByCode");
+
+/** Whether a serialized `expectedErrors` entry was authored by code string. */
+export function isExpectedErrorByCode(entry: unknown): boolean {
+	return (
+		entry !== null &&
+		typeof entry === "object" &&
+		(entry as { [EXPECTED_ERROR_BY_CODE]?: unknown })[EXPECTED_ERROR_BY_CODE] === true
+	);
+}
+
+/**
+ * Tags the serialized entries that were authored by code and warns once per
+ * entry. `HealthScenarioSchema` keeps array order, so the authored entry at
+ * `[stepIndex][entryIndex]` is the serialized one at the same position.
+ */
+function markExpectedErrorsByCode(input: unknown, scenario: HealthScenario): void {
+	if (
+		input === null ||
+		typeof input !== "object" ||
+		!Array.isArray((input as { steps?: unknown }).steps)
+	)
+		return;
+	const { id, steps } = input as { id?: unknown; steps: unknown[] };
+	for (const [stepIndex, step] of steps.entries()) {
+		if (step === null || typeof step !== "object") continue;
+		const { expectedErrors, id: stepId } = step as { expectedErrors?: unknown; id?: unknown };
+		if (!Array.isArray(expectedErrors)) continue;
+		const serialized = scenario.steps[stepIndex];
+		if (serialized?.kind !== "operation") continue;
+		for (const [entryIndex, entry] of expectedErrors.entries()) {
+			if (
+				entry === null ||
+				typeof entry !== "object" ||
+				typeof (entry as { code?: unknown }).code !== "string"
+			)
+				continue;
+			const target = serialized.expectedErrors?.[entryIndex];
+			if (target !== undefined)
+				Object.defineProperty(target, EXPECTED_ERROR_BY_CODE, { value: true, enumerable: false });
+			console.warn(
+				`[provider-sdk] Health scenario ${JSON.stringify(id)} step ${JSON.stringify(stepId)} declares expectedErrors by code string ${JSON.stringify((entry as { code: string }).code)}; reference the declared code instead ({ error: errorRefs(errorCodes).${(entry as { code: string }).code}, attribute }). The by-code form is removed in the next minor.`,
+			);
+		}
+	}
+}
+
+/**
+ * Validates an authored scenario and returns its serialized form: expected
+ * errors normalized to `{ status, code, attribute }`. The freshness guard is
+ * not attached here, because whether an operation serves stale is declared on
+ * the operation (`cache: { staleIfErrorMs }`), which `defineProvider` reads
+ * when it attaches the guard ({@link withFreshnessGuards}); the step budget
+ * (64) and the id and binding uniqueness are re-checked there for what the
+ * monitor receives, attached guards included.
+ */
 export function defineHealthScenario(input: unknown): HealthScenario {
-	return HealthScenarioSchema.parse(input);
+	const scenario = HealthScenarioSchema.parse(input);
+	markExpectedErrorsByCode(input, scenario);
+	return scenario;
 }

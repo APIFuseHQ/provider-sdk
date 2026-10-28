@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+	buildSessionKey,
+	InMemorySessionOwnerRegistry,
+	StatefulRoutingDeadlineError,
+	StatefulSessionRouter,
+} from "../stateful/index.js";
+import {
 	STATEFUL_PROVIDER_METRIC_NAMES,
 	type StatefulProviderMetricLabelInput,
 	type StatefulProviderMetricName,
@@ -8,6 +14,7 @@ import {
 import {
 	STATEFUL_PROVIDER_METRIC_HELP,
 	STATEFUL_PROVIDER_METRIC_KINDS,
+	STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS,
 	StatefulProviderMetricRegistry,
 } from "../stateful/stateful-provider-metric-registry.js";
 
@@ -18,7 +25,10 @@ import {
 // stateful-router-default-metrics-assembly.test.ts.
 
 const FORWARD = "apifuse_stateful_provider_routing_forward_total";
+const LOCAL = "apifuse_stateful_provider_routing_local_total";
+const REACQUIRE = "apifuse_stateful_provider_routing_reacquire_total";
 const DEADLINE = "apifuse_stateful_provider_routing_deadline_expired_total";
+const ROUTING = [FORWARD, LOCAL, REACQUIRE, DEADLINE] as const;
 const ACTIVE_SESSIONS = "apifuse_stateful_provider_active_sessions";
 const QUEUE_DEPTH = "apifuse_stateful_provider_session_operation_queue_depth";
 const DURATION = "apifuse_stateful_provider_session_operation_duration_ms";
@@ -306,5 +316,170 @@ describe("StatefulProviderMetricRegistry", () => {
 
 		registry.reset();
 		expect(registry.render()).toBe(empty);
+	});
+});
+
+// The routing counters serve() declares at zero for the operations it hands
+// to the stateful runtime: what a declaration renders, that the router's
+// first increment lands on the declared series, and what reset keeps.
+describe("StatefulProviderMetricRegistry routing series declarations", () => {
+	// Every sample line of the four routing counters, in render order.
+	function routingSamples(body: string): string[] {
+		return body.split("\n").filter((line) => ROUTING.some((name) => line.startsWith(`${name}{`)));
+	}
+
+	function declaredAtZero(providerId: string, operationId: string): string[] {
+		return [
+			`${FORWARD}{providerId="${providerId}",operationId="${operationId}"} 0`,
+			`${LOCAL}{providerId="${providerId}",operationId="${operationId}"} 0`,
+			`${REACQUIRE}{providerId="${providerId}",operationId="${operationId}"} 0`,
+			`${DEADLINE}{providerId="${providerId}",operationId="${operationId}",redactedErrorCode="deadline_expired"} 0`,
+		];
+	}
+
+	it("declares the four routing counters of every listed operation as series at zero", () => {
+		expect(Object.keys(STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS).sort()).toEqual(
+			[...ROUTING].sort(),
+		);
+		const registry = new StatefulProviderMetricRegistry();
+		registry.declareRoutingSeries({
+			providerId: "kakaotalk",
+			operationIds: ["send-message", "read-messages"],
+		});
+
+		const body = registry.render();
+		expect(section(body, FORWARD)).toBe(
+			[
+				header(FORWARD),
+				`${FORWARD}{providerId="kakaotalk",operationId="read-messages"} 0`,
+				`${FORWARD}{providerId="kakaotalk",operationId="send-message"} 0`,
+			].join("\n"),
+		);
+		expect(section(body, DEADLINE)).toBe(
+			[
+				header(DEADLINE),
+				`${DEADLINE}{providerId="kakaotalk",operationId="read-messages",redactedErrorCode="deadline_expired"} 0`,
+				`${DEADLINE}{providerId="kakaotalk",operationId="send-message",redactedErrorCode="deadline_expired"} 0`,
+			].join("\n"),
+		);
+		expect(routingSamples(body)).toHaveLength(8);
+		// Only the routing counters are declared; every other name keeps its
+		// HELP and TYPE lines alone.
+		const others = STATEFUL_PROVIDER_METRIC_NAMES.filter(
+			(name) => !ROUTING.some((routing) => routing === name),
+		);
+		for (const name of others) expect(section(body, name)).toBe(header(name));
+	});
+
+	it("counts the router's labels into the declared series instead of a second one", () => {
+		const registry = new StatefulProviderMetricRegistry();
+		registry.declareRoutingSeries({ providerId: "kakaotalk", operationIds: ["send-message"] });
+		registry.increment(FORWARD, routerLabels("request-1"));
+		registry.increment(DEADLINE, {
+			...routerLabels("request-2"),
+			redactedErrorCode: "deadline_expired",
+		});
+
+		expect(routingSamples(registry.render())).toEqual([
+			`${FORWARD}{providerId="kakaotalk",operationId="send-message"} 1`,
+			`${LOCAL}{providerId="kakaotalk",operationId="send-message"} 0`,
+			`${REACQUIRE}{providerId="kakaotalk",operationId="send-message"} 0`,
+			`${DEADLINE}{providerId="kakaotalk",operationId="send-message",redactedErrorCode="deadline_expired"} 1`,
+		]);
+	});
+
+	it("ignores a repeated declaration and keeps the value of a series that already counted", () => {
+		const registry = new StatefulProviderMetricRegistry();
+		registry.increment(FORWARD, routerLabels("request-1"), 2);
+		registry.declareRoutingSeries({
+			providerId: "kakaotalk",
+			operationIds: ["send-message", "send-message"],
+		});
+		registry.declareRoutingSeries({ providerId: "kakaotalk", operationIds: ["send-message"] });
+
+		expect(routingSamples(registry.render())).toEqual([
+			`${FORWARD}{providerId="kakaotalk",operationId="send-message"} 2`,
+			...declaredAtZero("kakaotalk", "send-message").slice(1),
+		]);
+	});
+
+	it("keeps the declared series at zero on reset and forgets the undeclared ones", () => {
+		const registry = new StatefulProviderMetricRegistry();
+		registry.declareRoutingSeries({ providerId: "kakaotalk", operationIds: ["send-message"] });
+		const declared = registry.render();
+		registry.increment(FORWARD, routerLabels("request-1"));
+		registry.increment(FORWARD, routerLabels("request-2", "undeclared-operation"));
+		registry.gauge(ACTIVE_SESSIONS, {}, 1);
+		registry.observe(DURATION, {}, 1);
+		expect(registry.render()).not.toBe(declared);
+
+		registry.reset();
+		expect(registry.render()).toBe(declared);
+		expect(routingSamples(declared)).toEqual(declaredAtZero("kakaotalk", "send-message"));
+	});
+
+	it("receives every routing count a real router makes for a declared operation on a declared series", async () => {
+		const registry = new StatefulProviderMetricRegistry();
+		registry.declareRoutingSeries({ providerId: "kakaotalk", operationIds: ["send-message"] });
+		const owners = new InMemorySessionOwnerRegistry();
+		const sessionOf = (connectionId: string) =>
+			buildSessionKey({ providerId: "kakaotalk", serviceAccountId: "account-1", connectionId });
+		const forwardedTo: string[] = [];
+		const router = new StatefulSessionRouter({
+			currentPod: { podId: "pod-local", endpoint: "http://pod-local" },
+			registry: owners,
+			forwarder: {
+				forward: async (owner) => {
+					forwardedTo.push(owner.ownerPodId);
+					return { output: "forwarded" };
+				},
+			},
+			executor: { executeLocal: async () => ({ output: "local" }) },
+			leaseDurationMs: 30_000,
+			metricEmitter: registry,
+		});
+		await owners.acquire({
+			sessionKey: sessionOf("connection-remote"),
+			ownerPodId: "pod-remote",
+			ownerEndpoint: "http://pod-remote",
+			leaseDurationMs: 60_000,
+		});
+		const request = (requestId: string, connectionId: string, deadlineAt?: string) => ({
+			requestId,
+			sessionKey: sessionOf(connectionId),
+			providerId: "kakaotalk",
+			operationId: "send-message",
+			connectionId,
+			serviceAccountId: "account-1",
+			input: {},
+			...(deadlineAt ? { deadlineAt } : {}),
+		});
+
+		try {
+			// Nobody owns the session: the router acquires it, then runs it here.
+			expect(await router.route(request("request-1", "connection-local"))).toEqual({
+				output: "local",
+			});
+			// Another pod owns the session: the router forwards to it.
+			expect(await router.route(request("request-2", "connection-remote"))).toEqual({
+				output: "forwarded",
+			});
+			// The deadline passed before routing.
+			await expect(
+				router.route(
+					request("request-3", "connection-local", new Date(Date.now() - 1).toISOString()),
+				),
+			).rejects.toBeInstanceOf(StatefulRoutingDeadlineError);
+		} finally {
+			await router.release();
+		}
+
+		expect(forwardedTo).toEqual(["pod-remote"]);
+		expect(routingSamples(registry.render())).toEqual([
+			`${FORWARD}{providerId="kakaotalk",operationId="send-message"} 1`,
+			`${LOCAL}{providerId="kakaotalk",operationId="send-message"} 1`,
+			`${REACQUIRE}{providerId="kakaotalk",operationId="send-message"} 1`,
+			`${DEADLINE}{providerId="kakaotalk",operationId="send-message",redactedErrorCode="deadline_expired"} 1`,
+		]);
 	});
 });

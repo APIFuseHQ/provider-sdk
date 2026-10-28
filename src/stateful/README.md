@@ -36,9 +36,13 @@ the following compatibility-sensitive behavior:
   the bound one. Expose it to Prometheus as a Service port named `metrics`, so the primary port can
   keep admitting the gateway only. The listener renders one process-wide registry, which a
   `StatefulSessionRouter` built without a `metricEmitter` counts into, so the routing counters
-  (`apifuse_stateful_provider_routing_*_total`) come out without wiring. A
-  `StatefulProviderSessionManager` built without a `metricEmitter` counts into the same registry,
-  so `apifuse_stateful_provider_session_operation_duration_ms` and
+  (`apifuse_stateful_provider_routing_*_total`) come out without wiring. A `serve()` given an
+  `operationExecutor` or `internalOperationExecutor` starts the four routing counters of every
+  declared operation at `0` before its listeners open, so the first scrape already has the series
+  and Prometheus `rate()` counts the first routed operation; a server that runs its declared
+  handlers itself declares none. A `StatefulProviderSessionManager` built without a
+  `metricEmitter` counts into the same registry, so
+  `apifuse_stateful_provider_session_operation_duration_ms` and
   `apifuse_stateful_provider_session_invalidations_total` (labelled `redactedErrorCode` with the
   adapter's `StatefulSessionInvalidatedError.reason`) come out without wiring too. Provider code
   that counts its own names from the closed set, such as a write ledger's

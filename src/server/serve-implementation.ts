@@ -74,7 +74,7 @@ import {
 } from "../observability.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
-import { createProviderCache } from "../runtime/cache.js";
+import { createProviderCache, withOperationCachePolicy } from "../runtime/cache.js";
 import { bindCacheTelemetry, CacheTelemetryCollector } from "../runtime/cache-telemetry.js";
 import type { HandleTelemetryEvent } from "../handle.js";
 import { createHandleContext } from "../runtime/handle.js";
@@ -198,6 +198,7 @@ import {
 	statefulDeadlineAbortReason,
 	statefulRoutingDeadlineErrorCausedBy,
 } from "../stateful/deadline-expiry.js";
+import { statefulProviderMetricRegistry } from "../stateful/stateful-provider-metric-registry.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
@@ -352,12 +353,11 @@ export const ProviderServerStatefulForwardEnvelopeSchema = z
 // that predates the field: the rejection is terminal for the operation and the
 // two pods coexist for the whole rolling update. The envelope's own keys stay
 // strict on both sides, because they are protocol rather than payload.
-const ReceivedStatefulForwardEnvelopeSchema =
-	ProviderServerStatefulForwardEnvelopeSchema.extend({
-		operationRequest: z.object(
-			ProviderServerStatefulForwardEnvelopeSchema.shape.operationRequest.shape,
-		),
-	});
+const ReceivedStatefulForwardEnvelopeSchema = ProviderServerStatefulForwardEnvelopeSchema.extend({
+	operationRequest: z.object(
+		ProviderServerStatefulForwardEnvelopeSchema.shape.operationRequest.shape,
+	),
+});
 
 export type ProviderServerStatefulForwardEnvelope = Readonly<
 	z.infer<typeof ProviderServerStatefulForwardEnvelopeSchema>
@@ -955,8 +955,10 @@ function createProviderContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
-	const cache = createProviderCache(
-		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
+	const cache = withOperationCachePolicy(
+		createProviderCache(bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry)),
+		{ providerId: provider.id, operationId },
+		provider.operations[operationId]?.cache,
 	);
 	const { capabilityModules } = options;
 	const resolverDeadlineAtMs = resolveResolverDeadlineAtMs(
@@ -1381,11 +1383,9 @@ function createAuthFlowContext(
 			...(signal ? { signal } : {}),
 			httpTelemetry: scope.httpTelemetry,
 		}),
-		state: instrumentProviderRuntimeState(
-			state,
-			scope.stateTelemetry,
-			scope.redact,
-		).forConnection(resolveOperationConnectionId(request)),
+		state: instrumentProviderRuntimeState(state, scope.stateTelemetry, scope.redact).forConnection(
+			resolveOperationConnectionId(request),
+		),
 		stealth: stealthBaseUrl
 			? capabilityModules.stealth
 				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
@@ -4738,6 +4738,19 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 			allowMemoryFallback: options.allowMemoryStateFallback === true,
 		}),
 	);
+
+	// A server that hands its operations to an executor runs them through the
+	// stateful runtime, whose router counts every one it routes. Their routing
+	// counters start at zero before any listener opens: the first scrape then
+	// has the series, and rate() counts the first routed operation instead of
+	// starting from it. A server that runs the declared handlers itself routes
+	// nothing and declares nothing.
+	if (options.operationExecutor || options.internalOperationExecutor) {
+		statefulProviderMetricRegistry.declareRoutingSeries({
+			providerId: provider.id,
+			operationIds: Object.keys(provider.operations),
+		});
+	}
 
 	// The process's proxy vendor selector: adaptive unless the environment says
 	// `ordered`. Released with the server so a stopped server leaves the static
