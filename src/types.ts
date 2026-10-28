@@ -2201,6 +2201,12 @@ export interface ProviderCacheGetOrSetOptions {
 	/**
 	 * Optional stale window after ttlMs. If the loader fails while the entry is
 	 * still inside this window, stale data is returned and marked stale.
+	 *
+	 * @deprecated Declare the window once on the operation instead:
+	 * `defineOperation({ cache: { staleIfErrorMs } })`. The SDK applies it to
+	 * every cache write the operation makes and attaches the health-scenario
+	 * freshness guard for it; a per-call value is honoured one more release,
+	 * warns once per operation, and is removed in the next minor.
 	 */
 	staleIfErrorMs?: number;
 	/** Optional jitter applied to writes to avoid synchronized expiry. */
@@ -2760,6 +2766,26 @@ export interface OperationDeprecationMetadata {
 	migrationGuide: string;
 }
 
+/**
+ * The stale-serve policy of one operation (`OperationDefinition.cache`).
+ *
+ * Declared once, read twice: the runtime applies `staleIfErrorMs` to every
+ * `ctx.cache.getOrSet` / `ctx.cache.set` the operation makes (the call's own
+ * options need only `ttlMs`), and `defineProvider` attaches the freshness
+ * guard to the operation's health scenarios, because an operation that
+ * serves stale answers an upstream outage with a schema-valid 200 that only
+ * `served_stale_cache` on the step result can tell from a live read. Requires
+ * the provider-level `cache` capability.
+ */
+export interface OperationCachePolicy {
+	/**
+	 * Stale window after each write's `ttlMs`, in whole milliseconds, at least
+	 * 1. A loader failure inside the window is answered from the cache and
+	 * marked stale. Omit `cache` entirely to serve nothing stale.
+	 */
+	readonly staleIfErrorMs: number;
+}
+
 export interface OperationContractMetadata {
 	/**
 	 * Callable operation contract version. Defaults to 1.0.0 for the clean
@@ -2820,6 +2846,8 @@ export interface OperationDefinition<
 		proxy?: boolean | ProviderProxyPolicy;
 	};
 	hints?: Record<string, string>;
+	/** Stale-serve policy; see {@link OperationCachePolicy}. */
+	cache?: OperationCachePolicy;
 	healthCheck?: HealthCheckSuite<InferSchemaOutput<TInput>, InferSchemaOutput<TOutput>>;
 	healthCheckUnsupported?: HealthCheckUnsupported;
 	/** The operation's items have no picture and no own page upstream; see `noMedia()`. */

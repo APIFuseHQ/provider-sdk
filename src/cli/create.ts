@@ -425,9 +425,7 @@ export async function buildProviderCreatePlan(
 	// gate. `sync-assets` after an explicit SDK upgrade re-records the version.
 	const sdkSpecifier =
 		options.sdkSpecifier ??
-		(options.preset === "monorepo" && resolvedWorkspaceRoot
-			? "workspace:*"
-			: packageJson.version);
+		(options.preset === "monorepo" && resolvedWorkspaceRoot ? "workspace:*" : packageJson.version);
 	const relativeProviderRoot = relative(cwd, providerRoot) || options.name;
 	const nextDevCommand = `cd ${relativeProviderRoot} && bun run dev`;
 	const packageName =
@@ -952,7 +950,9 @@ function printResult(plan: ProviderCreatePlan, jsonMode: boolean, dryRun: boolea
 		nextDevCommand: plan.nextDevCommand,
 		files: plan.files.map((file) => {
 			const relativePath = relative(plan.providerRoot, file.path) || file.path;
-			return file.kind === "symlink" ? `${relativePath} -> ${file.content} (symlink)` : relativePath;
+			return file.kind === "symlink"
+				? `${relativePath} -> ${file.content} (symlink)`
+				: relativePath;
 		}),
 	};
 
