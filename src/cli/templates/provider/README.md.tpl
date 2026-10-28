@@ -178,8 +178,11 @@ healthCheck: {
 }
 ```
 
-If the operation reads through `ctx.cache.getOrSet(..., { staleIfErrorMs })`,
-add a guard step on the operation step result's `served_stale_cache` as well —
-otherwise an upstream outage is answered with a schema-valid 200 and the probe
-reports `ok` for the whole stale window. See
+If the operation declares `cache: { staleIfErrorMs }` (the stale window the
+SDK applies to its `ctx.cache` writes), an upstream outage is answered with a
+schema-valid 200; `defineProvider` attaches a guard on the operation step
+result's `served_stale_cache` so the probe reports `degraded` instead of `ok`
+for the stale window. The guard attributes the SDK-owned locale key
+`health.servedStaleCache`, whose copy the SDK ships; add the key to `locales/`
+only to change the wording. See
 `.agents/skills/health-checks-and-fail-closed/SKILL.md` for both shapes.

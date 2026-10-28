@@ -1,0 +1,87 @@
+# Health-scenario migration for the typed `expectedErrors` reference and the
+# operation-level stale window. Run from a provider checkout (dry run first):
+#
+#   sg scan --rule <sdk>/scripts/codemods/health-refs.yml .
+#   sg scan --rule <sdk>/scripts/codemods/health-refs.yml --update-all .
+#
+# What it rewrites, and what it leaves to the author:
+#
+# 1. `expectedErrors` entries written by code string become references,
+#    whatever order the three properties were written in. The rewrite names
+#    the reference `errors.<CODE>`; declare `errors` once in the scenario
+#    module from the operation's own declaration, which the codemod cannot
+#    locate across files:
+#
+#      import { errorRefs } from "@apifuse/provider-sdk/provider";
+#      const errors = errorRefs(<operation>ErrorCodes);
+#
+# 2. A per-call `staleIfErrorMs` on `ctx.cache.getOrSet` / `ctx.cache.set` is
+#    reported with the operation declaration that replaces it. Not rewritten:
+#    the declaration lives on `defineOperation({ cache: { staleIfErrorMs } })`,
+#    usually in another file, and dropping the per-call value before the
+#    declaration exists would silently turn stale serving off. Add the
+#    declaration, then delete the per-call option; the runtime warns once per
+#    operation until it is gone.
+#
+# Nothing to do for locales: `health.servedStaleCache`, the reasonKey of the
+# SDK-attached freshness guard, is SDK-owned and the platform resolves it to
+# the SDK's copy when a catalog lacks it. Add the key only to change the
+# wording.
+#
+# Hand-written `served_stale_cache` guards keep working and are not removed:
+# the SDK attaches its guard only to an operation step the author left
+# unguarded.
+id: health-expected-error-by-code-to-ref
+language: TypeScript
+message: expectedErrors names the code by string; reference the declared code through errorRefs(errorCodes)
+severity: warning
+rule:
+  kind: object
+  inside:
+    kind: array
+    inside:
+      kind: pair
+      has:
+        field: key
+        regex: ^expectedErrors$
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+    - has:
+        pattern:
+          context: '{ status: $STATUS }'
+          selector: pair
+    - has:
+        pattern:
+          context: '{ attribute: $ATTRIBUTE }'
+          selector: pair
+constraints:
+  CODE:
+    kind: string
+transform:
+  NAME:
+    replace:
+      source: $CODE
+      replace: '^["'']|["'']$'
+      by: ''
+fix: '{ error: errors.$NAME, attribute: $ATTRIBUTE }'
+---
+id: health-stale-window-per-call
+language: TypeScript
+message: 'staleIfErrorMs is passed per cache call; declare it once on the operation: defineOperation({ cache: { staleIfErrorMs: $WINDOW } }), then delete it here'
+severity: warning
+rule:
+  pattern:
+    context: '{ staleIfErrorMs: $WINDOW }'
+    selector: pair
+  inside:
+    kind: object
+    inside:
+      kind: arguments
+      inside:
+        kind: call_expression
+        has:
+          field: function
+          regex: '\.cache\.(getOrSet|set)$'

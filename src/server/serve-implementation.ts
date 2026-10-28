@@ -74,7 +74,7 @@ import {
 } from "../observability.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
-import { createProviderCache } from "../runtime/cache.js";
+import { createProviderCache, withOperationCachePolicy } from "../runtime/cache.js";
 import { bindCacheTelemetry, CacheTelemetryCollector } from "../runtime/cache-telemetry.js";
 import type { HandleTelemetryEvent } from "../handle.js";
 import { createHandleContext } from "../runtime/handle.js";
@@ -352,12 +352,11 @@ export const ProviderServerStatefulForwardEnvelopeSchema = z
 // that predates the field: the rejection is terminal for the operation and the
 // two pods coexist for the whole rolling update. The envelope's own keys stay
 // strict on both sides, because they are protocol rather than payload.
-const ReceivedStatefulForwardEnvelopeSchema =
-	ProviderServerStatefulForwardEnvelopeSchema.extend({
-		operationRequest: z.object(
-			ProviderServerStatefulForwardEnvelopeSchema.shape.operationRequest.shape,
-		),
-	});
+const ReceivedStatefulForwardEnvelopeSchema = ProviderServerStatefulForwardEnvelopeSchema.extend({
+	operationRequest: z.object(
+		ProviderServerStatefulForwardEnvelopeSchema.shape.operationRequest.shape,
+	),
+});
 
 export type ProviderServerStatefulForwardEnvelope = Readonly<
 	z.infer<typeof ProviderServerStatefulForwardEnvelopeSchema>
@@ -955,8 +954,10 @@ function createProviderContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
-	const cache = createProviderCache(
-		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
+	const cache = withOperationCachePolicy(
+		createProviderCache(bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry)),
+		{ providerId: provider.id, operationId },
+		provider.operations[operationId]?.cache,
 	);
 	const { capabilityModules } = options;
 	const resolverDeadlineAtMs = resolveResolverDeadlineAtMs(
@@ -1381,11 +1382,9 @@ function createAuthFlowContext(
 			...(signal ? { signal } : {}),
 			httpTelemetry: scope.httpTelemetry,
 		}),
-		state: instrumentProviderRuntimeState(
-			state,
-			scope.stateTelemetry,
-			scope.redact,
-		).forConnection(resolveOperationConnectionId(request)),
+		state: instrumentProviderRuntimeState(state, scope.stateTelemetry, scope.redact).forConnection(
+			resolveOperationConnectionId(request),
+		),
 		stealth: stealthBaseUrl
 			? capabilityModules.stealth
 				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)

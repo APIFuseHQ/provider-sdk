@@ -23,6 +23,7 @@ type OperationFixture = {
 	fixtures: { request: unknown; response: unknown };
 	source?: string;
 	healthCheck?: unknown;
+	cache?: { staleIfErrorMs: number };
 };
 
 function operation(healthCheck?: unknown, source?: string): OperationFixture {
@@ -208,6 +209,72 @@ describe("health-check monitorability lint", () => {
 
 	it("stays silent for an operation with no health check at all", () => {
 		expect(rules(lint(undefined), UNMONITORED)).toEqual([]);
+	});
+
+	it("never stale-serve lints an operation that declares cache.staleIfErrorMs", () => {
+		// The declared operation gets the SDK-attached guard; the two rules stay
+		// only for the deprecated per-call path. A declared operation is skipped
+		// even when its handler still passes the option per call, and even when
+		// an unattributable file-level cache call would otherwise list it.
+		const declared: OperationFixture = {
+			...operation(
+				{
+					interval: "1h",
+					cases: [{ name: "dense", input: {}, scenario: scenario([readStep(OPERATION_KEY)]) }],
+				},
+				STALE_CLIENT,
+			),
+			cache: { staleIfErrorMs: 300_000 },
+		};
+		expect(rules(lintFleet({ [OPERATION_KEY]: declared }), UNGUARDED_STALE)).toEqual([]);
+		expect(
+			rules(
+				lintFleet({ [OPERATION_KEY]: declared }, { "src/cache.ts": STALE_CLIENT }),
+				UNGUARDED_STALE,
+			),
+		).toEqual([]);
+		// The reason rule is skipped the same way: the SDK guard attributing
+		// served_stale_cache goes in front of the authored one.
+		const guard = freshnessGuard(OPERATION_KEY);
+		if (guard.kind !== "guard") throw new Error("expected a guard step");
+		const absenceGuard: HealthStep = {
+			...guard,
+			onFail: {
+				attribute: [
+					{
+						operationId: OPERATION_KEY,
+						status: "degraded",
+						reasonCode: "expected_absence",
+						reasonKey: `health.operations.${OPERATION_KEY}.probe.calm`,
+					},
+				],
+				stop: "scenario",
+			},
+		};
+		const declaredAbsence: OperationFixture = {
+			...operation(
+				{
+					interval: "1h",
+					cases: [
+						{
+							name: "dense",
+							input: {},
+							scenario: scenario([readStep(OPERATION_KEY), absenceGuard]),
+						},
+					],
+				},
+				STALE_CLIENT,
+			),
+			cache: { staleIfErrorMs: 300_000 },
+		};
+		expect(rules(lintFleet({ [OPERATION_KEY]: declaredAbsence }), STALE_REASON)).toEqual([]);
+		// Without the declaration the same shapes are the per-call findings.
+		expect(
+			rules(lintFleet({ [OPERATION_KEY]: { ...declared, cache: undefined } }), UNGUARDED_STALE),
+		).toHaveLength(1);
+		expect(
+			rules(lintFleet({ [OPERATION_KEY]: { ...declaredAbsence, cache: undefined } }), STALE_REASON),
+		).toHaveLength(1);
 	});
 
 	it("warns when a stale-if-error read has no served_stale_cache guard", () => {
