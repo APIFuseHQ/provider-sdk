@@ -729,12 +729,15 @@ export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[]> = {
 export function errorRefs<const T extends readonly OperationErrorCodeDeclaration[]>(
 	errorCodes: T,
 ): ErrorRefs<T> {
+	// `buildOperationErrorCodeLookup` resolves a duplicate code to its LAST
+	// declaration, so the reference follows the same reading: resolve first,
+	// then decide whether the resolved declaration names an absence. Filtering
+	// per row would keep an earlier absence row that the server never serves.
+	const resolved = new Map<string, OperationErrorCodeDeclaration>();
+	for (const declaration of errorCodes) resolved.set(declaration.code, declaration);
 	const refs: Record<string, OperationErrorRef> = {};
-	for (const declaration of errorCodes) {
-		const { code, status } = declaration;
+	for (const { code, status } of resolved.values()) {
 		if (!isExpectedAbsenceStatus(status) || EXPECTED_ERROR_REFUSAL_CODE_SET.has(code)) continue;
-		// `buildOperationErrorCodeLookup` resolves a duplicate code to its LAST
-		// declaration, so the reference follows the same reading.
 		refs[code] = Object.freeze({ code, status });
 	}
 	return Object.freeze(refs) as ErrorRefs<T>;

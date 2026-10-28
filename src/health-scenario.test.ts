@@ -919,6 +919,17 @@ describe("declarative health scenarios", () => {
 		expect(JSON.parse(JSON.stringify(parsed))).toEqual(parsed);
 	});
 
+	it("resolves a duplicate code to its last declaration before exposing a reference, as the server does", () => {
+		const refs = errorRefs([
+			{ code: "NO_DATA", status: 404 },
+			{ code: "NO_DATA", status: 422 },
+			{ code: "EMPTY", status: 422 },
+			{ code: "EMPTY", status: 404 },
+		] as const) as Record<string, { code: string; status: number } | undefined>;
+		expect(refs.NO_DATA).toBeUndefined();
+		expect(refs.EMPTY).toEqual({ code: "EMPTY", status: 404 });
+	});
+
 	it("references a declared absence code by value and serializes it as status and code", () => {
 		const errorCodes = [
 			{ code: "NO_DATA", status: 404, description: "No alert is issued today." },
