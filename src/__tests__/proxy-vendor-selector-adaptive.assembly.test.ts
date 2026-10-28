@@ -1,4 +1,13 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	setSystemTime,
+} from "bun:test";
 import {
 	createServer,
 	request as httpRequest,
@@ -187,10 +196,13 @@ afterEach(() => {
 });
 
 describe("operational assembly: adaptive vendor fallback on ctx.http", () => {
-	const transitions: ProxyVendorStateTransition[] = [];
+	// Each case starts from a cold selector and drives its own history through
+	// the transport, so the cases do not depend on their order.
+	let transitions: ProxyVendorStateTransition[];
 	let selector: AdaptiveProxyVendorSelector;
 
-	beforeAll(() => {
+	beforeEach(() => {
+		transitions = [];
 		selector = createAdaptiveProxyVendorSelector({
 			consecutiveFailureThreshold: 2,
 			baseOpenMs: 200,
@@ -252,9 +264,16 @@ describe("operational assembly: adaptive vendor fallback on ctx.http", () => {
 		});
 	});
 
-	it("opens the vendor at the threshold and sends later requests straight to the next one", async () => {
+	/** Two requests whose smartproxy tunnels are refused: the second one opens smartproxy. */
+	async function refuseTwice() {
 		smartproxy.mode = "refuse";
-		const second = await read("/second");
+		const first = await read("/refused-1");
+		expect(first.proxy).toMatchObject({ selection: { reason: "retry_alternate" } });
+		return await read("/refused-2");
+	}
+
+	it("opens the vendor at the threshold and sends later requests straight to the next one", async () => {
+		const second = await refuseTwice();
 		expect(second.status).toBe(200);
 		expect(second.smartproxy).toHaveLength(1);
 		expect(second.nodemaven).toHaveLength(1);
@@ -278,6 +297,7 @@ describe("operational assembly: adaptive vendor fallback on ctx.http", () => {
 	});
 
 	it("probes the vendor once after the open period and returns it to the head of the chain", async () => {
+		await refuseTwice();
 		smartproxy.mode = "forward";
 		await Bun.sleep(250);
 		const probe = await read("/probe");
@@ -309,14 +329,13 @@ describe("operational assembly: adaptive vendor fallback on ctx.http", () => {
 
 	it("does not hold a stalled origin behind the proxy against the vendor", async () => {
 		smartproxy.mode = "stall";
-		const before = transitions.length;
 		const stalled = await read("/stalled", 150);
 		expect(stalled.status).toBe(200);
 		// Timeouts are not the vendor's: the request walks its static share on
 		// smartproxy, then the fallback, and the vendor stays closed.
 		expect(stalled.smartproxy).toHaveLength(3);
 		expect(stalled.nodemaven).toHaveLength(1);
-		expect(transitions.length).toBe(before);
+		expect(transitions).toEqual([]);
 		expect(selector.snapshot()[0]).toMatchObject({
 			vendor: "smartproxy",
 			state: "closed",
