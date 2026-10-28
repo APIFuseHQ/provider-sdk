@@ -120,6 +120,20 @@ describe("lintRuntimeBoundarySources (deprecated shim)", () => {
 		}
 	});
 
+	it("keeps an unused import reachable when the statement has no semicolon and a trailing comment", () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const result = lintRuntimeBoundarySources({
+				"index.ts": `import { readFile } from "node:fs/promises" // kept for later\nexport const name = "x";\n`,
+			});
+			expect(result.diagnostics.map((d) => [d.field, d.rule, d.message.split(": ")[0]])).toEqual([
+				["sourceFiles.index.ts", "node-runtime-module-import", "node:fs/promises (line 1)"],
+			]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("judges nothing without an in-scope file and refuses paths outside the provider root", () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		try {

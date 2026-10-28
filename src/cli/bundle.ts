@@ -637,11 +637,13 @@ function keepValueImports(ts: TypeScriptModule, fileName: string, source: string
 		) {
 			specifier = statement.moduleSpecifier.text;
 		}
-		if (specifier !== undefined) insertions.push({ offset: statement.end, specifier });
+		// Inserted at the statement start, self-terminated and on the same line: a trailing comment or a
+		// missing semicolon after the original statement cannot swallow it, and line numbers stay put.
+		if (specifier !== undefined) insertions.push({ offset: statement.getStart(sourceFile), specifier });
 	}
 	let text = source;
 	for (const { offset, specifier } of insertions.reverse()) {
-		text = `${text.slice(0, offset)} import ${JSON.stringify(specifier)};${text.slice(offset)}`;
+		text = `${text.slice(0, offset)}import ${JSON.stringify(specifier)}; ${text.slice(offset)}`;
 	}
 	return text;
 }
