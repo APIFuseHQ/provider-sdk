@@ -121,16 +121,35 @@ export interface SensitiveFieldOptions {
 	description?: string;
 }
 
+/**
+ * A schema that went through an SDK public-schema entry point (`describeKey()`,
+ * `.describeKey()`, `fields.*()`, `sensitive()`, `publicField()`,
+ * `untrustedContent()`). It is the same zod schema at runtime and stays
+ * assignable to its zod type; the only difference is that raw `.describe()`
+ * prose on it is marked deprecated, so the hover shows up on public operation
+ * schemas and nowhere else (upstream response schemas and other zod users in
+ * the same program keep zod's own `.describe()` untouched).
+ */
+export type PublicSchema<TSchema extends ZodType> = {
+	/**
+	 * @deprecated Raw prose on a public schema is not localized. Use
+	 * `.describeKey("<locale key>")` (or `describeKey(schema, key)`) backed by
+	 * `locales/<lang>.json`; `defineProvider` warns on raw prose now and refuses
+	 * it in the next release. Codemod: `scripts/codemods/schema.yml`.
+	 */
+	describe(description: string): PublicSchema<TSchema>;
+} & TSchema;
+
 export function describeKey<TSchema extends ZodType>(
 	schema: TSchema,
 	key: ProviderLocaleKey | string,
-): TSchema {
+): PublicSchema<TSchema> {
 	const descriptionKey = providerLocaleKey(key);
 	const metadata = schema.meta() ?? {};
 	return schema.meta({
 		...metadata,
 		[APIFUSE_DESCRIPTION_KEY_META_KEY]: descriptionKey,
-	});
+	}) as PublicSchema<TSchema>;
 }
 
 /**
@@ -139,32 +158,28 @@ export function describeKey<TSchema extends ZodType>(
  * meta keys on the field node so the platform can enforce the boundary when it
  * assembles tool output; validation and the parsed value are unchanged.
  */
-export function untrustedContent<TSchema extends ZodType>(schema: TSchema): TSchema {
+export function untrustedContent<TSchema extends ZodType>(schema: TSchema): PublicSchema<TSchema> {
 	const metadata = schema.meta() ?? {};
 	return schema.meta({
 		...metadata,
 		[APIFUSE_CONTENT_TRUST_META_KEY]: "untrusted",
 		[APIFUSE_CONTENT_PROVENANCE_META_KEY]: "external",
-	});
+	}) as PublicSchema<TSchema>;
 }
 
+// Only the SDK's own `.describeKey()` is added to zod here; zod's `.describe()`
+// is left alone so that no other zod user in a program that includes these
+// types sees a deprecation. The deprecation lives on `PublicSchema`.
 declare module "zod" {
 	interface ZodType {
-		/**
-		 * @deprecated Raw prose on a public schema is not localized. Use
-		 * `.describeKey("<locale key>")` (or `describeKey(schema, key)`) backed by
-		 * `locales/<lang>.json`; `defineProvider` warns on raw prose now and refuses
-		 * it in the next release. Codemod: `scripts/codemods/schema.yml`.
-		 */
-		describe(description: string): this;
-		describeKey(key: ProviderLocaleKey | string): this;
+		describeKey(key: ProviderLocaleKey | string): PublicSchema<this>;
 	}
 }
 
 const describeKeyMethod = function <TSchema extends ZodType>(
 	this: TSchema,
 	key: ProviderLocaleKey | string,
-): TSchema {
+): PublicSchema<TSchema> {
 	return describeKey(this, key);
 };
 
@@ -213,7 +228,7 @@ const RESERVED_SENSITIVE_KEYS = new Set([
 export function field<TSchema extends ZodType>(
 	schema: TSchema,
 	options: SensitiveFieldOptions = {},
-): TSchema {
+): PublicSchema<TSchema> {
 	const described = options.description
 		? schema.meta({ ...(schema.meta() ?? {}), description: options.description })
 		: schema;
@@ -239,13 +254,13 @@ export function field<TSchema extends ZodType>(
 		...(kind !== undefined || APIFUSE_SENSITIVE_KIND_META_KEY in metadata
 			? { [APIFUSE_SENSITIVE_KIND_META_KEY]: kind }
 			: {}),
-	});
+	}) as PublicSchema<TSchema>;
 }
 
 export function sensitive<TSchema extends ZodType>(
 	schema: TSchema,
 	kind?: SensitiveFieldKind,
-): TSchema {
+): PublicSchema<TSchema> {
 	return field(schema, { sensitive: true, kind });
 }
 
@@ -257,7 +272,7 @@ export function sensitive<TSchema extends ZodType>(
  * identifies a person. Apply it to the leaf, before `.optional()` or
  * `.nullable()`; wrapping a `sensitive()` declaration throws at definition time.
  */
-export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema {
+export function publicField<TSchema extends ZodType>(schema: TSchema): PublicSchema<TSchema> {
 	return field(schema, { sensitive: false });
 }
 
@@ -298,7 +313,7 @@ export interface SensitivePresetOptions {
 function sensitiveString(
 	preset: keyof typeof SENSITIVE_FIELD_PRESETS,
 	options: SensitivePresetOptions & { minLength?: number } = {},
-): ZodString {
+): PublicSchema<ZodString> {
 	const { kind, description } = SENSITIVE_FIELD_PRESETS[preset];
 	const schema = options.minLength === undefined ? z.string() : z.string().min(options.minLength);
 	return field(schema, {

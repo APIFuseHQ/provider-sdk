@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { defineCursor } from "../handle.js";
 import { APIFUSE_HANDLE_META_KEY, handleFieldDescription } from "../handle-meta.js";
-import { describeKey, fields, publicField, sensitive } from "../schema.js";
+import { describeKey, fields, type PublicSchema, publicField, sensitive } from "../schema.js";
 import { collectUndeclaredFields, warnUndeclaredFields } from "../schema-fields.js";
 
 function keyed<TSchema extends z.ZodType>(schema: TSchema, key: string): TSchema {
@@ -192,7 +192,9 @@ describe("warnUndeclaredFields", () => {
 
 		expect(warn).toHaveBeenCalledTimes(1);
 		const message = String(warn.mock.calls[0]?.[0]);
-		expect(message).toContain('Provider "warn-demo" has 2 public schema fields without a locale key');
+		expect(message).toContain(
+			'Provider "warn-demo" has 2 public schema fields without a locale key',
+		);
 		expect(message).toContain("operations.search.input.q (raw .describe() prose)");
 		expect(message).toContain("operations.search.output (no description)");
 		expect(message).toContain('.describeKey("<locale key>")');
@@ -208,5 +210,29 @@ describe("warnUndeclaredFields", () => {
 		});
 
 		expect(warn).not.toHaveBeenCalled();
+	});
+});
+
+describe("PublicSchema", () => {
+	it("is the same zod schema at runtime and stays assignable to its zod type", () => {
+		const token: z.ZodString = fields.token();
+		const keyed: z.ZodObject<{ id: z.ZodString }> = describeKey(z.object({ id: z.string() }), "k");
+		const viaMethod: PublicSchema<z.ZodString> = z.string().describeKey("k");
+		const wrapped = z.object({
+			token,
+			keyed,
+			viaMethod,
+			opt: publicField(z.number()).optional(),
+			sens: sensitive(z.string()).nullable(),
+		});
+		const parsed: z.infer<typeof wrapped> = wrapped.parse({
+			token: "t",
+			keyed: { id: "i" },
+			viaMethod: "v",
+			sens: null,
+		});
+
+		expect(parsed).toEqual({ token: "t", keyed: { id: "i" }, viaMethod: "v", sens: null });
+		expect(fields.token()).toBeInstanceOf(z.ZodString);
 	});
 });

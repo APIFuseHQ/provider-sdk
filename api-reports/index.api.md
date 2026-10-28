@@ -1887,7 +1887,7 @@ export function delayed(maxDelay: string): HealthScheduleRandomization;
 export function derivedProviderErrorCatalogPath(code: string, field: "message" | "fix"): string;
 
 // @public (undocumented)
-export function describeKey<TSchema extends ZodType>(schema: TSchema, key: ProviderLocaleKey | string): TSchema;
+export function describeKey<TSchema extends ZodType>(schema: TSchema, key: ProviderLocaleKey | string): PublicSchema<TSchema>;
 
 // @public (undocumented)
 export interface DevServerOptions {
@@ -2123,21 +2123,21 @@ export const ExtractStepSchema: z.ZodObject<{
 export function extractVerificationCode(text: string, options?: SttVerificationCodeOptions): VerificationCodeExtractionResult;
 
 // @public (undocumented)
-export function field<TSchema extends ZodType>(schema: TSchema, options?: SensitiveFieldOptions): TSchema;
+export function field<TSchema extends ZodType>(schema: TSchema, options?: SensitiveFieldOptions): PublicSchema<TSchema>;
 
 // @public (undocumented)
 export const fields: {
-    readonly apiKey: (options?: SensitivePresetOptions) => ZodString;
-    readonly authorization: (options?: SensitivePresetOptions) => ZodString;
-    readonly cookie: (options?: SensitivePresetOptions) => ZodString;
-    readonly otp: (options?: SensitivePresetOptions) => ZodString;
+    readonly apiKey: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
+    readonly authorization: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
+    readonly cookie: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
+    readonly otp: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
     readonly password: (options?: SensitivePresetOptions & {
         minLength?: number;
-    }) => ZodString;
-    readonly paymentUrl: (options?: SensitivePresetOptions) => ZodString;
-    readonly phone: (options?: SensitivePresetOptions) => ZodString;
-    readonly secret: (options?: SensitivePresetOptions) => ZodString;
-    readonly token: (options?: SensitivePresetOptions) => ZodString;
+    }) => PublicSchema<ZodString>;
+    readonly paymentUrl: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
+    readonly phone: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
+    readonly secret: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
+    readonly token: (options?: SensitivePresetOptions) => PublicSchema<ZodString>;
 };
 
 // @public (undocumented)
@@ -6889,7 +6889,12 @@ export type ProxyVendorStateTransition = {
 };
 
 // @public
-export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema;
+export function publicField<TSchema extends ZodType>(schema: TSchema): PublicSchema<TSchema>;
+
+// @public
+export type PublicSchema<TSchema extends ZodType> = {
+    describe(description: string): PublicSchema<TSchema>;
+} & TSchema;
 
 // @public (undocumented)
 export function qualifyProviderLocaleKey(providerId: string, key: ProviderLocaleKey | string): string;
@@ -8391,7 +8396,7 @@ interface SelfTestCancellationLogEvent {
 }
 
 // @public (undocumented)
-export function sensitive<TSchema extends ZodType>(schema: TSchema, kind?: SensitiveFieldKind): TSchema;
+export function sensitive<TSchema extends ZodType>(schema: TSchema, kind?: SensitiveFieldKind): PublicSchema<TSchema>;
 
 // @public (undocumented)
 export type SensitiveFieldKind = "api_key" | "authorization" | "cookie" | "credential" | "otp" | "password" | "payment_url" | "personal_data" | "phone" | "secret" | "token";
@@ -9637,7 +9642,7 @@ export class UnsupportedProviderStateError extends ProviderError {
 }
 
 // @public
-export function untrustedContent<TSchema extends ZodType>(schema: TSchema): TSchema;
+export function untrustedContent<TSchema extends ZodType>(schema: TSchema): PublicSchema<TSchema>;
 
 // @public
 export function unwrapEnvelope(data: unknown, path?: string): unknown;
