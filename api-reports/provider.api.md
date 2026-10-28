@@ -17,6 +17,9 @@ export type AbsenceErrorRef<T> = T extends {
     readonly status: infer TStatus extends ExpectedAbsenceStatus;
 } ? TCode extends ExpectedErrorRefusalCode ? never : OperationErrorRef<TCode, TStatus> : never;
 
+// @public
+export type AllowedHostList = readonly [string, ...string[]];
+
 // @public (undocumented)
 export const APIFUSE_CONTENT_PROVENANCE_META_KEY = "x-apifuse-content-provenance";
 
@@ -521,6 +524,35 @@ export interface AuthFlowTerminalContext {
 // @public (undocumented)
 export type AuthMode = "none" | "platform-managed" | "credentials" | "oauth2" | "oauth2_proxied";
 
+// @public
+export type AuthModeCredentialGuard<TConfig> = TConfig extends {
+    auth: {
+        mode: "credentials";
+    };
+} ? TConfig extends {
+    credential: {
+        keys: readonly string[];
+    };
+} ? TConfig extends {
+    credential: {
+        keys: readonly [];
+    };
+} ? {
+    "credentials auth mode stores at least one credential key; list the keys the auth flow stores in credential.keys": never;
+} : unknown : {
+    "credentials auth mode stores a credential; declare credential: { keys: [...] } naming every key the auth flow stores": never;
+} : TConfig extends {
+    auth: {
+        mode: "platform-managed";
+    };
+} ? TConfig extends {
+    credential: {
+        keys: readonly [string, ...string[]];
+    };
+} ? {
+    "platform-managed auth already implies the unfiltered credential capability; remove credential.keys": never;
+} : unknown : unknown;
+
 // @public (undocumented)
 export type AuthSafeData = {
     readonly [key: string]: AuthSafeJson;
@@ -965,6 +997,9 @@ interface CredentialDeclaration {
     storesReusableSecret?: boolean;
 }
 
+// @public
+type CredentialKeysName<TKeys, TWord extends string> = TKeys extends readonly (infer TKey)[] ? true extends (TKey extends string ? string extends TKey ? false : Lowercase<TKey> extends `${string}${TWord}${string}` ? true : false : false) ? true : false : false;
+
 // @public (undocumented)
 export type CredentialRefDeclaration = {
     alias: string;
@@ -1077,6 +1112,28 @@ export type CredentialsAuthInput<TFields extends CredentialsAuthFields> = {
 // @public (undocumented)
 export type CredentialsAuthLoginResult<TCredentialKeys extends readonly string[], TChallengeId extends string = string> = CredentialsAuthCompleteResult<TCredentialKeys> | CredentialsAuthChallengeRequest<TChallengeId>;
 
+// Warning: (ae-forgotten-export) The symbol "CredentialKeysName" needs to be exported by the entry point provider.d.ts
+// Warning: (ae-forgotten-export) The symbol "ReusableSecretKeyWord" needs to be exported by the entry point provider.d.ts
+// Warning: (ae-forgotten-export) The symbol "DeclaresReusableSecret" needs to be exported by the entry point provider.d.ts
+// Warning: (ae-forgotten-export) The symbol "ReloginSecretKeyWord" needs to be exported by the entry point provider.d.ts
+//
+// @public
+export type CredentialSecretGuard<TConfig> = TConfig extends {
+    credential: {
+        keys: infer TKeys;
+    };
+} ? CredentialKeysName<TKeys, ReusableSecretKeyWord> extends true ? DeclaresReusableSecret<TConfig> extends true ? unknown : {
+    "credential.keys names a reusable secret (token, password, cookie, session, api key); declare credential.storesReusableSecret: true and credential.justification": never;
+} : TConfig extends {
+    auth: {
+        flow: {
+            refresh: (...args: never[]) => unknown;
+        };
+    };
+} ? CredentialKeysName<TKeys, ReloginSecretKeyWord> extends true ? DeclaresReusableSecret<TConfig> extends true ? unknown : {
+    "auth.flow.refresh may log in again with a stored secret (password, passcode, secret, cookie, session); declare credential.storesReusableSecret: true and credential.justification": never;
+} : unknown : unknown : unknown;
+
 // @public (undocumented)
 export interface CursorKind<TSchema extends ZodType = ZodType, TName extends string = string> extends HandleKindBase<TSchema> {
     readonly name: TName;
@@ -1136,6 +1193,19 @@ export type DeclaredHandleKind<TConfig> = TConfig extends {
     handle: readonly (infer K)[];
 } ? [K] extends [never] ? HandleKind : K extends HandleKind ? K : HandleKind : HandleKind;
 
+// @public
+type DeclaresCapability<TConfig, TKey extends string> = string extends keyof TConfig ? true : [TConfig] extends [{
+    [K in TKey]: NonNullable<unknown>;
+}] ? true : false;
+
+// @public (undocumented)
+type DeclaresReusableSecret<TConfig> = TConfig extends {
+    credential: {
+        storesReusableSecret: true;
+        justification: string;
+    };
+} ? true : false;
+
 // @public (undocumented)
 export function defineCredentialsAuth<TFields extends CredentialsAuthFields, TCredentialKeys extends readonly [string, ...string[]], TChallenges extends Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, keyof TChallenges & string>> = Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, string>>>(options: DefineCredentialsAuthOptions<TFields, TCredentialKeys, TChallenges>): DefinedCredentialsAuth;
 
@@ -1185,12 +1255,13 @@ export interface DefineCursorOptions<TSchema extends ZodType, TName extends stri
     readonly ttl: ProviderStateDurationString;
 }
 
-// @public (undocumented)
+// @public
 export interface DefinedCredentialsAuth {
-    // Warning: (ae-forgotten-export) The symbol "AuthConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
-    auth: AuthConfig;
+    auth: {
+        mode: "credentials";
+        flow: AuthFlowDefinition;
+    };
     // Warning: (ae-forgotten-export) The symbol "ContextDeclaration" needs to be exported by the entry point provider.d.ts
     //
     // (undocumented)
@@ -1198,7 +1269,9 @@ export interface DefinedCredentialsAuth {
     // Warning: (ae-forgotten-export) The symbol "CredentialDeclaration" needs to be exported by the entry point provider.d.ts
     //
     // (undocumented)
-    credential: CredentialDeclaration;
+    credential: CredentialDeclaration & {
+        keys: [string, ...string[]];
+    };
 }
 
 // @public
@@ -1259,7 +1332,12 @@ export function defineOperation<TContext>(): <TInput extends SchemaLike, TOutput
 // Warning: (ae-forgotten-export) The symbol "AuthStartNoInputGuard" needs to be exported by the entry point provider.d.ts
 //
 // @public
-export function defineProvider<const TConfig extends ProviderDeclaration>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TConfig> & HandleRequiresStateGuard<TConfig>): ProviderBuilder<TConfig>;
+export function defineProvider<const TConfig extends ProviderDeclaration>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TConfig> & HandleRequiresStateGuard<TConfig> & AuthModeCredentialGuard<TConfig> & CredentialSecretGuard<TConfig>): ProviderBuilder<TConfig>;
+
+// Warning: (ae-forgotten-export) The symbol "WidenedAuthModeGuard" needs to be exported by the entry point provider.d.ts
+//
+// @public @deprecated (undocumented)
+export function defineProvider<const TConfig extends ProviderDeclarationWithAuthConfig>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & WidenedAuthModeGuard<TConfig> & AuthStartNoInputGuard<TConfig> & HandleRequiresStateGuard<TConfig> & CredentialSecretGuard<TConfig>): ProviderBuilder<TConfig>;
 
 // @public (undocumented)
 export function defineSmsOtpMatcher(config: Omit<SmsOtpMatcherDefinition, "extractOtp">): SmsOtpMatcherDefinition;
@@ -2945,6 +3023,11 @@ type NativeVendorSkipTelemetryEvent = {
 };
 
 // @public
+type NoAuthExchange = {
+    exchange?: never;
+};
+
+// @public
 export type NodemavenConnectionType = "residential" | "mobile";
 
 // @public
@@ -3747,8 +3830,33 @@ interface ProviderAccessConfig {
 // @public (undocumented)
 export type ProviderAccessVisibility = "public" | "early_access";
 
+// Warning: (ae-forgotten-export) The symbol "NoAuthExchange" needs to be exported by the entry point provider.d.ts
+//
 // @public
-export type ProviderBuilder<TConfig extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
+export type ProviderAuthDeclaration = ({
+    mode: "none";
+    flow?: AuthFlowDefinition;
+    proxied?: never;
+} & NoAuthExchange) | ({
+    mode: "platform-managed";
+    flow?: AuthFlowDefinition;
+    proxied?: never;
+} & NoAuthExchange) | ({
+    mode: "credentials";
+    flow: AuthFlowDefinition;
+    proxied?: never;
+} & NoAuthExchange) | ({
+    mode: "oauth2";
+    flow: AuthFlowDefinition;
+    proxied?: never;
+} & NoAuthExchange) | ({
+    mode: "oauth2_proxied";
+    proxied: ProxiedOAuthConfig;
+    flow?: AuthFlowDefinition;
+} & NoAuthExchange);
+
+// @public
+export type ProviderBuilder<TConfig extends ProviderDeclaration | ProviderDeclarationWithAuthConfig> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
     operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 }) => Omit<ProviderDefinition, "operations"> & {
     operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
@@ -3886,45 +3994,47 @@ type ProviderChallenge = {
 // @public (undocumented)
 type ProviderChallengeKind = ProviderChallenge["kind"];
 
+// Warning: (ae-forgotten-export) The symbol "DeclaresCapability" needs to be exported by the entry point provider.d.ts
+//
 // @public
 export type ProviderContext<TConfig = Record<string, unknown>> = {
     request?: ProviderRequestContext;
     trace: TraceContext;
-} & ("env" extends keyof TConfig ? {
+} & (DeclaresCapability<TConfig, "env"> extends true ? {
     env: EnvContext;
-} : Record<never, never>) & ("credential" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "credential"> extends true ? {
     credential: CredentialContext;
-} : TConfig extends {
+} : [TConfig] extends [{
     auth: {
         mode: "platform-managed";
     };
-} ? {
+}] ? {
     credential: CredentialContext;
-} : Record<never, never>) & ("http" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "http"> extends true ? {
     http: HttpClient;
-} : Record<never, never>) & ("files" extends keyof TConfig ? string extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "files"> extends true ? string extends keyof TConfig ? {
     readonly files?: ProviderFilesContext;
 } : {
     readonly files: ProviderFilesContext;
-} : Record<never, never>) & ("native" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "native"> extends true ? {
     readonly native: NativeContext;
-} : Record<never, never>) & ("cache" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "cache"> extends true ? {
     cache: ProviderCache;
-} : Record<never, never>) & ("state" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "state"> extends true ? {
     state: ProviderRuntimeState;
-} : Record<never, never>) & ("stealth" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "stealth"> extends true ? {
     stealth: StealthClient;
-} : Record<never, never>) & ("browser" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "browser"> extends true ? {
     browser: BrowserClient;
-} : Record<never, never>) & ("auth" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "auth"> extends true ? {
     auth: AuthContext;
-} : Record<never, never>) & ("ocr" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "ocr"> extends true ? {
     ocr: OcrContext;
-} : Record<never, never>) & ("stt" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "stt"> extends true ? {
     stt: SttContext;
-} : Record<never, never>) & ("resolver" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "resolver"> extends true ? {
     resolver: ResolverContext;
-} : Record<never, never>) & ("handle" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "handle"> extends true ? {
     handle: HandleContext<DeclaredHandleKind<TConfig>>;
 } : Record<never, never>);
 
@@ -3934,15 +4044,14 @@ export type ProviderContextFor<TConfig> = ProviderContext<TConfig>;
 // @public
 export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TConfig> ? ProviderContext<TConfig> : never;
 
-// @public (undocumented)
+// @public
 export interface ProviderDeclaration {
     // Warning: (ae-forgotten-export) The symbol "ProviderAccessConfig" needs to be exported by the entry point provider.d.ts
     //
     // (undocumented)
     access?: ProviderAccessConfig;
-    allowedHosts?: string[];
-    // (undocumented)
-    auth?: AuthConfig;
+    allowedHosts: AllowedHostList;
+    auth?: ProviderAuthDeclaration;
     // (undocumented)
     browser?: {
         engine: BrowserEngine;
@@ -4004,9 +4113,7 @@ export interface ProviderDeclaration {
     // (undocumented)
     resolver?: ProviderResolverConfig;
     // Warning: (ae-forgotten-export) The symbol "ProviderReviewed" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    reviewed?: ProviderReviewed;
+    reviewed: Exclude<ProviderReviewed, "staging">;
     // (undocumented)
     runtime: "standard" | "shared" | "browser";
     runtimeTarget?: ProviderRuntimeTarget;
@@ -4023,6 +4130,11 @@ export interface ProviderDeclaration {
     // (undocumented)
     version: string;
 }
+
+// @public
+export type ProviderDeclarationWithAuthConfig = Omit<ProviderDeclaration, "auth"> & {
+    auth: AuthConfig;
+};
 
 // @public (undocumented)
 export interface ProviderDefinition<TContext = ProviderContext> {
@@ -4856,6 +4968,14 @@ const relativeDateNodeSchema: z.ZodObject<{
     }, z.core.$strict>;
 }, z.core.$strict>;
 
+// @public
+const RELOGIN_SECRET_KEY_WORDS: readonly ["password", "passcode", "secret", "cookie", "session"];
+
+// Warning: (ae-forgotten-export) The symbol "RELOGIN_SECRET_KEY_WORDS" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type ReloginSecretKeyWord = (typeof RELOGIN_SECRET_KEY_WORDS)[number];
+
 // @public (undocumented)
 interface RequestOptions {
     headers?: Record<string, string> | HttpHeadersFactory;
@@ -4938,6 +5058,14 @@ export type RetryPolicy = {
 
 // @public (undocumented)
 export const RetryPolicySchema: z.ZodType<RetryPolicy, unknown, z.core.$ZodTypeInternals<RetryPolicy, unknown>>;
+
+// @public
+const REUSABLE_SECRET_KEY_WORDS: readonly ["password", "secret", "cookie", "session", "token", "api_key", "api-key", "apikey"];
+
+// Warning: (ae-forgotten-export) The symbol "REUSABLE_SECRET_KEY_WORDS" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type ReusableSecretKeyWord = (typeof REUSABLE_SECRET_KEY_WORDS)[number];
 
 // @public (undocumented)
 export type SafeRegex = {
@@ -6624,6 +6752,15 @@ interface VerificationCodeExtractionResult {
 }
 
 // @public
+type WidenedAuthModeGuard<TConfig> = TConfig extends {
+    auth: {
+        mode: infer TMode;
+    };
+} ? AuthMode extends TMode ? unknown : {
+    "this overload is for an auth block typed AuthConfig; a literal auth block is checked by ProviderAuthDeclaration": never;
+} : unknown;
+
+// @public
 export function withFreshnessGuards(scenario: HealthScenario, staleServingOperations: ReadonlySet<string>): HealthScenario;
 
 export { z }
@@ -6639,8 +6776,9 @@ export { z }
 // dist/config/loader.d.ts:153:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/define-errors.d.ts:33:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:134:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:166:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:264:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:296:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:313:5 - (ae-forgotten-export) The symbol "AuthConfig" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:57:5 - (ae-forgotten-export) The symbol "NativeTelemetrySink" needs to be exported by the entry point provider.d.ts
@@ -6667,9 +6805,9 @@ export { z }
 // dist/types.d.ts:2072:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:2079:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:2114:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2392:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2398:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2400:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2406:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2412:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2414:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

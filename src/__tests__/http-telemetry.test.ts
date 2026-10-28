@@ -227,6 +227,8 @@ for (const factory of ["sync", "async"] as const) {
 				data: await probe(ctx),
 			});
 			const provider: ProviderDefinition = {
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "http-telemetry-probe",
 				version: "1.0.0",
 				runtime: "standard",

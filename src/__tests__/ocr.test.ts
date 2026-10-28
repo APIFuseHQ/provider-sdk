@@ -624,6 +624,8 @@ describe("OCR CAPTCHA constraint handling", () => {
 describe("OCR Provider SDK context integration", () => {
 	it("defineProvider preserves the OCR capability declaration", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "ocr-demo",
 			version: "1.0.0",
 			runtime: "standard",
@@ -649,6 +651,8 @@ describe("OCR Provider SDK context integration", () => {
 
 	it("defineProvider validates OCR declaration shape and mode", () => {
 		const base = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "ocr-invalid-demo",
 			version: "1.0.0",
 			runtime: "standard",
@@ -704,6 +708,8 @@ describe("OCR Provider SDK context integration", () => {
 			},
 		};
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "ocr-server-demo",
 			version: "1.0.0",
 			runtime: "standard",
@@ -714,6 +720,7 @@ describe("OCR Provider SDK context integration", () => {
 				category: "test",
 			},
 			context: { keys: [] },
+			credential: { keys: ["account_id"] },
 			auth: {
 				mode: "credentials",
 				flow: {
@@ -768,6 +775,8 @@ describe("OCR Provider SDK context integration", () => {
 
 	it("maps missing required OCR config to runtime-unavailable status", async () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "ocr-unavailable-demo",
 			version: "1.0.0",
 			runtime: "standard",

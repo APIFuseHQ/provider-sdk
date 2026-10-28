@@ -513,6 +513,8 @@ export default defineProvider({
   id: "invalid-import-declaration-provider",
   version: "1.0.0",
   runtime: "standard",
+  allowedHosts: ["api.example.com"],
+  reviewed: "community",
   proxy: true,
   meta: { displayName: "Invalid Import Declaration Provider", category: "other" },
 })({

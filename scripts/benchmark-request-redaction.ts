@@ -101,6 +101,8 @@ for (let trial = 0; trial < warmupTrials + measuredTrials; trial++) {
 // serve-http.test.ts "dispatches operation handlers" has no timing benchmark.
 // This is its in-process echo/connection dispatch shape, measured separately here.
 const provider: ProviderDefinition = {
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "redaction-cost-provider",
 	version: "1.0.0",
 	runtime: "standard",

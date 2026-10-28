@@ -22,6 +22,8 @@ function requireZodSchema(schema: SchemaLike): z.ZodType {
 }
 
 const validConfig = {
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "korea-air-quality",
 	version: "1.0.0",
 	runtime: "standard" as const,
@@ -78,6 +80,99 @@ describe("defineProvider", () => {
 			"akamai_sensor",
 			"akamai_sbsd",
 		]);
+	});
+
+	describe("declaration host, review and auth-mode validation", () => {
+		const credentialsFlow = {
+			start: async () => ({ kind: "form", turnId: "start" }),
+			continue: async () => ({ kind: "complete", turnId: "complete" }),
+		};
+
+		it.each([
+			["missing allowedHosts", { allowedHosts: undefined }, "must declare at least one allowed host"],
+			["empty allowedHosts", { allowedHosts: [] }, "must declare at least one allowed host"],
+			[
+				"a wildcard host",
+				{ allowedHosts: ["*.example.com"] },
+				'must not declare wildcard allowedHosts entries like "*.example.com"',
+			],
+			["missing reviewed", { reviewed: undefined }, 'must declare reviewed as "first-party" or "community"'],
+			["reviewed staging", { reviewed: "staging" }, 'must declare reviewed as "first-party" or "community"'],
+			[
+				"credentials without auth.flow.continue",
+				{ auth: { mode: "credentials", flow: { start: credentialsFlow.start } }, credential: { keys: ["id"] } },
+				"must define auth.flow.continue for credentials auth mode",
+			],
+			[
+				"oauth2 without auth.flow",
+				{ auth: { mode: "oauth2" } },
+				"must define auth.flow.continue for oauth2 auth mode",
+			],
+			[
+				"credentials without credential keys",
+				{ auth: { mode: "credentials", flow: credentialsFlow } },
+				"must declare credential.keys for credentials auth mode",
+			],
+			[
+				"platform-managed with credential keys",
+				{ auth: { mode: "platform-managed" }, credential: { keys: ["access_token"] } },
+				"must not declare credential.keys because platform-managed auth mode",
+			],
+			[
+				"a credential key that is not a string",
+				{ auth: { mode: "none" }, credential: { keys: [undefined] } },
+				"credential.keys must contain non-empty strings",
+			],
+			[
+				"a reusable secret key without the opt-in",
+				{ auth: { mode: "oauth2", flow: credentialsFlow }, credential: { keys: ["refresh_token"] } },
+				"must set credential.storesReusableSecret and credential.justification when credential.keys includes reusable secrets",
+			],
+			[
+				"a refresh handler over a re-login secret without the opt-in",
+				{
+					auth: {
+						mode: "credentials",
+						flow: { ...credentialsFlow, refresh: async () => ({ kind: "complete", turnId: "r" }) },
+					},
+					credential: { keys: ["username", "passcode"] },
+				},
+				"when auth.flow.refresh may silently re-login with reusable credential secrets",
+			],
+		])("refuses %s", (_label, overrides, message) => {
+			expect(() => defineProvider({ ...validConfig, ...overrides })).toThrow(ValidationError);
+			expect(() => defineProvider({ ...validConfig, ...overrides })).toThrow(message);
+		});
+
+		it("accepts each auth mode with the fields the mode needs", () => {
+			const sessionCredential = {
+				keys: ["session"],
+				storesReusableSecret: true,
+				justification: "test fixture",
+			};
+			expect(defineProvider({ ...validConfig, auth: undefined }).auth).toBeUndefined();
+			expect(defineProvider({ ...validConfig, auth: { mode: "none" } }).auth?.mode).toBe("none");
+			expect(
+				defineProvider({ ...validConfig, auth: { mode: "platform-managed" } }).auth?.mode,
+			).toBe("platform-managed");
+			expect(
+				defineProvider({
+					...validConfig,
+					auth: { mode: "credentials", flow: credentialsFlow },
+					credential: sessionCredential,
+				}).credential,
+			).toEqual(sessionCredential);
+			expect(
+				defineProvider({ ...validConfig, auth: { mode: "oauth2", flow: credentialsFlow } }).auth
+					?.mode,
+			).toBe("oauth2");
+		});
+
+		it("serves allowedHosts as a plain array", () => {
+			const provider = defineProvider({ ...validConfig, allowedHosts: ["a.example.com"] as const });
+			expect(provider.allowedHosts).toEqual(["a.example.com"]);
+			expect(Array.isArray(provider.allowedHosts)).toBe(true);
+		});
 	});
 
 	it("accepts a transport-owned resolver client profile", () => {

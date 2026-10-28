@@ -85,6 +85,8 @@ describe("provider capability imports", () => {
 
 	it("creates an app asynchronously with declared capabilities preloaded", async () => {
 		const provider: ProviderDefinition = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "declared-resolver-startup",
 			version: "1.0.0",
 			runtime: "standard",

@@ -317,6 +317,8 @@ describe("STT prompt and runtime clients", () => {
 describe("STT Provider SDK context integration", () => {
 	it("defineProvider preserves STT capability declaration", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "stt-demo",
 			version: "1.0.0",
 			runtime: "standard",
@@ -362,6 +364,8 @@ describe("STT Provider SDK context integration", () => {
 			extractVerificationCode,
 		};
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "stt-server-demo",
 			version: "1.0.0",
 			runtime: "standard",
@@ -372,6 +376,7 @@ describe("STT Provider SDK context integration", () => {
 				category: "test",
 			},
 			context: { keys: [] },
+			credential: { keys: ["account_id"] },
 			auth: {
 				mode: "credentials",
 				flow: {
@@ -430,6 +435,8 @@ describe("STT Provider SDK context integration", () => {
 
 	it("provider server maps missing required STT config to runtime-unavailable status", async () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "stt-unavailable-demo",
 			version: "1.0.0",
 			runtime: "standard",

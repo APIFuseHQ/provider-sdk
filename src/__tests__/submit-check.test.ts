@@ -4269,7 +4269,9 @@ const response = { updatedAt: "20260707222855" };
 		const baseChecks = report.checks.find((check) => check.id === "base-checks");
 
 		expect(report.score.verdict).toBe("blocked");
-		expect(baseChecks?.evidence?.join("\\n")).toContain("auth-refresh-reusable-secret");
+		expect(baseChecks?.evidence?.join("\\n")).toContain(
+			"must set credential.storesReusableSecret and credential.justification",
+		);
 	});
 
 	it("includes actionable remediation on every failing or warning submit check", async () => {

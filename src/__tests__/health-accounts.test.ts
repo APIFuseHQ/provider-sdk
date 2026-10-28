@@ -46,6 +46,8 @@ const meta = {
 const READ_RISK_CLASS: OperationRiskClass = "read";
 
 const baseDeclaration = {
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "health-accounts-proof",
 	version: "1.0.0",
 	runtime: "standard",
@@ -73,6 +75,8 @@ function expectRejected(healthAccounts: unknown, message: string): void {
 
 function buildWeverseProvider(healthAccounts?: readonly HealthAccountDeclaration[]) {
 	return defineProvider({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "weverse-health-accounts",
 		version: "1.0.0",
 		runtime: "standard",

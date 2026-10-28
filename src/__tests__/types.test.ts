@@ -66,6 +66,8 @@ describe("ProviderDefinition types", () => {
 
 	it("types platform-managed credentials without an explicit declaration", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "platform-managed-types",
 			version: "1.0.0",
 			runtime: "standard",
@@ -102,6 +104,8 @@ describe("ProviderDefinition types", () => {
 		expect(() =>
 			// @ts-expect-error test-invalid: runtime validation must reject auth start handlers that declare input.
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "bad-auth-start",
 				version: "1.0.0",
 				runtime: "standard",
@@ -143,6 +147,8 @@ describe("ProviderDefinition types", () => {
 		const defineInvalidProvider = () =>
 			// @ts-expect-error test-invalid: runtime validation must reject defaulted auth start input hidden from Function.length.
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "defaulted-auth-start",
 				version: "1.0.0",
 				runtime: "standard",
@@ -165,6 +171,8 @@ describe("ProviderDefinition types", () => {
 		expect(defineInvalidProvider).toThrow(/auth\.flow\.start must not declare an input parameter/);
 
 		const contextOnlyProvider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "context-only-auth-start",
 			version: "1.0.0",
 			runtime: "standard",
@@ -180,8 +188,11 @@ describe("ProviderDefinition types", () => {
 					continue: async () => ({ kind: "complete", turnId: "complete" }),
 				},
 			},
+			credential: { keys: ["account_id"] },
 		})({ operations: { noop } });
 		const noParameterProvider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "no-parameter-auth-start",
 			version: "1.0.0",
 			runtime: "standard",
@@ -197,6 +208,7 @@ describe("ProviderDefinition types", () => {
 					continue: async () => ({ kind: "complete", turnId: "complete" }),
 				},
 			},
+			credential: { keys: ["account_id"] },
 		})({ operations: { noop } });
 
 		expect(contextOnlyProvider.id).toBe("context-only-auth-start");
@@ -229,6 +241,9 @@ describe("ProviderDefinition types", () => {
 				id,
 				version: "1.0.0",
 				runtime: "standard",
+				allowedHosts: ["example.com"],
+				reviewed: "community",
+				credential: { keys: ["account_id"] },
 				meta: {
 					displayName: "One Parameter Auth Start",
 					descriptionKey: "providers.oneParameterAuthStart.description",
@@ -257,6 +272,8 @@ describe("ProviderDefinition types", () => {
 		expect(() =>
 			// @ts-expect-error test-invalid: runtime validation must reject defaulted auth start input in function declarations.
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "function-defaulted-auth-start",
 				version: "1.0.0",
 				runtime: "standard",
@@ -309,6 +326,9 @@ describe("ProviderDefinition types", () => {
 				id,
 				version: "1.0.0",
 				runtime: "standard",
+				allowedHosts: ["example.com"],
+				reviewed: "community",
+				credential: { keys: ["account_id"] },
 				meta: {
 					displayName: "Ambiguous Auth Start",
 					descriptionKey: "providers.ambiguousAuthStart.description",
@@ -395,11 +415,14 @@ describe("ProviderDefinition types", () => {
 					id,
 					version: "1.0.0",
 					runtime: "standard",
+					allowedHosts: ["example.com"],
+					reviewed: "community",
 					meta: {
 						displayName: "Widened Auth Flow",
 						descriptionKey: "providers.widenedAuthFlow.description",
 						category: "test",
 					},
+					credential: { keys: ["account_id"] },
 					auth: { mode: "credentials", flow },
 				})({ operations: { noop } });
 
@@ -420,7 +443,10 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(() =>
+			// @ts-expect-error test-invalid: auth.exchange is refused by the type; this test covers the runtime refusal behind it.
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "bad-auth-exchange",
 				version: "1.0.0",
 				runtime: "standard",
@@ -437,12 +463,15 @@ describe("ProviderDefinition types", () => {
 					},
 					exchange: async () => ({ session: "cookie" }),
 				},
+				credential: { keys: ["account_id"] },
 			})({ operations: { noop } }),
 		).toThrow(/auth\.exchange is not part of the Provider SDK auth contract/);
 	});
 
 	it("should type a complete provider definition", () => {
 		const definition = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "korea-air-quality",
 			version: "1.0.0",
 			runtime: "standard" as const,

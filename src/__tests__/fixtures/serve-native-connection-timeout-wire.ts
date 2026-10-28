@@ -50,6 +50,8 @@ const operation = {
 };
 
 const provider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "native-connection-timeout-wire",
 	version: "1.0.0",
 	runtime: "standard",

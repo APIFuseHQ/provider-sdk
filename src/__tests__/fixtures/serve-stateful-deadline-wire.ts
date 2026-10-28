@@ -99,6 +99,8 @@ const operation = {
 };
 
 const provider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: PROVIDER_ID,
 	version: "1.0.0",
 	runtime: "standard",

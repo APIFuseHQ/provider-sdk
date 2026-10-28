@@ -182,6 +182,8 @@ type TurnKind = keyof typeof turns;
 
 function createProvider(): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "auth-contract-provider",
 		version: "1.0.0",
 		runtime: "standard",
@@ -260,6 +262,8 @@ describe("auth-flow AuthTurn provider contract", () => {
 			});
 			const app = createServerApp(
 				{
+					allowedHosts: ["example.com"],
+					reviewed: "community",
 					id: "auth-contract-provider",
 					version: "1.0.0",
 					runtime: "standard",
@@ -469,6 +473,8 @@ describe("auth-flow AuthTurn provider contract", () => {
 	it("exposes helpers and request signal on auth flow context routes", async () => {
 		const app = createServerApp(
 			{
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "auth-helper-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -550,6 +556,8 @@ describe("auth-flow AuthTurn provider contract", () => {
 		};
 		const app = createServerApp(
 			{
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "auth-state-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -684,6 +692,8 @@ describe("auth-flow AuthTurn provider contract", () => {
 	it("normalizes thrown auth abort errors into safe abort turns", async () => {
 		const app = createServerApp(
 			{
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "auth-abort-error-provider",
 				version: "1.0.0",
 				runtime: "standard",

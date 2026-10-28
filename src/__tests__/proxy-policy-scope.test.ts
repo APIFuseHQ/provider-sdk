@@ -45,6 +45,8 @@ function operation() {
 }
 
 const baseConfig = {
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "nol-like",
 	version: "1.0.0",
 	runtime: "standard" as const,

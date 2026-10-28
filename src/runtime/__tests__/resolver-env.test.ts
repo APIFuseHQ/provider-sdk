@@ -291,6 +291,8 @@ describe("resolver server wiring", () => {
 		const restoreTwoCaptcha = swapResolverAdapterFactoryForTests("2captcha", () => succeeding);
 		try {
 			const provider = defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "resolver-telemetry-parity",
 				version: "1.0.0",
 				runtime: "standard",
@@ -300,6 +302,7 @@ describe("resolver server wiring", () => {
 					descriptionKey: "resolver-telemetry-parity.description",
 					category: "test",
 				},
+				credential: { keys: ["account_id"] },
 				auth: {
 					mode: "credentials",
 					flow: {
@@ -410,6 +413,8 @@ describe("resolver server wiring", () => {
 		const restore = swapResolverAdapterFactoryForTests("capsolver", () => adapter);
 		try {
 			const provider = defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "resolver-telemetry-exhausted",
 				version: "1.0.0",
 				runtime: "standard",
@@ -496,6 +501,8 @@ describe("resolver server wiring", () => {
 		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
 		try {
 			const provider = defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "resolver-production-identity",
 				version: "1.0.0",
 				runtime: "standard",
@@ -580,6 +587,8 @@ describe("resolver server wiring", () => {
 		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
 		try {
 			const provider = defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "resolver-required-proxy-policy",
 				version: "1.0.0",
 				runtime: "standard",
@@ -661,6 +670,8 @@ describe("resolver server wiring", () => {
 		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
 		try {
 			const provider = defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "resolver-required-proxy-auth-flow",
 				version: "1.0.0",
 				runtime: "standard",
@@ -672,6 +683,7 @@ describe("resolver server wiring", () => {
 					descriptionKey: "resolver-required-proxy-auth-flow.description",
 					category: "test",
 				},
+				credential: { keys: ["account_id"] },
 				auth: {
 					mode: "credentials",
 					flow: {
@@ -748,6 +760,8 @@ describe("resolver server wiring", () => {
 	it("threads defineProvider resolver declarations into the server without an override", async () => {
 		const declaration = { vendors: ["custom"], kinds: ["turnstile"] } as const;
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "resolver-authoring-path",
 			version: "1.0.0",
 			runtime: "standard",
@@ -809,6 +823,8 @@ describe("resolver server wiring", () => {
 
 	it("fails closed when an undeclared provider accesses the resolver", async () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "resolver-undeclared",
 			version: "1.0.0",
 			runtime: "standard",
@@ -857,6 +873,8 @@ describe("resolver server wiring", () => {
 			},
 		};
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "resolver-server-demo",
 			version: "1.0.0",
 			runtime: "standard",
@@ -867,6 +885,7 @@ describe("resolver server wiring", () => {
 				category: "test",
 			},
 			context: { keys: [] },
+			credential: { keys: ["account_id"] },
 			auth: {
 				mode: "credentials",
 				flow: {

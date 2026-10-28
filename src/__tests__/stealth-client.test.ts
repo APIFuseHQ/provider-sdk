@@ -7155,6 +7155,7 @@ describe("server SBSD bound-transport wiring", () => {
 				category: "test",
 			},
 			allowedHosts: ["example.com"],
+			reviewed: "community",
 			stealth: { browser: "safari", os: "macos", challengeDetection: { akamaiSbsd: true } },
 			resolver: {
 				vendors: ["hypersolutions"],

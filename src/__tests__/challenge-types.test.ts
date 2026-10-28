@@ -122,6 +122,8 @@ describe("challenge resolver types", () => {
 			solve: async () => Promise.reject(new Error("resolver is unavailable in type tests")),
 		};
 		const withResolver: ProviderDefinition = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "with-resolver",
 			version: "1.0.0",
 			runtime: "standard",
@@ -134,6 +136,8 @@ describe("challenge resolver types", () => {
 			operations: {},
 		};
 		const withoutResolver: ProviderDefinition = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "without-resolver",
 			version: "1.0.0",
 			runtime: "standard",

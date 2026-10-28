@@ -12,6 +12,8 @@ function baseConfig(
 	} = {},
 ) {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "alias-provider",
 		version: "1.0.0",
 		runtime: "standard" as const,

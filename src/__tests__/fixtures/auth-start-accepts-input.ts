@@ -9,6 +9,8 @@ const noop = defineOperation<unknown>()({
 });
 
 defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "bad-auth-start",
 	version: "1.0.0",
 	runtime: "standard",

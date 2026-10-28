@@ -126,6 +126,7 @@ function createProvider(options: {
 		version: "1.0.0",
 		runtime: "standard",
 		allowedHosts: ["example.com"],
+		reviewed: "community",
 		stealth: { browser: "chrome", os: "macos" },
 		cache: true,
 		...(options.proxy ? { proxy: options.proxy } : {}),

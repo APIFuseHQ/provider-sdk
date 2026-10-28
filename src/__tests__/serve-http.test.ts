@@ -111,6 +111,8 @@ const ProbeCursor = defineCursor({
 
 function createTestProvider(state: { streamCancelled?: boolean } = {}): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "test-provider",
 		version: "1.0.0",
 		runtime: "standard",

@@ -76,12 +76,17 @@ export {
 	defineSmsOtpMatcher,
 	defineStreamOperation,
 	every,
+	type AllowedHostList,
+	type AuthModeCredentialGuard,
 	type AuthStartNoInputGuard,
+	type CredentialSecretGuard,
 	type HandleRequiresStateGuard,
 	type OperationDefinitionFor,
+	type ProviderAuthDeclaration,
 	type ProviderBuilder,
 	type ProviderContextOf,
 	type ProviderDeclaration,
+	type ProviderDeclarationWithAuthConfig,
 	type ProviderDefinitionFor,
 } from "./define.js";
 export {

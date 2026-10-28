@@ -46,6 +46,8 @@ it.each([
 		};
 	};
 	const provider: ProviderDefinition = {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "observer-probe",
 		version: "1.0.0",
 		runtime: "standard",

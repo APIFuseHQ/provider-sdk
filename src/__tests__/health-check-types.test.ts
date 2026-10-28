@@ -7,6 +7,8 @@ import type { HealthCheckAssertionContext, HealthCheckCase } from "../types.js";
 
 function providerWithHealthCheckInterval(interval: string) {
 	return defineProvider({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "test-provider",
 		version: "1.0.0",
 		runtime: "standard",
@@ -71,6 +73,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects unknown fields on healthCheck suite with hint", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -107,6 +111,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects empty cases array", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -135,6 +141,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 	it("accepts arbitrary positive ms-style probe intervals", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
@@ -215,6 +223,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 	it("accepts operation healthCheck schedule randomization", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
@@ -252,6 +262,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 	it("uses characterized ms-style intervals when validating randomization bounds", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
@@ -290,6 +302,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects operation healthCheck schedule jitter", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -326,6 +340,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects operation healthCheck randomization duration as long as interval", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -360,6 +376,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 	it("accepts provider, suite, case, and runtime override policy fields", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
@@ -414,6 +432,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects invalid provider and case timeout policy fields", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -449,6 +469,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -484,6 +506,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects malformed probe interval strings", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -519,6 +543,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects healthCheck and healthCheckUnsupported declared together", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -554,6 +580,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects empty reason on healthCheckUnsupported", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -578,6 +606,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 	it("accepts a valid healthCheckUnsupported declaration", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
@@ -607,6 +637,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 	it("accepts provider-level healthMonitor with requiredSecrets", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
@@ -644,6 +676,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects unknown field on provider healthMonitor", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -671,6 +705,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects invalid provider healthMonitor probe override interval", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
@@ -702,6 +738,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("rejects duplicate case names within a suite", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",

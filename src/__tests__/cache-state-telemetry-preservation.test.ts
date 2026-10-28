@@ -66,6 +66,8 @@ for (const mode of ["reject", "resolve", "caught"] as const) {
 		let handlers = 0;
 		const app = createServerApp(
 			{
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "r3-shared",
 				version: "1.0.0",
 				runtime: "standard",

@@ -66,8 +66,8 @@ const NEGATIVE_CONTROLS = [
 	},
 	{
 		filename: "negative-control-define-provider-resolver-vendor.ts",
-		expectedCode: "TS2322",
-		description: "defineProvider rejects an unknown resolver vendor",
+		expectedCode: "TS2769",
+		description: "defineProvider rejects an unknown resolver vendor (no overload accepts it)",
 		source: [
 			'import { defineProvider, z } from "@apifuse/provider-sdk";',
 			"",
@@ -75,6 +75,8 @@ const NEGATIVE_CONTROLS = [
 			'\tid: "invalid-resolver-vendor",',
 			'\tversion: "1.0.0",',
 			'\truntime: "standard",',
+			'\tallowedHosts: ["example.com"],',
+			'\treviewed: "community",',
 			'\tresolver: { vendors: ["unknown-vendor"], kinds: ["turnstile"] },',
 			'\tmeta: { displayName: "Invalid Resolver Vendor", descriptionKey: "meta.description", category: "test" },',
 			"})({",
@@ -804,7 +806,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			'export const cookieSolution: ChallengeSolution = { form: "cookies", cookies: { cf_clearance: "clearance" }, userAgent: "fixture-agent" };',
 			"export const invalidation = invalidateResolverSolution(providerContext.resolver, awsWafChallenge, cookieSolution);",
 			'export const resolverConfig: ProviderResolverConfig = { vendors: ["browser", "capsolver"], kinds: ["cloudflare_interstitial", "turnstile"] };',
-			'export const resolverProvider = defineProvider({ id: "pack-types-resolver", version: "1.0.0", runtime: "standard", resolver: resolverConfig, meta: { displayName: "Pack Types Resolver", descriptionKey: "meta.description", category: "test" } })({ operations: { probe: { riskClass: "read", input: z.object({}), output: z.object({ ok: z.boolean() }), handler: async () => ({ ok: true }), healthCheckUnsupported: { reason: "type fixture" } } } });',
+			'export const resolverProvider = defineProvider({ id: "pack-types-resolver", version: "1.0.0", runtime: "standard", allowedHosts: ["example.com"], reviewed: "community", resolver: resolverConfig, meta: { displayName: "Pack Types Resolver", descriptionKey: "meta.description", category: "test" } })({ operations: { probe: { riskClass: "read", input: z.object({}), output: z.object({ ok: z.boolean() }), handler: async () => ({ ok: true }), healthCheckUnsupported: { reason: "type fixture" } } } });',
 			"export const resolverContext: ResolverContext = { solve: async () => tokenSolution };",
 			'export const browserCookie: BrowserCookie = { name: "persistent-id", value: "persistent-token", domain: "example.com", path: "/", expires: 1786698176, httpOnly: true, secure: true };',
 			'const browserPage = undefined as unknown as Awaited<ReturnType<ProviderContext["browser"]["newPage"]>>;',

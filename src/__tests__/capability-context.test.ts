@@ -54,6 +54,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("contextually types inline handlers from the first phase", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-inline",
 			version: "1.0.0",
 			runtime: "standard",
@@ -78,6 +80,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("exposes every bare-object capability declaration to handler context", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-bare-objects",
 			version: "1.0.0",
 			runtime: "standard",
@@ -110,6 +114,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("keeps only ambient members for a provider declaring no capabilities", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-ambient",
 			version: "1.0.0",
 			runtime: "standard",
@@ -136,6 +142,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("exposes native directly when declared on a capable runtime", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-native",
 			version: "1.0.0",
 			runtime: "standard",
@@ -162,6 +170,7 @@ describe("declaration-derived provider contexts", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			allowedHosts: ["example.test"],
+			reviewed: "community",
 			proxy: false,
 			secrets: [],
 			context: { keys: [] },
@@ -191,6 +200,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("keeps legacy true capability markers source-compatible", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-legacy-marker",
 			version: "1.0.0",
 			runtime: "standard",
@@ -217,6 +228,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("carries declaration-derived contexts through named operation and provider types", async () => {
 		const buildProvider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-context-carry",
 			version: "1.0.0",
 			runtime: "standard",
@@ -303,6 +316,8 @@ describe("declaration-derived provider contexts", () => {
 			},
 		};
 		const bareProvider: ProviderDefinition = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-context-bare",
 			version: "1.0.0",
 			runtime: "standard",
@@ -325,6 +340,8 @@ describe("declaration-derived provider contexts", () => {
 		type ForeignContext = { upstreamSession: string };
 
 		const foreignProvider: ProviderDefinition<ForeignContext> = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-context-foreign",
 			version: "1.0.0",
 			runtime: "standard",
@@ -349,6 +366,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("executes with the selected operation's declaration-derived context", async () => {
 		const buildProvider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-executor",
 			version: "1.0.0",
 			runtime: "standard",
@@ -400,6 +419,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("reports required secrets when a narrow test context has no env", async () => {
 		const buildProvider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-executor-secrets",
 			version: "1.0.0",
 			runtime: "standard",
@@ -430,6 +451,8 @@ describe("declaration-derived provider contexts", () => {
 
 	it("rejects ambient trace and unknown declaration capabilities", () => {
 		defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-trace-declaration",
 			version: "1.0.0",
 			runtime: "standard",
@@ -438,6 +461,8 @@ describe("declaration-derived provider contexts", () => {
 			trace: {},
 		});
 		defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-typo",
 			version: "1.0.0",
 			runtime: "standard",
@@ -446,6 +471,8 @@ describe("declaration-derived provider contexts", () => {
 			htpp: true,
 		});
 		defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "capability-invented",
 			version: "1.0.0",
 			runtime: "standard",

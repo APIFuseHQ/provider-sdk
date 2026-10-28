@@ -1,4 +1,4 @@
-import { AuthError, ProviderError } from "./errors.js";
+import { AuthError, ProviderError, ValidationError } from "./errors.js";
 import {
 	declarationInvalidError,
 	DECLARATION_RULE_IDS,
@@ -6,7 +6,7 @@ import {
 } from "./declaration-validation.js";
 import type {
 	AuthAbortData,
-	AuthConfig,
+	AuthFlowDefinition,
 	AuthFlowTerminalContext,
 	AuthSafeData,
 	AuthSafeJson,
@@ -317,9 +317,14 @@ export interface DefineCredentialsAuthOptions<
 		| Promise<CredentialsAuthLoginResult<TCredentialKeys, keyof TChallenges & string>>;
 }
 
+/**
+ * The declaration fields `defineCredentialsAuth` produces, typed as the
+ * `credentials` arm of `ProviderAuthDeclaration` so they spread straight into
+ * `defineProvider({ ...credentialsAuth })`.
+ */
 export interface DefinedCredentialsAuth {
-	auth: AuthConfig;
-	credential: CredentialDeclaration;
+	auth: { mode: "credentials"; flow: AuthFlowDefinition };
+	credential: CredentialDeclaration & { keys: [string, ...string[]] };
 	context: ContextDeclaration;
 }
 
@@ -693,6 +698,12 @@ export function defineCredentialsAuth<
 			fix: 'Pass fields such as { email: { type: "email" }, password: { type: "password" } }.',
 		});
 	}
+	const [firstCredentialKey, ...restCredentialKeys] = options.credentialKeys;
+	if (typeof firstCredentialKey !== "string" || firstCredentialKey.length === 0) {
+		throw new ValidationError("defineCredentialsAuth requires at least one credential key", {
+			fix: 'Pass credentialKeys naming every key login stores, e.g. credentialKeys: ["session"] as const.',
+		});
+	}
 
 	const expectedInput = expectedInputFromFields(options.fields);
 	const retryTurnId = options.retryTurnId ?? "credentials.retry";
@@ -797,7 +808,7 @@ export function defineCredentialsAuth<
 			},
 		},
 		credential: {
-			keys: Array.from(options.credentialKeys),
+			keys: [firstCredentialKey, ...restCredentialKeys],
 			...(options.storesReusableSecret === undefined
 				? {}
 				: { storesReusableSecret: options.storesReusableSecret }),
@@ -823,8 +834,7 @@ function validateCredentialsAuthChallenges(
 			challenge.fields && typeof challenge.fields === "object"
 				? Object.keys(challenge.fields).length
 				: 0;
-		const fieldsDeclared =
-			challenge.fields !== undefined && challenge.fields !== null;
+		const fieldsDeclared = challenge.fields !== undefined && challenge.fields !== null;
 		const hasFields = fieldCount > 0;
 		const hasVerify = typeof challenge.verify === "function";
 		const hasPoll = typeof challenge.poll === "function";

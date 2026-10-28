@@ -15,6 +15,8 @@ const callDefineProvider = (config: unknown): unknown =>
 	defineProvider(config);
 
 const makeProviderConfig = () => ({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "ergonomic-provider",
 	version: "1.0.0",
 	runtime: "standard" as const,
