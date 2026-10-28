@@ -9,6 +9,7 @@ import {
 	PROMPT_ASSETS_CHECK_MESSAGE,
 	PROVIDER_JSON_CHECK_MESSAGE,
 	REDUNDANT_DEPLOYMENT_DEFAULT_RULE,
+	RUNTIME_BOUNDARY_CHECK_MESSAGE,
 	runChecks,
 	SPREAD_EXPORT_DEPLOYMENT_RULE,
 } from "../../bin/apifuse-check.js";
@@ -174,33 +175,38 @@ export default {
 		]);
 	});
 
-	it("fails on a runtime boundary finding in request-path source", async () => {
+	it("fails the runtime boundary check on a reachable process.env read, naming file and line", async () => {
 		const providerDir = makeProviderDir("apifuse-check-runtime-boundary-error-");
 		writeValidLocaleCatalogs(providerDir);
-		writeReviewReadyProviderIndex(providerDir);
+		writeReviewReadyProviderIndex(
+			providerDir,
+			'import { token } from "./upstream/session";\nexport const reach = token;\n',
+		);
 		mkdirSync(join(providerDir, "upstream"), { recursive: true });
 		writeFileSync(
 			join(providerDir, "upstream", "session.ts"),
-			"export const token = process.env.EXAMPLE_SESSION_TOKEN;\n",
+			"export const port = process.env.APIFUSE__RUNTIME__PORT;\nexport const token = process.env.EXAMPLE_SESSION_TOKEN;\n",
 		);
 
 		const results = await runChecks(providerDir);
-		const lint = results.find((result) => result.message === AUTHORING_LINT_CHECK_MESSAGE);
+		const boundary = results.find((result) => result.message === RUNTIME_BOUNDARY_CHECK_MESSAGE);
 
-		expect(lint?.passed).toBe(false);
-		expect(lint?.details).toEqual([
+		expect(boundary?.passed).toBe(false);
+		expect(boundary?.details).toEqual([
 			expect.stringContaining(
-				"ERROR process-env-direct-read sourceFiles.upstream/session.ts: process.env.EXAMPLE_SESSION_TOKEN (line 1)",
+				"ERROR global upstream/session.ts:2:22: process.env.EXAMPLE_SESSION_TOKEN",
 			),
 		]);
+		expect(boundary?.details?.[0]).toContain("ctx.env.get(name)");
 	});
 
-	it("does not scan a nested git checkout as this provider's runtime source", async () => {
-		const providerDir = makeProviderDir("apifuse-check-nested-checkout-");
+	it("judges only the module graph index.ts reaches, not the directory tree", async () => {
+		const providerDir = makeProviderDir("apifuse-check-runtime-graph-");
 		writeValidLocaleCatalogs(providerDir);
-		writeReviewReadyProviderIndex(providerDir);
-		// A linked worktree left under the root: `.git` is a file pointing at the
-		// main repository, and its `scripts/` is not at *this* provider's root.
+		writeReviewReadyProviderIndex(
+			providerDir,
+			'import { page } from "./vendor/plain/helper";\nexport const reach = page;\n',
+		);
 		const worktree = join(providerDir, ".worktree", "stale-branch");
 		mkdirSync(join(worktree, "scripts"), { recursive: true });
 		writeFileSync(join(worktree, ".git"), "gitdir: ../../.git/worktrees/stale-branch\n");
@@ -208,31 +214,26 @@ export default {
 			join(worktree, "scripts", "record.ts"),
 			"export const tap = process.env.EXAMPLE_TAP_DIR;\n",
 		);
-		// A nested clone (or initialised submodule): `.git` is a directory.
-		const clone = join(providerDir, "vendor", "nested-clone");
-		mkdirSync(join(clone, ".git"), { recursive: true });
+		mkdirSync(join(providerDir, "vendor", "unreferenced"), { recursive: true });
 		writeFileSync(
-			join(clone, "index.ts"),
-			'export const page = await fetch("https://api.example.com");\n',
+			join(providerDir, "vendor", "unreferenced", "index.ts"),
+			'export const page = () => fetch("https://api.example.com");\n',
 		);
-		// A plain nested directory without the marker stays in scope.
 		mkdirSync(join(providerDir, "vendor", "plain"), { recursive: true });
 		writeFileSync(
 			join(providerDir, "vendor", "plain", "helper.ts"),
-			'export const page = await fetch("https://api.example.com");\n',
+			'export const page = () => fetch("https://api.example.com");\n',
 		);
 
 		const results = await runChecks(providerDir);
-		const lint = results.find((result) => result.message === AUTHORING_LINT_CHECK_MESSAGE);
+		const boundary = results.find((result) => result.message === RUNTIME_BOUNDARY_CHECK_MESSAGE);
 
-		expect(lint?.passed).toBe(false);
-		expect(lint?.details).toEqual([
-			expect.stringContaining(
-				"ERROR direct-fetch-call sourceFiles.vendor/plain/helper.ts: fetch() (line 1)",
-			),
+		expect(boundary?.passed).toBe(false);
+		expect(boundary?.details).toEqual([
+			expect.stringContaining("ERROR global vendor/plain/helper.ts:1:27: fetch —"),
 		]);
-		expect(lint?.details?.join("\n")).not.toContain(".worktree/");
-		expect(lint?.details?.join("\n")).not.toContain("nested-clone");
+		expect(boundary?.details?.join("\n")).not.toContain(".worktree/");
+		expect(boundary?.details?.join("\n")).not.toContain("unreferenced");
 	});
 
 	it("warns on a legacy deploy.ts without failing the check", async () => {
@@ -639,13 +640,16 @@ export default {
 		expect(details).not.toContain("ERROR public-schema-upstream-field");
 	});
 
-	it("fails official authoring lint for nested self-hosted browser source and entrypoint scripts", async () => {
+	it("fails the runtime boundary check for a reachable browser driver import in official mode", async () => {
 		const providerDir = makeProviderDir("apifuse-check-browser-lint-fail-");
 		writeValidLocaleCatalogs(providerDir);
 		writeFileSync(
 			join(providerDir, "index.ts"),
 			`
 import { describeKey, z } from "@apifuse/provider-sdk";
+import { localBrowser } from "./src/browser/launch";
+
+export const reach = localBrowser;
 
 const input = describeKey(
   z.object({
@@ -685,34 +689,27 @@ export default {
 		mkdirSync(join(providerDir, "src", "browser"), { recursive: true });
 		writeFileSync(
 			join(providerDir, "src", "browser", "launch.ts"),
-			"export async function localBrowser() { return chromium.launch(); }\n",
-		);
-		mkdirSync(join(providerDir, "scripts"), { recursive: true });
-		writeFileSync(
-			join(providerDir, "scripts", "entrypoint.mjs"),
-			'Bun.spawn(["chromium", "--remote-debugging-port=9222"]);\n',
-		);
-		writeFileSync(
-			join(providerDir, "entrypoint.sh"),
-			"#!/usr/bin/env bash\nchromium --remote-debugging-port=9222\n",
-		);
-		writeFileSync(
-			join(providerDir, "Dockerfile"),
-			'FROM oven/bun:1.2-alpine\nCMD ["google-chrome", "--remote-debugging-port=9222"]\n',
+			'import { chromium } from "playwright";\nexport async function localBrowser() { return chromium.launch(); }\n',
 		);
 
-		const results = await runChecks(providerDir);
-		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
-		const details = authoring?.details?.join("\n") ?? "";
+		const official = await runChecks(providerDir);
+		const boundary = official.find((result) => result.message === RUNTIME_BOUNDARY_CHECK_MESSAGE);
 
-		expect(authoring?.passed).toBe(false);
-		expect(details).toContain("browser-self-hosted-launch");
-		expect(details).toContain("sourceFiles.src/browser/launch.ts");
-		expect(details).toContain("browser-self-hosted-child-process");
-		expect(details).toContain("sourceFiles.scripts/entrypoint.mjs");
-		expect(details).toContain("sourceFiles.entrypoint.sh");
-		expect(details).toContain("sourceFiles.Dockerfile");
-		expect(details).toContain("ctx.browser");
+		expect(boundary?.passed).toBe(false);
+		expect(boundary?.details).toEqual([
+			expect.stringContaining("ERROR module src/browser/launch.ts:1:1: playwright —"),
+		]);
+		expect(boundary?.details?.[0]).toContain("ctx.browser");
+
+		const standalone = await runChecks(providerDir, { lintMode: "standalone" });
+		const standaloneBoundary = standalone.find(
+			(result) => result.message === RUNTIME_BOUNDARY_CHECK_MESSAGE,
+		);
+
+		expect(standaloneBoundary?.passed).toBe(true);
+		expect(standaloneBoundary?.details).toEqual([
+			expect.stringContaining("WARN module src/browser/launch.ts:1:1: playwright —"),
+		]);
 	});
 
 	it("blocks operation credential writes while return-based refresh passes the scan", async () => {
@@ -771,25 +768,6 @@ export default defineProvider({
 
 		expect(authoring?.passed).toBe(false);
 		expect(authoring?.details?.join("\n")).toContain("ctx-credential-write-forbidden-in-handler");
-	});
-
-	it("keeps source files planted under .agents/ in authoring-lint scanner scope", async () => {
-		const providerDir = makeProviderDir("apifuse-check-agents-scan-");
-		writeMinimalProviderIndex(providerDir);
-		syncPromptAssets(providerDir);
-		// .agents must not be a scan-exempt hiding place: a planted .ts file
-		// there is provider source like any other.
-		mkdirSync(join(providerDir, ".agents"), { recursive: true });
-		writeFileSync(
-			join(providerDir, ".agents", "hidden.ts"),
-			'import { chromium } from "playwright";\nexport const browser = chromium;\n',
-		);
-
-		const results = await runChecks(providerDir);
-		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
-
-		expect(authoring?.details?.join("\n")).toContain(".agents/hidden.ts");
-		expect(authoring?.details?.join("\n")).toContain("playwright-direct-import");
 	});
 
 	it("blocks browser-version literals while excluding tests, fixtures, and comments", async () => {
@@ -1004,12 +982,12 @@ export default {
 	);
 }
 
-function writeReviewReadyProviderIndex(providerDir: string): void {
+function writeReviewReadyProviderIndex(providerDir: string, prelude = ""): void {
 	writeFileSync(
 		join(providerDir, "index.ts"),
 		`
 import { describeKey, z } from "@apifuse/provider-sdk";
-
+${prelude}
 const input = describeKey(
   z.object({
     q: describeKey(z.string(), "operations.lookup.fields.q.description"),

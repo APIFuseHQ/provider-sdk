@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 import { z } from "zod";
 
+import { bundleProvider, formatBoundaryViolation } from "../src/cli/bundle.js";
 import {
 	formatPromptAssetIssues,
 	PROMPT_ASSET_SYNC_REMEDIATION,
@@ -154,7 +155,8 @@ export async function runChecks(
 		checkFixtures(provider),
 		checkSchemas(provider),
 		checkOutputUrlCoverage(provider),
-		checkAuthoringLint(provider, providerSourceFiles, localeCatalogEn, options.lintMode),
+		checkAuthoringLint(provider, providerSourceFiles, localeCatalogEn),
+		await checkRuntimeBoundary(providerRoot, indexPath, options.lintMode),
 		checkProviderMetadata(provider),
 		await checkDeploymentIntent(providerRoot, provider),
 		checkDockerfile(dockerfilePath),
@@ -441,7 +443,6 @@ function checkAuthoringLint(
 	provider: ProviderDefinition | undefined,
 	providerSourceFiles: Record<string, string>,
 	localeCatalogEn: Record<string, unknown>,
-	lintMode: ProviderLintMode = "official",
 ): CheckResult {
 	if (!provider) {
 		return {
@@ -450,10 +451,11 @@ function checkAuthoringLint(
 		};
 	}
 
-	const { diagnostics, information } = lintProviderWithInformation(
-		{ ...provider, providerSourceFiles, localeCatalogEn },
-		{ mode: lintMode },
-	);
+	const { diagnostics, information } = lintProviderWithInformation({
+		...provider,
+		providerSourceFiles,
+		localeCatalogEn,
+	});
 	const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
 	const details = information.map((entry) => {
 		const field = entry.field ? `${entry.field}: ` : "";
@@ -470,6 +472,25 @@ function checkAuthoringLint(
 		message: "Provider authoring lint has no error-level diagnostics",
 		passed: errors.length === 0,
 		details,
+	};
+}
+
+export const RUNTIME_BOUNDARY_CHECK_MESSAGE =
+	"Runtime sources reach the outside world through the SDK context only";
+
+async function checkRuntimeBoundary(
+	providerRoot: string,
+	indexPath: string,
+	lintMode: ProviderLintMode = "official",
+): Promise<CheckResult> {
+	if (!existsSync(indexPath)) {
+		return { message: RUNTIME_BOUNDARY_CHECK_MESSAGE, passed: false };
+	}
+	const bundle = await bundleProvider(providerRoot, { mode: lintMode });
+	return {
+		message: RUNTIME_BOUNDARY_CHECK_MESSAGE,
+		passed: bundle.ok,
+		details: bundle.violations.map(formatBoundaryViolation),
 	};
 }
 
