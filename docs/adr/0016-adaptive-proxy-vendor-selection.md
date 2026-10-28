@@ -109,6 +109,18 @@ observed incident shape.
    version. The gateway ignores unknown keys; persisting any of them is a
    separate gateway change.
 
+## Scope
+
+The selector routes and learns on the `ctx.stealth` and `ctx.http` request
+paths, which resolve every attempt through it and report every transport
+outcome to it. `ctx.native.network` walks its own vendor chain without the
+selector, so neither the routing nor the observation applies there. `ctx.http`
+streams (`stream`, `sse`) resolve through the selector, so they are routed
+around an open vendor, but make one attempt and report no transport outcome,
+so they never open or close a vendor (a stream that draws a half-open probe
+holds it until the 30 s probe timeout). Connecting either path is a separate
+change.
+
 ## Consequences
 
 Positive:
