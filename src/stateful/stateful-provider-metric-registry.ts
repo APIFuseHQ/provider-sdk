@@ -10,14 +10,14 @@ import {
  * The process-wide metric registry: a `StatefulProviderMetricEmitter` that
  * keeps counters, gauges and histograms in memory and renders them in the
  * Prometheus text exposition format. It is the default emitter of a
- * `StatefulSessionRouter` built without one, and every `serve()` in the
- * process renders it on its metrics listener (`/metrics`). A `serve()` whose
- * operations go through the stateful runtime declares their routing counters
- * here at zero before its listeners open. The package exports only its
- * emitter view, `statefulProviderMetricRegistryEmitter` (as
- * `statefulProviderMetricRegistry`); the class, the tables, the class-typed
- * singleton, `render()`, `reset()` and `declareRoutingSeries()` stay inside
- * the SDK.
+ * `StatefulSessionRouter` or a `StatefulProviderSessionManager` built without
+ * one, and every `serve()` in the process renders it on its metrics listener
+ * (`/metrics`). A `serve()` whose operations go through the stateful runtime
+ * declares their routing counters here at zero before its listeners open. The
+ * package exports only its emitter view, `statefulProviderMetricRegistryEmitter`
+ * (as `statefulProviderMetricRegistry`); the class, the tables, the
+ * class-typed singleton, `render()`, `reset()` and `declareRoutingSeries()`
+ * stay inside the SDK.
  */
 
 export type StatefulProviderMetricKind = "counter" | "gauge" | "histogram";

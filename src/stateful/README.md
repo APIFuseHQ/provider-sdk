@@ -40,8 +40,13 @@ the following compatibility-sensitive behavior:
   `operationExecutor` or `internalOperationExecutor` starts the four routing counters of every
   declared operation at `0` before its listeners open, so the first scrape already has the series
   and Prometheus `rate()` counts the first routed operation; a server that runs its declared
-  handlers itself declares none. Provider code that counts its own names from the closed set, such
-  as a write ledger's `apifuse_stateful_provider_write_ledger_*_total`, passes the same registry,
+  handlers itself declares none. A `StatefulProviderSessionManager` built without a
+  `metricEmitter` counts into the same registry, so
+  `apifuse_stateful_provider_session_operation_duration_ms` and
+  `apifuse_stateful_provider_session_invalidations_total` (labelled `redactedErrorCode` with the
+  adapter's `StatefulSessionInvalidatedError.reason`) come out without wiring too. Provider code
+  that counts its own names from the closed set, such as a write ledger's
+  `apifuse_stateful_provider_write_ledger_*_total`, passes the same registry,
   `statefulProviderMetricRegistry` from this entry point, as its components' `metricEmitter`. It is
   typed as a `StatefulProviderMetricEmitter` and exposes only `increment`, `gauge` and `observe`;
   it drops a call outside the closed set or the name's kind instead of throwing. Only the labels
