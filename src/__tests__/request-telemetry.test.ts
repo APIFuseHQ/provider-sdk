@@ -22,7 +22,7 @@ import { createTraceContext } from "../runtime/trace.js";
  */
 const PROXY_WIRE_ORACLE = "gateway-session";
 const ORACLE_PROXY_BYTES =
-	'{"kind":"resolved","provider":"brightdata","userAgentSource":"request","protocol":"https","cacheStatus":"disabled","cacheHit":false,"resolutionMs":16,"attempts":3,"attemptSamples":[{"n":1,"a":2,"h":"abcdef1234567890","o":"error","c":"E_FAIL","s":502,"d":9},{"n":2,"a":1,"o":"ok","c":"E_OTHER"},{"n":3,"a":1,"o":"ok","c":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],"vendors":["smartproxy","brightdata"],"failovers":[{"v":"smartproxy","nx":"brightdata","p":"resolve","r":"timeout","a":2}]}';
+	'{"kind":"resolved","provider":"brightdata","userAgentSource":"request","protocol":"https","cacheStatus":"disabled","cacheHit":false,"resolutionMs":16,"attempts":3,"attemptSamples":[{"n":1,"a":2,"v":"smartproxy","h":"abcdef1234567890","o":"error","c":"E_FAIL","s":502,"d":9},{"n":2,"a":1,"v":"brightdata","o":"ok","c":"E_OTHER"},{"n":3,"a":1,"v":"smartproxy","o":"ok","c":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],"vendors":["smartproxy","brightdata"],"failovers":[{"v":"smartproxy","nx":"brightdata","p":"resolve","r":"timeout","a":2}]}';
 
 function decode(value: string): Record<string, unknown> {
 	return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
@@ -268,7 +268,7 @@ describe("request telemetry ledger", () => {
 			const envelope = decode(ledger.toHeaderValue() ?? "");
 			const proxy = envelope.proxy as { attemptSamples?: Record<string, unknown>[] };
 			expect(proxy).toBeDefined();
-			expect(proxy.attemptSamples?.[0]).toEqual({ n: 1, a: 1, o: "error" });
+			expect(proxy.attemptSamples?.[0]).toEqual({ n: 1, a: 1, v: "smartproxy", o: "error" });
 			expect(warn).not.toHaveBeenCalled();
 		} finally {
 			console.warn = original;

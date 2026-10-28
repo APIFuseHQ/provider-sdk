@@ -4003,7 +4003,7 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     event: "provider_metrics_listener";
     providerId: string;
     port: number;
-} | ProviderStateBackendLogEvent | SelfTestCancellationLogEvent;
+} | ProviderStateBackendLogEvent | SelfTestCancellationLogEvent | ProxyVendorStateLogEvent;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderRequestCost" needs to be exported by the entry point index.d.ts
 //
@@ -4282,6 +4282,18 @@ type ProxyResolutionTelemetryEvent = {
 };
 
 // @public
+export type ProxyTelemetryAttemptSample = {
+    n: number;
+    a: number;
+    v?: ProxyVendorName;
+    h?: string;
+    o: ProxyAttemptTelemetryEvent["outcome"];
+    c?: string;
+    s?: number;
+    d?: number;
+};
+
+// @public
 export type ProxyTelemetryHeaderPayload = {
     kind: ClosedEnum<"resolved" | "unresolved">;
     provider?: ClosedEnum<ProxyVendorName>;
@@ -4294,6 +4306,7 @@ export type ProxyTelemetryHeaderPayload = {
     attemptSamples?: {
         n: number;
         a: number;
+        v?: ClosedEnum<ProxyVendorName>;
         h?: ProxyHash;
         o: ClosedEnum<ProxyAttemptTelemetryEvent["outcome"]>;
         c?: ClosedEnum<string>;
@@ -4307,6 +4320,15 @@ export type ProxyTelemetryHeaderPayload = {
         p: ClosedEnum<ProxyVendorFailoverTelemetryEvent["phase"]>;
         r: ClosedEnum<ProxyVendorFailoverTelemetryEvent["reason"]>;
         a?: number;
+    }[];
+    selection?: {
+        kind: ClosedEnum<ProxyTelemetrySelection["kind"]>;
+        reason: ClosedEnum<ProxyVendorSelectionReason>;
+    };
+    vendorStates?: {
+        v: ClosedEnum<ProxyVendorName>;
+        s: ClosedEnum<ProxyVendorState>;
+        e: number;
     }[];
 };
 
@@ -4323,15 +4345,7 @@ export type ProxyTelemetryResolvedPayload = {
     cacheHit: boolean;
     resolutionMs: number;
     attempts: number;
-    attemptSamples?: {
-        n: number;
-        a: number;
-        h?: string;
-        o: ProxyAttemptTelemetryEvent["outcome"];
-        c?: string;
-        s?: number;
-        d?: number;
-    }[];
+    attemptSamples?: ProxyTelemetryAttemptSample[];
     vendors?: ProxyVendorName[];
     failovers?: {
         v: ProxyVendorName;
@@ -4340,6 +4354,14 @@ export type ProxyTelemetryResolvedPayload = {
         r: ProxyVendorFailoverTelemetryEvent["reason"];
         a?: number;
     }[];
+    selection?: ProxyTelemetrySelection;
+    vendorStates?: ProxyTelemetryVendorState[];
+};
+
+// @public (undocumented)
+export type ProxyTelemetrySelection = {
+    kind: ProxyVendorSelectionObservation["kind"];
+    reason: ProxyVendorSelectionReason;
 };
 
 // @public (undocumented)
@@ -4364,15 +4386,16 @@ export type ProxyTelemetryUnresolvedPayload = {
         r: ProxyVendorFailoverTelemetryEvent["reason"];
         a?: number;
     }[];
-    attemptSamples?: {
-        n: number;
-        a: number;
-        h?: string;
-        o: ProxyAttemptTelemetryEvent["outcome"];
-        c?: string;
-        s?: number;
-        d?: number;
-    }[];
+    attemptSamples?: ProxyTelemetryAttemptSample[];
+    selection?: ProxyTelemetrySelection;
+    vendorStates?: ProxyTelemetryVendorState[];
+};
+
+// @public
+export type ProxyTelemetryVendorState = {
+    v: ProxyVendorName;
+    s: ProxyVendorState;
+    e: number;
 };
 
 // @public (undocumented)
@@ -4389,6 +4412,67 @@ type ProxyVendorFailoverTelemetryEvent = {
 
 // @public
 export type ProxyVendorName = "smartproxy" | "nodemaven";
+
+// @public
+export type ProxyVendorSelectionObservation = {
+    readonly kind: "adaptive";
+    readonly reason: ProxyVendorSelectionReason;
+    readonly vendorStates: readonly ProxyVendorSelectionVendorState[];
+};
+
+// @public (undocumented)
+export type ProxyVendorSelectionReason =
+/** Every vendor ahead in the chain is closed (or the selector is cold). */
+"chain_order"
+/** A vendor ahead in the chain is open and was skipped. */
+| "vendor_open"
+/** The first directive is the single probe of a half-open vendor. */
+| "half_open_probe"
+/** Every vendor is open or probing; the chain order is used as is (fail open). */
+| "all_open"
+/**
+* The request's previous attempt failed because of the vendor the baseline
+* names again, so this attempt moves to another closed vendor of the chain.
+*/
+| "retry_alternate";
+
+// @public
+export type ProxyVendorSelectionVendorState = {
+    readonly vendor: ProxyVendorName;
+    readonly state: ProxyVendorState;
+    readonly ejections: number;
+};
+
+// @public (undocumented)
+export type ProxyVendorState = "closed" | "open" | "half_open";
+
+// @public
+export type ProxyVendorStateLogEvent = {
+    level: "info" | "warn";
+    event: "proxy_vendor_state";
+    providerId: string;
+    vendor: ProxyVendorStateTransition["vendor"];
+    from: ProxyVendorStateTransition["from"];
+    to: ProxyVendorStateTransition["to"];
+    reason: ProxyVendorStateTransition["reason"];
+    consecutiveFailures: number;
+    ejections: number;
+    openUntil?: string;
+    errorCode?: string;
+};
+
+// @public (undocumented)
+export type ProxyVendorStateTransition = {
+    readonly vendor: ProxyVendorName;
+    readonly from: ProxyVendorState;
+    readonly to: ProxyVendorState;
+    readonly reason: "failure_threshold" | "open_elapsed" | "probe_succeeded" | "probe_failed" | "probe_timed_out";
+    readonly now: number;
+    readonly consecutiveFailures: number;
+    readonly ejections: number;
+    readonly openUntil?: number;
+    readonly errorCode?: string;
+};
 
 // @public (undocumented)
 type Quantifier = {
@@ -6469,11 +6553,11 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1948:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1949:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:91:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:100:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:18:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:197:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:220:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:24:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:113:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:19:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:218:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:241:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:129:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:165:5 - (ae-forgotten-export) The symbol "SafeRegex" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:198:9 - (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point index.d.ts
