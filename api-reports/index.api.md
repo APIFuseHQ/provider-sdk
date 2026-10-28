@@ -16,6 +16,28 @@ import { ZodType } from 'zod';
 export function acceptLanguageHeaderValue(headers: Readonly<Record<string, unknown>> | undefined): string | undefined;
 
 // @public (undocumented)
+export const ADAPTIVE_PROXY_VENDOR_SELECTOR_DEFAULTS: Required<Omit<AdaptiveProxyVendorSelectorOptions, "onTransition">>;
+
+// @public (undocumented)
+export interface AdaptiveProxyVendorSelector extends ProxyVendorSelector {
+    // (undocumented)
+    readonly kind: "adaptive";
+    lastSelectionReason(): ProxyVendorSelectionReason;
+    reset(): void;
+    snapshot(now?: number): readonly ProxyVendorHealthSnapshot[];
+}
+
+// @public
+export type AdaptiveProxyVendorSelectorOptions = {
+    readonly consecutiveFailureThreshold?: number;
+    readonly baseOpenMs?: number;
+    readonly maxOpenMs?: number;
+    readonly ejectionDecayIntervalMs?: number;
+    readonly probeTimeoutMs?: number;
+    readonly onTransition?: (event: ProxyVendorStateTransition) => void;
+};
+
+// @public (undocumented)
 export const APIFUSE__CACHE__KEY_PEPPER_ENV = "APIFUSE__CACHE__KEY_PEPPER";
 
 // @public (undocumented)
@@ -1169,6 +1191,9 @@ export type ChallengeSolution = {
 // @public
 export function checkResultCode(raw: unknown, successCodes?: string[]): boolean;
 
+// @public
+export function classifyProxyVendorAttemptOutcome(outcome: Pick<ProxyAttemptOutcome, "phase" | "outcome" | "errorCode">): ProxyVendorAttemptOutcome;
+
 // @public (undocumented)
 const CLOSED_ENUM: unique symbol;
 
@@ -1253,6 +1278,9 @@ export interface CookieJar {
     // (undocumented)
     toString(url?: string): string;
 }
+
+// @public (undocumented)
+export function createAdaptiveProxyVendorSelector(options?: AdaptiveProxyVendorSelectorOptions): AdaptiveProxyVendorSelector;
 
 // @public (undocumented)
 export function createAuthFlowHelpers(options?: {
@@ -6329,6 +6357,15 @@ export const PROXY_ATTEMPTS_PER_VENDOR = 3;
 // @public (undocumented)
 const PROXY_HASH: unique symbol;
 
+// @public
+export const PROXY_VENDOR_AMBIGUOUS_ERROR_CODES: readonly ["transport_network_error", "transport_timeout"];
+
+// @public
+export const PROXY_VENDOR_FAILURE_ERROR_CODES: readonly ["PROXY_ALLOCATION_FAILED", "proxy_connect_failed", "PROXY_POOL_STALE", "PROXY_EDGE_AUTH_REJECTED", "PROXY_EDGE_TLS_REJECTED", "PROXY_AUTH_IP_DENIED"];
+
+// @public (undocumented)
+export const PROXY_VENDOR_SELECTION_ENV = "APIFUSE__PROXY__VENDOR_SELECTION";
+
 // @public (undocumented)
 export type ProxyAttemptOutcome = {
     readonly vendor: ProxyVendorName;
@@ -6539,6 +6576,9 @@ export type ProxyTelemetryUnresolvedPayload = {
 // @public (undocumented)
 export type ProxyUserAgentSource = "declared" | "defaulted";
 
+// @public
+export type ProxyVendorAttemptOutcome = "ok" | "vendor_failure" | "other_failure";
+
 // @public (undocumented)
 export type ProxyVendorDirective = {
     readonly vendor: ProxyVendorName;
@@ -6555,14 +6595,54 @@ type ProxyVendorFailoverTelemetryEvent = {
     attempt?: number;
 };
 
+// @public (undocumented)
+export type ProxyVendorHealthSnapshot = {
+    readonly vendor: ProxyVendorName;
+    readonly state: ProxyVendorState;
+    readonly consecutiveFailures: number;
+    readonly ejections: number;
+    readonly openUntil?: number;
+    readonly probeIssuedAt?: number;
+};
+
 // @public
 export type ProxyVendorName = "smartproxy" | "nodemaven";
+
+// @public
+export type ProxyVendorSelectionMode = "ordered" | "adaptive";
+
+// @public (undocumented)
+export type ProxyVendorSelectionReason =
+/** Every vendor ahead in the chain is closed (or the selector is cold). */
+"chain_order"
+/** A vendor ahead in the chain is open and was skipped. */
+| "vendor_open"
+/** The first directive is the single probe of a half-open vendor. */
+| "half_open_probe"
+/** Every vendor is open or probing; the chain order is used as is (fail open). */
+| "all_open";
 
 // @public (undocumented)
 export interface ProxyVendorSelector {
     report(outcome: ProxyAttemptOutcome): void;
     select(request: ProxyAttemptRequest): readonly ProxyVendorDirective[];
 }
+
+// @public (undocumented)
+export type ProxyVendorState = "closed" | "open" | "half_open";
+
+// @public (undocumented)
+export type ProxyVendorStateTransition = {
+    readonly vendor: ProxyVendorName;
+    readonly from: ProxyVendorState;
+    readonly to: ProxyVendorState;
+    readonly reason: "failure_threshold" | "open_elapsed" | "probe_succeeded" | "probe_failed" | "probe_timed_out";
+    readonly now: number;
+    readonly consecutiveFailures: number;
+    readonly ejections: number;
+    readonly openUntil?: number;
+    readonly errorCode?: string;
+};
 
 // @public
 export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema;
@@ -6753,6 +6833,9 @@ export function resolveProviderLocaleValue(catalogs: ProviderLocaleCatalogMap, k
 
 // @public
 export function resolveProxy(options?: ProxyResolutionOptions): Promise<ResolvedProxyConfig>;
+
+// @public
+export function resolveProxyVendorSelectionMode(value: string | undefined, fallback: ProxyVendorSelectionMode): ProxyVendorSelectionMode;
 
 // @public
 export const RESOLVER_BUDGET_MARGIN_MS = 5000;

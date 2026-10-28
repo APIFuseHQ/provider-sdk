@@ -33,6 +33,25 @@ export {
 	setProxyVendorSelector,
 	staticOrderProxyVendorSelector,
 } from "./config/loader.js";
+export type {
+	AdaptiveProxyVendorSelector,
+	AdaptiveProxyVendorSelectorOptions,
+	ProxyVendorAttemptOutcome,
+	ProxyVendorHealthSnapshot,
+	ProxyVendorSelectionMode,
+	ProxyVendorSelectionReason,
+	ProxyVendorState,
+	ProxyVendorStateTransition,
+} from "./runtime/proxy-vendor-selector-adaptive.js";
+export {
+	ADAPTIVE_PROXY_VENDOR_SELECTOR_DEFAULTS,
+	classifyProxyVendorAttemptOutcome,
+	createAdaptiveProxyVendorSelector,
+	PROXY_VENDOR_AMBIGUOUS_ERROR_CODES,
+	PROXY_VENDOR_FAILURE_ERROR_CODES,
+	PROXY_VENDOR_SELECTION_ENV,
+	resolveProxyVendorSelectionMode,
+} from "./runtime/proxy-vendor-selector-adaptive.js";
 export {
 	canonicalJson,
 	digestProviderContract,
