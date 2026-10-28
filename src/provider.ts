@@ -20,6 +20,7 @@ export {
 export { createFormCeremony } from "./ceremonies/index.js";
 export type { JsonPrimitive, JsonValue } from "./contract-json.js";
 export type {
+	HandleRequiresStateGuard,
 	OperationDefinitionFor,
 	ProviderBuilder,
 	ProviderContextOf,
@@ -89,6 +90,7 @@ export {
 	handleFieldDescription,
 	handleFieldNameFor,
 	handleHasDirectionalFieldNames,
+	isHandleFieldDescription,
 	isHandleFieldMeta,
 } from "./handle-meta.js";
 export type {
@@ -379,6 +381,7 @@ export type {
 	SessionStateScope,
 	SessionStateValidity,
 } from "./types.js";
+export type { DeclaredHandleKind } from "./types.js";
 export {
 	HttpRetryAfterPolicy,
 	HttpRetryDelayStrategy,
