@@ -159,6 +159,7 @@ for (const route of [
 			error: { code: "UPSTREAM_ERROR", message: `failed ${SECRET}` },
 		});
 		expect(JSON.parse(response.headers.get(ERROR_OBSERVABILITY_HEADER) ?? "null")).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: true,

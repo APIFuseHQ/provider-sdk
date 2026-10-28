@@ -3,6 +3,7 @@ import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { CLIENT_CANCELLED_STATUS } from "../server/client-cancelled.js";
 
 type Observability = {
+	origin?: string;
 	category?: string;
 	taxonomyVersion?: string;
 	retryable?: boolean;
@@ -17,6 +18,7 @@ type FailureLog = {
 	status?: number;
 	code?: string;
 	errorCategory?: string;
+	errorOrigin?: string;
 	retryable?: boolean;
 	causeChain?: CauseFrame[];
 };
@@ -57,12 +59,14 @@ const wire = await runWire();
 function outcome(scenario: Scenario) {
 	return {
 		status: scenario.served?.status,
+		origin: scenario.served?.observability?.origin,
 		category: scenario.served?.observability?.category,
 		retryable: scenario.served?.observability?.retryable,
 		source: scenario.served?.body.error?.source,
 		bodyRetryable: scenario.served?.body.error?.retryable,
 		logStatus: scenario.log?.status,
 		logCategory: scenario.log?.errorCategory,
+		logOrigin: scenario.log?.errorOrigin,
 		logRetryable: scenario.log?.retryable,
 	};
 }
@@ -70,12 +74,14 @@ function outcome(scenario: Scenario) {
 // The same constant the streaming path terminalizes a cancelled stream with.
 const clientCancelled = {
 	status: CLIENT_CANCELLED_STATUS,
+	origin: "platform",
 	category: "client_cancelled",
 	retryable: false,
 	source: "client",
 	bodyRetryable: false,
 	logStatus: CLIENT_CANCELLED_STATUS,
 	logCategory: "client_cancelled",
+	logOrigin: "platform",
 	logRetryable: false,
 };
 
@@ -108,18 +114,21 @@ describe("serve classification when the caller closes the connection mid-operati
 		// The provider's own time limit: classified like the timeout option's
 		// transport_timeout, never client_cancelled.
 		expect(result.served?.observability).toEqual({
+			origin: "provider",
 			category: "timeout",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: true,
 		});
 		expect(outcome(result)).toEqual({
 			status: 504,
+			origin: "provider",
 			category: "timeout",
 			retryable: true,
 			source: "upstream_failure",
 			bodyRetryable: true,
 			logStatus: 504,
 			logCategory: "timeout",
+			logOrigin: "provider",
 			logRetryable: true,
 		});
 	});
@@ -129,6 +138,7 @@ describe("serve classification when the caller closes the connection mid-operati
 		expect(result.clientAborted).toBe(false);
 		expect(result.log?.code).toBe("upstream_http_error");
 		expect(result.served?.observability).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: true,
@@ -136,12 +146,14 @@ describe("serve classification when the caller closes the connection mid-operati
 		});
 		expect(outcome(result)).toEqual({
 			status: 502,
+			origin: "provider",
 			category: "upstream_http",
 			retryable: true,
 			source: "upstream_failure",
 			bodyRetryable: true,
 			logStatus: 502,
 			logCategory: "upstream_http",
+			logOrigin: "provider",
 			logRetryable: true,
 		});
 	});

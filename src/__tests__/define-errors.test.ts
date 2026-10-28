@@ -381,7 +381,7 @@ describe("defineOperation errors", () => {
 type Served = {
 	status: number;
 	body: { error: { code: string; retryable: boolean; source: string; message: string } };
-	header: { category: string; retryable: boolean; taxonomyVersion: string };
+	header: { origin: string; category: string; retryable: boolean; taxonomyVersion: string };
 	events: ProviderServerLogEvent[];
 };
 
@@ -437,6 +437,7 @@ describe("serving a factory-made error", () => {
 			expect({ listed, status: served.status, ...served.header }).toEqual({
 				listed,
 				status: 404,
+				origin: "provider",
 				taxonomyVersion: expect.any(String),
 				category: "upstream_rejected",
 				retryable: false,

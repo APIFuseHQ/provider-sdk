@@ -3,6 +3,7 @@ import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { CLIENT_CANCELLED_STATUS } from "../server/client-cancelled.js";
 
 type Observability = {
+	origin?: string;
 	category?: string;
 	taxonomyVersion?: string;
 	retryable?: boolean;
@@ -17,6 +18,7 @@ type FailureLog = {
 	status?: number;
 	code?: string;
 	errorCategory?: string;
+	errorOrigin?: string;
 	retryable?: boolean;
 	causeChain?: CauseFrame[];
 };
@@ -62,6 +64,7 @@ const wire = await runWire();
 function outcome(scenario: Scenario) {
 	return {
 		status: scenario.served?.status,
+		origin: scenario.served?.observability?.origin,
 		category: scenario.served?.observability?.category,
 		retryable: scenario.served?.observability?.retryable,
 		code: scenario.served?.body.error?.code,
@@ -71,6 +74,7 @@ function outcome(scenario: Scenario) {
 		logStatus: scenario.log?.status,
 		logCode: scenario.log?.code,
 		logCategory: scenario.log?.errorCategory,
+		logOrigin: scenario.log?.errorOrigin,
 		logRetryable: scenario.log?.retryable,
 	};
 }
@@ -78,6 +82,7 @@ function outcome(scenario: Scenario) {
 // What transport_timeout serves, with the native code kept in the body.
 const providerTimeoutAbort = {
 	status: 504,
+	origin: "provider",
 	category: "timeout",
 	retryable: true,
 	code: "native_connection_aborted",
@@ -87,6 +92,7 @@ const providerTimeoutAbort = {
 	logStatus: 504,
 	logCode: "native_connection_aborted",
 	logCategory: "timeout",
+	logOrigin: "provider",
 	logRetryable: true,
 };
 
@@ -94,6 +100,7 @@ const providerTimeoutAbort = {
 // provider's own signal caused (upstream_http with no upstream status).
 const providerAbort = {
 	status: 502,
+	origin: "provider",
 	category: "upstream_http",
 	retryable: false,
 	code: "native_connection_aborted",
@@ -103,6 +110,7 @@ const providerAbort = {
 	logStatus: 502,
 	logCode: "native_connection_aborted",
 	logCategory: "upstream_http",
+	logOrigin: "provider",
 	logRetryable: false,
 };
 
@@ -113,6 +121,7 @@ describe("serve classification of a provider's own ctx.native signal abort", () 
 		expect(result.upstreamReached).toBe(true);
 		expect(outcome(result)).toEqual(providerTimeoutAbort);
 		expect(result.served?.observability).toEqual({
+			origin: "provider",
 			category: "timeout",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: true,
@@ -133,6 +142,7 @@ describe("serve classification of a provider's own ctx.native signal abort", () 
 		expect(result.upstreamReached).toBe(true);
 		expect(outcome(result)).toEqual(providerAbort);
 		expect(result.served?.observability).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: false,
@@ -152,6 +162,7 @@ describe("serve classification of a provider's own ctx.native signal abort", () 
 		expect(result.upstreamReached).toBe(true);
 		expect(outcome(result)).toEqual({
 			status: 504,
+			origin: "provider",
 			category: "timeout",
 			retryable: true,
 			code: "native_connection_timeout",
@@ -161,6 +172,7 @@ describe("serve classification of a provider's own ctx.native signal abort", () 
 			logStatus: 504,
 			logCode: "native_connection_timeout",
 			logCategory: "timeout",
+			logOrigin: "provider",
 			logRetryable: true,
 		});
 		expect(result.log?.causeChain).toBeUndefined();
@@ -173,6 +185,7 @@ describe("serve classification of a provider's own ctx.native signal abort", () 
 		// What ctx.http serves for a transport_cancelled the caller caused.
 		expect(outcome(result)).toEqual({
 			status: CLIENT_CANCELLED_STATUS,
+			origin: "platform",
 			category: "client_cancelled",
 			retryable: false,
 			code: "native_connection_aborted",
@@ -182,6 +195,7 @@ describe("serve classification of a provider's own ctx.native signal abort", () 
 			logStatus: CLIENT_CANCELLED_STATUS,
 			logCode: "native_connection_aborted",
 			logCategory: "client_cancelled",
+			logOrigin: "platform",
 			logRetryable: false,
 		});
 	});

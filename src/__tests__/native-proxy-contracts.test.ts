@@ -96,6 +96,12 @@ function errorCategory(response: Response): string | undefined {
 	return JSON.parse(value ?? "{}").category;
 }
 
+function errorOrigin(response: Response): string | undefined {
+	const value = response.headers.get(ERROR_OBSERVABILITY_HEADER);
+	expect(value).toBeTruthy();
+	return JSON.parse(value ?? "{}").origin;
+}
+
 function eventPayload(event: ProviderServerLogEvent | undefined, key: "proxy" | "native"): unknown {
 	return event && Object.hasOwn(event, key) ? Reflect.get(event, key) : undefined;
 }
@@ -545,6 +551,7 @@ describe("native server error classification", () => {
 				body: JSON.stringify({ requestId: `proxy-required-${transport}`, input: {} }),
 			});
 			expect(errorCategory(response)).toBe("proxy_pool");
+			expect(errorOrigin(response)).toBe("platform");
 			const failed = events.find(
 				(event) =>
 					event.event === "provider_request_failed" &&
@@ -553,11 +560,12 @@ describe("native server error classification", () => {
 			expect(failed).toMatchObject({
 				event: "provider_request_failed",
 				errorCategory: "proxy_pool",
+				errorOrigin: "platform",
 			});
 		}
 	});
 
-	it("classifies every native transport error code; only a provider's own abort reaches upstream_http", async () => {
+	it("classifies every native transport error code a provider throws itself as a provider failure", async () => {
 		const expected = {
 			// Like ctx.http's transport_cancelled from the provider's own signal.
 			native_connection_aborted: "upstream_http",
@@ -573,8 +581,11 @@ describe("native server error classification", () => {
 			native_egress_not_declared: "provider_error",
 			native_egress_policy_invalid: "provider_error",
 			native_dynamic_egress_unsupported: "provider_error",
-			native_proxy_expired: "proxy_pool",
-			native_proxy_invalid: "proxy_pool",
+			// The proxy pool's fault only when the native client issued it (the
+			// SDK's own sticky expiry and allocated endpoint): a provider that
+			// constructs one has thrown a transport failure like any other.
+			native_proxy_expired: "upstream_http",
+			native_proxy_invalid: "upstream_http",
 		} as const satisfies Record<NativeNetworkErrorCode, string>;
 		const operations = Object.fromEntries(
 			(Object.keys(expected) as NativeNetworkErrorCode[]).map((code) => [
@@ -601,6 +612,7 @@ describe("native server error classification", () => {
 				body: JSON.stringify({ requestId: `request-${code}`, input: {} }),
 			});
 			expect(errorCategory(response)).toBe(category);
+			expect(errorOrigin(response)).toBe("provider");
 		}
 	});
 
@@ -654,6 +666,7 @@ describe("native server error classification", () => {
 		const providerAbort = {
 			status: 502,
 			observability: {
+				origin: "provider",
 				category: "upstream_http",
 				taxonomyVersion: expect.any(String),
 				retryable: false,
@@ -667,6 +680,7 @@ describe("native server error classification", () => {
 			"timeout-reason": {
 				status: 504,
 				observability: {
+					origin: "provider",
 					category: "timeout",
 					taxonomyVersion: expect.any(String),
 					retryable: true,
@@ -740,6 +754,7 @@ describe("native server error classification", () => {
 		const callerCancelled = {
 			status: CLIENT_CANCELLED_STATUS,
 			observability: {
+				origin: "platform",
 				category: "client_cancelled",
 				taxonomyVersion: expect.any(String),
 				retryable: false,
@@ -756,6 +771,7 @@ describe("native server error classification", () => {
 			"inbound-timeout-reason": {
 				status: 504,
 				observability: {
+					origin: "provider",
 					category: "timeout",
 					taxonomyVersion: expect.any(String),
 					retryable: true,

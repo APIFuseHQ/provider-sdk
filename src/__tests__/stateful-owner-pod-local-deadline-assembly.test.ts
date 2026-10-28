@@ -389,6 +389,7 @@ const DEADLINE_EXPIRED_BODY = (requestId: string) => ({
 	},
 });
 const DEADLINE_EXPIRED_OBSERVABILITY = {
+	origin: "platform",
 	category: "stateful_forwarding_deadline",
 	taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	retryable: false,
@@ -464,6 +465,7 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			// transport_cancelled, the TimeoutError stays the logged cause.
 			expect(result.owner?.status).toBe(504);
 			expect(result.owner?.observability).toEqual({
+				origin: "provider",
 				category: "timeout",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: true,
@@ -495,6 +497,7 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			// The deadline timer had fired, but it did not cancel this failure.
 			expect(result.owner?.status).toBe(500);
 			expect(result.owner?.observability).toEqual({
+				origin: "platform",
 				category: "internal_error",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: false,
