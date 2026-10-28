@@ -55,6 +55,9 @@ export const APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY = "APIFUSE__RESOLVER__HY
 export const APIFUSE__RESOLVER__TIMEOUT_MS = "APIFUSE__RESOLVER__TIMEOUT_MS";
 
 // @public (undocumented)
+export const APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS = "APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS";
+
+// @public (undocumented)
 export const APIFUSE__STT__BACKEND_ENV = "APIFUSE__STT__BACKEND";
 
 // @public (undocumented)
@@ -1116,6 +1119,7 @@ export function centered(maxOffset: string): HealthScheduleRandomization;
 export type ChallengeSolution = {
     readonly form: "token";
     readonly token: string;
+    readonly expires?: number;
 } | {
     readonly form: "cookies";
     readonly cookies: Readonly<Record<string, string>>;
@@ -1357,6 +1361,9 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 
 // @public
 export function createProviderEnvironment(environment: Readonly<Record<string, string | undefined>>, declaredNames: readonly string[]): Readonly<Record<string, string>>;
+
+// @public (undocumented)
+export function createResolverVendorHealthRegistry(): ResolverVendorHealthRegistry;
 
 // @public (undocumented)
 export function createScratchpad(allowedKeys: string[], initial?: Record<string, unknown>): ContextScratchpad;
@@ -1648,8 +1655,11 @@ export const DEFAULT_OPERATION_TRANSPORT: OperationJsonTransport;
 // @public
 export const DEFAULT_PROVIDER_ERROR_LOCALE = "en";
 
-// @public (undocumented)
-export const DEFAULT_RESOLVER_TIMEOUT_MS = 180000;
+// @public
+export const DEFAULT_RESOLVER_TIMEOUT_MS = 45000;
+
+// @public
+export const DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS = 600000;
 
 // @public (undocumented)
 export const DEFAULT_STEALTH_BROWSER: "chrome";
@@ -2090,6 +2100,9 @@ export function getProviderLocalePath(catalog: ProviderLocaleCatalog, key: Provi
 // @public
 export function getProviderLocaleSegments(catalog: ProviderLocaleCatalog, segments: readonly string[]): ProviderLocaleValue | undefined;
 
+// @public
+export function getResolverVendorHealthSnapshot(nowMs?: number): readonly ResolverVendorHealthSnapshot[];
+
 // @public (undocumented)
 export function getStealthProfile(selection?: StealthProfileSelection): StealthProfile;
 
@@ -2411,10 +2424,7 @@ interface HealthCheckInputPreparationContext<TInput = unknown> {
 
 // @public
 export interface HealthCheckSuite<TInput = unknown, TOutput = unknown> {
-    cases: [
-    HealthCheckCase<TInput, TOutput>,
-    ...HealthCheckCase<TInput, TOutput>[]
-    ];
+    cases: [HealthCheckCase<TInput, TOutput>, ...HealthCheckCase<TInput, TOutput>[]];
     degradedThresholdMs?: number;
     interval: ProbeInterval;
     requiresConnection?: boolean;
@@ -6659,6 +6669,14 @@ export function resolveProviderLocaleValue(catalogs: ProviderLocaleCatalogMap, k
 // @public
 export function resolveProxy(options?: ProxyResolutionOptions): Promise<ResolvedProxyConfig>;
 
+// @public
+export const RESOLVER_BUDGET_MARGIN_MS = 5000;
+
+// @public
+export const RESOLVER_TOKEN_SOLUTION_TTL_MS_BY_KIND: {
+    readonly aws_waf: number;
+};
+
 // @public (undocumented)
 export type ResolverAttemptSample = {
     v: ProviderResolverVendor;
@@ -6725,6 +6743,7 @@ export interface ResolverRuntimeOptions {
         readonly clientProfile?: string;
         readonly identityScope?: string;
     }) => ResolverVendorTransport;
+    readonly deadlineAtMs?: number;
     readonly identityScope?: string;
     readonly proxyIntent?: {
         readonly mode: ProviderProxyMode;
@@ -6735,13 +6754,14 @@ export interface ResolverRuntimeOptions {
     };
     readonly telemetry?: ResolverTelemetrySink;
     readonly transport?: ResolverVendorTransport;
+    readonly vendorHealth?: ResolverVendorHealthRegistry;
 }
 
 // @public (undocumented)
 export type ResolverTelemetryAttemptOutcome = "ok" | "error";
 
-// @public (undocumented)
-export type ResolverTelemetryCacheStatus = "hit" | "miss" | "disabled" | "not_cacheable";
+// @public
+export type ResolverTelemetryCacheStatus = "hit" | "miss" | "in_flight" | "disabled" | "not_cacheable";
 
 // @public (undocumented)
 export type ResolverTelemetryCacheWriteReason = "no_expires" | "not_cacheable" | "error";
@@ -6820,7 +6840,11 @@ export type ResolverTelemetryLogPayload = {
 };
 
 // @public
-export type ResolverTelemetryOutcome = "solved" | "cached" | "exhausted" | "aborted" | "error";
+export type ResolverTelemetryOutcome = "solved" | "cached" | "exhausted" | "aborted" | "error"
+/** The caller left mid-solve; the vendor poll finished afterwards and the cache was written. */
+| "detached_completed"
+/** The caller left mid-solve; the vendor poll failed afterwards. */
+| "detached_failed";
 
 // @public (undocumented)
 export type ResolverTelemetryPhase = "create_task" | "poll_result" | "cleanup" | "measure_ip" | "fetch_script" | "generate_payload" | "post_payload";
@@ -6864,6 +6888,76 @@ export type ResolverVendorAttemptTelemetryEvent = {
     };
 };
 
+// @public
+export type ResolverVendorBalance = {
+    readonly balance: number;
+};
+
+// @public (undocumented)
+export type ResolverVendorBalanceRecord = {
+    readonly balance: number;
+    readonly checkedAtMs: number;
+} | {
+    readonly error: ResolverVendorUnavailableReason | "unexpected";
+    readonly checkedAtMs: number;
+};
+
+// @public (undocumented)
+export type ResolverVendorCooldownReason = "allocation_exhausted";
+
+// @public
+export interface ResolverVendorHealthRegistry {
+    cooldownUntilMs(vendor: ProviderResolverVendor, nowMs: number): number | undefined;
+    // (undocumented)
+    recordBalance(vendor: ProviderResolverVendor, record: ResolverVendorBalanceRecord): void;
+    // (undocumented)
+    recordDetachedOutcome(vendor: ProviderResolverVendor, outcome: "completed" | "failed"): void;
+    // (undocumented)
+    recordSolveSample(vendor: ProviderResolverVendor, kind: ProviderChallengeKind, sample: {
+        readonly ms: number;
+        readonly ok: boolean;
+    }): void;
+    // (undocumented)
+    reset(): void;
+    // (undocumented)
+    snapshot(nowMs?: number): readonly ResolverVendorHealthSnapshot[];
+    // (undocumented)
+    solveP50Ms(vendor: ProviderResolverVendor, kind: ProviderChallengeKind): number | undefined;
+    // (undocumented)
+    startCooldown(vendor: ProviderResolverVendor, reason: ResolverVendorCooldownReason, startedAtMs: number, untilMs: number): void;
+}
+
+// @public
+export type ResolverVendorHealthSnapshot = {
+    readonly vendor: ProviderResolverVendor;
+    readonly balance?: {
+        readonly amount: number;
+        readonly checkedAtMs: number;
+    };
+    readonly balanceError?: {
+        readonly reason: ResolverVendorUnavailableReason | "unexpected";
+        readonly checkedAtMs: number;
+    };
+    readonly cooldown?: {
+        readonly reason: ResolverVendorCooldownReason;
+        readonly startedAtMs: number;
+        readonly untilMs: number;
+    };
+    readonly solves: readonly ResolverVendorSolveStats[];
+    readonly detached: {
+        readonly completed: number;
+        readonly failed: number;
+    };
+};
+
+// @public (undocumented)
+export type ResolverVendorSolveStats = {
+    readonly kind: ProviderChallengeKind;
+    readonly samples: number;
+    readonly successes: number;
+    readonly p50Ms?: number;
+};
+
 // @public (undocumented)
 export interface ResolverVendorTransport {
     fetch(url: string, init: {
@@ -6893,7 +6987,11 @@ export interface ResolverVendorTransport {
 }
 
 // @public (undocumented)
-export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_proxy_identity" | "missing_client_profile" | "missing_challenge_input" | "missing_transport" | "allocation_exhausted" | "transport_failure" | "timeout" | "not_implemented";
+export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_proxy_identity" | "missing_client_profile" | "missing_challenge_input" | "missing_transport" | "allocation_exhausted" | "transport_failure" | "timeout" | "not_implemented"
+/** Skipped without a network call while its allocation-exhausted cooldown is active. */
+| "cooldown"
+/** Skipped or cut short because the caller's remaining budget cannot cover the solve. */
+| "budget_exceeded";
 
 // @public (undocumented)
 export function resolveSttPrompt(request: SttTranscribeRequest): string | undefined;
@@ -8319,6 +8417,7 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
         requestClass?: "navigation" | "form-post" | "xhr" | "post";
         userActivation?: boolean;
         insecureSkipVerify?: boolean;
+        rotateExitOnAdmissionRefusal?: boolean;
     };
     throwOnHttpError?: boolean;
 }
@@ -9132,7 +9231,7 @@ export { z }
 // Warnings were encountered during analysis:
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/config/loader.d.ts:114:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:117:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:149:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
@@ -9150,12 +9249,12 @@ export { z }
 // dist/server/serve-implementation.d.ts:220:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:295:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:732:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2076:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2164:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2172:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2173:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2360:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:734:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2091:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2179:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2187:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2188:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2375:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

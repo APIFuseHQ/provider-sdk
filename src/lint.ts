@@ -1495,11 +1495,18 @@ function extractBalancedCallArguments(source: string, startIndex: number): strin
 }
 
 /**
+ * Option names whose value is read as a `true` / `false` literal instead of a
+ * string literal. Collected as the text "true" / "false".
+ */
+const BOOLEAN_ERROR_OPTION_NAMES: ReadonlySet<string> = new Set(["retryable"]);
+
+/**
  * Collects literal string values of the named top-level properties inside a
  * ProviderError/AuthError/ValidationError options object. Only plain `"..."` /
  * `'...'` literals at options-object depth count; computed values (identifiers,
  * ternaries, template substitutions, concatenations, escapes) are skipped
  * silently so the rules never guess. The first literal wins per property name.
+ * Names in BOOLEAN_ERROR_OPTION_NAMES are read as boolean literals instead.
  */
 function collectLiteralErrorOptionValues(
 	args: string,
@@ -1624,6 +1631,26 @@ function collectLiteralErrorOptionValues(
 					}
 					return collected;
 				}
+				if (BOOLEAN_ERROR_OPTION_NAMES.has(optionName)) {
+					const word = args.startsWith("true", cursor)
+						? "true"
+						: args.startsWith("false", cursor)
+							? "false"
+							: undefined;
+					if (word !== undefined) {
+						let after = cursor + word.length;
+						while (after < args.length && /\s/.test(args[after] ?? "")) {
+							after++;
+						}
+						const nextChar = after < args.length ? (args[after] ?? "") : "";
+						if (nextChar === "," || nextChar === "}" || nextChar === "") {
+							collected[optionName] ??= word;
+							index = cursor + word.length - 1;
+							previousSignificantChar = word[word.length - 1] ?? "";
+							continue;
+						}
+					}
+				}
 				nonLiteral?.add(optionName);
 			} else if (args[cursor] === "," || args[cursor] === "}") {
 				// Shorthand member: the value is a variable of the same name.
@@ -1651,6 +1678,8 @@ type ThrownErrorConstructionSite = {
 	readonly fixKey?: string;
 	/** Literal `category` option, when the site sets one. */
 	readonly category?: string;
+	/** Literal `retryable: true | false` option, when the site sets one. */
+	readonly retryable?: boolean;
 	/**
 	 * The site sets `category` from something other than a string literal (a
 	 * variable, a shorthand member, or a spread that names it), so it may carry
@@ -1659,7 +1688,13 @@ type ThrownErrorConstructionSite = {
 	readonly nonLiteralCategory?: true;
 };
 
-const THROWN_ERROR_SCANNED_OPTION_NAMES = ["code", "messageKey", "fixKey", "category"] as const;
+const THROWN_ERROR_SCANNED_OPTION_NAMES = [
+	"code",
+	"messageKey",
+	"fixKey",
+	"category",
+	"retryable",
+] as const;
 
 function collectThrownErrorConstructionSites(source: string): ThrownErrorConstructionSite[] {
 	const sites: ThrownErrorConstructionSite[] = [];
@@ -1684,6 +1719,7 @@ function collectThrownErrorConstructionSites(source: string): ThrownErrorConstru
 				...(values.messageKey === undefined ? {} : { messageKey: values.messageKey }),
 				...(values.fixKey === undefined ? {} : { fixKey: values.fixKey }),
 				...(values.category === undefined ? {} : { category: values.category }),
+				...(values.retryable === undefined ? {} : { retryable: values.retryable === "true" }),
 				...(nonLiteral.has("category") ? { nonLiteralCategory: true as const } : {}),
 			});
 		}
@@ -1785,6 +1821,89 @@ function lintUndeclaredThrownErrorCodes(provider: {
 				level: "warn",
 				field,
 				message: `Thrown error code "${code}" (${field}) is neither SDK-registered nor declared in any operation's errorCodes; at runtime it serves HTTP 500 and emits the unregistered_provider_error_code signal. Declare it in the owning operation's errorCodes with status and retryable.`,
+			});
+		}
+	}
+	return diagnostics;
+}
+
+/**
+ * Flags a `new ProviderError|AuthError|ValidationError(...)` site whose literal
+ * `retryable` contradicts what the provider declares for that code.
+ *
+ * Runtime retryability resolves as `instance option ?? declared ?? false`, so
+ * the throw site wins: a provider that declares `UPSTREAM_ERROR` with
+ * `retryable: false` and then throws it with `retryable: true` serves a
+ * retryable error whose published contract says the opposite. Callers and the
+ * Gateway retry policy read the declaration; the served envelope disagrees.
+ * `error-code-retryable-conflicts-sdk` catches the declaration against the SDK
+ * canonical value; this rule catches the throw site against the declaration.
+ *
+ * Attribution follows `thrown-error-code-undeclared`: throw sites cannot be
+ * tied to one operation, so the expected value is the provider-level
+ * declaration for the code. When operations declare the same code with
+ * different `retryable` values the rule stays silent (it cannot know which
+ * operation the site serves); when no operation declares `retryable` for the
+ * code, the SDK canonical value applies for registered codes, and the rule
+ * stays silent otherwise. Only literal codes and literal booleans are read.
+ *
+ * Error level: this is a contract lie that `apifuse check` must stop, and the
+ * fix is local (drop the literal, or throw the code the declaration describes).
+ */
+function lintThrownErrorRetryableConflicts(provider: {
+	id?: string;
+	authFlowSource?: string;
+	providerSourceFiles?: Record<string, string>;
+	operations?: Record<
+		string,
+		{
+			handler?: unknown;
+			source?: string;
+			errorCodes?: ReadonlyArray<{ code: string; retryable?: boolean }>;
+		}
+	>;
+}): LintDiagnostic[] {
+	const providerId = provider.id ?? "unknown";
+	// code -> declared retryable, or null when operations disagree.
+	const declared = new Map<string, boolean | null>();
+	for (const operation of Object.values(provider.operations ?? {})) {
+		for (const entry of operation.errorCodes ?? []) {
+			if (typeof entry?.code !== "string" || typeof entry.retryable !== "boolean") continue;
+			const previous = declared.get(entry.code);
+			if (previous === undefined) {
+				declared.set(entry.code, entry.retryable);
+			} else if (previous !== null && previous !== entry.retryable) {
+				declared.set(entry.code, null);
+			}
+		}
+	}
+	const expectedRetryable = (code: string): { value: boolean; origin: string } | undefined => {
+		const fromDeclaration = declared.get(code);
+		if (fromDeclaration === null) return undefined;
+		if (fromDeclaration !== undefined) {
+			return { value: fromDeclaration, origin: "the operation errorCodes declaration" };
+		}
+		const canonical = SDK_CANONICAL_ERROR_CODE_RETRYABILITY.get(code);
+		if (canonical === undefined) return undefined;
+		return { value: canonical, origin: "the SDK canonical registration" };
+	};
+
+	const diagnostics: LintDiagnostic[] = [];
+	for (const { field, source } of collectThrowSiteLintSources(provider)) {
+		const reported = new Set<string>();
+		for (const site of collectThrownErrorConstructionSites(source)) {
+			if (!UNDECLARED_CODE_ERROR_CLASSES.has(site.errorClass)) continue;
+			if (site.code === undefined || site.retryable === undefined) continue;
+			const expected = expectedRetryable(site.code);
+			if (expected === undefined || expected.value === site.retryable) continue;
+			const key = `${site.code}:${site.retryable}`;
+			if (reported.has(key)) continue;
+			reported.add(key);
+			diagnostics.push({
+				rule: "thrown-error-retryable-conflicts-declaration",
+				level: "error",
+				field,
+				message: `Provider "${providerId}" throws error code "${site.code}" with retryable ${site.retryable} (${field}), but ${expected.origin} says retryable ${expected.value}. The thrown value wins at runtime, so callers and the Gateway retry policy read a contract the served error contradicts. Drop the retryable literal at the throw site (the declaration supplies ${expected.value}) or throw a distinct code declared with retryable ${site.retryable}.`,
 			});
 		}
 	}
@@ -3949,6 +4068,7 @@ export function lintProviderWithInformation(
 		...lintSelfHostedBrowserPatterns(provider, options),
 		...lintBrowserVersionLiterals(provider),
 		...lintUndeclaredThrownErrorCodes(provider),
+		...lintThrownErrorRetryableConflicts(provider),
 		...lintErrorCodeDeclarationConflicts(provider),
 		...lintErrorMessageLocalization(provider),
 		...lintLegacyChoiceUsage(provider),

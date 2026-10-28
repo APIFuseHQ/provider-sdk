@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { defineProvider } from "../../define.js";
@@ -15,6 +15,7 @@ import {
 	createResolverClientFromEnv,
 	swapResolverAdapterFactoryForTests,
 } from "../resolver.js";
+import { resetResolverVendorHealthForTests } from "../resolver-vendor-health.js";
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,
@@ -48,6 +49,11 @@ function installNodemavenTestCredentials(): () => void {
 		else process.env[NODEMAVEN_PASSWORD_ENV] = originalPassword;
 	};
 }
+
+beforeEach(() => {
+	// The server wiring under test shares the process-wide vendor registry (process.env).
+	resetResolverVendorHealthForTests();
+});
 
 describe("resolver env availability", () => {
 	it("fails closed when the provider does not declare resolver capability", async () => {

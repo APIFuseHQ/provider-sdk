@@ -2,11 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { lintOperation, lintProvider } from "../lint.js";
 import { describeKey, fields, publicField } from "../schema.js";
-import type {
-	AuthMode,
-	OperationApprovalPolicy,
-	OperationRiskClass,
-} from "../types.js";
+import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "../types.js";
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
 
@@ -1174,6 +1170,164 @@ describe("lintProvider error-code declaration conflicts", () => {
 	});
 });
 
+describe("lintProvider thrown-error-retryable-conflicts-declaration", () => {
+	const conflictRule = (item: { rule: string }) =>
+		item.rule === "thrown-error-retryable-conflicts-declaration";
+
+	function operation(
+		errorCodes: ReadonlyArray<{
+			code: string;
+			status?: number;
+			description: string;
+			retryable?: boolean;
+		}>,
+	) {
+		return {
+			riskClass: READ_RISK_CLASS,
+			descriptionKey: "operations.lookup.description",
+			input: withDescriptionKey(z.object({}), "operations.lookup.input.description"),
+			output: withDescriptionKey(z.object({}), "operations.lookup.output.description"),
+			fixtures: { request: {}, response: {} },
+			errorCodes: [...errorCodes],
+		};
+	}
+
+	function lintSources(
+		providerSourceFiles: Record<string, string>,
+		errorCodes: ReadonlyArray<{
+			code: string;
+			status?: number;
+			description: string;
+			retryable?: boolean;
+		}>,
+		extraOperations: Record<string, ReturnType<typeof operation>> = {},
+	) {
+		return lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			providerSourceFiles,
+			operations: { lookup: operation(errorCodes), ...extraOperations },
+		}).filter(conflictRule);
+	}
+
+	// Buyee shape: errors.ts declares UPSTREAM_ERROR non-retryable, upstream/buyee.ts
+	// mints the same code with retryable: true.
+	const upstreamErrorDeclaredNonRetryable = [
+		{
+			code: "UPSTREAM_ERROR",
+			status: 502,
+			description: "Buyee returned an unexpected HTTP status.",
+			retryable: false,
+		},
+	];
+
+	it("errors when a thrown retryable literal contradicts the declaration", () => {
+		const diagnostics = lintSources(
+			{
+				"upstream/buyee.ts": [
+					"throw new ProviderError(`Buyee responded with HTTP ${response.status}`, {",
+					'\tcode: "UPSTREAM_ERROR",',
+					"\tretryable: true,",
+					"});",
+				].join("\n"),
+			},
+			upstreamErrorDeclaredNonRetryable,
+		);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "thrown-error-retryable-conflicts-declaration",
+				level: "error",
+				field: "sourceFiles.upstream/buyee.ts",
+			}),
+		]);
+		expect(diagnostics[0]?.message).toContain('"UPSTREAM_ERROR"');
+		expect(diagnostics[0]?.message).toContain("retryable true");
+		expect(diagnostics[0]?.message).toContain("declaration says retryable false");
+	});
+
+	it("stays silent when the thrown literal agrees with the declaration", () => {
+		expect(
+			lintSources(
+				{
+					"upstream/buyee.ts": `throw new ProviderError("bad gateway", { code: "UPSTREAM_ERROR", retryable: false });`,
+				},
+				upstreamErrorDeclaredNonRetryable,
+			),
+		).toEqual([]);
+	});
+
+	it("stays silent when the throw site sets no retryable literal", () => {
+		expect(
+			lintSources(
+				{
+					"upstream/buyee.ts": [
+						`throw new ProviderError("bad gateway", { code: "UPSTREAM_ERROR" });`,
+						`throw new ProviderError("dyn", { code: "UPSTREAM_ERROR", retryable: isTransient });`,
+						`throw new ProviderError("short", { code: "UPSTREAM_ERROR", retryable });`,
+					].join("\n"),
+				},
+				upstreamErrorDeclaredNonRetryable,
+			),
+		).toEqual([]);
+	});
+
+	it("falls back to the SDK canonical value for a registered code nobody declares", () => {
+		const diagnostics = lintSources(
+			{
+				"upstream/client.ts": `throw new ProviderError("shape", { code: "UPSTREAM_SCHEMA_ERROR", retryable: true });`,
+			},
+			[],
+		);
+
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain("SDK canonical registration says retryable false");
+	});
+
+	it("stays silent for an undeclared, unregistered code and for test sources", () => {
+		expect(
+			lintSources(
+				{
+					"upstream/client.ts": `throw new ProviderError("sold out", { code: "ITEM_SOLD_OUT", retryable: true });`,
+					"upstream/buyee.test.ts": `throw new ProviderError("x", { code: "UPSTREAM_ERROR", retryable: true });`,
+				},
+				upstreamErrorDeclaredNonRetryable,
+			),
+		).toEqual([]);
+	});
+
+	it("stays silent when operations declare the same code with different retryable values", () => {
+		expect(
+			lintSources(
+				{
+					"upstream/client.ts": `throw new ProviderError("x", { code: "UPSTREAM_ERROR", retryable: true });`,
+				},
+				upstreamErrorDeclaredNonRetryable,
+				{
+					search: operation([
+						{ code: "UPSTREAM_ERROR", status: 502, description: "Flaky.", retryable: true },
+					]),
+				},
+			),
+		).toEqual([]);
+	});
+
+	it("reports one diagnostic per code and value per file", () => {
+		const diagnostics = lintSources(
+			{
+				"upstream/client.ts": [
+					`throw new ProviderError("first", { code: "UPSTREAM_ERROR", retryable: true });`,
+					`throw new ProviderError("second", { retryable: true, code: "UPSTREAM_ERROR" });`,
+				].join("\n"),
+			},
+			upstreamErrorDeclaredNonRetryable,
+		);
+
+		expect(diagnostics).toHaveLength(1);
+	});
+});
+
 describe("flat operation safety lint", () => {
 	const credentialBearingModes = [
 		"credentials",
@@ -1206,26 +1360,23 @@ describe("flat operation safety lint", () => {
 		});
 	}
 
-	it.each(credentialBearingModes)(
-		"requires explicit connectionMode for %s auth",
-		(authMode) => {
-			const diagnostics = providerWithOperation({ riskClass: "read" }, authMode);
-			expect(diagnostics).toContainEqual(
-				expect.objectContaining({
-					rule: "mixed-auth-connection-mode-required",
-					level: "error",
-					field: "operations.lookup.connectionMode",
-				}),
-			);
-		},
-	);
+	it.each(credentialBearingModes)("requires explicit connectionMode for %s auth", (authMode) => {
+		const diagnostics = providerWithOperation({ riskClass: "read" }, authMode);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				rule: "mixed-auth-connection-mode-required",
+				level: "error",
+				field: "operations.lookup.connectionMode",
+			}),
+		);
+	});
 
 	it("does not require connectionMode for none or platform-managed auth", () => {
 		for (const authMode of ["none", "platform-managed"] satisfies readonly AuthMode[]) {
 			const diagnostics = providerWithOperation({ riskClass: "read" }, authMode);
-			expect(
-				diagnostics.some((item) => item.rule === "mixed-auth-connection-mode-required"),
-			).toBe(false);
+			expect(diagnostics.some((item) => item.rule === "mixed-auth-connection-mode-required")).toBe(
+				false,
+			);
 		}
 	});
 
@@ -1234,9 +1385,9 @@ describe("flat operation safety lint", () => {
 			{ riskClass: "read", connectionMode: "none" },
 			"credentials",
 		);
-		expect(
-			diagnostics.some((item) => item.rule === "mixed-auth-connection-mode-required"),
-		).toBe(false);
+		expect(diagnostics.some((item) => item.rule === "mixed-auth-connection-mode-required")).toBe(
+			false,
+		);
 	});
 
 	it.each([
@@ -1412,11 +1563,9 @@ export function clear(headers: Headers, tuples: Array<[string, string | undefine
 }
 `);
 
-		expect(diagnostics.map((diagnostic) => diagnostic.message.match(/"([^"]+)" header/)?.[1])).toEqual([
-			"sec-fetch-dest",
-			"sec-fetch-mode",
-			"sec-fetch-site",
-		]);
+		expect(
+			diagnostics.map((diagnostic) => diagnostic.message.match(/"([^"]+)" header/)?.[1]),
+		).toEqual(["sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]);
 	});
 
 	it("does not scope a ctx.http file into the rule because a comment or string mentions ctx.stealth", () => {

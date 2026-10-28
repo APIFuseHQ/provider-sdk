@@ -27,6 +27,7 @@ import {
 } from "../runtime/engine-mode.js";
 import { SDK_VERSION } from "./sdk-version.js";
 import { CLIENT_CANCELLED_STATUS } from "./client-cancelled.js";
+import { resolveResolverDeadlineAtMs } from "./resolver-deadline.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
@@ -716,6 +717,7 @@ function createStealthChallengeDetection(
 										telemetry: resolverOptions.telemetry,
 										browserTelemetry: resolverOptions.browserTelemetry,
 										identityScope: resolverOptions.identityScope,
+										deadlineAtMs: resolverOptions.deadlineAtMs,
 										// No proxyIntent: the transport is already bound to the initiating
 										// request's lease, and a second identity resolution would allocate
 										// again (and fail closed without allocator credentials) for nothing
@@ -927,6 +929,7 @@ function createProviderContext(
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	scope: RequestScopeContext,
 	signal?: AbortSignal,
+	envelopeDeadlineAtMs?: number,
 ): ProviderContext {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
@@ -951,16 +954,24 @@ function createProviderContext(
 		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
 	);
 	const { capabilityModules } = options;
-	const resolverOptions = createResolverRuntimeOptions(
-		provider,
-		cache,
-		resolverIdentityScope,
-		proxyPolicy,
-		proxyClientOptions,
-		stealthProfile,
-		scope.resolverTelemetry,
-		scope.browserTelemetry,
+	const resolverDeadlineAtMs = resolveResolverDeadlineAtMs(
+		Date.now(),
+		provider.operations[operationId]?.timeoutMs,
+		envelopeDeadlineAtMs,
 	);
+	const resolverOptions: ResolverRuntimeOptions = {
+		...createResolverRuntimeOptions(
+			provider,
+			cache,
+			resolverIdentityScope,
+			proxyPolicy,
+			proxyClientOptions,
+			stealthProfile,
+			scope.resolverTelemetry,
+			scope.browserTelemetry,
+		),
+		...(resolverDeadlineAtMs !== undefined ? { deadlineAtMs: resolverDeadlineAtMs } : {}),
+	};
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
 		capabilityModules.resolver,
@@ -4234,6 +4245,7 @@ function createServerAppWithCapabilityModules(
 					state,
 					requestScope as RequestScope,
 					signal,
+					deadlineAtMs,
 				);
 				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);

@@ -22,6 +22,9 @@ export const APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY = "APIFUSE__RESOLVER__HY
 // @public (undocumented)
 export const APIFUSE__RESOLVER__TIMEOUT_MS = "APIFUSE__RESOLVER__TIMEOUT_MS";
 
+// @public (undocumented)
+export const APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS = "APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS";
+
 // Warning: (ae-forgotten-export) The symbol "ResolverContext" needs to be exported by the entry point resolver-public.d.ts
 //
 // @public (undocumented)
@@ -67,6 +70,7 @@ interface BrowserTelemetrySink {
 type ChallengeSolution = {
     readonly form: "token";
     readonly token: string;
+    readonly expires?: number;
 } | {
     readonly form: "cookies";
     readonly cookies: Readonly<Record<string, string>>;
@@ -97,6 +101,11 @@ export function createResolverClient(options: {
     readonly clientProfile?: string;
     readonly allowedHosts?: readonly string[];
     readonly telemetry?: ResolverTelemetrySink;
+    readonly timeoutMs?: number;
+    readonly deadlineAtMs?: number;
+    readonly cooldownMs?: number;
+    readonly vendorHealth?: ResolverVendorHealthRegistry;
+    readonly now?: () => number;
 }): ResolverChainClient;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderResolverConfig" needs to be exported by the entry point resolver-public.d.ts
@@ -106,10 +115,16 @@ export function createResolverClient(options: {
 export function createResolverClientFromEnv(config: ProviderResolverConfig | undefined, env?: EnvLike, options?: ResolverRuntimeOptions): ResolverContext;
 
 // @public (undocumented)
-export function createUnsupportedResolverClient(reason?: string): ResolverContext;
+export function createResolverVendorHealthRegistry(): ResolverVendorHealthRegistry;
 
 // @public (undocumented)
-export const DEFAULT_RESOLVER_TIMEOUT_MS = 180000;
+export function createUnsupportedResolverClient(reason?: string): ResolverContext;
+
+// @public
+export const DEFAULT_RESOLVER_TIMEOUT_MS = 45000;
+
+// @public
+export const DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS = 600000;
 
 // @public
 export const DEFAULT_RESOLVER_VENDOR_PREFERENCE: readonly ["capsolver", "2captcha", "hypersolutions"];
@@ -121,6 +136,9 @@ type EnvLike = Record<string, string | undefined>;
 //
 // @public
 export function getResolverSolutionSource(solution: ChallengeSolution): ResolverSolutionSource | undefined;
+
+// @public
+export function getResolverVendorHealthSnapshot(nowMs?: number): readonly ResolverVendorHealthSnapshot[];
 
 // Warning: (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point resolver-public.d.ts
 //
@@ -399,13 +417,28 @@ type ProxyVendorFailoverTelemetryEvent = {
 type ProxyVendorName = "smartproxy" | "nodemaven";
 
 // @public
+export function refreshResolverVendorBalances(config: ProviderResolverConfig | undefined, env?: EnvLike, options?: {
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly vendorHealth?: ResolverVendorHealthRegistry;
+}): Promise<readonly ResolverVendorHealthSnapshot[]>;
+
+// @public
 export function resolveProviderResolverVendors(config: ProviderResolverConfig): readonly ProviderResolverVendor[];
 
 // @public (undocumented)
 export const RESOLVER_ADAPTER_REGISTRY: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>;
 
+// @public
+export const RESOLVER_BUDGET_MARGIN_MS = 5000;
+
 // @public (undocumented)
 export const RESOLVER_INSTRUMENTATION_METADATA: unique symbol;
+
+// @public
+export const RESOLVER_TOKEN_SOLUTION_TTL_MS_BY_KIND: {
+    readonly aws_waf: number;
+};
 
 // Warning: (ae-forgotten-export) The symbol "BrowserTelemetrySink" needs to be exported by the entry point resolver-public.d.ts
 //
@@ -493,6 +526,7 @@ export interface ResolverRuntimeOptions {
         readonly clientProfile?: string;
         readonly identityScope?: string;
     }) => ResolverVendorTransport;
+    readonly deadlineAtMs?: number;
     readonly identityScope?: string;
     readonly proxyIntent?: {
         readonly mode: ProviderProxyMode;
@@ -503,6 +537,7 @@ export interface ResolverRuntimeOptions {
     };
     readonly telemetry?: ResolverTelemetrySink;
     readonly transport?: ResolverVendorTransport;
+    readonly vendorHealth?: ResolverVendorHealthRegistry;
 }
 
 // @public (undocumented)
@@ -511,8 +546,8 @@ export type ResolverSolutionSource = "cache" | "vendor";
 // @public (undocumented)
 export type ResolverTelemetryAttemptOutcome = "ok" | "error";
 
-// @public (undocumented)
-export type ResolverTelemetryCacheStatus = "hit" | "miss" | "disabled" | "not_cacheable";
+// @public
+export type ResolverTelemetryCacheStatus = "hit" | "miss" | "in_flight" | "disabled" | "not_cacheable";
 
 // @public (undocumented)
 export type ResolverTelemetryCacheWriteReason = "no_expires" | "not_cacheable" | "error";
@@ -524,7 +559,11 @@ export type ResolverTelemetryErrorClass = ResolverVendorUnavailableReason | "abo
 export type ResolverTelemetryIdentitySource = "declared" | "defaulted" | "none";
 
 // @public
-export type ResolverTelemetryOutcome = "solved" | "cached" | "exhausted" | "aborted" | "error";
+export type ResolverTelemetryOutcome = "solved" | "cached" | "exhausted" | "aborted" | "error"
+/** The caller left mid-solve; the vendor poll finished afterwards and the cache was written. */
+| "detached_completed"
+/** The caller left mid-solve; the vendor poll failed afterwards. */
+| "detached_failed";
 
 // @public (undocumented)
 export type ResolverTelemetryPhase = "create_task" | "poll_result" | "cleanup" | "measure_ip" | "fetch_script" | "generate_payload" | "post_payload";
@@ -547,6 +586,7 @@ export interface ResolverTelemetrySink {
 
 // @public (undocumented)
 interface ResolverVendorAdapter {
+    getBalance?(signal: AbortSignal): Promise<ResolverVendorBalance>;
     // Warning: (ae-forgotten-export) The symbol "ResolverIssuingIdentity" needs to be exported by the entry point resolver-public.d.ts
     getIssuingIdentity?(solution: ChallengeSolution, requestedIdentity: ResolverIdentity | undefined, challenge: ProviderChallenge): ResolverIssuingIdentity | undefined;
     // (undocumented)
@@ -583,6 +623,76 @@ export type ResolverVendorAttemptTelemetryEvent = {
     };
 };
 
+// @public
+export type ResolverVendorBalance = {
+    readonly balance: number;
+};
+
+// @public (undocumented)
+export type ResolverVendorBalanceRecord = {
+    readonly balance: number;
+    readonly checkedAtMs: number;
+} | {
+    readonly error: ResolverVendorUnavailableReason | "unexpected";
+    readonly checkedAtMs: number;
+};
+
+// @public (undocumented)
+export type ResolverVendorCooldownReason = "allocation_exhausted";
+
+// @public
+export interface ResolverVendorHealthRegistry {
+    cooldownUntilMs(vendor: ProviderResolverVendor, nowMs: number): number | undefined;
+    // (undocumented)
+    recordBalance(vendor: ProviderResolverVendor, record: ResolverVendorBalanceRecord): void;
+    // (undocumented)
+    recordDetachedOutcome(vendor: ProviderResolverVendor, outcome: "completed" | "failed"): void;
+    // (undocumented)
+    recordSolveSample(vendor: ProviderResolverVendor, kind: ProviderChallengeKind, sample: {
+        readonly ms: number;
+        readonly ok: boolean;
+    }): void;
+    // (undocumented)
+    reset(): void;
+    // (undocumented)
+    snapshot(nowMs?: number): readonly ResolverVendorHealthSnapshot[];
+    // (undocumented)
+    solveP50Ms(vendor: ProviderResolverVendor, kind: ProviderChallengeKind): number | undefined;
+    // (undocumented)
+    startCooldown(vendor: ProviderResolverVendor, reason: ResolverVendorCooldownReason, startedAtMs: number, untilMs: number): void;
+}
+
+// @public
+export type ResolverVendorHealthSnapshot = {
+    readonly vendor: ProviderResolverVendor;
+    readonly balance?: {
+        readonly amount: number;
+        readonly checkedAtMs: number;
+    };
+    readonly balanceError?: {
+        readonly reason: ResolverVendorUnavailableReason | "unexpected";
+        readonly checkedAtMs: number;
+    };
+    readonly cooldown?: {
+        readonly reason: ResolverVendorCooldownReason;
+        readonly startedAtMs: number;
+        readonly untilMs: number;
+    };
+    readonly solves: readonly ResolverVendorSolveStats[];
+    readonly detached: {
+        readonly completed: number;
+        readonly failed: number;
+    };
+};
+
+// @public (undocumented)
+export type ResolverVendorSolveStats = {
+    readonly kind: ProviderChallengeKind;
+    readonly samples: number;
+    readonly successes: number;
+    readonly p50Ms?: number;
+};
+
 // @public (undocumented)
 interface ResolverVendorTransport {
     fetch(url: string, init: {
@@ -612,7 +722,11 @@ interface ResolverVendorTransport {
 }
 
 // @public (undocumented)
-export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_proxy_identity" | "missing_client_profile" | "missing_challenge_input" | "missing_transport" | "allocation_exhausted" | "transport_failure" | "timeout" | "not_implemented";
+export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_proxy_identity" | "missing_client_profile" | "missing_challenge_input" | "missing_transport" | "allocation_exhausted" | "transport_failure" | "timeout" | "not_implemented"
+/** Skipped without a network call while its allocation-exhausted cooldown is active. */
+| "cooldown"
+/** Skipped or cut short because the caller's remaining budget cannot cover the solve. */
+| "budget_exceeded";
 
 // @public (undocumented)
 type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
@@ -641,19 +755,19 @@ interface TraceRecorder {
 // dist/config/loader.d.ts:73:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:78:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:89:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:12:5 - (ae-forgotten-export) The symbol "TraceRecorder" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:24:9 - (ae-forgotten-export) The symbol "ProxyResolutionOptions" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:64:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:65:5 - (ae-forgotten-export) The symbol "ResolverVendorAdapter" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:67:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:68:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:70:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:406:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:1040:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:114:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:115:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:116:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:14:5 - (ae-forgotten-export) The symbol "TraceRecorder" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:26:9 - (ae-forgotten-export) The symbol "ProxyResolutionOptions" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:76:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:77:5 - (ae-forgotten-export) The symbol "ResolverVendorAdapter" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:79:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:80:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:82:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:408:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:1034:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:1039:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 
 // (No @packageDocumentation comment for this package)
 

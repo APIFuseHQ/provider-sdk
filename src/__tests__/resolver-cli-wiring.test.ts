@@ -9,6 +9,7 @@ import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	swapResolverAdapterFactoryForTests,
 } from "../runtime/resolver.js";
+import { resetResolverVendorHealthForTests } from "../runtime/resolver-vendor-health.js";
 import { ResolverTelemetryCollector } from "../runtime/resolver-telemetry.js";
 import {
 	type ResolverIdentity,
@@ -89,6 +90,8 @@ let providerOrdinal = 0;
 let restoreAdapter: (() => void) | undefined;
 
 beforeEach(() => {
+	// The CLI runtime under test shares the process-wide vendor registry (process.env).
+	resetResolverVendorHealthForTests();
 	originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
 	originalCapsolverKey = process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY];
 	originalNodemavenUsername = process.env[NODEMAVEN_USERNAME_ENV];
