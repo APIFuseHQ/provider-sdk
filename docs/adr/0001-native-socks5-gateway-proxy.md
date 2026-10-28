@@ -5,6 +5,10 @@
 - Deciders: Taehoon (owner), Soju (agent)
 - Scope: `@apifuse/provider-sdk` native network capability (`ctx.native.network`), first consumer `APIFuseHQ/apifuse-provider-kakaotalk`
 
+> **Status note (2026-10-28):** ADR 0015 supersedes decision 6. smartproxy is a
+> gateway vendor with per-attempt session ids on every transport, and the
+> extraction allocator this decision kept for `ctx.http` / `ctx.stealth` is gone.
+
 > **Status note (2026-07-31):** ADR 0003 supersedes the SOCKS5-only and
 > gateway-only parts of this decision. Native transport now selects HTTP CONNECT
 > or SOCKS5 per vendor, and smartproxy participates through its allocation API.

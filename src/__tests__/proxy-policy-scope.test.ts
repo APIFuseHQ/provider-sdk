@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-import { clearProxyResolutionCache, resolveProxyConfigAsync } from "../config/loader.js";
+import { resolveProxyConfigAsync } from "../config/loader.js";
 import { ValidationError } from "../errors.js";
 import {
 	formatNodemavenTtl,
@@ -137,10 +137,31 @@ describe("proxy policy: operation scope and nodemaven options (contract)", () =>
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
 					geo: { country: "KR" },
-					session: { affinity: "connection", lifetimeMinutes: 120, poolSize: 6 },
+					session: { affinity: "connection", lifetimeMinutes: 120 },
 				},
 			}),
 		).not.toThrow();
+	});
+
+	it("rejects the retired session.poolSize as an unknown field", () => {
+		// The pool is gone (each attempt is its own vendor session), so a pin bump
+		// surfaces a leftover declaration instead of silently ignoring it.
+		expect(() =>
+			defineProvider({
+				...baseConfig,
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: {
+						affinity: "connection",
+						lifetimeMinutes: 120,
+						// defineProvider's declaration generic accepts the literal; its runtime check rejects it.
+						poolSize: 6,
+					},
+				},
+			}),
+		).toThrow(/Unknown field "poolSize" on proxy\.session/);
 	});
 });
 
@@ -217,8 +238,8 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 			credentials: CREDENTIALS,
 			affinityKey: "af_con_1",
 			protocol: "http",
-			poolIndex: 0,
-			refreshEpoch: 0,
+			attempt: 0,
+			windowEpoch: 0,
 			now,
 		});
 		expect(proxyUsername(synthesized.url)).toContain("-ttl-8m20s");
@@ -226,12 +247,12 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 		expect(synthesized.diagnostics.lifetimeMinutes).toBe(8);
 		expect(synthesized.expiresAt).toBe(new Date(now + 8 * 60_000).toISOString());
 		const window = nodemavenSessionWindow(policy, now);
-		expect(window.refreshEpoch).toBe(Math.floor(now / (8 * 60_000)));
+		expect(window.windowEpoch).toBe(Math.floor(now / (8 * 60_000)));
 		expect(Date.parse(window.expiresAt) - now).toBeLessThanOrEqual(8 * 60_000);
 
 		// Without a ttl, or with a ttl longer than the session, the session lifetime stands.
 		const { nodemaven: _ttl, ...withoutTtl } = policy;
-		expect(nodemavenSessionWindow(withoutTtl, now).refreshEpoch).toBe(
+		expect(nodemavenSessionWindow(withoutTtl, now).windowEpoch).toBe(
 			Math.floor(now / (120 * 60_000)),
 		);
 		const longTtl = synthesizeNodemavenProxy({
@@ -239,8 +260,8 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 			credentials: CREDENTIALS,
 			affinityKey: "af_con_1",
 			protocol: "http",
-			poolIndex: 0,
-			refreshEpoch: 0,
+			attempt: 0,
+			windowEpoch: 0,
 			now,
 		});
 		expect(longTtl.diagnostics.lifetimeMinutes).toBe(120);
@@ -272,8 +293,8 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 			credentials: CREDENTIALS,
 			affinityKey: undefined,
 			protocol: "http",
-			poolIndex: 0,
-			refreshEpoch: 0,
+			attempt: 0,
+			windowEpoch: 0,
 		});
 
 		expect(proxyUsername(synthesized.url)).toMatch(
@@ -297,15 +318,15 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 			credentials: { ...CREDENTIALS, filter: "high" },
 			affinityKey: undefined,
 			protocol: "http",
-			poolIndex: 0,
-			refreshEpoch: 0,
+			attempt: 0,
+			windowEpoch: 0,
 		});
 		expect(proxyUsername(synthesized.url)).toMatch(
 			/^acct123-type-mobile-ipv4-true-sid-[0-9a-f]{10}-filter-high$/,
 		);
 	});
 
-	it("picks isp[poolIndex % isp.length], so proxyAttemptOffset 1 moves to the next carrier with a new sid", async () => {
+	it("picks isp[attempt % isp.length], so proxyAttemptOffset 1 moves to the next carrier with a new sid", async () => {
 		const policy: ProviderProxyPolicy = KR_MOBILE_DETAIL_ONLY;
 		const resolve = (proxyAttempt: number) =>
 			resolveProxyConfigAsync({
@@ -323,8 +344,8 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 		expect(retryUser).toMatch(/-isp-lg_uplus-type-mobile-ipv4-true-sid-[0-9a-f]{10}$/);
 		expect(proxyUsername(third.url ?? "")).toContain("-isp-sk_telecom-");
 		expect(firstUser.split("-sid-")[1]).not.toBe(retryUser.split("-sid-")[1]);
-		expect(first.diagnostics).toMatchObject({ poolIndex: 0, isp: "sk_telecom", type: "mobile" });
-		expect(retry.diagnostics).toMatchObject({ poolIndex: 1, isp: "lg_uplus", type: "mobile" });
+		expect(first.diagnostics).toMatchObject({ attempt: 0, isp: "sk_telecom", type: "mobile" });
+		expect(retry.diagnostics).toMatchObject({ attempt: 1, isp: "lg_uplus", type: "mobile" });
 	});
 
 	it("keeps the residential token set, sid and port; only -ipv4-true moves ahead of -sid-", () => {
@@ -332,18 +353,20 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 			mode: "required",
 			providers: ["smartproxy", "nodemaven"],
 			geo: { country: "KR", subdivision: "Seoul" },
-			session: { affinity: "connection", lifetimeMinutes: 120, poolSize: 6 },
+			session: { affinity: "connection", lifetimeMinutes: 120 },
 		};
 		const synthesized = synthesizeNodemavenProxy({
 			policy,
 			credentials: CREDENTIALS,
 			affinityKey: "af_con_1",
 			protocol: "http",
-			poolIndex: 3,
-			refreshEpoch: 42,
+			attempt: 3,
+			windowEpoch: 42,
 		});
 
-		// The sticky sid and port the earlier releases derived for the same inputs.
+		// The sticky sid and port the earlier releases derived for the same inputs
+		// (the window epoch and the attempt took the places of the refresh epoch and
+		// the pool index in the same digest).
 		const sid = sha256Hex("af_con_1:42:3").slice(0, 10);
 		const port = 8080 + (Number.parseInt(sha256Hex(`${sid}:3`).slice(0, 8), 16) % 1001);
 		const earlierUsername = `acct123-country-kr-region-seoul-sid-${sid}-filter-medium-ipv4-true`;
@@ -379,8 +402,8 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 			credentials: { ...CREDENTIALS, filter: "medium" },
 			affinityKey: "af_con_1",
 			protocol: "http",
-			poolIndex: 0,
-			refreshEpoch: 0,
+			attempt: 0,
+			windowEpoch: 0,
 		});
 		const sid = sha256Hex("af_con_1:0:0").slice(0, 10);
 
@@ -392,8 +415,8 @@ describe("synthesizeNodemavenProxy: NodeMaven username tokens", () => {
 			credentials: CREDENTIALS,
 			affinityKey: "af_con_1",
 			protocol: "http",
-			poolIndex: 0,
-			refreshEpoch: 0,
+			attempt: 0,
+			windowEpoch: 0,
 		});
 		expect(proxyUsername(residentialSticky.url)).toEndWith(
 			`-ipv4-true-sid-${sid}-ttl-8m20s-filter-medium`,
@@ -478,7 +501,6 @@ describe("createServerApp: proxy.operations scopes ctx.http, ctx.stealth and res
 			if (value === undefined) delete process.env[name];
 			else process.env[name] = value;
 		};
-		clearProxyResolutionCache();
 		if (credentials) {
 			process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = CREDENTIALS.username;
 			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = CREDENTIALS.password;
@@ -495,7 +517,6 @@ describe("createServerApp: proxy.operations scopes ctx.http, ctx.stealth and res
 			restore("APIFUSE__PROXY__NODEMAVEN_USERNAME", saved.username);
 			restore("APIFUSE__PROXY__NODEMAVEN_PASSWORD", saved.password);
 			restore("APIFUSE__PROXY__NODEMAVEN_FILTER", saved.filter);
-			clearProxyResolutionCache();
 		}
 	}
 
@@ -597,7 +618,7 @@ type WireCall = {
 	logProxy: {
 		kind?: string;
 		provider?: string;
-		attemptSamples?: { i?: number; s?: number }[];
+		attemptSamples?: { a?: number; h?: string; s?: number }[];
 	} | null;
 };
 type Wire = {
@@ -656,10 +677,14 @@ describe("operational assembly: operation-scoped NodeMaven mobile egress on the 
 			{ path: "/stays/1/detail", forwardedByDouble: true },
 		]);
 		expect(wire.detail.logProxy).toMatchObject({ kind: "resolved", provider: "nodemaven" });
-		expect(wire.detail.logProxy?.attemptSamples?.map((sample) => [sample.i, sample.s])).toEqual([
-			[0, 403],
+		// Two fetches of one attempt each; their sessions, and so their URL hashes, differ.
+		const samples = wire.detail.logProxy?.attemptSamples ?? [];
+		expect(samples.map((sample) => [sample.a, sample.s])).toEqual([
+			[1, 403],
 			[1, 200],
 		]);
+		expect(samples[0]?.h).toBeString();
+		expect(samples[0]?.h).not.toBe(samples[1]?.h);
 		for (const rewrite of wire.gatewayRewrites) {
 			expect(rewrite.host).toBe("gate.nodemaven.com");
 			expect(rewrite.port).toBeGreaterThanOrEqual(8080);

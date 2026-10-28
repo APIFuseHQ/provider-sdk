@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 
 import { createDiagnosticRedactor } from "../diagnostic-redactor.js";
 import {
@@ -25,11 +26,77 @@ const DEFAULT_SCOPE: LeaseScope = {
 
 const SMARTPROXY_BINDING: CeremonyEgressBinding = {
 	vendor: "smartproxy",
-	proxyUrl: "http://user:password@198.51.100.7:9000",
-	poolIndex: 2,
+	proxyUrl: "http://user_area-KR_life-30_session-0a1b2c3d4e:password@proxy.smartproxy.net:3120",
 	affinityKey: DEFAULT_SCOPE.affinityKey,
-	refreshEpoch: 0,
+	sessionId: "0a1b2c3d4e",
 	lifetimeMinutes: 30,
+};
+
+/**
+ * A handle minted by the v1 encoder (before gateway sessions): the payload
+ * carried the allocator-era `poolIndex` and `refreshEpoch`, the AAD and the
+ * wire prefix carry version 1. Mirrors the SDK encoder byte for byte.
+ */
+function mintV1Handle(
+	binding: {
+		vendor: "smartproxy" | "nodemaven";
+		proxyUrl: string;
+		poolIndex: number;
+		refreshEpoch: number;
+		lifetimeMinutes: number;
+	},
+	mintedAtMs: number,
+	scope: LeaseScope = DEFAULT_SCOPE,
+): string {
+	const key = createHash("sha256")
+		.update("apifuse:ceremony-egress-lease:v1\0", "utf8")
+		.update(KEY, "utf8")
+		.digest();
+	const nonce = randomBytes(12);
+	const cipher = createCipheriv("aes-256-gcm", key, nonce, { authTagLength: 16 });
+	cipher.setAAD(
+		Buffer.from(
+			JSON.stringify({
+				version: 1,
+				tenantId: scope.tenantId,
+				providerId: scope.providerId,
+				flowId: scope.flowId,
+				affinityKey: scope.affinityKey,
+			}),
+			"utf8",
+		),
+	);
+	const payload = {
+		version: 1,
+		tenantId: scope.tenantId,
+		providerId: scope.providerId,
+		flowId: scope.flowId,
+		vendor: binding.vendor,
+		proxyUrl: binding.proxyUrl,
+		poolIndex: binding.poolIndex,
+		affinityKey: scope.affinityKey,
+		refreshEpoch: binding.refreshEpoch,
+		lifetimeMinutes: binding.lifetimeMinutes,
+		mintedAtMs,
+		expiresAtMs: mintedAtMs + binding.lifetimeMinutes * 60_000,
+	};
+	const ciphertext = Buffer.concat([
+		cipher.update(JSON.stringify(payload), "utf8"),
+		cipher.final(),
+	]);
+	return [
+		"v1",
+		nonce.toString("base64url"),
+		ciphertext.toString("base64url"),
+		cipher.getAuthTag().toString("base64url"),
+	].join(".");
+}
+
+/** The binding a later attempt takes: the same gateway, the next vendor session. */
+const NEXT_SESSION_BINDING: CeremonyEgressBinding = {
+	...SMARTPROXY_BINDING,
+	proxyUrl: "http://user_area-KR_life-30_session-5f6e7d8c9b:password@proxy.smartproxy.net:3120",
+	sessionId: "5f6e7d8c9b",
 };
 
 function runtime(
@@ -115,13 +182,13 @@ describe("engine ceremony egress lease", () => {
 		first.bind({
 			vendor: "nodemaven",
 			proxyUrl: "http://account-sid-fixed:password@gate.nodemaven.com:8080",
-			poolIndex: 7,
 			affinityKey: "connection-1",
-			refreshEpoch: 3,
+			sessionId: "fixed",
 			lifetimeMinutes: 30,
 		});
 		const handle = first.handle();
 		expect(handle).toBeString();
+		expect(String(handle).startsWith("v2.")).toBe(true);
 		expect(handle).not.toContain("gate.nodemaven.com");
 		const adversaryViews = String(handle)
 			.split(".")
@@ -139,11 +206,59 @@ describe("engine ceremony egress lease", () => {
 		expect(next.binding).toEqual({
 			vendor: "nodemaven",
 			proxyUrl: "http://account-sid-fixed:password@gate.nodemaven.com:8080",
-			poolIndex: 7,
 			affinityKey: "connection-1",
-			refreshEpoch: 3,
+			sessionId: "fixed",
 			lifetimeMinutes: 30,
 		});
+	});
+
+	it("verifies a v1 handle minted before the upgrade and binds it without the allocator fields", () => {
+		// A ceremony in flight across the SDK upgrade keeps its egress: the v1 handle's
+		// version is part of the AAD, and its poolIndex / refreshEpoch are not read.
+		const v1Handle = mintV1Handle(
+			{
+				vendor: "smartproxy",
+				proxyUrl: "http://203.0.113.9:31001",
+				poolIndex: 4,
+				refreshEpoch: 1,
+				lifetimeMinutes: 30,
+			},
+			1_000,
+		);
+		const restored = runtime({ handle: v1Handle, now: () => 2_000 });
+		expect(restored.binding).toEqual({
+			vendor: "smartproxy",
+			proxyUrl: "http://203.0.113.9:31001",
+			affinityKey: DEFAULT_SCOPE.affinityKey,
+			lifetimeMinutes: 30,
+		});
+		expect(restored.handle()).toBe(v1Handle);
+
+		// The v1 AAD still binds the ceremony scope.
+		expect(() => runtime({ handle: v1Handle, flowId: "other-flow", now: () => 2_000 })).toThrow(
+			expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }),
+		);
+		// A v1 payload relabelled as v2 fails authentication instead of verifying.
+		expect(() => runtime({ handle: v1Handle.replace(/^v1\./u, "v2."), now: () => 2_000 })).toThrow(
+			expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }),
+		);
+		// An expired v1 handle is dropped like any other, never treated as a fault.
+		const expired = runtime({ handle: v1Handle, now: () => 1_000 + 30 * 60_000 });
+		expect(expired.binding).toBeUndefined();
+
+		// The next bind after the upgrade mints a v2 handle.
+		const rebound = runtime({ now: () => 3_000 });
+		rebound.bind(SMARTPROXY_BINDING);
+		expect(String(rebound.handle()).startsWith("v2.")).toBe(true);
+	});
+
+	it("rejects handle versions the engine never minted", () => {
+		const handle = mintSmartproxyHandle();
+		for (const version of ["v0", "v3", "v"]) {
+			expect(() => runtime({ handle: handle.replace(/^v2/u, version), now: () => 1_001 })).toThrow(
+				expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }),
+			);
+		}
 	});
 
 	it("fails before binding when the engine key is missing", () => {
@@ -218,7 +333,8 @@ describe("engine ceremony egress lease", () => {
 			expect(error).toMatchObject({ code: "EGRESS_LEASE_INVALID", details: undefined });
 			const observable = JSON.stringify(error);
 			expect(observable).not.toContain("proxyUrl");
-			expect(observable).not.toContain("198.51.100.7");
+			expect(observable).not.toContain("proxy.smartproxy.net");
+			expect(observable).not.toContain("0a1b2c3d4e");
 			expect(observable).not.toContain("password");
 			expect(observable).not.toContain(DEFAULT_SCOPE.tenantId);
 		}
@@ -230,17 +346,21 @@ describe("engine ceremony egress lease", () => {
 			runtime({
 				handle,
 				now: () => 1_001,
-				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "rotated-engine-key-0123456789abcdef" },
+				environment: {
+					[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "rotated-engine-key-0123456789abcdef",
+				},
 			}),
 		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }));
 	});
 
-	it("keeps a Smartproxy binding for its session lifetime, not the 15 s extraction cache", () => {
+	it("keeps a smartproxy gateway session binding for its `life` window and drops it after", () => {
 		const handle = mintSmartproxyHandle(1_000);
 
-		const twentySecondsLater = runtime({ handle, now: () => 21_000 });
-		expect(twentySecondsLater.binding).toEqual(SMARTPROXY_BINDING);
-		expect(twentySecondsLater.handle()).toBe(handle);
+		// The bound gateway URL, session id included, survives turns inside the
+		// vendor session lifetime the URL asked for (`life-30`).
+		const twentyNineMinutesLater = runtime({ handle, now: () => 1_000 + 29 * 60_000 });
+		expect(twentyNineMinutesLater.binding).toEqual(SMARTPROXY_BINDING);
+		expect(twentyNineMinutesLater.handle()).toBe(handle);
 
 		const afterLifetime = runtime({ handle, now: () => 1_000 + 30 * 60_000 });
 		expect(afterLifetime.binding).toBeUndefined();
@@ -254,7 +374,7 @@ describe("engine ceremony egress lease", () => {
 		const firstHandle = lease.handle();
 		now += 59_999;
 		expect(lease.dropExpiredBinding()).toBe(false);
-		expect(lease.binding?.poolIndex).toBe(2);
+		expect(lease.binding?.sessionId).toBe("0a1b2c3d4e");
 
 		now += 1;
 		expect(lease.dropExpiredBinding()).toBe(true);
@@ -264,8 +384,8 @@ describe("engine ceremony egress lease", () => {
 		expect(lease.dropExpiredBinding()).toBe(false);
 		expect(lease.generation).toBe(1);
 
-		lease.bind({ ...SMARTPROXY_BINDING, poolIndex: 5 });
-		expect(lease.binding?.poolIndex).toBe(5);
+		lease.bind(NEXT_SESSION_BINDING);
+		expect(lease.binding?.sessionId).toBe("5f6e7d8c9b");
 		expect(lease.handle()).toBeString();
 		expect(lease.handle()).not.toBe(firstHandle);
 	});
@@ -285,8 +405,8 @@ describe("engine ceremony egress lease", () => {
 		expect(lease.generation).toBe(1);
 
 		// Rebinding does not count as a drop: sessions compare drops, not binds.
-		lease.bind({ ...SMARTPROXY_BINDING, poolIndex: 5 });
-		expect(lease.binding?.poolIndex).toBe(5);
+		lease.bind(NEXT_SESSION_BINDING);
+		expect(lease.binding?.sessionId).toBe("5f6e7d8c9b");
 		expect(lease.generation).toBe(1);
 		expect(lease.handle()).not.toBe(firstHandle);
 	});

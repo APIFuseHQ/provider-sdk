@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Cookie } from "tough-cookie";
 import type {
 	BrowserProfile,
@@ -9,15 +9,19 @@ import type {
 
 import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.js";
 import {
-	DEFAULT_SMARTPROXY_POOL_SIZE,
-	invalidateProxyResolutionCacheAsync,
+	PROXY_ATTEMPTS_PER_VENDOR,
 	ProxyResolutionError,
 	policyResolvesRegistryVendorChain,
-	resolvePolicyProxyPoolSpan,
+	resolvePolicyProxyAttemptSpan,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 	vendorFromResolvedSource,
 } from "../config/loader.js";
+import {
+	getProxyVendorSelector,
+	type ProxyAttemptRecord,
+	type ProxyVendorSelector,
+} from "./proxy-vendor-selector.js";
 import { SDKError, TransportError } from "../errors.js";
 import {
 	DEFAULT_STEALTH_BROWSER,
@@ -73,6 +77,7 @@ import {
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
+import { proxyAttemptHash } from "./proxy-telemetry.js";
 import { redirectHopHeaders } from "./redirect-hop-headers.js";
 import {
 	evaluateRedirectHop,
@@ -135,7 +140,6 @@ export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
 
-const MAX_POLICY_PROXY_POOL_REFRESHES = 1;
 const PROXY_CONNECT_FAILURE_CODE = "proxy_connect_failed";
 const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 	/\bproxy\b.*\b(non[\s-]?200|connect|tunnel)|\bconnect\b.*\bproxy\b|\btunnel\b/i;
@@ -1113,45 +1117,24 @@ function shouldRunProxyAuthDiagnostic(error: unknown): boolean {
 	return error.cause instanceof Error;
 }
 
-type ResolvedAttemptProxy = {
-	url?: string;
-	poolIndex?: number;
-	proxyHash?: string;
-	vendor?: ProxyVendorName;
-	refreshEpoch?: number;
-	lifetimeMinutes?: number;
+/** One request's vendor selection state, shared by every attempt of its retry loop. */
+type StealthProxyAttemptContext = {
+	readonly attemptCap: number;
+	/** The selector that picks each attempt's vendor and receives each attempt's outcome. */
+	readonly vendorSelector: ProxyVendorSelector;
+	readonly requestId: string;
+	/** Transport outcomes of the attempts made so far, oldest first. */
+	readonly history: ProxyAttemptRecord[];
 };
 
-function proxyPoolIndexFromDiagnostics(
-	diagnostics: Record<string, string | number | boolean> | undefined,
-): number | undefined {
-	const value = diagnostics?.poolIndex;
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-		return undefined;
-	}
-	return Math.floor(value);
-}
-
-function positiveDiagnosticNumber(
-	diagnostics: Record<string, string | number | boolean> | undefined,
-	name: string,
-): number | undefined {
-	const value = diagnostics?.[name];
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
-}
-
-function proxyEndpointHash(proxyUrl: string | undefined): string | undefined {
-	if (!proxyUrl) return undefined;
-	try {
-		const parsed = new URL(proxyUrl);
-		return createHash("sha256")
-			.update(`${parsed.protocol}//${parsed.host}`)
-			.digest("hex")
-			.slice(0, 12);
-	} catch {
-		return createHash("sha256").update(proxyUrl).digest("hex").slice(0, 12);
-	}
-}
+type ResolvedAttemptProxy = {
+	url?: string;
+	proxyHash?: string;
+	vendor?: ProxyVendorName;
+	/** Vendor session id the URL carries; differs per attempt. */
+	sessionId?: string;
+	lifetimeMinutes?: number;
+};
 
 function getProxyTunnelStatus(error: unknown): number | undefined {
 	if (isRecord(error)) {
@@ -1798,9 +1781,9 @@ function createSessionFetcher(
 	}
 
 	async function resolveRequestProxy(
-		options?: StealthFetchOptions,
-		proxyAttempt?: number,
-		refreshEpoch?: number,
+		options: StealthFetchOptions | undefined,
+		proxyAttempt: number,
+		request: StealthProxyAttemptContext,
 	): Promise<ResolvedAttemptProxy> {
 		const pinned = (options as SessionStatePinnedFetchOptions | undefined)?.[
 			SESSION_STATE_PINNED_EGRESS
@@ -1819,10 +1802,9 @@ function createSessionFetcher(
 			}
 			return {
 				url: bound.proxyUrl,
-				poolIndex: bound.poolIndex,
-				proxyHash: proxyEndpointHash(bound.proxyUrl),
+				proxyHash: proxyAttemptHash(bound.proxyUrl, bound.sessionId),
 				vendor: bound.vendor,
-				refreshEpoch: bound.refreshEpoch,
+				...(bound.sessionId ? { sessionId: bound.sessionId } : {}),
 				lifetimeMinutes: bound.lifetimeMinutes,
 			};
 		}
@@ -1838,7 +1820,13 @@ function createSessionFetcher(
 			// The stealth transport tunnels both HTTP CONNECT and SOCKS5,
 			// preserving the client TLS fingerprint end-to-end.
 			transportProtocols: ["http", "socks5"],
-			...(refreshEpoch === undefined ? {} : { proxyRefreshEpoch: refreshEpoch }),
+			proxyAttemptCap: request.attemptCap,
+			vendorSelector: request.vendorSelector,
+			proxyRequestId: request.requestId,
+			proxyAttemptHistory: request.history,
+			...(clientOptions.gatewayOverrides
+				? { gatewayOverrides: clientOptions.gatewayOverrides }
+				: {}),
 			telemetry: clientOptions.telemetry,
 			engineCredentials: clientOptions.engineCredentials,
 		});
@@ -1850,15 +1838,12 @@ function createSessionFetcher(
 
 		return {
 			url: resolvedProxy.url,
-			poolIndex: proxyPoolIndexFromDiagnostics(resolvedProxy.diagnostics),
-			proxyHash: proxyEndpointHash(resolvedProxy.url),
+			proxyHash: proxyAttemptHash(resolvedProxy.url, resolvedProxy.sessionId),
 			vendor: vendorFromResolvedSource(resolvedProxy.source),
-			refreshEpoch: refreshEpoch ?? 0,
-			...(positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes") === undefined
+			...(resolvedProxy.sessionId ? { sessionId: resolvedProxy.sessionId } : {}),
+			...(resolvedProxy.lifetimeMinutes === undefined
 				? {}
-				: {
-						lifetimeMinutes: positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes"),
-					}),
+				: { lifetimeMinutes: resolvedProxy.lifetimeMinutes }),
 		};
 	}
 
@@ -1867,8 +1852,8 @@ function createSessionFetcher(
 		if (!lease || !attemptProxy?.url || !attemptProxy.vendor) return;
 		if (lease.binding) {
 			// A concurrent request on this session may have bound the ceremony while this one
-			// was in flight on an endpoint it selected before the binding existed (pool
-			// rotation after a transport failure). Its response reached the origin from an
+			// was in flight on an endpoint it selected before the binding existed (a new
+			// session after a transport failure). Its response reached the origin from an
 			// egress the handle does not name; accepting it would split the ceremony identity.
 			if (attemptProxy.url !== lease.binding.proxyUrl) {
 				throw new SDKError(
@@ -1880,13 +1865,9 @@ function createSessionFetcher(
 			}
 			return;
 		}
-		if (
-			attemptProxy.poolIndex === undefined ||
-			attemptProxy.lifetimeMinutes === undefined ||
-			!clientOptions.affinityKey
-		) {
-			// Registry vendors always report pool index and session lifetime; missing either
-			// is an SDK fault, not something the caller can correct.
+		if (attemptProxy.lifetimeMinutes === undefined || !clientOptions.affinityKey) {
+			// Registry vendors always report the session lifetime; missing it is an SDK
+			// fault, not something the caller can correct.
 			throw new SDKError("The selected egress cannot be represented by a ceremony lease", {
 				code: "EGRESS_LEASE_BINDING_INVALID",
 			});
@@ -1894,9 +1875,8 @@ function createSessionFetcher(
 		const binding: CeremonyEgressBinding = {
 			vendor: attemptProxy.vendor,
 			proxyUrl: attemptProxy.url,
-			poolIndex: attemptProxy.poolIndex,
 			affinityKey: clientOptions.affinityKey,
-			refreshEpoch: attemptProxy.refreshEpoch ?? 0,
+			...(attemptProxy.sessionId ? { sessionId: attemptProxy.sessionId } : {}),
 			lifetimeMinutes: attemptProxy.lifetimeMinutes,
 		};
 		lease.bind(binding);
@@ -1970,206 +1950,432 @@ function createSessionFetcher(
 				);
 			throwIfAmbientAborted(clientOptions.signal);
 			const hasPolicyProxy = isPolicyManagedProxy(clientOptions);
-			const usesPolicyAllocator = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
+			const usesPolicyProxy = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
 			const retryAttemptCap = Math.max(1, stealthRetryOptions?.attempts ?? 1);
-			// Span the whole vendor chain: successive attempts rotate one vendor's
-			// pool, then fail over to the next vendor via the flat attempt index.
+			// Span the whole vendor chain: every attempt takes a new vendor session,
+			// and past a vendor's share of the attempt budget the next vendor serves.
 			const policyProxy =
 				clientOptions.proxyPolicy ??
 				(typeof clientOptions.upstream?.proxy === "object"
 					? clientOptions.upstream.proxy
 					: undefined);
-			// The pool span is already bounded by each vendor's max pool size
-			// (smartproxy ≤20, nodemaven ≤50), so the configured span never exceeds
-			// the chain's true maximum — a large NodeMaven pool stays fully
-			// reachable rather than being truncated at an arbitrary ceiling.
+			// Each vendor gets an equal share of the attempt budget; the chain span is
+			// the entitlement when no explicit retry pins a larger budget.
 			const policyProxyAttemptCap = Math.max(
-				1,
-				policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
+				retryAttemptCap,
+				policyProxy ? resolvePolicyProxyAttemptSpan(policyProxy) : PROXY_ATTEMPTS_PER_VENDOR,
 			);
 			// A registry vendor chain (smartproxy/nodemaven) is the only policy whose
-			// successive attempts resolve a *different* endpoint, so it is the only one
-			// that may widen the attempt cap to the pool span, de-duplicate endpoints,
-			// and drive allocator stale-pool refresh. Deprecated custom/decodo policies
-			// have no managed endpoint to rotate or refresh, so they follow the ordinary
-			// transport-retry budget instead.
+			// successive attempts resolve a *different* vendor session, so it is the
+			// only one that may widen the attempt cap to the chain span and
+			// de-duplicate endpoints. Deprecated custom/decodo policies have no managed
+			// endpoint to rotate, so they follow the ordinary transport-retry budget.
 			const rotatesRegistryChain =
-				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
+				usesPolicyProxy && policyResolvesRegistryVendorChain(policyProxy);
 			const unboundMaxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;
 			// A bound ceremony has exactly one endpoint to try; releasing the binding after a
 			// transport failure widens the budget back to the ordinary rotation span.
 			let maxAttempts = ceremonyEgressLease?.binding ? 1 : unboundMaxAttempts;
-			const dedupeAllocatorEndpoints = rotatesRegistryChain;
+			// Gateway attempts mint their own sessions, so the same URL comes back only
+			// from a session-state pinned egress or when a released ceremony binding is
+			// the session the next attempt derives. Such a repeat is skipped, not re-sent.
+			const dedupeProxyEndpoints = rotatesRegistryChain;
+			// Cap the number of transport retries. For a registry vendor chain every
+			// attempt resolves a *different* vendor session, and past a vendor's share
+			// of the attempt budget the next vendor, so a transport failure is a signal
+			// to advance to the next session, not to retry the same one. Truncating at
+			// the per-endpoint retry budget would strand the request on the primary
+			// vendor. resolvePolicyTransportAttemptCap widens to the full chain span
+			// only for implicit, safe-method policy requests; explicit retry policies
+			// (their documented `attempts` ceiling), unsafe methods, and
+			// static/non-registry vendors keep the per-endpoint retry budget. It is also
+			// the budget the vendor selector splits across the chain, as on ctx.http, so
+			// an explicit `attempts: 2` on a two-vendor chain reaches the second vendor
+			// on its second attempt. Vendor edge refusals may run on to `maxAttempts`;
+			// attempts past this budget stay on the last vendor.
+			const transportRetryCap = resolvePolicyTransportAttemptCap({
+				policy: policyProxy,
+				usesPolicyProxy,
+				retryAttempts: stealthRetryOptions?.attempts ?? 1,
+				explicitRetry: hasExplicitRetryPolicy,
+				method,
+			});
+			// One selector serves the whole request: it names each attempt's vendor and
+			// receives each attempt's outcome, and sees the request's own history.
+			const proxyAttemptContext: StealthProxyAttemptContext = {
+				attemptCap: transportRetryCap,
+				vendorSelector: clientOptions.vendorSelector ?? getProxyVendorSelector(),
+				requestId: randomUUID(),
+				history: [],
+			};
 			let lastError: unknown;
 
-			for (
-				let refreshAttempt = 0;
-				refreshAttempt <= MAX_POLICY_PROXY_POOL_REFRESHES;
-				refreshAttempt += 1
-			) {
-				let stalePoolError: unknown;
-				let stalePoolDiagnosticProxy: string | undefined;
-				const attemptedProxies = new Set<string>();
+			// The vendor edge refusing sessions (stale, edge auth, edge TLS): the last one
+			// seen, and the endpoint a hidden CONNECT 512 auth rejection was seen on.
+			let stalePoolError: unknown;
+			let stalePoolDiagnosticProxy: string | undefined;
+			const attemptedProxies = new Set<string>();
 
-				for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-					throwIfAmbientAborted(clientOptions.signal);
-					let proxy: string | undefined;
-					let attemptProxy: ResolvedAttemptProxy | undefined;
-					// Reuse the exact serialization used by this outbound attempt in its catch path.
-					let serializedUrl: ReturnType<typeof serializeRequestUrl> | undefined;
-					let fallbackSensitiveValues: readonly string[] = [];
-					let fallbackRequestUrl: string | undefined;
-					let fallbackRedactedUrl: string | undefined;
-					let attemptStartedAt = Date.now();
-					let attemptRecorded = false;
-					const attemptEgressGeneration = currentEgressGeneration();
-					const recordProxyAttempt = (
-						outcome: "ok" | "error",
-						errorCode?: string,
-						status?: number,
-					) => {
-						if (attemptRecorded || !proxy) return;
-						attemptRecorded = true;
-						clientOptions.telemetry?.recordProxyAttempt?.({
-							provider: attemptProxy?.vendor ?? "smartproxy",
-							attempt: attempt + 1,
-							...(attemptProxy?.poolIndex === undefined
-								? {}
-								: { poolIndex: attemptProxy.poolIndex }),
-							...(attemptProxy?.proxyHash ? { proxyHash: attemptProxy.proxyHash } : {}),
+			for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+				throwIfAmbientAborted(clientOptions.signal);
+				let proxy: string | undefined;
+				let attemptProxy: ResolvedAttemptProxy | undefined;
+				// Reuse the exact serialization used by this outbound attempt in its catch path.
+				let serializedUrl: ReturnType<typeof serializeRequestUrl> | undefined;
+				let fallbackSensitiveValues: readonly string[] = [];
+				let fallbackRequestUrl: string | undefined;
+				let fallbackRedactedUrl: string | undefined;
+				let attemptStartedAt = Date.now();
+				let attemptRecorded = false;
+				const attemptEgressGeneration = currentEgressGeneration();
+				const recordProxyAttempt = (
+					outcome: "ok" | "error",
+					errorCode?: string,
+					status?: number,
+				) => {
+					if (attemptRecorded || !proxy) return;
+					attemptRecorded = true;
+					clientOptions.telemetry?.recordProxyAttempt?.({
+						provider: attemptProxy?.vendor ?? "smartproxy",
+						attempt: attempt + 1,
+						...(attemptProxy?.proxyHash ? { proxyHash: attemptProxy.proxyHash } : {}),
+						outcome,
+						...(errorCode ? { errorCode } : {}),
+						...(status === undefined ? {} : { status }),
+						durationMs: Date.now() - attemptStartedAt,
+					});
+					if (attemptProxy?.vendor) {
+						const now = Date.now();
+						proxyAttemptContext.history.push({
+							vendor: attemptProxy.vendor,
 							outcome,
 							...(errorCode ? { errorCode } : {}),
-							...(status === undefined ? {} : { status }),
-							durationMs: Date.now() - attemptStartedAt,
 						});
-					};
-					// Shared tail of the first fetch, the automatic refetch, and an explicit replay: a
-					// classified challenge is returned whatever `throwOnHttpError` says (documented on
-					// StealthFetchOptions), any other non-2xx honours it, and the proxy attempt is
-					// recorded once per delivered response.
-					const finalizeAttempt = (
-						attemptResponse: StealthTransportResponse,
-						attemptNormalized: StealthResponse,
-					): StealthResponse => {
-						if (attemptNormalized.challenge)
-							emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
-								sink.recordSbsd(attemptNormalized.challenge!.outcome),
-							);
-						if (
-							!attemptNormalized.challenge &&
-							attemptResponse.status >= 400 &&
-							options.throwOnHttpError !== false
-						) {
-							throw new TransportError(
-								`Upstream request failed with status ${attemptResponse.status}`,
-								{ code: "upstream_http_error", status: attemptResponse.status },
-							);
-						}
-						recordProxyAttempt("ok", undefined, attemptResponse.status);
-						if (sessionStateBinding && attemptProxy?.url) {
-							// Where a state was acquired, for `distribute.egress: "pinned"`.
-							Object.defineProperty(attemptNormalized, SESSION_STATE_RESPONSE_EGRESS, {
-								value: attemptProxy,
-								enumerable: false,
-								configurable: true,
-							});
-						}
-						return attemptNormalized;
-					};
-					const redactAttemptError = <T>(error: T): T =>
-						redactSensitiveError(
-							error,
-							serializedUrl?.sensitiveValues ?? fallbackSensitiveValues,
-							serializedUrl?.requestUrl ?? fallbackRequestUrl,
-							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-						);
-					// Cancellation and resolver failures leave the transport path here, redacted; any
-					// other failure becomes the TransportError the retry decision reasons about.
-					const normalizeAttemptError = (error: unknown): TransportError => {
-						let normalizedError: TransportError;
 						try {
-							throwIfAmbientAborted(clientOptions.signal);
-							normalizedError = normalizeStealthTransportError(error);
-						} catch (normalizationError) {
-							if (
-								normalizationError instanceof TransportError &&
-								normalizationError.code === "transport_cancelled"
-							) {
-								recordProxyAttempt(
-									"error",
-									proxyAttemptErrorCode(normalizationError),
-									proxyAttemptStatus(normalizationError),
-								);
-							}
-							throw redactAttemptError(normalizationError);
+							proxyAttemptContext.vendorSelector.report({
+								vendor: attemptProxy.vendor,
+								phase: "transport",
+								outcome,
+								attempt,
+								...(attemptProxy.sessionId ? { sessionId: attemptProxy.sessionId } : {}),
+								...(errorCode ? { errorCode } : {}),
+								...(status === undefined ? {} : { status }),
+								durationMs: Math.max(0, now - attemptStartedAt),
+								now,
+								requestId: proxyAttemptContext.requestId,
+							});
+						} catch {
+							// A selector cannot fail the request it observes.
 						}
-						if (challengeSolveFailure && error === challengeSolveFailure) {
-							throw redactAttemptError(challengeSolveFailure.error);
-						}
-						return normalizedError;
-					};
-					const recordAttemptFailure = (normalizedError: TransportError): TransportError => {
-						const redactedError = redactAttemptError(normalizedError);
-						recordProxyAttempt(
-							"error",
-							proxyAttemptErrorCode(redactedError),
-							proxyAttemptStatus(redactedError),
+					}
+				};
+				// Shared tail of the first fetch, the automatic refetch, and an explicit replay: a
+				// classified challenge is returned whatever `throwOnHttpError` says (documented on
+				// StealthFetchOptions), any other non-2xx honours it, and the proxy attempt is
+				// recorded once per delivered response.
+				const finalizeAttempt = (
+					attemptResponse: StealthTransportResponse,
+					attemptNormalized: StealthResponse,
+				): StealthResponse => {
+					if (attemptNormalized.challenge)
+						emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+							sink.recordSbsd(attemptNormalized.challenge!.outcome),
 						);
-						return redactedError;
-					};
+					if (
+						!attemptNormalized.challenge &&
+						attemptResponse.status >= 400 &&
+						options.throwOnHttpError !== false
+					) {
+						throw new TransportError(
+							`Upstream request failed with status ${attemptResponse.status}`,
+							{ code: "upstream_http_error", status: attemptResponse.status },
+						);
+					}
+					recordProxyAttempt("ok", undefined, attemptResponse.status);
+					if (sessionStateBinding && attemptProxy?.url) {
+						// Where a state was acquired, for `distribute.egress: "pinned"`.
+						Object.defineProperty(attemptNormalized, SESSION_STATE_RESPONSE_EGRESS, {
+							value: attemptProxy,
+							enumerable: false,
+							configurable: true,
+						});
+					}
+					return attemptNormalized;
+				};
+				const redactAttemptError = <T>(error: T): T =>
+					redactSensitiveError(
+						error,
+						serializedUrl?.sensitiveValues ?? fallbackSensitiveValues,
+						serializedUrl?.requestUrl ?? fallbackRequestUrl,
+						serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+					);
+				// Cancellation and resolver failures leave the transport path here, redacted; any
+				// other failure becomes the TransportError the retry decision reasons about.
+				const normalizeAttemptError = (error: unknown): TransportError => {
+					let normalizedError: TransportError;
 					try {
 						throwIfAmbientAborted(clientOptions.signal);
-						const sensitiveParams = normalizeSensitiveParams(options.sensitiveParams);
-						const structural = redactUrlQueryParams(url, Object.keys(sensitiveParams ?? {}));
-						fallbackSensitiveValues = [
-							...new Set([
-								...Object.values(sensitiveParams ?? {}).map(String),
-								...structural.sensitiveValues,
-							]),
-						].filter((value) => value !== "");
-						fallbackRequestUrl = url;
-						fallbackRedactedUrl = structural.redactedUrl;
-						assertNoUnsupportedFingerprintOverrides(options);
-						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
-						throwIfAmbientAborted(clientOptions.signal);
-						proxy = attemptProxy.url;
-						if (proxy && dedupeAllocatorEndpoints) {
-							// An under-filled allocation repeats endpoints (via the modulo
-							// pool mapping) before the flat offset crosses into the next
-							// vendor. Skip an already-tried endpoint and advance the offset
-							// rather than breaking — breaking here would strand the request on
-							// the primary vendor and never reach the fallback leg.
-							if (attemptedProxies.has(proxy)) {
-								continue;
-							}
-							attemptedProxies.add(proxy);
+						normalizedError = normalizeStealthTransportError(error);
+					} catch (normalizationError) {
+						if (
+							normalizationError instanceof TransportError &&
+							normalizationError.code === "transport_cancelled"
+						) {
+							recordProxyAttempt(
+								"error",
+								proxyAttemptErrorCode(normalizationError),
+								proxyAttemptStatus(normalizationError),
+							);
 						}
-						const ignoreTlsErrors = Boolean(
-							options.stealth?.insecureSkipVerify ??
-								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
+						throw redactAttemptError(normalizationError);
+					}
+					if (challengeSolveFailure && error === challengeSolveFailure) {
+						throw redactAttemptError(challengeSolveFailure.error);
+					}
+					return normalizedError;
+				};
+				const recordAttemptFailure = (normalizedError: TransportError): TransportError => {
+					const redactedError = redactAttemptError(normalizedError);
+					recordProxyAttempt(
+						"error",
+						proxyAttemptErrorCode(redactedError),
+						proxyAttemptStatus(redactedError),
+					);
+					return redactedError;
+				};
+				try {
+					throwIfAmbientAborted(clientOptions.signal);
+					const sensitiveParams = normalizeSensitiveParams(options.sensitiveParams);
+					const structural = redactUrlQueryParams(url, Object.keys(sensitiveParams ?? {}));
+					fallbackSensitiveValues = [
+						...new Set([
+							...Object.values(sensitiveParams ?? {}).map(String),
+							...structural.sensitiveValues,
+						]),
+					].filter((value) => value !== "");
+					fallbackRequestUrl = url;
+					fallbackRedactedUrl = structural.redactedUrl;
+					assertNoUnsupportedFingerprintOverrides(options);
+					attemptProxy = await resolveRequestProxy(options, attempt, proxyAttemptContext);
+					throwIfAmbientAborted(clientOptions.signal);
+					proxy = attemptProxy.url;
+					if (proxy && dedupeProxyEndpoints) {
+						// A pinned egress or a released binding came back (see
+						// dedupeProxyEndpoints). Skip it and advance the attempt rather than
+						// breaking, which would strand the request before the fallback share.
+						if (attemptedProxies.has(proxy)) {
+							continue;
+						}
+						attemptedProxies.add(proxy);
+					}
+					const ignoreTlsErrors = Boolean(
+						options.stealth?.insecureSkipVerify ??
+							(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
+					);
+					serializedUrl = serializeRequestUrl(
+						resolveRequestUrl(baseUrl, url),
+						options.params,
+						sensitiveParams,
+					);
+					const { requestUrl } = serializedUrl;
+					const wreq = await getWreqModule();
+					const mapping = resolveWreqProfile(requestProfile, wreq.getProfiles());
+					const emulationHeaders = Array.from(
+						wreq.getEmulationHeaders(mapping.browser, mapping.os),
+						([name, value]) => [String(name), String(value)] as HeaderTuple,
+					);
+					const chromeEmulationHeaders = mapping.browser.startsWith("chrome_")
+						? emulationHeaders
+						: undefined;
+					const buildOrderedHeaders = chromeEmulationHeaders
+						? (
+								currentUrl: string,
+								currentMethod: StealthMethod,
+								currentBody: string | Buffer | undefined,
+								currentHeaders: Record<string, string>,
+								redirected: boolean,
+							) =>
+								buildChromeHeaderTuples({
+									emulationHeaders: chromeEmulationHeaders,
+									method: currentMethod,
+									body: currentBody,
+									headers: currentHeaders,
+									requestUrl: currentUrl,
+									acceptLanguage: clientOptions.stealth?.acceptLanguage,
+									requestClass: options.stealth?.requestClass,
+									userActivation: options.stealth?.userActivation,
+									redirected,
+								})
+						: undefined;
+					const initialHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
+					if (!hasHeader(initialHeaders, "cookie")) {
+						const cookieHeader = cookieJar.toHeader(requestUrl);
+						if (cookieHeader) initialHeaders.cookie = cookieHeader;
+					}
+					// The session partition key (getClientEntry) takes the first-request order even
+					// for a session.redirects.run hop, so the hop stays on the wreq session, and
+					// its connections, that the same request outside a redirect uses.
+					const defaultHeaders = buildOrderedHeaders?.(
+						requestUrl,
+						method,
+						requestBody,
+						initialHeaders,
+						false,
+					);
+					const fetchOnBoundSession = (
+						fetchUrl: string,
+						fetchMethod: StealthMethod,
+						fetchOptions: StealthFetchOptions,
+						fetchSignal: AbortSignal | undefined,
+						orderedHeaders = buildOrderedHeaders,
+						sessionDefaultHeaders = defaultHeaders,
+						kind: StealthTelemetryAttemptKind = "request",
+					) =>
+						withClient(
+							requestProfile,
+							proxy,
+							ignoreTlsErrors,
+							(transport) =>
+								fetchStealthRedirectChain(
+									transport,
+									cookieJar,
+									fetchUrl,
+									fetchMethod,
+									fetchOptions,
+									fetchSignal,
+									orderedHeaders,
+									clientOptions.stealthTelemetry
+										? {
+												sink: clientOptions.stealthTelemetry,
+												profileId: requestProfile,
+												proxyUsed: Boolean(proxy),
+												kind,
+												cookieJar,
+											}
+										: undefined,
+								),
+							fetchSignal,
+							sessionDefaultHeaders,
 						);
-						serializedUrl = serializeRequestUrl(
-							resolveRequestUrl(baseUrl, url),
-							options.params,
-							sensitiveParams,
+					const throwProxyTransportFault = (
+						faultResponse: StealthTransportResponse,
+						faultBody: string,
+					) => {
+						if (!proxy) return;
+						if (isProxyConnectFailureResponse(faultResponse, faultBody)) {
+							throw createProxyConnectFailureError(faultBody);
+						}
+						if (faultResponse.status < 400) return;
+						if (
+							usesPolicyProxy &&
+							isProxyEdgeTlsRejectedResponse(
+								faultResponse.status,
+								[JSON.stringify(responseHeadersToRecord(faultResponse.headers)), faultBody].join(
+									"\n",
+								),
+							)
+						) {
+							throw createProxyEdgeTlsRejectedError(faultResponse.status);
+						}
+						if (isProxyAuthIpDeniedMessage(faultBody)) {
+							throw createProxyAuthIpDeniedError();
+						}
+						if (isProxyEdgeAuthRejectedMessage(faultBody)) {
+							throw createProxyEdgeAuthRejectedError();
+						}
+						if (
+							isProxyPoolStaleStatus(faultResponse.status) &&
+							isProxyPoolStaleMessage(faultBody)
+						) {
+							throw createProxyPoolStaleError(faultResponse.status);
+						}
+					};
+					let { normalized, response } = await fetchOnBoundSession(
+						requestUrl,
+						method,
+						options,
+						clientOptions.signal,
+					);
+					throwProxyTransportFault(response, normalized.body);
+					if (
+						rotateExitOnAdmissionRefusal &&
+						!exitRotationSpent &&
+						proxy &&
+						rotatesRegistryChain &&
+						attempt + 1 < maxAttempts &&
+						isAdmissionRefusalResponse(response.status, normalized.headers, normalized.body)
+					) {
+						// The refusal is read as "this exit", not "this origin": the request goes once
+						// more on the next attempt's vendor session (the attempt index stays advanced
+						// for the rest of the call). Thrown before the ceremony binding so a refused
+						// exit is never sealed into a lease.
+						exitRotationSpent = true;
+						throw createProxyExitRefusedError(response.status);
+					}
+
+					// Commit only after the selected endpoint reached the origin. A failed
+					// proxy attempt moves to a new vendor session; the successful exact
+					// endpoint is the one sealed into the ceremony handle.
+					bindCeremonyEgress(attemptProxy);
+
+					const akamaiSbsd = clientOptions.stealth?.challengeRuntime?.akamaiSbsd;
+					const detected = akamaiSbsd
+						? detectAkamaiSbsdChallenge(
+								normalized,
+								requestUrl,
+								cookieJar,
+								akamaiSbsd.allowedHosts,
+								akamaiSbsdState,
+							)
+						: undefined;
+					if (akamaiSbsd && !detected)
+						emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+							sink.recordSbsd({ detected: false }),
 						);
-						const { requestUrl } = serializedUrl;
-						const wreq = await getWreqModule();
-						const mapping = resolveWreqProfile(requestProfile, wreq.getProfiles());
-						const emulationHeaders = Array.from(
-							wreq.getEmulationHeaders(mapping.browser, mapping.os),
-							([name, value]) => [String(name), String(value)] as HeaderTuple,
+					if (detected && akamaiSbsd) {
+						emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+							sink.recordSbsd("detected"),
 						);
-						const chromeEmulationHeaders = mapping.browser.startsWith("chrome_")
-							? emulationHeaders
-							: undefined;
-						const buildOrderedHeaders = chromeEmulationHeaders
+						if (challengeSolveAttempted || challengeRefetchAttempted) {
+							normalized.challenge = {
+								challenge: detected,
+								outcome: "challenge_persisted",
+							};
+							return finalizeAttempt(response, normalized);
+						}
+						const automaticReplayEligible = isProxyTransportRetryMethod(
+							method,
+							automaticChallengeRefetchPolicy,
+							{ body: requestBody, headers: options.headers },
+						);
+						if (automaticReplayEligible && !akamaiSbsd.solve) {
+							normalized.challenge = {
+								challenge: detected,
+								outcome: "resolver_unavailable",
+							};
+							return finalizeAttempt(response, normalized);
+						}
+
+						const emulationHeaderMap = new Map(
+							emulationHeaders.map(([name, value]) => [name.toLowerCase(), value] as const),
+						);
+						const initiatingHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
+						// Mirror what the protected request actually sent: `stealth.acceptLanguage` is
+						// applied by the Chrome header builder only; Safari/Firefox sessions send the
+						// emulation default.
+						const sessionHeaders = {
+							"User-Agent": requiredEmulationHeader(emulationHeaderMap, "user-agent"),
+							"Accept-Language":
+								initiatingHeaders["accept-language"] ??
+								(chromeEmulationHeaders ? clientOptions.stealth?.acceptLanguage : undefined) ??
+								requiredEmulationHeader(emulationHeaderMap, "accept-language"),
+						};
+						const resolverBuildHeaders = chromeEmulationHeaders
 							? (
 									currentUrl: string,
 									currentMethod: StealthMethod,
 									currentBody: string | Buffer | undefined,
 									currentHeaders: Record<string, string>,
-									redirected: boolean,
 								) =>
 									buildChromeHeaderTuples({
 										emulationHeaders: chromeEmulationHeaders,
@@ -2178,528 +2384,306 @@ function createSessionFetcher(
 										headers: currentHeaders,
 										requestUrl: currentUrl,
 										acceptLanguage: clientOptions.stealth?.acceptLanguage,
-										requestClass: options.stealth?.requestClass,
-										userActivation: options.stealth?.userActivation,
-										redirected,
 									})
 							: undefined;
-						const initialHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
-						if (!hasHeader(initialHeaders, "cookie")) {
-							const cookieHeader = cookieJar.toHeader(requestUrl);
-							if (cookieHeader) initialHeaders.cookie = cookieHeader;
-						}
-						// The session partition key (getClientEntry) takes the first-request order even
-						// for a session.redirects.run hop, so the hop stays on the wreq session, and
-						// its connections, that the same request outside a redirect uses.
-						const defaultHeaders = buildOrderedHeaders?.(
-							requestUrl,
-							method,
-							requestBody,
-							initialHeaders,
-							false,
-						);
-						const fetchOnBoundSession = (
-							fetchUrl: string,
-							fetchMethod: StealthMethod,
-							fetchOptions: StealthFetchOptions,
-							fetchSignal: AbortSignal | undefined,
-							orderedHeaders = buildOrderedHeaders,
-							sessionDefaultHeaders = defaultHeaders,
-							kind: StealthTelemetryAttemptKind = "request",
-						) =>
-							withClient(
-								requestProfile,
-								proxy,
-								ignoreTlsErrors,
-								(transport) =>
-									fetchStealthRedirectChain(
-										transport,
-										cookieJar,
-										fetchUrl,
-										fetchMethod,
-										fetchOptions,
-										fetchSignal,
-										orderedHeaders,
-										clientOptions.stealthTelemetry
-											? {
-													sink: clientOptions.stealthTelemetry,
-													profileId: requestProfile,
-													proxyUsed: Boolean(proxy),
-													kind,
-													cookieJar,
-												}
-											: undefined,
-									),
-								fetchSignal,
-								sessionDefaultHeaders,
-							);
-						const throwProxyTransportFault = (
-							faultResponse: StealthTransportResponse,
-							faultBody: string,
-						) => {
-							if (!proxy) return;
-							if (isProxyConnectFailureResponse(faultResponse, faultBody)) {
-								throw createProxyConnectFailureError(faultBody);
-							}
-							if (faultResponse.status < 400) return;
-							if (
-								usesPolicyAllocator &&
-								isProxyEdgeTlsRejectedResponse(
-									faultResponse.status,
-									[JSON.stringify(responseHeadersToRecord(faultResponse.headers)), faultBody].join(
-										"\n",
-									),
-								)
-							) {
-								throw createProxyEdgeTlsRejectedError(faultResponse.status);
-							}
-							if (isProxyAuthIpDeniedMessage(faultBody)) {
-								throw createProxyAuthIpDeniedError();
-							}
-							if (isProxyEdgeAuthRejectedMessage(faultBody)) {
-								throw createProxyEdgeAuthRejectedError();
-							}
-							if (
-								isProxyPoolStaleStatus(faultResponse.status) &&
-								isProxyPoolStaleMessage(faultBody)
-							) {
-								throw createProxyPoolStaleError(faultResponse.status);
-							}
-						};
-						let { normalized, response } = await fetchOnBoundSession(
-							requestUrl,
-							method,
-							options,
-							clientOptions.signal,
-						);
-						throwProxyTransportFault(response, normalized.body);
-						if (
-							rotateExitOnAdmissionRefusal &&
-							!exitRotationSpent &&
-							proxy &&
-							rotatesRegistryChain &&
-							attempt + 1 < maxAttempts &&
-							isAdmissionRefusalResponse(response.status, normalized.headers, normalized.body)
-						) {
-							// The refusal is read as "this exit", not "this origin": the request goes once
-							// more through the next pool entry (the attempt index is the offset and stays
-							// advanced for the rest of the call). Thrown before the ceremony binding so a
-							// refused exit is never sealed into a lease.
-							exitRotationSpent = true;
-							throw createProxyExitRefusedError(response.status);
-						}
-
-						// Commit only after the selected endpoint reached the origin. A failed
-						// proxy attempt may rotate pool index; the successful exact endpoint is
-						// the one sealed into the ceremony handle.
-						bindCeremonyEgress(attemptProxy);
-
-						const akamaiSbsd = clientOptions.stealth?.challengeRuntime?.akamaiSbsd;
-						const detected = akamaiSbsd
-							? detectAkamaiSbsdChallenge(
-									normalized,
-									requestUrl,
-									cookieJar,
-									akamaiSbsd.allowedHosts,
-									akamaiSbsdState,
-								)
-							: undefined;
-						if (akamaiSbsd && !detected)
-							emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
-								sink.recordSbsd({ detected: false }),
-							);
-						if (detected && akamaiSbsd) {
-							emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
-								sink.recordSbsd("detected"),
-							);
-							if (challengeSolveAttempted || challengeRefetchAttempted) {
-								normalized.challenge = {
-									challenge: detected,
-									outcome: "challenge_persisted",
-								};
-								return finalizeAttempt(response, normalized);
-							}
-							const automaticReplayEligible = isProxyTransportRetryMethod(
-								method,
-								automaticChallengeRefetchPolicy,
-								{ body: requestBody, headers: options.headers },
-							);
-							if (automaticReplayEligible && !akamaiSbsd.solve) {
-								normalized.challenge = {
-									challenge: detected,
-									outcome: "resolver_unavailable",
-								};
-								return finalizeAttempt(response, normalized);
-							}
-
-							const emulationHeaderMap = new Map(
-								emulationHeaders.map(([name, value]) => [name.toLowerCase(), value] as const),
-							);
-							const initiatingHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
-							// Mirror what the protected request actually sent: `stealth.acceptLanguage` is
-							// applied by the Chrome header builder only; Safari/Firefox sessions send the
-							// emulation default.
-							const sessionHeaders = {
-								"User-Agent": requiredEmulationHeader(emulationHeaderMap, "user-agent"),
-								"Accept-Language":
-									initiatingHeaders["accept-language"] ??
-									(chromeEmulationHeaders ? clientOptions.stealth?.acceptLanguage : undefined) ??
-									requiredEmulationHeader(emulationHeaderMap, "accept-language"),
-							};
-							const resolverBuildHeaders = chromeEmulationHeaders
-								? (
-										currentUrl: string,
-										currentMethod: StealthMethod,
-										currentBody: string | Buffer | undefined,
-										currentHeaders: Record<string, string>,
-									) =>
-										buildChromeHeaderTuples({
-											emulationHeaders: chromeEmulationHeaders,
-											method: currentMethod,
-											body: currentBody,
-											headers: currentHeaders,
-											requestUrl: currentUrl,
-											acceptLanguage: clientOptions.stealth?.acceptLanguage,
-										})
-								: undefined;
-							const resolverTransport: ResolverVendorTransport = {
-								sessionHeaders,
-								getCookie(name, cookieUrl) {
-									return cookieJar.get(name, cookieUrl);
-								},
-								async fetch(transportUrl, init) {
-									const boundSignal = clientOptions.signal
-										? AbortSignal.any([clientOptions.signal, init.signal])
-										: init.signal;
-									const transportHeaders = { ...(init.headers ?? {}) };
-									if (resolverBuildHeaders) {
-										for (const name of Object.keys(transportHeaders)) {
-											if (name.toLowerCase() === "user-agent") {
-												delete transportHeaders[name];
-											}
+						const resolverTransport: ResolverVendorTransport = {
+							sessionHeaders,
+							getCookie(name, cookieUrl) {
+								return cookieJar.get(name, cookieUrl);
+							},
+							async fetch(transportUrl, init) {
+								const boundSignal = clientOptions.signal
+									? AbortSignal.any([clientOptions.signal, init.signal])
+									: init.signal;
+								const transportHeaders = { ...(init.headers ?? {}) };
+								if (resolverBuildHeaders) {
+									for (const name of Object.keys(transportHeaders)) {
+										if (name.toLowerCase() === "user-agent") {
+											delete transportHeaders[name];
 										}
 									}
-									// Session defaults come from this request's own shape, never from the
-									// initiating request: its defaults carry the upstream Cookie header,
-									// which wreq would otherwise merge into the Hyper /ip call.
-									const result = await fetchOnBoundSession(
+								}
+								// Session defaults come from this request's own shape, never from the
+								// initiating request: its defaults carry the upstream Cookie header,
+								// which wreq would otherwise merge into the Hyper /ip call.
+								const result = await fetchOnBoundSession(
+									transportUrl,
+									init.method,
+									{
+										method: init.method,
+										headers: transportHeaders,
+										...(init.body === undefined ? {} : { body: init.body }),
+										redirect: "manual",
+										throwOnHttpError: false,
+										...(init.maxBodyBytes === undefined ? {} : { maxBodyBytes: init.maxBodyBytes }),
+									},
+									boundSignal,
+									resolverBuildHeaders,
+									resolverBuildHeaders?.(
 										transportUrl,
 										init.method,
-										{
-											method: init.method,
-											headers: transportHeaders,
-											...(init.body === undefined ? {} : { body: init.body }),
-											redirect: "manual",
-											throwOnHttpError: false,
-											...(init.maxBodyBytes === undefined
-												? {}
-												: { maxBodyBytes: init.maxBodyBytes }),
-										},
-										boundSignal,
-										resolverBuildHeaders,
-										resolverBuildHeaders?.(
-											transportUrl,
-											init.method,
-											init.body,
-											normalizeHeaders(transportHeaders),
-										),
-										"resolver",
-									);
-									return {
-										status: result.normalized.status,
-										headers: result.normalized.headers,
-										body: result.normalized.body,
-										cookies: resolverCookiesFromResponse(result.response, transportUrl),
-									};
-								},
-							};
-							// `options` is already the fetch-start snapshot; the replay gets its own copy
-							// of the body bytes so the transport cannot alias the first send's buffer.
-							const replayOptions: StealthFetchOptions = {
-								...options,
-								...(Buffer.isBuffer(requestBody) ? { body: Buffer.from(requestBody) } : {}),
-							};
-							const transactionKey = akamaiSbsdChallengeKey(detected, {
-								wreqBrowser: mapping.browser,
-								wreqOs: mapping.os,
-								proxyUrl: proxy,
-							});
-							const challenged = { normalized, response };
-							const solveAndReplay = async (
-								explicitReplay: boolean,
-							): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> => {
-								if (!akamaiSbsd.solve) {
-									throw new SDKError("No resolver is available for the challenged request", {
-										code: "RESOLVER_UNAVAILABLE",
-									});
-								}
-								// Only a solve that will actually run on this session needs the profile match.
-								assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
-								// A safe request that already solved this exact challenge on this identity
-								// left the session cookies valid: the explicit replay reuses them once
-								// instead of paying for a second solve.
-								const reuseCompletedSuccess =
-									explicitReplay && akamaiSbsdState.completedSuccessKey === transactionKey;
-								if (reuseCompletedSuccess) akamaiSbsdState.completedSuccessKey = undefined;
-								let ownsTransaction = false;
-								if (!reuseCompletedSuccess) {
-									let transaction = akamaiSbsdState.transactions.get(transactionKey);
-									if (!transaction) {
-										akamaiSbsdState.completedSuccessKey = undefined;
-										challengeSolveAttempted = true;
-										ownsTransaction = true;
-										// The solve spans several round trips, so it runs under the client's ambient
-										// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
-										transaction = {
-											result: akamaiSbsd
-												.solve(
-													detected,
-													resolverTransport,
-													clientOptions.signal ?? new AbortController().signal,
-												)
-												.then(
-													() => ({ solved: true }) as const,
-													(error: unknown) => ({ solved: false, error }) as const,
-												)
-												.finally(() => {
-													akamaiSbsdState.transactions.delete(transactionKey);
-												}),
-										};
-										akamaiSbsdState.transactions.set(transactionKey, transaction);
-									}
-									const transactionResult = await transaction.result;
-									if (!transactionResult.solved) {
-										emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
-											sink.recordSbsd("solve_failed"),
-										);
-										if (ownsTransaction) {
-											// The proxy delivered the challenged response; the resolver failed.
-											// Surface that failure as-is: it is not a transport fault to normalize
-											// or retry.
-											if (!explicitReplay) {
-												recordProxyAttempt("ok", undefined, challenged.response.status);
-											}
-											challengeSolveFailure = { error: transactionResult.error };
-											throw challengeSolveFailure;
-										}
-										return {
-											normalized: {
-												...challenged.normalized,
-												challenge: { challenge: detected, outcome: "solve_failed" },
-											},
-											response: challenged.response,
-										};
-									}
-								}
-								challengeRefetchAttempted = true;
-								// An explicit replay is a new transport exchange on the bound endpoint and
-								// gets its own proxy-attempt record timed from here, not from the initiating
-								// fetch (the caller's think time in between is not transport duration); the
-								// automatic refetch stays within the initiating attempt's record.
-								if (explicitReplay) {
-									// The solve above may have taken seconds; if another session of this client
-									// moved the ceremony meanwhile, the mutation must not go out on the retired
-									// endpoint.
-									if (currentEgressGeneration() !== attemptEgressGeneration) {
-										throw new SDKError(
-											"The ceremony's egress binding changed while the replay was being solved",
-											{ code: "REPLAY_SESSION_MISMATCH" },
-										);
-									}
-									attemptRecorded = false;
-									attemptStartedAt = Date.now();
-								}
-								if (!explicitReplay)
-									emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
-										sink.recordSafeRefetch(),
-									);
-								const replayed = await fetchOnBoundSession(
-									requestUrl,
-									method,
-									replayOptions,
-									clientOptions.signal,
+										init.body,
+										normalizeHeaders(transportHeaders),
+									),
+									"resolver",
 								);
-								throwProxyTransportFault(replayed.response, replayed.normalized.body);
-								const persisted = detectAkamaiSbsdChallenge(
-									replayed.normalized,
-									requestUrl,
-									cookieJar,
-									akamaiSbsd.allowedHosts,
-									akamaiSbsdState,
-								);
-								emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
-									sink.recordSbsd(persisted ? "challenge_persisted" : "refetch_clear"),
-								);
-								if (persisted) {
-									replayed.normalized.challenge = {
-										challenge: persisted,
-										outcome: "challenge_persisted",
-									};
-								} else if (ownsTransaction && !explicitReplay) {
-									akamaiSbsdState.completedSuccessKey = transactionKey;
-								}
-								return replayed;
-							};
-
-							if (!automaticReplayEligible) {
-								normalized.challenge = {
-									challenge: detected,
-									outcome: "replay_required",
+								return {
+									status: result.normalized.status,
+									headers: result.normalized.headers,
+									body: result.normalized.body,
+									cookies: resolverCookiesFromResponse(result.response, transportUrl),
 								};
-								challengedReplays.set(normalized, {
-									consumed: false,
-									generation: attemptEgressGeneration,
-									async replay() {
-										try {
-											const replayed = await solveAndReplay(true);
-											return finalizeAttempt(replayed.response, replayed.normalized);
-										} catch (error) {
-											const normalizedError = normalizeAttemptError(error);
-											releaseFailedCeremonyEgress(proxy, normalizedError);
-											throw recordAttemptFailure(normalizedError);
-										}
-									},
-								});
-								return finalizeAttempt(response, normalized);
-							}
-							({ normalized, response } = await solveAndReplay(false));
-						}
-
-						return finalizeAttempt(response, normalized);
-					} catch (error) {
-						if (error instanceof TransportError && error.code === PROXY_EXIT_REFUSED_CODE) {
-							recordProxyAttempt("error", PROXY_EXIT_REFUSED_CODE, error.status);
-							lastError = redactAttemptError(error);
-							continue;
-						}
-						const normalizedError = normalizeAttemptError(error);
-						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
-						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
-						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
-						const redactedError = recordAttemptFailure(normalizedError);
-						lastError = redactedError;
-						const releasedBoundEgress = releaseFailedCeremonyEgress(proxy, normalizedError);
-						if (releasedBoundEgress) {
-							// The request now proceeds as an unbound one with the full rotation budget;
-							// the attempt spent on the dead endpoint does not count against it.
-							maxAttempts = attempt + 1 + unboundMaxAttempts;
-						}
-						if (challengeSolveAttempted || challengeRefetchAttempted) {
-							// The single refetch is spent (owner or waiter of a shared solve): another
-							// transport attempt would replay the original request and may rotate the
-							// proxy the solved jar is bound to.
-							throw redactedError;
-						}
-						if (proxy && rotatesRegistryChain && refreshableProxyError) {
-							// Also the path a released bound endpoint takes after a proxy-level refusal:
-							// the stale-pool bookkeeping here is what drives allocator invalidation and the
-							// refresh pass when the fresh selection lands on the same endpoint again.
-							stalePoolError = redactedError;
-							if (runProxyAuthDiagnostic) {
-								stalePoolDiagnosticProxy = proxy;
-							}
-							if (attempt + 1 < maxAttempts) {
-								continue;
-							}
-							break;
-						}
-						if (
-							releasedBoundEgress &&
-							attempt + 1 < maxAttempts &&
-							retryErrorCode === PROXY_CONNECT_FAILURE_CODE
-						) {
-							// The tunnel to the released endpoint never opened, so the origin never saw the
-							// request: selecting and binding a fresh endpoint in this request is safe for
-							// any method. Ambiguous failures (reset, timeout) fall through to the ordinary
-							// method-aware retry decision below with the binding already released.
-							continue;
-						}
-						// Cap the number of transport retries. For a policy-allocator chain,
-						// every attempt resolves a *different* endpoint/vendor (poolIndex
-						// rotates across the concatenated vendor pool spans), so a transport
-						// failure is a signal to advance to the next endpoint — potentially
-						// crossing into the fallback vendor — not to retry the same endpoint.
-						// Truncating that rotation at the per-endpoint retry budget would
-						// strand the request on the primary vendor and never reach the
-						// fallback, since the crossover only happens once the flat attempt
-						// index exceeds the primary vendor's pool size (~10-20).
-						// resolvePolicyTransportAttemptCap widens to the full chain span only
-						// for implicit, safe-method allocator requests; explicit retry
-						// policies (their documented `attempts` ceiling), unsafe methods, and
-						// static/non-registry vendors keep the per-endpoint retry budget.
-						const transportRetryCap = resolvePolicyTransportAttemptCap({
-							policy: policyProxy,
-							usesPolicyAllocator,
-							retryAttempts: stealthRetryOptions?.attempts ?? 1,
-							explicitRetry: hasExplicitRetryPolicy,
-							method,
+							},
+						};
+						// `options` is already the fetch-start snapshot; the replay gets its own copy
+						// of the body bytes so the transport cannot alias the first send's buffer.
+						const replayOptions: StealthFetchOptions = {
+							...options,
+							...(Buffer.isBuffer(requestBody) ? { body: Buffer.from(requestBody) } : {}),
+						};
+						const transactionKey = akamaiSbsdChallengeKey(detected, {
+							wreqBrowser: mapping.browser,
+							wreqOs: mapping.os,
+							proxyUrl: proxy,
 						});
-						if (
-							attempt + 1 < transportRetryCap &&
-							shouldRetryProxyTransportAttempt({
-								error: { code: retryErrorCode },
-								explicitRetry: hasExplicitRetryPolicy,
-								method,
-								options: stealthRetryOptions,
-								proxyUsed: Boolean(proxy),
-							})
-						) {
-							if (stealthRetryOptions) {
-								await sleep(
-									computeProxyTransportRetryDelayMs(stealthRetryOptions, attempt + 1),
-									clientOptions.signal,
-								);
+						const challenged = { normalized, response };
+						const solveAndReplay = async (
+							explicitReplay: boolean,
+						): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> => {
+							if (!akamaiSbsd.solve) {
+								throw new SDKError("No resolver is available for the challenged request", {
+									code: "RESOLVER_UNAVAILABLE",
+								});
 							}
-							throwIfAmbientAborted(clientOptions.signal);
-							continue;
+							// Only a solve that will actually run on this session needs the profile match.
+							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
+							// A safe request that already solved this exact challenge on this identity
+							// left the session cookies valid: the explicit replay reuses them once
+							// instead of paying for a second solve.
+							const reuseCompletedSuccess =
+								explicitReplay && akamaiSbsdState.completedSuccessKey === transactionKey;
+							if (reuseCompletedSuccess) akamaiSbsdState.completedSuccessKey = undefined;
+							let ownsTransaction = false;
+							if (!reuseCompletedSuccess) {
+								let transaction = akamaiSbsdState.transactions.get(transactionKey);
+								if (!transaction) {
+									akamaiSbsdState.completedSuccessKey = undefined;
+									challengeSolveAttempted = true;
+									ownsTransaction = true;
+									// The solve spans several round trips, so it runs under the client's ambient
+									// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
+									transaction = {
+										result: akamaiSbsd
+											.solve(
+												detected,
+												resolverTransport,
+												clientOptions.signal ?? new AbortController().signal,
+											)
+											.then(
+												() => ({ solved: true }) as const,
+												(error: unknown) => ({ solved: false, error }) as const,
+											)
+											.finally(() => {
+												akamaiSbsdState.transactions.delete(transactionKey);
+											}),
+									};
+									akamaiSbsdState.transactions.set(transactionKey, transaction);
+								}
+								const transactionResult = await transaction.result;
+								if (!transactionResult.solved) {
+									emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+										sink.recordSbsd("solve_failed"),
+									);
+									if (ownsTransaction) {
+										// The proxy delivered the challenged response; the resolver failed.
+										// Surface that failure as-is: it is not a transport fault to normalize
+										// or retry.
+										if (!explicitReplay) {
+											recordProxyAttempt("ok", undefined, challenged.response.status);
+										}
+										challengeSolveFailure = { error: transactionResult.error };
+										throw challengeSolveFailure;
+									}
+									return {
+										normalized: {
+											...challenged.normalized,
+											challenge: { challenge: detected, outcome: "solve_failed" },
+										},
+										response: challenged.response,
+									};
+								}
+							}
+							challengeRefetchAttempted = true;
+							// An explicit replay is a new transport exchange on the bound endpoint and
+							// gets its own proxy-attempt record timed from here, not from the initiating
+							// fetch (the caller's think time in between is not transport duration); the
+							// automatic refetch stays within the initiating attempt's record.
+							if (explicitReplay) {
+								// The solve above may have taken seconds; if another session of this client
+								// moved the ceremony meanwhile, the mutation must not go out on the retired
+								// endpoint.
+								if (currentEgressGeneration() !== attemptEgressGeneration) {
+									throw new SDKError(
+										"The ceremony's egress binding changed while the replay was being solved",
+										{ code: "REPLAY_SESSION_MISMATCH" },
+									);
+								}
+								attemptRecorded = false;
+								attemptStartedAt = Date.now();
+							}
+							if (!explicitReplay)
+								emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+									sink.recordSafeRefetch(),
+								);
+							const replayed = await fetchOnBoundSession(
+								requestUrl,
+								method,
+								replayOptions,
+								clientOptions.signal,
+							);
+							throwProxyTransportFault(replayed.response, replayed.normalized.body);
+							const persisted = detectAkamaiSbsdChallenge(
+								replayed.normalized,
+								requestUrl,
+								cookieJar,
+								akamaiSbsd.allowedHosts,
+								akamaiSbsdState,
+							);
+							emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) =>
+								sink.recordSbsd(persisted ? "challenge_persisted" : "refetch_clear"),
+							);
+							if (persisted) {
+								replayed.normalized.challenge = {
+									challenge: persisted,
+									outcome: "challenge_persisted",
+								};
+							} else if (ownsTransaction && !explicitReplay) {
+								akamaiSbsdState.completedSuccessKey = transactionKey;
+							}
+							return replayed;
+						};
+
+						if (!automaticReplayEligible) {
+							normalized.challenge = {
+								challenge: detected,
+								outcome: "replay_required",
+							};
+							challengedReplays.set(normalized, {
+								consumed: false,
+								generation: attemptEgressGeneration,
+								async replay() {
+									try {
+										const replayed = await solveAndReplay(true);
+										return finalizeAttempt(replayed.response, replayed.normalized);
+									} catch (error) {
+										const normalizedError = normalizeAttemptError(error);
+										releaseFailedCeremonyEgress(proxy, normalizedError);
+										throw recordAttemptFailure(normalizedError);
+									}
+								},
+							});
+							return finalizeAttempt(response, normalized);
 						}
+						({ normalized, response } = await solveAndReplay(false));
+					}
+
+					return finalizeAttempt(response, normalized);
+				} catch (error) {
+					if (error instanceof TransportError && error.code === PROXY_EXIT_REFUSED_CODE) {
+						recordProxyAttempt("error", PROXY_EXIT_REFUSED_CODE, error.status);
+						lastError = redactAttemptError(error);
+						continue;
+					}
+					const normalizedError = normalizeAttemptError(error);
+					const retryErrorCode = proxyAttemptErrorCode(normalizedError);
+					const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
+					const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
+					const redactedError = recordAttemptFailure(normalizedError);
+					lastError = redactedError;
+					const releasedBoundEgress = releaseFailedCeremonyEgress(proxy, normalizedError);
+					if (releasedBoundEgress) {
+						// The request now proceeds as an unbound one with the full rotation budget;
+						// the attempt spent on the dead endpoint does not count against it.
+						maxAttempts = attempt + 1 + unboundMaxAttempts;
+					}
+					if (challengeSolveAttempted || challengeRefetchAttempted) {
+						// The single refetch is spent (owner or waiter of a shared solve): another
+						// transport attempt would replay the original request and may rotate the
+						// proxy the solved jar is bound to.
 						throw redactedError;
 					}
-				}
-
-				if (
-					rotatesRegistryChain &&
-					stalePoolError &&
-					refreshAttempt < MAX_POLICY_PROXY_POOL_REFRESHES
-				) {
-					throwIfAmbientAborted(clientOptions.signal);
-					emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) => sink.recordPoolRefresh());
-					await invalidateProxyResolutionCacheAsync({
-						proxyPolicy: clientOptions.proxyPolicy,
-						upstream: clientOptions.upstream,
-						affinityKey: clientOptions.affinityKey,
-					});
-					throwIfAmbientAborted(clientOptions.signal);
-					continue;
-				}
-
-				const proxyAuthDiagnostic =
-					stalePoolError && stalePoolDiagnosticProxy
-						? await classifyProxyAuthDiagnostic(requestProfile, stalePoolDiagnosticProxy)
-						: undefined;
-				if (proxyAuthDiagnostic === "source_ip_denied") {
-					throw createProxyAuthIpDeniedError(
-						stalePoolError instanceof Error ? stalePoolError : undefined,
-					);
-				}
-				if (proxyAuthDiagnostic === "edge_auth_rejected") {
-					throw createProxyEdgeAuthRejectedError(
-						stalePoolError instanceof Error ? stalePoolError : undefined,
-					);
-				}
-
-				if (stalePoolError) {
-					if (
-						stalePoolError instanceof TransportError &&
-						stalePoolError.code === PROXY_EDGE_AUTH_REJECTED_CODE
-					) {
-						throw stalePoolError;
+					if (proxy && rotatesRegistryChain && refreshableProxyError) {
+						// The vendor edge refused this session (also the path a released bound endpoint
+						// takes after a proxy-level refusal). The next attempt takes a new session; when
+						// every session the budget allows is refused the request fails as exhausted.
+						stalePoolError = redactedError;
+						if (runProxyAuthDiagnostic) {
+							stalePoolDiagnosticProxy = proxy;
+						}
+						if (attempt + 1 < maxAttempts) {
+							continue;
+						}
+						break;
 					}
-					throw createProxyPoolExhaustedError(
-						stalePoolError instanceof Error ? stalePoolError : undefined,
-					);
+					if (
+						releasedBoundEgress &&
+						attempt + 1 < maxAttempts &&
+						retryErrorCode === PROXY_CONNECT_FAILURE_CODE
+					) {
+						// The tunnel to the released endpoint never opened, so the origin never saw the
+						// request: selecting and binding a fresh endpoint in this request is safe for
+						// any method. Ambiguous failures (reset, timeout) fall through to the ordinary
+						// method-aware retry decision below with the binding already released.
+						continue;
+					}
+					if (
+						attempt + 1 < transportRetryCap &&
+						shouldRetryProxyTransportAttempt({
+							error: { code: retryErrorCode },
+							explicitRetry: hasExplicitRetryPolicy,
+							method,
+							options: stealthRetryOptions,
+							proxyUsed: Boolean(proxy),
+						})
+					) {
+						if (stealthRetryOptions) {
+							await sleep(
+								computeProxyTransportRetryDelayMs(stealthRetryOptions, attempt + 1),
+								clientOptions.signal,
+							);
+						}
+						throwIfAmbientAborted(clientOptions.signal);
+						continue;
+					}
+					throw redactedError;
 				}
-				break;
+			}
+
+			const proxyAuthDiagnostic =
+				stalePoolError && stalePoolDiagnosticProxy
+					? await classifyProxyAuthDiagnostic(requestProfile, stalePoolDiagnosticProxy)
+					: undefined;
+			if (proxyAuthDiagnostic === "source_ip_denied") {
+				throw createProxyAuthIpDeniedError(
+					stalePoolError instanceof Error ? stalePoolError : undefined,
+				);
+			}
+			if (proxyAuthDiagnostic === "edge_auth_rejected") {
+				throw createProxyEdgeAuthRejectedError(
+					stalePoolError instanceof Error ? stalePoolError : undefined,
+				);
+			}
+
+			if (stalePoolError) {
+				if (
+					stalePoolError instanceof TransportError &&
+					stalePoolError.code === PROXY_EDGE_AUTH_REJECTED_CODE
+				) {
+					throw stalePoolError;
+				}
+				throw createProxyPoolExhaustedError(
+					stalePoolError instanceof Error ? stalePoolError : undefined,
+				);
 			}
 
 			throwIfAmbientAborted(clientOptions.signal);
@@ -3053,7 +3037,7 @@ function createSessionFetcher(
 					...(headers ? { headers } : {}),
 					...(sensitiveParams ? { sensitiveParams } : {}),
 					throwOnHttpError: false,
-					// A re-sent request moves to the next pool slot, as a caller retry would.
+					// A re-sent request moves to the next attempt (a new vendor session), as a caller retry would.
 					...(replay > 0
 						? { proxyAttemptOffset: (callerOptions.proxyAttemptOffset ?? 0) + replay }
 						: {}),

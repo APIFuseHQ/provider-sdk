@@ -19,7 +19,14 @@ export const ENGINE_CEREMONY_EGRESS_LEASE = Symbol.for(
 	"@apifuse/provider-sdk/engine-ceremony-egress-lease",
 );
 
-const HANDLE_VERSION = 1;
+/**
+ * v2 dropped the allocator-era `poolIndex` and `refreshEpoch` fields and added
+ * the optional `sessionId`. v1 handles minted before the upgrade still verify
+ * (their version is part of the AAD) and their binding is read without those
+ * fields, so a ceremony in flight across the upgrade keeps its egress.
+ */
+const HANDLE_VERSION = 2;
+const ACCEPTED_HANDLE_VERSIONS: ReadonlySet<number> = new Set([1, HANDLE_VERSION]);
 const HANDLE_MAX_BYTES = 16_384;
 const AEAD_NONCE_BYTES = 12;
 const AEAD_TAG_BYTES = 16;
@@ -29,24 +36,24 @@ const LEASE_KEY_MIN_BYTES = 32;
 
 export type CeremonyEgressBinding = {
 	readonly vendor: ProxyVendorName;
+	/** The synthesized gateway URL; its username carries the vendor session id. */
 	readonly proxyUrl: string;
-	readonly poolIndex: number;
 	readonly affinityKey: string;
-	readonly refreshEpoch: number;
+	/** Vendor session id the bound URL carries, when the vendor reported one. */
+	readonly sessionId?: string;
 	/**
-	 * Vendor session lifetime the endpoint was allocated for (`proxy.session.lifetimeMinutes`,
-	 * Smartproxy `life`, NodeMaven SID window). It is the upper bound of the lease, counted
-	 * from the mint (the first successful attempt), so a Smartproxy lease can outlive the
-	 * vendor session by the extraction-cache reuse window; expiry then drops and rebinds.
-	 * The bound is not a vendor guarantee (ADR-0010: a raw Smartproxy endpoint is not a hard
-	 * lease): the stealth runtime releases the binding as soon as the endpoint fails at the
-	 * transport, so a dead endpoint is left before the lifetime elapses.
+	 * Vendor session lifetime the URL was synthesized for (`proxy.session.lifetimeMinutes`
+	 * after the vendor's clamp: smartproxy `life`, NodeMaven sid window). It is the upper
+	 * bound of the lease, counted from the mint (the first successful attempt); expiry then
+	 * drops and rebinds. The bound is not a vendor guarantee: the stealth runtime releases
+	 * the binding as soon as the endpoint fails at the transport, so a dead session is left
+	 * before the lifetime elapses.
 	 */
 	readonly lifetimeMinutes: number;
 };
 
 type CeremonyEgressLeasePayloadV1 = CeremonyEgressBinding & {
-	readonly version: typeof HANDLE_VERSION;
+	readonly version: number;
 	readonly tenantId: string;
 	readonly providerId: string;
 	readonly flowId: string;
@@ -106,10 +113,10 @@ function encryptionKey(key: string): Buffer {
 }
 
 /** Fixed field order and JSON.stringify's compact form are the canonical AAD encoding. */
-function scopeAad(scope: CeremonyEgressLeaseScopeV1): Buffer {
+function scopeAad(scope: CeremonyEgressLeaseScopeV1, version: number): Buffer {
 	return Buffer.from(
 		JSON.stringify({
-			version: HANDLE_VERSION,
+			version,
 			tenantId: scope.tenantId,
 			providerId: scope.providerId,
 			flowId: scope.flowId,
@@ -128,7 +135,7 @@ function encodeHandle(
 	const cipher = createCipheriv(AEAD_ALGORITHM, encryptionKey(key), nonce, {
 		authTagLength: AEAD_TAG_BYTES,
 	});
-	cipher.setAAD(scopeAad(scope));
+	cipher.setAAD(scopeAad(scope, HANDLE_VERSION));
 	const ciphertext = Buffer.concat([
 		cipher.update(JSON.stringify(payload), "utf8"),
 		cipher.final(),
@@ -156,9 +163,11 @@ function decodeHandle(
 ): CeremonyEgressLeasePayloadV1 {
 	if (Buffer.byteLength(handle, "utf8") > HANDLE_MAX_BYTES) return invalidLease();
 	const parts = handle.split(".");
+	const versionMatch = /^v([0-9]+)$/u.exec(parts[0] ?? "");
+	const version = versionMatch ? Number(versionMatch[1]) : Number.NaN;
 	if (
 		parts.length !== 4 ||
-		parts[0] !== `v${HANDLE_VERSION}` ||
+		!ACCEPTED_HANDLE_VERSIONS.has(version) ||
 		parts.slice(1).some((part) => !/^[A-Za-z0-9_-]+$/u.test(part))
 	) {
 		return invalidLease();
@@ -178,7 +187,7 @@ function decodeHandle(
 		const decipher = createDecipheriv(AEAD_ALGORITHM, encryptionKey(key), nonce, {
 			authTagLength: AEAD_TAG_BYTES,
 		});
-		decipher.setAAD(scopeAad(scope));
+		decipher.setAAD(scopeAad(scope, version));
 		decipher.setAuthTag(tag);
 		const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 		parsed = JSON.parse(plaintext.toString("utf8"));
@@ -188,14 +197,14 @@ function decodeHandle(
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return invalidLease();
 	const candidate = parsed as Partial<CeremonyEgressLeasePayloadV1>;
 	if (
-		candidate.version !== HANDLE_VERSION ||
+		candidate.version !== version ||
 		(candidate.vendor !== "smartproxy" && candidate.vendor !== "nodemaven") ||
 		typeof candidate.proxyUrl !== "string" ||
 		!candidate.proxyUrl ||
-		!isFiniteInteger(candidate.poolIndex) ||
 		typeof candidate.affinityKey !== "string" ||
 		!candidate.affinityKey ||
-		!isFiniteInteger(candidate.refreshEpoch) ||
+		(candidate.sessionId !== undefined &&
+			(typeof candidate.sessionId !== "string" || !candidate.sessionId)) ||
 		typeof candidate.tenantId !== "string" ||
 		!candidate.tenantId ||
 		typeof candidate.providerId !== "string" ||
@@ -222,9 +231,8 @@ function bindingOf(payload: CeremonyEgressLeasePayloadV1): CeremonyEgressBinding
 	return {
 		vendor: payload.vendor,
 		proxyUrl: payload.proxyUrl,
-		poolIndex: payload.poolIndex,
 		affinityKey: payload.affinityKey,
-		refreshEpoch: payload.refreshEpoch,
+		...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
 		lifetimeMinutes: payload.lifetimeMinutes,
 	};
 }
@@ -316,7 +324,6 @@ export function createCeremonyEgressLeaseRuntime(options: {
 				binding.affinityKey !== options.affinityKey ||
 				!binding.proxyUrl ||
 				(binding.vendor !== "smartproxy" && binding.vendor !== "nodemaven") ||
-				!isFiniteInteger(binding.poolIndex) ||
 				!isPositiveFinite(binding.lifetimeMinutes)
 			) {
 				return bindingFault("The selected egress cannot be bound to the ceremony lease");

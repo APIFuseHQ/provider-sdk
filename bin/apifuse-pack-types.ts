@@ -775,7 +775,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			'const proxyOptions: ProxyResolutionOptions = { proxyPolicy: { mode: "disabled" } };',
 			'const proxyProtocol: ProxyProtocol = "http";',
 			"const proxyResult: Promise<ResolvedProxyConfig> = resolveProxy(proxyOptions);",
-			'const proxySource: ProxyResolutionSource = "smartproxy-allocator";',
+			'const proxySource: ProxyResolutionSource = "smartproxy-gateway";',
 			'const proxyVendor: ProxyVendorName = "smartproxy";',
 			'const requestFile: ProviderFileRef = { type: "request_file", id: "photo", filename: "photo.jpg", mime_type: "image/jpeg", size: 4 };',
 			'const resolvedFile: ProviderResolvedFile = { type: "request_file", id: requestFile.id, filename: requestFile.filename, size: requestFile.size, sha256: requestFile.sha256, mimeType: requestFile.mime_type, arrayBuffer: async () => new ArrayBuffer(0), bytes: async () => new Uint8Array(), stream: () => new ReadableStream<Uint8Array>() };',

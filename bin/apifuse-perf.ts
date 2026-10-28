@@ -479,7 +479,7 @@ async function assertProxyConfigured(provider: ProviderDefinition): Promise<void
 	const resolved = await resolveProxy({ proxyPolicy: policy });
 	if (!resolved.url) {
 		throw new Error(
-			"--compare-proxy could not resolve the provider proxy policy; configure its allocator credentials (for smartproxy, APIFUSE__PROXY__SMARTPROXY_APP_KEY).",
+			"--compare-proxy could not resolve the provider proxy policy; configure its vendor credentials (for smartproxy, APIFUSE__PROXY__SMARTPROXY_USERNAME and APIFUSE__PROXY__SMARTPROXY_PASSWORD).",
 		);
 	}
 }

@@ -40,7 +40,6 @@ const siblings = {
 	},
 	stealth: {
 		attempts: 24,
-		poolRefreshes: 1,
 		redirectHops: 2,
 		proxyUsed: true,
 		safeRefetch: 1,
@@ -238,8 +237,8 @@ describe("cache/state header budget", () => {
 		const proxy = new ProxyTelemetryCollector();
 		proxy.recordProxyResolution({
 			provider: "smartproxy",
-			cacheStatus: "memory_hit",
-			cacheHit: true,
+			cacheStatus: "disabled",
+			cacheHit: false,
 			resolutionMs: 120,
 			attempts: 2,
 		});
