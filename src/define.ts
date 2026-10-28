@@ -32,6 +32,7 @@ import {
 } from "./session-state-declaration.js";
 import { resolveHealthCheckInputDateTokens } from "./server/self-test-input-tokens.js";
 import type { HandleKind } from "./handle.js";
+import { bindHandleContracts } from "./handle/contract.js";
 import type {
 	AuthConfig,
 	BrowserEngine,
@@ -291,6 +292,21 @@ export type AuthStartNoInputGuard<TConfig> = TConfig extends {
 	? AuthStartHandlerNoInputGuard<TStart>
 	: TConfig extends { start: infer TStart }
 		? AuthStartHandlerNoInputGuard<TStart>
+		: unknown;
+
+/**
+ * `ctx.handle` stores records through `ctx.state`, so a declaration that lists
+ * handle kinds without the state capability cannot work at runtime; refuse it
+ * at the call. An empty `handle: []` declares nothing and needs nothing.
+ */
+export type HandleRequiresStateGuard<TConfig> = TConfig extends { handle: readonly [] }
+	? unknown
+	: TConfig extends { handle: readonly unknown[] }
+		? "state" extends keyof TConfig
+			? unknown
+			: {
+					"handle: [...] requires the state capability; add state: {} (ctx.handle stores records through ctx.state)": never;
+				}
 		: unknown;
 
 function splitAuthStartParameters(parameters: string): string[] | undefined {
@@ -625,7 +641,12 @@ export interface ProviderDeclaration {
 	resolver?: ProviderResolverConfig;
 	browser?: { engine: BrowserEngine };
 	auth?: AuthConfig;
-	/** Declares the handle kinds this provider issues and accepts (ADR-0012). */
+	/**
+	 * Declares the handle kinds this provider uses through `ctx.handle`
+	 * (ADR-0012); `ctx.handle` accepts only these kinds. Requires the state
+	 * capability. Each kind's property key and issuing operations are read from
+	 * the operation schemas where `kind.field()` is placed.
+	 */
 	handle?: readonly HandleKind[];
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
@@ -3368,7 +3389,8 @@ export type ProviderDefinitionFor<TBuilder> = ProviderDefinition<ProviderContext
 export function defineProvider<const TConfig extends ProviderDeclaration>(
 	declaration: TConfig &
 		Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> &
-		AuthStartNoInputGuard<TConfig>,
+		AuthStartNoInputGuard<TConfig> &
+		HandleRequiresStateGuard<TConfig>,
 ): ProviderBuilder<TConfig> {
 	validateProviderDeclaration(declaration);
 	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(implementation: {
@@ -3445,6 +3467,7 @@ function finalizeProvider<TOperations extends Record<string, ProviderOperation>,
 	validateOperationErrorCodes(config.id, config.operations);
 	validateOperationTransports(config.id, config.operations);
 	validateOperationContracts(config.id, config.operations);
+	bindHandleContracts(config.id, config.operations);
 	validateOperationMetadata(config.id, config.operations);
 	const journeyCoveredOperations = validateHealthJourneys(
 		config.id,

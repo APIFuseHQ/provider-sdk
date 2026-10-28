@@ -99,7 +99,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ScopedAssertionPredicate SafeRegex StepBase StepReference UpstreamMaintenanceWindow ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema
 			relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			ProviderStealthConfig StealthChallengeClassification
-					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
+					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType DeclaredHandleKind HandleField HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 		`,
@@ -232,7 +232,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ScopedAssertionExpression ScopedAssertionPredicate SafeRegex StepBase StepReference UpstreamMaintenanceWindow ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			ProviderStealthConfig StealthChallengeClassification NativeNetworkErrorCode
-								CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleOperation HandleRecord HandleStatus HandleStrength HandleTelemetryEvent HandleTelemetryOutcome HandleWordCount ResultOf
+								CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType DeclaredHandleKind HandleField HandleOperation HandleRecord HandleStatus HandleStrength HandleTelemetryEvent HandleTelemetryOutcome HandleWordCount ResultOf
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 		`,
@@ -280,7 +280,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ScopedAssertionExpression ScopedAssertionPredicate SafeRegex StepBase StepReference UpstreamMaintenanceWindow ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			ProviderStealthConfig StealthChallengeClassification
-					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
+					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType DeclaredHandleKind HandleField HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 		`,

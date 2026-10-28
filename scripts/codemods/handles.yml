@@ -1,0 +1,38 @@
+# Handle declaration codemod (provider-sdk ADR-0012, amended 2026-10-28).
+#
+# The property key a handle travels under and the operation that issues it are
+# read from the operation schemas where `kind.field()` is placed, so the
+# `fieldName` and `issuedBy` options of `defineCursor` / `defineDraft` are
+# deprecated and removed in the next release. This rule deletes them.
+#
+# Dry run (prints the diff, changes nothing):
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml .
+# Apply:
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml --update-all .
+#
+# After applying, run the provider lint: `legacy-handle-declaration` must be 0.
+# A kind that used to declare no `issuedBy` but is issued by an operation now
+# names that operation in its field description and recovery sentences; refresh
+# contract snapshots that pinned the old wording.
+id: handle-declaration-drop-deprecated-options
+language: typescript
+severity: warning
+message: fieldName / issuedBy on defineCursor / defineDraft are deprecated; the key and the issuer are read from the operation schemas where kind.field() is placed.
+rule:
+  kind: pair
+  has:
+    field: key
+    regex: ^(fieldName|issuedBy)$
+  inside:
+    kind: object
+    inside:
+      kind: arguments
+      inside:
+        kind: call_expression
+        has:
+          field: function
+          regex: ^(defineCursor|defineDraft)$
+fix:
+  template: ''
+  expandEnd:
+    regex: ^,$

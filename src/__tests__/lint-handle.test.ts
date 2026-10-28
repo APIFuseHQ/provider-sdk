@@ -1,10 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
+import { defineCursor, defineDraft } from "../handle.js";
 import {
 	APIFUSE_HANDLE_META_KEY,
 	type HandleFieldMeta,
-	type HandleKindDeclaration,
 	handleFieldDescription,
 } from "../handle-meta.js";
 import { type LintDiagnostic, lintProvider } from "../lint.js";
@@ -12,19 +12,11 @@ import { describeKey } from "../schema.js";
 
 const OPERATION_DESCRIPTION = "operations.waiting.description";
 
-const WAITING_KIND: HandleKindDeclaration = {
-	name: "waiting",
+const WAITING_META: HandleFieldMeta = {
+	kind: "waiting",
 	type: "draft",
 	fieldName: "waiting_token",
-	access: "bound",
 	issuedBy: "waiting-prepare",
-};
-
-const WAITING_META: HandleFieldMeta = {
-	kind: WAITING_KIND.name,
-	type: WAITING_KIND.type,
-	fieldName: WAITING_KIND.fieldName,
-	issuedBy: WAITING_KIND.issuedBy,
 };
 
 /** Mirrors what `kind.field()` produces without importing the runtime module. */
@@ -63,19 +55,25 @@ type ProviderFixture = {
 	allowedHosts: readonly string[];
 	reviewed: "first-party";
 	state?: true;
-	handle?: readonly HandleKindDeclaration[];
+	handle?: readonly unknown[];
 	operations: Record<string, OperationFixture>;
 	providerSourceFiles?: Record<string, string>;
 };
 
-/** Baseline provider that satisfies every handle rule. */
+const WaitingDraft = defineDraft({
+	name: "waiting",
+	schema: z.object({ shop: z.string() }),
+	ttl: { idle: "30m", max: "2h" },
+});
+
+/** Baseline provider on the current (declare-once) path. */
 function validProvider(): ProviderFixture {
 	return {
 		id: "waiting-demo",
 		allowedHosts: ["example.com"],
 		reviewed: "first-party",
 		state: true,
-		handle: [WAITING_KIND],
+		handle: [WaitingDraft],
 		operations: {
 			"waiting-prepare": operation(
 				{ shop_id: described(z.string(), "fields.shopId") },
@@ -97,380 +95,113 @@ function byRule(diagnostics: readonly LintDiagnostic[], rule: string): LintDiagn
 	return diagnostics.filter((diagnostic) => diagnostic.rule === rule);
 }
 
+const RETIRED_HANDLE_RULES = [
+	"handle-kind-undeclared",
+	"handle-field-name",
+	"handle-field-parity",
+	"handle-issued-by",
+	"handle-requires-state",
+] as const;
+
 describe("handle lint rules", () => {
-	it("is silent for a provider that declares, issues, and accepts its handle kind", () => {
+	it("is silent for a provider that declares its kinds and places their fields", () => {
 		const diagnostics = lintProvider(validProvider());
 
 		expect(rulesOf(diagnostics, "handle-")).toEqual([]);
+		expect(byRule(diagnostics, "legacy-handle-declaration")).toEqual([]);
 		expect(byRule(diagnostics, "legacy-choice-usage")).toEqual([]);
 	});
 
-	describe("handle-kind-undeclared", () => {
-		it("reports a handle field whose kind is not in provider.handle", () => {
+	describe("retired rules", () => {
+		// The facts those rules cross-checked are now written once (the schema key
+		// and the issuing output) or refused by the compiler (`handle` without
+		// `state`, a kind outside `handle: [...]` passed to ctx.handle), so a
+		// provider that would have tripped them reports nothing here.
+		it("does not report a field under a key other than the kind's name, a missing side, or a missing state", () => {
 			const provider = validProvider();
-			provider.operations["waiting-prepare"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{
-					waiting_token: handleField(),
-					page_cursor: handleField({
-						kind: "page",
-						type: "cursor",
-						fieldName: "page_cursor",
-						issuedBy: "waiting-prepare",
-					}),
-				},
-			);
-
-			const found = byRule(lintProvider(provider), "handle-kind-undeclared");
-
-			expect(found).toEqual([
-				expect.objectContaining({
-					level: "error",
-					field: "operations.waiting-prepare.output.page_cursor",
-					message: expect.stringContaining('kind "page"'),
-				}),
-			]);
-		});
-
-		it("reports every handle field when provider.handle is absent", () => {
-			const provider = validProvider();
-			delete provider.handle;
-
-			const found = byRule(lintProvider(provider), "handle-kind-undeclared");
-
-			expect(found.map((diagnostic) => diagnostic.field).sort()).toEqual([
-				"operations.waiting-confirm.input.waiting_token",
-				"operations.waiting-prepare.output.waiting_token",
-			]);
-		});
-	});
-
-	describe("handle-field-name", () => {
-		it("reports a handle field declared under a key other than its fieldName", () => {
-			const provider = validProvider();
+			delete provider.state;
 			provider.operations["waiting-confirm"] = operation(
 				{ token: handleField() },
 				{ confirmed: described(z.boolean(), "fields.confirmed") },
 			);
-
-			const diagnostics = lintProvider(provider);
-
-			expect(byRule(diagnostics, "handle-field-name")).toEqual([
-				expect.objectContaining({
-					level: "error",
-					field: "operations.waiting-confirm.input.token",
-					message: expect.stringContaining('fieldName is "waiting_token"'),
-				}),
-			]);
-			// The mis-keyed field still counts toward parity; it is a naming error only.
-			expect(byRule(diagnostics, "handle-field-parity")).toEqual([]);
-		});
-
-		// A kind may spell one handle differently per direction (the canon's
-		// `cursor` in, `next_cursor` out). The rule stays exact per side: it is
-		// about the handle's identity, not about a single spelling.
-		describe("directional fieldName", () => {
-			const PAGE_KIND: HandleKindDeclaration = {
-				name: "page",
-				type: "cursor",
-				fieldName: "cursor",
-				outputFieldName: "next_cursor",
-				access: "public",
-				issuedBy: "page-search",
-			};
-			const PAGE_META: HandleFieldMeta = {
-				kind: PAGE_KIND.name,
-				type: PAGE_KIND.type,
-				fieldName: PAGE_KIND.fieldName,
-				outputFieldName: PAGE_KIND.outputFieldName,
-				issuedBy: PAGE_KIND.issuedBy,
-			};
-
-			function pagingProvider(
-				inputKey: string,
-				outputKey: string,
-			): ReturnType<typeof validProvider> {
-				const provider = validProvider();
-				provider.handle = [WAITING_KIND, PAGE_KIND];
-				provider.operations["page-search"] = operation(
-					{ [inputKey]: handleField(PAGE_META) },
-					{ [outputKey]: handleField(PAGE_META) },
-				);
-				return provider;
-			}
-
-			it("accepts the canon shape: `cursor` on input, `next_cursor` on output", () => {
-				const diagnostics = lintProvider(pagingProvider("cursor", "next_cursor"));
-
-				expect(rulesOf(diagnostics, "handle-")).toEqual([]);
-			});
-
-			it("still rejects the names used on the wrong side", () => {
-				// Swapping them is the failure the single-name rule was really
-				// guarding: the caller would read a value keyed as the thing it is
-				// supposed to send, and the round trip loses its one direction.
-				const diagnostics = lintProvider(pagingProvider("next_cursor", "cursor"));
-
-				expect(
-					byRule(diagnostics, "handle-field-name")
-						.map((diagnostic) => diagnostic.field)
-						.sort(),
-				).toEqual([
-					"operations.page-search.input.next_cursor",
-					"operations.page-search.output.cursor",
-				]);
-				expect(byRule(diagnostics, "handle-field-name")[0]?.message).toContain(
-					'the kind\'s input fieldName is "cursor"',
-				);
-			});
-
-			it("still rejects a third name on either side", () => {
-				expect(
-					byRule(lintProvider(pagingProvider("token", "next_cursor")), "handle-field-name").map(
-						(diagnostic) => diagnostic.field,
-					),
-				).toEqual(["operations.page-search.input.token"]);
-				expect(
-					byRule(lintProvider(pagingProvider("cursor", "page_token")), "handle-field-name").map(
-						(diagnostic) => diagnostic.field,
-					),
-				).toEqual(["operations.page-search.output.page_token"]);
-			});
-
-			it("quotes the output name in the never-issued and issued-by diagnostics", () => {
-				const provider = validProvider();
-				provider.handle = [WAITING_KIND, PAGE_KIND];
-				provider.operations["page-search"] = operation(
-					{ cursor: handleField(PAGE_META) },
-					{ total: described(z.number(), "fields.total") },
-				);
-
-				const diagnostics = lintProvider(provider);
-
-				expect(byRule(diagnostics, "handle-field-parity")[0]?.message).toContain(
-					'its field "next_cursor"',
-				);
-				expect(byRule(diagnostics, "handle-issued-by")[0]?.message).toContain(
-					'no "next_cursor" handle field',
-				);
-			});
-		});
-	});
-
-	describe("handle-field-parity", () => {
-		it("reports a kind that is issued but never accepted by any input", () => {
-			const provider = validProvider();
-			provider.operations["waiting-confirm"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-
-			const found = byRule(lintProvider(provider), "handle-field-parity");
-
-			expect(found).toEqual([
-				expect.objectContaining({
-					level: "error",
-					field: "handle.waiting",
-					message: expect.stringContaining("never accepted"),
-				}),
-			]);
-			expect(found[0]?.message).toContain("no operation input");
-		});
-
-		it("reports a kind that is accepted but never issued by any output", () => {
-			const provider = validProvider();
 			provider.operations["waiting-prepare"] = operation(
 				{ shop_id: described(z.string(), "fields.shopId") },
-				{ ok: described(z.boolean(), "fields.ok") },
+				{
+					ok: described(z.boolean(), "fields.ok"),
+					page_cursor: handleField({ kind: "page", type: "cursor", fieldName: "page_cursor" }),
+				},
 			);
 
-			const diagnostics = lintProvider(provider);
-			const parity = byRule(diagnostics, "handle-field-parity");
+			const rules = lintProvider(provider).map((diagnostic) => diagnostic.rule);
 
-			expect(parity).toEqual([
-				expect.objectContaining({
-					field: "handle.waiting",
-					message: expect.stringContaining("never issued"),
-				}),
-			]);
-			expect(parity[0]?.message).toContain("no operation output");
-			// issuedBy points at an operation that no longer emits the field.
-			expect(byRule(diagnostics, "handle-issued-by")).toHaveLength(1);
+			for (const retired of RETIRED_HANDLE_RULES) expect(rules).not.toContain(retired);
+		});
+	});
+
+	describe("legacy-handle-declaration", () => {
+		let warn: ReturnType<typeof spyOn>;
+		beforeEach(() => {
+			warn = spyOn(console, "warn").mockImplementation(() => {});
+		});
+		afterEach(() => {
+			warn.mockRestore();
 		});
 
-		it("reports both sides for a declared kind with no fields anywhere", () => {
+		it("warns once per kind that still declares fieldName or issuedBy and points at the codemod", () => {
 			const provider = validProvider();
 			provider.handle = [
-				WAITING_KIND,
-				{ name: "page", type: "cursor", fieldName: "page_cursor", access: "public" },
+				WaitingDraft,
+				defineCursor({
+					name: "page",
+					fieldName: "page_cursor",
+					schema: z.object({}),
+					ttl: "10m",
+					issuedBy: "waiting-prepare",
+				}),
+				defineCursor({ name: "loc", schema: z.object({}), ttl: "10m", issuedBy: "search" }),
 			];
 
-			const found = byRule(lintProvider(provider), "handle-field-parity");
-
-			expect(found.map((diagnostic) => diagnostic.field)).toEqual(["handle.page", "handle.page"]);
-			expect(
-				found.map((diagnostic) => /never (issued|accepted)/.exec(diagnostic.message)?.[1]),
-			).toEqual(["issued", "accepted"]);
-		});
-	});
-
-	describe("handle-issued-by", () => {
-		it("reports issuedBy that names a missing operation", () => {
-			const provider = validProvider();
-			provider.handle = [{ ...WAITING_KIND, issuedBy: "waiting-start" }];
-
-			const found = byRule(lintProvider(provider), "handle-issued-by");
-
-			expect(found).toEqual([
-				expect.objectContaining({
-					level: "error",
-					field: "handle.waiting",
-					message: expect.stringContaining('"waiting-start", which is not an operation key'),
-				}),
-			]);
-		});
-
-		it("reports issuedBy whose operation output lacks the handle field", () => {
-			const provider = validProvider();
-			provider.handle = [{ ...WAITING_KIND, issuedBy: "waiting-confirm" }];
-
-			const found = byRule(lintProvider(provider), "handle-issued-by");
-
-			expect(found).toEqual([
-				expect.objectContaining({
-					field: "handle.waiting",
-					message: expect.stringContaining('output has no "waiting_token" handle field'),
-				}),
-			]);
-		});
-
-		it("is silent when issuedBy is omitted", () => {
-			const provider = validProvider();
-			const { issuedBy: _issuedBy, ...kindWithoutIssuer } = WAITING_KIND;
-			provider.handle = [kindWithoutIssuer];
-
-			expect(byRule(lintProvider(provider), "handle-issued-by")).toEqual([]);
-		});
-
-		describe("issuer lists", () => {
-			/** Two issuing operations; `waiting-prepare` and `waiting-restart` both output the field. */
-			function multiIssuerProvider(): ProviderFixture {
-				const provider = validProvider();
-				const issuedBy = ["waiting-prepare", "waiting-restart"] as const;
-				const meta: HandleFieldMeta = { ...WAITING_META, issuedBy };
-				provider.handle = [{ ...WAITING_KIND, issuedBy }];
-				provider.operations["waiting-prepare"] = operation(
-					{ shop_id: described(z.string(), "fields.shopId") },
-					{ waiting_token: handleField(meta) },
-				);
-				provider.operations["waiting-restart"] = operation(
-					{ shop_id: described(z.string(), "fields.shopId") },
-					{ waiting_token: handleField(meta) },
-				);
-				provider.operations["waiting-confirm"] = operation(
-					{ waiting_token: handleField(meta) },
-					{ confirmed: described(z.boolean(), "fields.confirmed") },
-				);
-				return provider;
-			}
-
-			it("is silent when every listed issuer is an operation that outputs the field", () => {
-				const diagnostics = lintProvider(multiIssuerProvider());
-
-				expect(rulesOf(diagnostics, "handle-")).toEqual([]);
-				// The two-issuer SDK wording is still exempt from describeKey.
-				expect(
-					diagnostics.filter((diagnostic) => diagnostic.rule.startsWith("schema-description")),
-				).toEqual([]);
-			});
-
-			it("is silent when at least one listed issuer outputs the field", () => {
-				const provider = multiIssuerProvider();
-				provider.operations["waiting-restart"] = operation(
-					{ shop_id: described(z.string(), "fields.shopId") },
-					{ ok: described(z.boolean(), "fields.ok") },
-				);
-
-				expect(byRule(lintProvider(provider), "handle-issued-by")).toEqual([]);
-			});
-
-			it("reports each listed issuer that is not an operation key", () => {
-				const provider = multiIssuerProvider();
-				provider.handle = [
-					{ ...WAITING_KIND, issuedBy: ["waiting-prepare", "waiting-start", "waiting-resume"] },
-				];
-
-				const found = byRule(lintProvider(provider), "handle-issued-by");
-
-				expect(found.map((diagnostic) => diagnostic.message)).toEqual([
-					expect.stringContaining('"waiting-start", which is not an operation key'),
-					expect.stringContaining('"waiting-resume", which is not an operation key'),
-				]);
-			});
-
-			it("reports when none of the listed issuers outputs the field", () => {
-				const provider = multiIssuerProvider();
-				provider.handle = [{ ...WAITING_KIND, issuedBy: ["waiting-confirm", "waiting-restart"] }];
-				provider.operations["waiting-restart"] = operation(
-					{ shop_id: described(z.string(), "fields.shopId") },
-					{ ok: described(z.boolean(), "fields.ok") },
-				);
-
-				const found = byRule(lintProvider(provider), "handle-issued-by");
-
-				expect(found).toEqual([
-					expect.objectContaining({
-						level: "error",
-						field: "handle.waiting",
-						message: expect.stringContaining(
-							'issuedBy "waiting-confirm", "waiting-restart", but none of those operations\' outputs has a "waiting_token" handle field',
-						),
-					}),
-				]);
-			});
-
-			it("skips a kind whose issuedBy is an empty or non-string list (malformed declaration)", () => {
-				const provider = validProvider();
-				provider.handle = [{ ...WAITING_KIND, issuedBy: [] }];
-
-				// The malformed declaration is not read as a kind, so its fields are undeclared.
-				expect(byRule(lintProvider(provider), "handle-issued-by")).toEqual([]);
-				expect(byRule(lintProvider(provider), "handle-kind-undeclared")).toHaveLength(2);
-			});
-		});
-	});
-
-	describe("handle-requires-state", () => {
-		it("warns when handle kinds are declared without the state capability", () => {
-			const provider = validProvider();
-			delete provider.state;
-
-			const found = byRule(lintProvider(provider), "handle-requires-state");
+			const found = byRule(lintProvider(provider), "legacy-handle-declaration");
 
 			expect(found).toEqual([
 				expect.objectContaining({
 					level: "warn",
-					field: "handle",
-					message: expect.stringContaining("state: true"),
+					field: "handle.page",
+					message: expect.stringContaining('kind "page" still declares fieldName and issuedBy'),
+				}),
+				expect.objectContaining({
+					level: "warn",
+					field: "handle.loc",
+					message: expect.stringContaining('kind "loc" still declares issuedBy'),
 				}),
 			]);
+			expect(found[0]?.message).toContain("scripts/codemods/handles.yml");
 		});
 
-		it("is silent when no handle kinds are declared even without state", () => {
-			const provider: ProviderFixture = {
-				id: "plain",
-				allowedHosts: ["example.com"],
-				reviewed: "first-party",
-				handle: [],
-				operations: {
-					search: operation(
-						{ query: described(z.string(), "fields.query") },
-						{ items: described(z.array(z.string()), "fields.items") },
-					),
-				},
-			};
+		it("is silent for kinds defined without the deprecated options and for a missing or empty list", () => {
+			expect(byRule(lintProvider(validProvider()), "legacy-handle-declaration")).toEqual([]);
 
-			expect(rulesOf(lintProvider(provider), "handle-")).toEqual([]);
+			const provider = validProvider();
+			provider.handle = [];
+			expect(byRule(lintProvider(provider), "legacy-handle-declaration")).toEqual([]);
+
+			delete provider.handle;
+			expect(byRule(lintProvider(provider), "legacy-handle-declaration")).toEqual([]);
+		});
+
+		it("ignores plain declaration objects that carry no SDK internals", () => {
+			const provider = validProvider();
+			provider.handle = [
+				{
+					name: "waiting",
+					type: "draft",
+					fieldName: "waiting_token",
+					access: "bound",
+					issuedBy: "waiting-prepare",
+				},
+			];
+
+			expect(byRule(lintProvider(provider), "legacy-handle-declaration")).toEqual([]);
 		});
 	});
 
@@ -525,50 +256,7 @@ describe("handle lint rules", () => {
 
 			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toEqual([]);
 		});
-	});
 
-	describe("intersection schemas", () => {
-		it("finds handle fields inside .and() / z.intersection() branches", () => {
-			const provider = validProvider();
-			provider.operations["waiting-confirm"] = {
-				...operation(
-					{ shop_id: described(z.string(), "fields.shopId") },
-					{ confirmed: described(z.boolean(), "fields.confirmed") },
-				),
-				input: described(
-					z
-						.object({ shop_id: described(z.string(), "fields.shopId") })
-						.and(z.object({ waiting_token: handleField() })),
-					"operations.waiting.input.description",
-				),
-			};
-
-			const diagnostics = lintProvider(provider);
-			expect(byRule(diagnostics, "handle-field-parity")).toEqual([]);
-			expect(byRule(diagnostics, "handle-issued-by")).toEqual([]);
-		});
-	});
-
-	describe("intersection branches keep the enclosing property key", () => {
-		it("accepts `field().and(refinement)` under the right key and flags it under a wrong key", () => {
-			const provider = validProvider();
-			provider.operations["waiting-confirm"] = operation(
-				{ waiting_token: handleField().and(z.string().max(80)) },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-			expect(byRule(lintProvider(provider), "handle-field-name")).toEqual([]);
-
-			provider.operations["waiting-confirm"] = operation(
-				{ token: handleField().and(z.string().max(80)) },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-			expect(byRule(lintProvider(provider), "handle-field-name")).toEqual([
-				expect.objectContaining({ field: "operations.waiting-confirm.input.token" }),
-			]);
-		});
-	});
-
-	describe("legacy-choice-usage ignores comments and string literals", () => {
 		it("scans code after template interpolations and ignores prose inside them", () => {
 			const provider = validProvider();
 			provider.providerSourceFiles = {
@@ -625,6 +313,20 @@ describe("handle lint rules", () => {
 			expect(descriptionRules).toEqual([]);
 		});
 
+		it("exempts the two-issuer SDK wording as well", () => {
+			const provider = validProvider();
+			const meta: HandleFieldMeta = {
+				...WAITING_META,
+				issuedBy: ["waiting-prepare", "waiting-restart"],
+			};
+			provider.operations["waiting-prepare"] = operation(
+				{ shop_id: described(z.string(), "fields.shopId") },
+				{ waiting_token: handleField(meta) },
+			);
+
+			expect(rulesOf(lintProvider(provider), "schema-description")).toEqual([]);
+		});
+
 		it("looks through optional/nullable wrappers around a handle field", () => {
 			const provider = validProvider();
 			provider.operations["waiting-confirm"] = operation(
@@ -657,10 +359,8 @@ describe("handle lint rules", () => {
 				"operations.waiting-confirm.input.note",
 			]);
 		});
-	});
 
-	describe("nested detection", () => {
-		it("finds handle fields inside arrays of objects and reports their path", () => {
+		it("exempts handle fields nested inside arrays of objects", () => {
 			const provider = validProvider();
 			provider.operations["waiting-prepare"] = operation(
 				{ shop_id: described(z.string(), "fields.shopId") },
@@ -671,11 +371,6 @@ describe("handle lint rules", () => {
 								z.object({
 									label: described(z.string(), "fields.label"),
 									waiting_token: handleField(),
-									page_cursor: handleField({
-										kind: "page",
-										type: "cursor",
-										fieldName: "page_cursor",
-									}),
 								}),
 								"fields.offer",
 							),
@@ -685,100 +380,7 @@ describe("handle lint rules", () => {
 				},
 			);
 
-			const diagnostics = lintProvider(provider);
-
-			// The nested waiting_token satisfies issuance + issuedBy for "waiting".
-			expect(byRule(diagnostics, "handle-field-parity")).toEqual([]);
-			expect(byRule(diagnostics, "handle-issued-by")).toEqual([]);
-			// The nested undeclared kind is reported with the array path.
-			expect(byRule(diagnostics, "handle-kind-undeclared")).toEqual([
-				expect.objectContaining({
-					field: "operations.waiting-prepare.output.offers[].page_cursor",
-				}),
-			]);
-			expect(byRule(diagnostics, "schema-description-key-required")).toEqual([]);
-		});
-
-		it("checks the property key of a nested handle field", () => {
-			const provider = validProvider();
-			provider.operations["waiting-prepare"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{
-					offers: described(
-						z.array(described(z.object({ token: handleField() }), "fields.offer")),
-						"fields.offers",
-					),
-				},
-			);
-
-			expect(byRule(lintProvider(provider), "handle-field-name")).toEqual([
-				expect.objectContaining({
-					field: "operations.waiting-prepare.output.offers[].token",
-				}),
-			]);
-		});
-	});
-
-	describe("shape keys that collide with structural edge names", () => {
-		it("still detects handle fields named like zod internals (item, type, schema)", () => {
-			const ITEM_KIND: HandleKindDeclaration = {
-				name: "item",
-				type: "cursor",
-				fieldName: "item",
-				access: "bound",
-				issuedBy: "waiting-prepare",
-			};
-			const itemMeta: HandleFieldMeta = {
-				kind: "item",
-				type: "cursor",
-				fieldName: "item",
-				issuedBy: "waiting-prepare",
-			};
-			const provider = validProvider();
-			provider.handle = [WAITING_KIND, ITEM_KIND];
-			provider.operations["waiting-prepare"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{ waiting_token: handleField(), item: handleField(itemMeta) },
-			);
-			provider.operations["waiting-confirm"] = operation(
-				{ waiting_token: handleField(), item: handleField(itemMeta) },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-
-			const diagnostics = lintProvider(provider);
-
-			expect(rulesOf(diagnostics, "handle-")).toEqual([]);
-			expect(byRule(diagnostics, "schema-description-key-required")).toEqual([]);
-		});
-
-		it("does not treat an object property named `schema` as a wrapper when reading handle meta", () => {
-			const provider = validProvider();
-			provider.operations["waiting-prepare"] = operation(
-				{ shop_id: described(z.string(), "fields.shopId") },
-				{
-					waiting_token: handleField(),
-					schema: described(z.object({ token: handleField() }), "fields.schema"),
-				},
-			);
-
-			expect(byRule(lintProvider(provider), "handle-field-name")).toEqual([
-				expect.objectContaining({ field: "operations.waiting-prepare.output.schema.token" }),
-			]);
-		});
-	});
-
-	describe("reused wrapped schema instances", () => {
-		it("checks a reused `field().optional()` instance at every property key", () => {
-			const provider = validProvider();
-			const shared = handleField().optional();
-			provider.operations["waiting-confirm"] = operation(
-				{ waiting_token: shared, wrong_name: shared },
-				{ confirmed: described(z.boolean(), "fields.confirmed") },
-			);
-
-			expect(byRule(lintProvider(provider), "handle-field-name")).toEqual([
-				expect.objectContaining({ field: "operations.waiting-confirm.input.wrong_name" }),
-			]);
+			expect(byRule(lintProvider(provider), "schema-description-key-required")).toEqual([]);
 		});
 	});
 });

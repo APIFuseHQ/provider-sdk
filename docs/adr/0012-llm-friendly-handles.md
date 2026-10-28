@@ -136,6 +136,19 @@ Three DX gaps surfaced while migrating 19 provider repositories to beta.61. All 
 | `ctx.handle.createRecord(kind, data)` → `HandleRecord` | goodchoice — expose `expires_at` on the issuing operation without recomputing ttl math | `create` is implemented as `(await createRecord(...)).handle`; telemetry still reports one `create` operation. |
 | Root exports: `APIFUSE_HANDLE_META_KEY`, `handleFieldDescription`, `isHandleFieldMeta`, `HANDLE_KIND_NAME_PATTERN`, `createMemoryProviderRuntimeState`, `createUnsupportedProviderRuntimeState` from `@apifuse/provider-sdk` and `/provider` | all — tests and lint shims were reaching into `dist/` paths | Exported from both entry points. |
 
+## Amendment (2026-10-28, declare once)
+
+The 2026-10 lint audit found that `handle: HandleKind[]`, the schema keys, and `issuedBy: string` were three copies of the same facts joined by name, with five rules (`handle-kind-undeclared`, `handle-field-name`, `handle-field-parity`, `handle-issued-by`, `handle-requires-state`) rebuilding the graph to keep them aligned. D7 is amended so each fact is written once:
+
+| Fact | Written once in | Mechanism |
+|---|---|---|
+| property key of a kind's field | the operation schema, where `kind.field()` is placed (one key per direction) | `defineProvider` walks input/output schemas and binds the key onto the kind; two different keys on one side throw at definition time |
+| issuing operation(s) | the output schemas that contain the field | bound in operation order; the SDK-owned field description and every recovery sentence are refreshed from it |
+| kinds a provider may use through `ctx.handle` | `handle: [...]` | `ctx.handle` is typed to that list (`HandleContext<DeclaredHandleKind>`); kind names are literal types so same-schema kinds stay distinct |
+| handles need state | the type | `defineProvider` refuses `handle: [...]` without `state` (`HandleRequiresStateGuard`) |
+
+`fieldName` and `issuedBy` on `defineCursor`/`defineDraft` are deprecated for one release (they win over the bound contract while present, with a one-line runtime warning) and removed in the next; `scripts/codemods/handles.yml` deletes them. The five rules are deleted; `legacy-handle-declaration` (warn) remains until removal and points at the codemod. Runtime behaviour, wire shapes, and the `x-apifuse-handle` meta are unchanged for a provider whose schemas agree with what it used to declare. Kinds that declared no `issuedBy` but are issued by an operation now name it.
+
 ## Verification
 
 Hold when the implementing change lands (mirrors `SDK-SPEC.md` §11) and after the first fleet wave:

@@ -128,7 +128,15 @@
 		{
 			"file": "src/__tests__/runtime-boundary-lint.test.ts",
 			"symbol": "RUNTIME_BOUNDARY_RULES",
-			"reason": "Tests the one-release shim maps bundleProvider findings to the old diagnostic shape."
+			"reason": "Tests the one-release shim maps bundleProvider findings to the old diagnostic shape.",
+			"file": "src/handle.ts",
+			"symbol": "fieldName",
+			"reason": "defineCursor/defineDraft read the deprecated fieldName option for one release so an unmigrated provider keeps byte-identical field names until scripts/codemods/handles.yml has run."
+		},
+		{
+			"file": "src/handle.ts",
+			"symbol": "issuedBy",
+			"reason": "defineCursor/defineDraft read the deprecated issuedBy option for one release so an unmigrated provider keeps byte-identical issuer text until scripts/codemods/handles.yml has run."
 		}
 	]
 }
