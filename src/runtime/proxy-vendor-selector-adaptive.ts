@@ -462,6 +462,10 @@ export function createAdaptiveProxyVendorSelector(
 				return;
 			}
 			if (learned === "ok") {
+				// A synthesized proxy URL says nothing about the tunnel: the resolver
+				// reports it before every transport attempt, so counting it would clear
+				// every streak and settle every probe before the attempt it precedes.
+				if (outcome.phase === "resolution") return;
 				entry.consecutiveFailures = 0;
 				if (entry.state === "half_open") {
 					entry.probeIssuedAt = undefined;

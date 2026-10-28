@@ -373,4 +373,47 @@ describe("adaptive selector through the resolver", () => {
 			{ vendor: "nodemaven", state: "closed", consecutiveFailures: 0 },
 		]);
 	});
+
+	it("learns from the transport attempt, not from the synthesis the resolver reports before it", async () => {
+		const selector = createAdaptiveProxyVendorSelector();
+		// Each request: the resolver selects and reports a successful synthesis,
+		// then the tunnel fails. The streak must survive the synthesis reports.
+		for (let i = 0; i < consecutiveFailureThreshold; i += 1) {
+			const resolved = await resolveProxyConfigAsync({
+				proxyPolicy: policy,
+				affinityKey: "af_con_1",
+				proxyAttempt: 0,
+				now: T0 + i,
+				vendorSelector: selector,
+			});
+			expect(resolved.source).toBe("smartproxy-gateway");
+			selector.report(failure("smartproxy", T0 + i));
+		}
+		expect(selector.snapshot(T0 + consecutiveFailureThreshold)[0]).toMatchObject({
+			vendor: "smartproxy",
+			state: "open",
+			ejections: 1,
+		});
+
+		// The probe stays in flight through its own synthesis; the tunnel decides.
+		const probeAt = T0 + baseOpenMs + consecutiveFailureThreshold;
+		const probe = await resolveProxyConfigAsync({
+			proxyPolicy: policy,
+			affinityKey: "af_con_1",
+			proxyAttempt: 0,
+			now: probeAt,
+			vendorSelector: selector,
+		});
+		expect(probe.source).toBe("smartproxy-gateway");
+		expect(selector.lastSelectionReason()).toBe("half_open_probe");
+		expect(selector.snapshot(probeAt)[0]).toMatchObject({
+			state: "half_open",
+			probeIssuedAt: probeAt,
+		});
+		selector.report(success("smartproxy", probeAt + 900));
+		expect(selector.snapshot(probeAt + 900)[0]).toMatchObject({
+			state: "closed",
+			consecutiveFailures: 0,
+		});
+	});
 });
