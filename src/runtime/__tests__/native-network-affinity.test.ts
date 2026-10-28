@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 
-import { clearProxyResolutionCache, SMARTPROXY_APP_KEY_ENV } from "../../config/loader.js";
 import type { ProviderProxyPolicy } from "../../types.js";
 import {
 	createEnvVendorCredentialResolver,
@@ -10,18 +9,13 @@ import {
 	resolveNativeGatewayProxy,
 	type NativeGatewayProxySynthesizer,
 } from "../native-network.js";
+import { SMARTPROXY_PASSWORD_ENV, SMARTPROXY_USERNAME_ENV } from "../proxy-smartproxy.js";
 
 const POLICY: ProviderProxyPolicy = {
 	mode: "required",
 	providers: ["nodemaven"],
 	session: { affinity: "connection", lifetimeMinutes: 60 },
 };
-
-function createFetchDouble(implementation: () => Promise<Response>): typeof fetch {
-	return Object.assign(implementation, {
-		preconnect(_url: string | URL): void {},
-	});
-}
 
 let usernameBefore: string | undefined;
 let passwordBefore: string | undefined;
@@ -34,7 +28,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	clearProxyResolutionCache();
 	if (usernameBefore === undefined) delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
 	else process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = usernameBefore;
 	if (passwordBefore === undefined) delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
@@ -123,46 +116,33 @@ describe("native credential affinity", () => {
 		expect(first?.sessionId).not.toBe(nextWindow?.sessionId);
 	});
 
-	it("keeps Smartproxy allocation sticky per affinity and separates different affinities", async () => {
-		const originalFetch = globalThis.fetch;
-		let allocations = 0;
-		globalThis.fetch = createFetchDouble(async () => {
-			allocations += 1;
-			return new Response(`127.0.0.${allocations}:8080`, { status: 200 });
-		});
+	it("keeps Smartproxy sessions sticky per affinity and window and separates different affinities", async () => {
 		const credentials = () => ({
 			kind: "present" as const,
-			values: { [SMARTPROXY_APP_KEY_ENV]: "injected-smartproxy-key" },
+			values: {
+				[SMARTPROXY_USERNAME_ENV]: "injected-smartproxy-user",
+				[SMARTPROXY_PASSWORD_ENV]: "injected-smartproxy-password",
+			},
 		});
 		const policy: ProviderProxyPolicy = {
 			mode: "required",
 			providers: ["smartproxy"],
-			session: { affinity: "connection", lifetimeMinutes: 60, poolSize: 1 },
+			session: { affinity: "connection", lifetimeMinutes: 60 },
 		};
-		try {
-			const first = await resolveNativeGatewayProxy({
-				policy,
-				affinityKey: "account-a",
-				credentials,
-			});
-			const same = await resolveNativeGatewayProxy({
-				policy,
-				affinityKey: "account-a",
-				credentials,
-			});
-			const different = await resolveNativeGatewayProxy({
-				policy,
-				affinityKey: "account-b",
-				credentials,
-			});
+		const resolve = (affinityKey: string, at: string) =>
+			resolveNativeGatewayProxy({ policy, affinityKey, credentials, now: Date.parse(at) });
+		const first = await resolve("account-a", "2026-07-30T12:34:00.000Z");
+		const same = await resolve("account-a", "2026-07-30T12:59:59.999Z");
+		const different = await resolve("account-b", "2026-07-30T12:34:00.000Z");
+		const nextWindow = await resolve("account-a", "2026-07-30T13:00:00.000Z");
 
-			expect(first?.url).toBe("http://127.0.0.1:8080");
-			expect(same?.url).toBe(first?.url);
-			expect(different?.url).toBe("http://127.0.0.2:8080");
-			expect(allocations).toBe(2);
-		} finally {
-			globalThis.fetch = originalFetch;
-		}
+		expect(first?.url).toContain("_life-60_session-");
+		expect(same?.url).toBe(first?.url);
+		expect(same?.sessionId).toBe(first?.sessionId);
+		expect(different?.sessionId).not.toBe(first?.sessionId);
+		expect(nextWindow?.sessionId).not.toBe(first?.sessionId);
+		// The smartproxy native connection now reports the window end, like NodeMaven.
+		expect(first?.expiresAt).toBe("2026-07-30T13:00:00.000Z");
 	});
 
 	it("synthesizes from injected credentials while the ambient env is empty", async () => {

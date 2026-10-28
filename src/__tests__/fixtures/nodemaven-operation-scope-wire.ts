@@ -215,7 +215,7 @@ const provider = defineProvider({
 })({
 	operations: {
 		// The caller-managed retry a provider writes for an upstream block page:
-		// one more attempt on the next pool slot (new sid, next carrier).
+		// one more attempt (new sid, next carrier).
 		"get-stay-detail": {
 			riskClass: "read",
 			input: z.object({}),

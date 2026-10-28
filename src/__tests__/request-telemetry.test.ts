@@ -12,9 +12,17 @@ import {
 } from "../runtime/request-telemetry.js";
 import { createTraceContext } from "../runtime/trace.js";
 
-const BASE_SHA = "94f708a";
-const BASE_PROXY_BYTES =
-	'{"kind":"resolved","provider":"brightdata","userAgentSource":"request","protocol":"https","cacheStatus":"allocator","cacheHit":false,"resolutionMs":16,"allocatorMs":3,"allocatorStatus":201,"allocatorBodyClass":"json","allocatorAttempts":2,"lockWaitMs":1,"redisReadMs":2,"redisWriteMs":4,"poolAgeMs":5,"poolExpiresInMs":8,"attempts":3,"refreshes":1,"attemptSamples":[{"n":1,"a":2,"i":3,"h":"abcdef1234567890","o":"error","c":"E_FAIL","s":502,"d":9},{"n":2,"a":1,"o":"ok","c":"E_OTHER"},{"n":3,"a":1,"o":"ok","c":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],"vendors":["smartproxy","brightdata"],"failovers":[{"v":"smartproxy","nx":"brightdata","p":"resolve","r":"timeout","a":2}]}';
+/**
+ * Proxy sibling wire pinned when smartproxy moved to gateway sessions: the
+ * allocator-era fields (allocator timings and status, lock and Redis waits,
+ * pool age, refreshes) and the per-attempt pool index `i` are no longer
+ * emitted, and `cacheStatus` has the single value `disabled`. The oracle
+ * input still passes the retired fields so a stale caller cannot put them
+ * back on the wire.
+ */
+const PROXY_WIRE_ORACLE = "gateway-session";
+const ORACLE_PROXY_BYTES =
+	'{"kind":"resolved","provider":"brightdata","userAgentSource":"request","protocol":"https","cacheStatus":"disabled","cacheHit":false,"resolutionMs":16,"attempts":3,"attemptSamples":[{"n":1,"a":2,"h":"abcdef1234567890","o":"error","c":"E_FAIL","s":502,"d":9},{"n":2,"a":1,"o":"ok","c":"E_OTHER"},{"n":3,"a":1,"o":"ok","c":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],"vendors":["smartproxy","brightdata"],"failovers":[{"v":"smartproxy","nx":"brightdata","p":"resolve","r":"timeout","a":2}]}';
 
 function decode(value: string): Record<string, unknown> {
 	return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
@@ -42,10 +50,9 @@ function ledgerWith(
 
 function recordedProxy(): ProxyTelemetryCollector {
 	const collector = new ProxyTelemetryCollector();
-	// test-invalid: reproduce the exact base-SHA oracle event, including legacy literals.
 	collector.recordProxyResolution({
 		provider: "smartproxy",
-		cacheStatus: "allocator",
+		cacheStatus: "disabled",
 		cacheHit: false,
 		resolutionMs: 1,
 		attempts: 1,
@@ -55,10 +62,10 @@ function recordedProxy(): ProxyTelemetryCollector {
 
 function oracleProxy(): ProxyTelemetryCollector {
 	const collector = new ProxyTelemetryCollector();
-	// test-invalid: reproduce the exact base-SHA oracle event, including legacy literals.
+	// test-invalid: the retired allocator fields a stale caller could still pass.
 	collector.recordProxyResolution({
 		provider: "smartproxy",
-		cacheStatus: "allocator",
+		cacheStatus: "disabled",
 		cacheHit: false,
 		resolutionMs: 12.9,
 		allocatorMs: 3.8,
@@ -74,17 +81,16 @@ function oracleProxy(): ProxyTelemetryCollector {
 		refreshes: 1.9,
 		userAgentSource: "request",
 		protocol: "http",
-	} as never); // test-invalid: base-SHA oracle includes legacy literals.
+	} as never); // test-invalid: the oracle passes the retired allocator fields.
 	collector.recordProxyResolution({
 		provider: "brightdata",
-		cacheStatus: "redis_hit",
+		cacheStatus: "disabled",
 		cacheHit: true,
 		resolutionMs: 4,
 		attempts: 1,
 		outcome: "ok",
 		protocol: "https",
-	} as never); // test-invalid: base-SHA oracle includes a legacy vendor.
-	// test-invalid: reproduce the exact base-SHA oracle event, including its legacy vendor.
+	} as never); // test-invalid: the oracle includes a legacy vendor.
 	collector.recordProxyAttempt({
 		provider: "smartproxy",
 		attempt: 2.9,
@@ -94,27 +100,27 @@ function oracleProxy(): ProxyTelemetryCollector {
 		errorCode: "E_FAIL",
 		status: 502.8,
 		durationMs: 9.7,
-	});
+	} as never); // test-invalid: the retired per-attempt pool index is passed and not emitted.
 	collector.recordProxyAttempt({
 		provider: "brightdata",
 		attempt: 1,
 		outcome: "ok",
 		errorCode: "E_OTHER",
-	} as never); // test-invalid: base-SHA oracle includes a legacy vendor.
+	} as never); // test-invalid: the oracle includes a legacy vendor.
 	collector.recordProxyAttempt({
 		provider: "smartproxy",
 		attempt: 1,
 		outcome: "ok",
 		errorCode: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	});
-	// test-invalid: reproduce the exact base-SHA oracle failover literals.
+	// test-invalid: reproduce the oracle's legacy failover literals.
 	collector.recordProxyVendorFailover({
 		vendor: "smartproxy",
 		nextVendor: "brightdata",
 		phase: "resolve",
 		reason: "timeout",
 		attempt: 2.2,
-	} as never); // test-invalid: base-SHA oracle includes legacy failover literals.
+	} as never); // test-invalid: the oracle includes legacy failover literals.
 	return collector;
 }
 
@@ -135,14 +141,14 @@ function largeValidPayload(prefix: string, count = 32): object {
 }
 
 describe("request telemetry ledger", () => {
-	it(`matches the ${BASE_SHA} proxy log and header byte oracle`, () => {
+	it(`matches the ${PROXY_WIRE_ORACLE} proxy log and header byte oracle`, () => {
 		const collector = oracleProxy();
 		const ledger = new RequestTelemetry(createTraceContext());
 		ledger.register(collector);
 		const log = ledger.toLogPayload();
 		const encoded = ledger.toHeaderValue();
-		expect(JSON.stringify(log?.proxy)).toBe(BASE_PROXY_BYTES);
-		expect(JSON.stringify(decode(encoded ?? "").proxy)).toBe(BASE_PROXY_BYTES);
+		expect(JSON.stringify(log?.proxy)).toBe(ORACLE_PROXY_BYTES);
+		expect(JSON.stringify(decode(encoded ?? "").proxy)).toBe(ORACLE_PROXY_BYTES);
 		expect(Object.keys(decode(encoded ?? ""))).toEqual(["v", "taxonomy", "proxy"]);
 	});
 
@@ -274,8 +280,8 @@ describe("request telemetry ledger", () => {
 		for (let index = 0; index < 10_000; index += 1) {
 			collector.recordProxyResolution({
 				provider: index % 2 === 0 ? "smartproxy" : "nodemaven",
-				cacheStatus: "memory_hit",
-				cacheHit: true,
+				cacheStatus: "disabled",
+				cacheHit: false,
 				resolutionMs: 1,
 				attempts: 1,
 			});
@@ -285,8 +291,8 @@ describe("request telemetry ledger", () => {
 		expect(collector.toLogPayload()).toEqual({
 			kind: "resolved",
 			provider: "nodemaven",
-			cacheStatus: "memory_hit",
-			cacheHit: true,
+			cacheStatus: "disabled",
+			cacheHit: false,
 			resolutionMs: 10_000,
 			attempts: 10_000,
 			vendors: ["smartproxy", "nodemaven"],
@@ -369,8 +375,8 @@ describe("HTTP sibling priority", () => {
 		http.startRequest({}).recordAttempt({ ms: 1, proxyUsed: true, status: 200 });
 		ledger.register(http);
 		const envelope = decode(ledger.toHeaderValue()!);
-		expect(JSON.stringify(envelope.proxy)).toBe(BASE_PROXY_BYTES);
-		expect(JSON.stringify(ledger.toLogPayload()?.proxy)).toBe(BASE_PROXY_BYTES);
+		expect(JSON.stringify(envelope.proxy)).toBe(ORACLE_PROXY_BYTES);
+		expect(JSON.stringify(ledger.toLogPayload()?.proxy)).toBe(ORACLE_PROXY_BYTES);
 		expect(Object.keys(envelope)).toEqual(["v", "taxonomy", "proxy", "http"]);
 	});
 });

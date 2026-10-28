@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { createServer, type Server, type Socket } from "node:net";
+import { createServer, type Server, Socket } from "node:net";
 import { z } from "zod";
-import { clearProxyResolutionCache, SMARTPROXY_APP_KEY_ENV } from "../config/loader.js";
 import { TransportError } from "../errors.js";
 import type {
 	NativeNetworkConnection,
@@ -19,6 +18,12 @@ import {
 } from "../runtime/native-network.js";
 import type { NativeNetworkErrorCode } from "../runtime/native-network-errors.js";
 import {
+	SMARTPROXY_GATEWAY_HOST,
+	SMARTPROXY_GATEWAY_PORT,
+	SMARTPROXY_PASSWORD_ENV,
+	SMARTPROXY_USERNAME_ENV,
+} from "../runtime/proxy-smartproxy.js";
+import {
 	NativeTelemetryCollector,
 	type NativeTelemetryLogPayload,
 } from "../runtime/native-telemetry.js";
@@ -34,19 +39,49 @@ import { statefulSignedHeaders } from "../stateful-signing.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
 const originalFetch = globalThis.fetch;
-const originalSmartproxyKey = process.env[SMARTPROXY_APP_KEY_ENV];
+const SMARTPROXY_ENV_NAMES = [SMARTPROXY_USERNAME_ENV, SMARTPROXY_PASSWORD_ENV] as const;
+const originalSmartproxyEnv = SMARTPROXY_ENV_NAMES.map(
+	(name) => [name, process.env[name]] as const,
+);
 
-function fetchDouble(
-	run: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
-): typeof fetch {
-	return Object.assign(run, { preconnect() {} });
+function setSmartproxyCredentials(username: string, password: string): void {
+	process.env[SMARTPROXY_USERNAME_ENV] = username;
+	process.env[SMARTPROXY_PASSWORD_ENV] = password;
+}
+
+/**
+ * Stands in for a hosts-file entry: a socket the native transport opens to the
+ * smartproxy gateway lands on the local CONNECT fixture instead, so the bytes
+ * the fixture sees are the ones the gateway would see and nothing leaves the
+ * machine. Any other destination is untouched.
+ */
+function routeSmartproxyGatewayTo(port: number): () => void {
+	const originalConnect = Socket.prototype.connect;
+	const patched = function (this: Socket, ...args: unknown[]) {
+		const [options] = args;
+		if (
+			options &&
+			typeof options === "object" &&
+			Reflect.get(options, "host") === SMARTPROXY_GATEWAY_HOST &&
+			Reflect.get(options, "port") === SMARTPROXY_GATEWAY_PORT
+		) {
+			args[0] = { ...options, host: "127.0.0.1", port };
+		}
+		// test-invalid: forwards the overloaded connect arguments unchanged except for the gateway.
+		return Reflect.apply(originalConnect, this, args);
+	};
+	Socket.prototype.connect = patched as typeof Socket.prototype.connect;
+	return () => {
+		Socket.prototype.connect = originalConnect;
+	};
 }
 
 afterEach(() => {
 	globalThis.fetch = originalFetch;
-	clearProxyResolutionCache();
-	if (originalSmartproxyKey === undefined) delete process.env[SMARTPROXY_APP_KEY_ENV];
-	else process.env[SMARTPROXY_APP_KEY_ENV] = originalSmartproxyKey;
+	for (const [name, value] of originalSmartproxyEnv) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
 });
 
 function decodeTelemetry(response: Response): Record<string, unknown> {
@@ -70,11 +105,25 @@ type ConnectProxyFixture = {
 	sockets: Set<Socket>;
 	port: number;
 	connects: () => number;
+	usernames: () => string[];
 	failNext: () => void;
 };
 
+function proxyAuthorizationUsername(head: string): string {
+	const header = head
+		.split("\r\n")
+		.find((line) => line.toLowerCase().startsWith("proxy-authorization: basic "));
+	if (!header) return "";
+	const decoded = Buffer.from(
+		header.slice("proxy-authorization: basic ".length),
+		"base64",
+	).toString("utf8");
+	return decoded.slice(0, decoded.indexOf(":"));
+}
+
 async function createConnectProxy(): Promise<ConnectProxyFixture> {
 	const sockets = new Set<Socket>();
+	const usernames: string[] = [];
 	let connects = 0;
 	let failNext = false;
 	const server = createServer((socket) => {
@@ -84,6 +133,7 @@ async function createConnectProxy(): Promise<ConnectProxyFixture> {
 		socket.on("data", (chunk) => {
 			if (!established) {
 				expect(chunk.toString("latin1")).toStartWith("CONNECT ");
+				usernames.push(proxyAuthorizationUsername(chunk.toString("latin1")));
 				connects++;
 				established = true;
 				if (failNext) {
@@ -108,6 +158,7 @@ async function createConnectProxy(): Promise<ConnectProxyFixture> {
 		sockets,
 		port: address.port,
 		connects: () => connects,
+		usernames: () => [...usernames],
 		failNext: () => {
 			failNext = true;
 		},
@@ -294,11 +345,8 @@ describe("native server telemetry construction paths", () => {
 	] as const) {
 		it(`${factory} threads fresh proxy and native sinks through operation, auth, and signed stateful routes`, async () => {
 			const proxy = await createConnectProxy();
-			process.env[SMARTPROXY_APP_KEY_ENV] = "native-server-smartproxy-key";
-			globalThis.fetch = fetchDouble(
-				async () => new Response(`127.0.0.1:${proxy.port}`, { status: 200 }),
-			);
-			clearProxyResolutionCache();
+			setSmartproxyCredentials("native-server-user", "native-server-password");
+			const restoreRoute = routeSmartproxyGatewayTo(proxy.port);
 			const provider = createNativeServerProvider(proxy.port);
 			const events: ProviderServerLogEvent[] = [];
 			try {
@@ -348,7 +396,12 @@ describe("native server telemetry construction paths", () => {
 					}
 				}
 				expect(proxy.connects()).toBe(serverPaths.length * 2);
+				// Every CONNECT carried the gateway sub-account with a session token.
+				for (const username of proxy.usernames()) {
+					expect(username).toMatch(/^native-server-user_life-30_session-[0-9a-f]{10}$/);
+				}
 			} finally {
+				restoreRoute();
 				await closeConnectProxy(proxy);
 			}
 		});
@@ -383,11 +436,8 @@ describe("native server telemetry construction paths", () => {
 
 	it("redacts request dictionary values from native vendor failures and keeps diagnostics out of the header", async () => {
 		const sentinel = "orchidpetals";
-		process.env[SMARTPROXY_APP_KEY_ENV] = "native-failure-smartproxy-key";
-		globalThis.fetch = fetchDouble(async () => {
-			throw new Error(`allocator rejected ${sentinel}`);
-		});
-		clearProxyResolutionCache();
+		// `_` is the gateway's username token separator, so synthesis fails locally.
+		setSmartproxyCredentials(`native_${sentinel}`, `native-${sentinel}`);
 		const provider = createNativeServerProvider(9);
 		const events: ProviderServerLogEvent[] = [];
 		const app = createServerApp(provider, { logger: (event) => events.push(event) });
@@ -456,8 +506,7 @@ describe("native server error classification", () => {
 	});
 
 	it("classifies PROXY_REQUIRED as proxy_pool through real HTTP, stealth, and native paths", async () => {
-		delete process.env[SMARTPROXY_APP_KEY_ENV];
-		clearProxyResolutionCache();
+		for (const name of SMARTPROXY_ENV_NAMES) delete process.env[name];
 		const operations = Object.fromEntries(
 			(["http", "stealth", "native"] as const).map((transport) => [
 				transport,

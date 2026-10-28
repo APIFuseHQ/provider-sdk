@@ -301,7 +301,11 @@ describe("engine credential containment", () => {
 	});
 
 	it("captures proxy credentials for the engine but omits them from provider environments", () => {
+		// The retired smartproxy extraction key is no longer read but stays engine-owned,
+		// so a deployment that still projects it never hands it to provider code.
 		const source = {
+			APIFUSE__PROXY__SMARTPROXY_USERNAME: "engine-smart-user",
+			APIFUSE__PROXY__SMARTPROXY_PASSWORD: "engine-smart-password",
 			APIFUSE__PROXY__SMARTPROXY_APP_KEY: "engine-key",
 			APIFUSE__PROXY__NODEMAVEN_USERNAME: "engine-user",
 			APIFUSE__PROXY__NODEMAVEN_PASSWORD: "engine-password",
@@ -309,6 +313,8 @@ describe("engine credential containment", () => {
 		};
 
 		expect(readEngineProxyCredentials(source)).toEqual({
+			APIFUSE__PROXY__SMARTPROXY_USERNAME: "engine-smart-user",
+			APIFUSE__PROXY__SMARTPROXY_PASSWORD: "engine-smart-password",
 			APIFUSE__PROXY__SMARTPROXY_APP_KEY: "engine-key",
 			APIFUSE__PROXY__NODEMAVEN_USERNAME: "engine-user",
 			APIFUSE__PROXY__NODEMAVEN_PASSWORD: "engine-password",
@@ -341,6 +347,8 @@ describe("engine credential containment", () => {
 			"otel_exporter_otlp_headers",
 			"Otel_Exporter_Otlp_Traces_Headers",
 			"apifuse__proxy__smartproxy_app_key",
+			"Apifuse__Proxy__Smartproxy_Username",
+			"apifuse__proxy__smartproxy_password",
 		]) {
 			expect(isEngineOwnedEnvName(alias)).toBe(true);
 		}

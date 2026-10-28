@@ -2,22 +2,24 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import {
 	assertTunnelingScheme,
-	clearProxyResolutionCache,
-	mapFlatAttempt,
+	mapAttemptToVendor,
+	PROXY_ATTEMPTS_PER_VENDOR,
+	type ProxyAttemptOutcome,
+	type ProxyAttemptRequest,
 	ProxyResolutionError,
 	type ProxyVendorFailoverTelemetryEvent,
+	type ProxyVendorSelector,
+	getProxyVendorSelector,
 	resolveProxyConfigAsync,
 	resolveVendorChain,
+	setProxyVendorSelector,
+	staticOrderProxyVendorSelector,
 } from "../config/loader.js";
-
-function createFetchDouble(implementation: () => Promise<Response>): typeof fetch {
-	return Object.assign(implementation, {
-		preconnect(_url: string | URL): void {},
-	});
-}
 
 const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
+	"APIFUSE__PROXY__SMARTPROXY_USERNAME",
+	"APIFUSE__PROXY__SMARTPROXY_PASSWORD",
 	"APIFUSE__PROXY__NODEMAVEN_USERNAME",
 	"APIFUSE__PROXY__NODEMAVEN_PASSWORD",
 	"APIFUSE__PROXY__NODEMAVEN_FILTER",
@@ -49,7 +51,6 @@ describe("proxy vendor fallback", () => {
 			saved.set(key, process.env[key]);
 			delete process.env[key];
 		}
-		clearProxyResolutionCache();
 	});
 
 	afterEach(() => {
@@ -58,7 +59,7 @@ describe("proxy vendor fallback", () => {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		clearProxyResolutionCache();
+		setProxyVendorSelector(undefined);
 	});
 
 	describe("assertTunnelingScheme (No-MITM invariant)", () => {
@@ -75,21 +76,242 @@ describe("proxy vendor fallback", () => {
 		});
 	});
 
-	describe("mapFlatAttempt", () => {
-		it("concatenates vendor pool spaces in chain order", () => {
-			expect(mapFlatAttempt(0, [20, 5])).toEqual({ vendorIndex: 0, poolIndex: 0 });
-			expect(mapFlatAttempt(19, [20, 5])).toEqual({ vendorIndex: 0, poolIndex: 19 });
-			expect(mapFlatAttempt(20, [20, 5])).toEqual({ vendorIndex: 1, poolIndex: 0 });
-			expect(mapFlatAttempt(24, [20, 5])).toEqual({ vendorIndex: 1, poolIndex: 4 });
+	describe("mapAttemptToVendor", () => {
+		it("splits the attempt budget evenly across the chain in declaration order", () => {
+			const slots = [0, 1, 2, 3, 4, 5].map((attempt) => mapAttemptToVendor(attempt, 2, 6));
+			expect(slots).toEqual([
+				{ vendorIndex: 0, vendorAttempt: 0 },
+				{ vendorIndex: 0, vendorAttempt: 1 },
+				{ vendorIndex: 0, vendorAttempt: 2 },
+				{ vendorIndex: 1, vendorAttempt: 0 },
+				{ vendorIndex: 1, vendorAttempt: 1 },
+				{ vendorIndex: 1, vendorAttempt: 2 },
+			]);
 		});
 
-		it("reduces to attempt % poolSize for a single vendor (backcompat invariant)", () => {
-			for (const attempt of [0, 1, 19, 20, 21]) {
-				expect(mapFlatAttempt(attempt % 20, [20])).toEqual({
+		it("reaches every vendor whenever the budget is at least the chain length", () => {
+			// An explicit `attempts: 2` on a two-vendor chain still reaches the fallback.
+			expect(mapAttemptToVendor(1, 2, 2)).toEqual({ vendorIndex: 1, vendorAttempt: 0 });
+			// An odd budget gives the remainder to the last vendor.
+			expect([0, 1, 2].map((attempt) => mapAttemptToVendor(attempt, 2, 3))).toEqual([
+				{ vendorIndex: 0, vendorAttempt: 0 },
+				{ vendorIndex: 0, vendorAttempt: 1 },
+				{ vendorIndex: 1, vendorAttempt: 0 },
+			]);
+		});
+
+		it("keeps attempts past the cap on the last vendor and every attempt on a single vendor", () => {
+			expect(mapAttemptToVendor(9, 2, 6)).toEqual({ vendorIndex: 1, vendorAttempt: 6 });
+			for (const attempt of [0, 1, 7, 20]) {
+				expect(mapAttemptToVendor(attempt, 1, 3)).toEqual({
 					vendorIndex: 0,
-					poolIndex: attempt % 20,
+					vendorAttempt: attempt,
 				});
 			}
+			expect(mapAttemptToVendor(Number.NaN, 2, 6)).toEqual({ vendorIndex: 0, vendorAttempt: 0 });
+		});
+	});
+
+	describe("vendor selector seam", () => {
+		function recordingSelector(
+			requests: ProxyAttemptRequest[],
+			outcomes: ProxyAttemptOutcome[],
+		): ProxyVendorSelector {
+			return {
+				select(request) {
+					requests.push(request);
+					return staticOrderProxyVendorSelector.select(request);
+				},
+				report(outcome) {
+					outcomes.push(outcome);
+				},
+			};
+		}
+
+		beforeEach(() => {
+			process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = "smart-user";
+			process.env.APIFUSE__PROXY__SMARTPROXY_PASSWORD = "smart-pass";
+			process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
+			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+		});
+
+		it("names the vendor, the attempt within it and the policy's session for each attempt", () => {
+			const directives = staticOrderProxyVendorSelector.select({
+				policy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					session: { affinity: "connection", lifetimeMinutes: 45 },
+				},
+				chain: ["smartproxy", "nodemaven"],
+				attempt: 4,
+				attemptCap: 6,
+				now: 0,
+			});
+			expect(directives).toEqual([
+				{
+					vendor: "nodemaven",
+					vendorAttempt: 1,
+					session: { kind: "sticky", lifetimeMinutes: 45 },
+				},
+			]);
+			const rotating = staticOrderProxyVendorSelector.select({
+				policy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+				chain: ["smartproxy", "nodemaven"],
+				attempt: 1,
+				attemptCap: 6,
+				now: 0,
+			});
+			// The vendors after the attempt's own are resolution-time fallbacks starting at attempt 0.
+			expect(rotating).toEqual([
+				{ vendor: "smartproxy", vendorAttempt: 1, session: { kind: "rotating" } },
+				{ vendor: "nodemaven", vendorAttempt: 0, session: { kind: "rotating" } },
+			]);
+		});
+
+		it("asks the injected selector with the request id and history, and reports back to that instance", async () => {
+			const globalOutcomes: ProxyAttemptOutcome[] = [];
+			setProxyVendorSelector(recordingSelector([], globalOutcomes));
+			const requests: ProxyAttemptRequest[] = [];
+			const outcomes: ProxyAttemptOutcome[] = [];
+			const injected = recordingSelector(requests, outcomes);
+			const history = [{ vendor: "smartproxy" as const, outcome: "error" as const }];
+
+			const resolved = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+				proxyAttempt: 1,
+				proxyAttemptCap: 6,
+				vendorSelector: injected,
+				proxyRequestId: "request-1",
+				proxyAttemptHistory: history,
+				now: 1_000,
+			});
+
+			expect(resolved.source).toBe("smartproxy-gateway");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]).toMatchObject({
+				chain: ["smartproxy", "nodemaven"],
+				attempt: 1,
+				attemptCap: 6,
+				now: 1_000,
+				requestId: "request-1",
+				history,
+			});
+			expect(outcomes).toEqual([
+				{
+					vendor: "smartproxy",
+					phase: "resolution",
+					outcome: "ok",
+					attempt: 1,
+					vendorAttempt: 1,
+					sessionId: resolved.sessionId,
+					now: 1_000,
+					requestId: "request-1",
+				},
+			]);
+			expect(globalOutcomes).toEqual([]);
+		});
+
+		it("uses the process selector when none is injected and moves to the directive fallback", async () => {
+			delete process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME;
+			const requests: ProxyAttemptRequest[] = [];
+			const outcomes: ProxyAttemptOutcome[] = [];
+			const processSelector = recordingSelector(requests, outcomes);
+			setProxyVendorSelector(processSelector);
+			expect(getProxyVendorSelector()).toBe(processSelector);
+
+			const resolved = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+				now: 1_000,
+			});
+
+			expect(resolved.source).toBe("nodemaven-gateway");
+			expect(requests[0]?.attemptCap).toBe(2 * PROXY_ATTEMPTS_PER_VENDOR);
+			expect(
+				outcomes.map(({ vendor, outcome, errorCode }) => [vendor, outcome, errorCode]),
+			).toEqual([
+				["smartproxy", "error", "no_credentials"],
+				["nodemaven", "ok", undefined],
+			]);
+			setProxyVendorSelector(undefined);
+			expect(getProxyVendorSelector()).toBe(staticOrderProxyVendorSelector);
+		});
+
+		it("lets a selector name the vendor regardless of the declared order", async () => {
+			const reversed: ProxyVendorSelector = {
+				select: (request) =>
+					[...request.chain].reverse().map((vendor) => ({
+						vendor,
+						vendorAttempt: 0,
+						session: { kind: "rotating" as const },
+					})),
+				report() {},
+			};
+			const resolved = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+				vendorSelector: reversed,
+			});
+			expect(resolved.source).toBe("nodemaven-gateway");
+		});
+
+		it("does not let a throwing report fail the resolution", async () => {
+			const resolved = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", providers: ["smartproxy"] },
+				vendorSelector: {
+					select: staticOrderProxyVendorSelector.select,
+					report() {
+						throw new Error("observer failed");
+					},
+				},
+			});
+			expect(resolved.source).toBe("smartproxy-gateway");
+		});
+	});
+
+	describe("gateway overrides", () => {
+		beforeEach(() => {
+			process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = "smart-user";
+			process.env.APIFUSE__PROXY__SMARTPROXY_PASSWORD = "smart-pass";
+			process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
+			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+		});
+
+		it("points each vendor at the given endpoint and keeps the username and password", async () => {
+			const gatewayOverrides = {
+				smartproxy: { host: "127.0.0.1", port: 18_001 },
+				nodemaven: { host: "localhost", port: 18_002 },
+			};
+			const smart = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", providers: ["smartproxy"], geo: { country: "KR" } },
+				gatewayOverrides,
+			});
+			const node = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", providers: ["nodemaven"], geo: { country: "KR" } },
+				gatewayOverrides,
+			});
+
+			expect(smart.url).toBe(
+				`http://smart-user_area-KR_life-30_session-${smart.sessionId}:smart-pass@127.0.0.1:18001`,
+			);
+			expect(node.url).toBe(
+				`http://acct123-country-kr-ipv4-true-sid-${node.sessionId}-filter-medium:s3cret@localhost:18002`,
+			);
+		});
+
+		it("rejects an override that could rewrite the URL around it", async () => {
+			for (const host of ["evil.example@127.0.0.1", "127.0.0.1/x", ""]) {
+				await expect(
+					resolveProxyConfigAsync({
+						proxyPolicy: { mode: "required", providers: ["smartproxy"] },
+						gatewayOverrides: { smartproxy: { host, port: 18_001 } },
+					}),
+				).rejects.toThrow("Proxy gateway override host must be a hostname or IPv4 address");
+			}
+			await expect(
+				resolveProxyConfigAsync({
+					proxyPolicy: { mode: "required", providers: ["smartproxy"] },
+					gatewayOverrides: { smartproxy: { host: "127.0.0.1", port: 70_000 } },
+				}),
+			).rejects.toThrow("Proxy gateway override port must be an integer between 1 and 65535");
 		});
 	});
 
@@ -254,14 +476,16 @@ describe("proxy vendor fallback", () => {
 			});
 		});
 
-		it("fails closed listing every vendor when the whole chain lacks credentials", async () => {
+		it("fails closed listing every missing credential when the whole chain lacks them", async () => {
+			process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = "smart-user";
 			await expect(
 				resolveProxyConfigAsync({
 					proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
 				}),
 			).rejects.toMatchObject({
 				code: "PROXY_REQUIRED",
-				message: expect.stringContaining("APIFUSE__PROXY__NODEMAVEN_USERNAME"),
+				message:
+					"Proxy egress is required but no vendor credentials are configured. Missing: APIFUSE__PROXY__SMARTPROXY_PASSWORD (smartproxy), APIFUSE__PROXY__NODEMAVEN_USERNAME and APIFUSE__PROXY__NODEMAVEN_PASSWORD (nodemaven).",
 				vendorChain: ["smartproxy", "nodemaven"],
 			});
 		});
@@ -303,22 +527,25 @@ describe("proxy vendor fallback", () => {
 
 	describe("smartproxy backcompat via providers[]", () => {
 		it("resolves identically whether declared as provider or single-element providers", async () => {
-			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-			const originalFetch = global.fetch;
-			global.fetch = createFetchDouble(async () =>
-				new Response("5.78.24.25:31001", { status: 200 }),
-			);
-			try {
-				const viaProviders = await resolveProxyConfigAsync({
-					proxyPolicy: { mode: "required", providers: ["smartproxy"], geo: { country: "KR" } },
-				});
-				expect(viaProviders).toMatchObject({
-					source: "smartproxy-allocator",
-					url: "http://5.78.24.25:31001",
-				});
-			} finally {
-				global.fetch = originalFetch;
-			}
+			process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME = "smart-user";
+			process.env.APIFUSE__PROXY__SMARTPROXY_PASSWORD = "smart-pass";
+			const session = { affinity: "connection", lifetimeMinutes: 60 } as const;
+			const common = { affinityKey: "conn-1", now: Date.parse("2026-10-28T05:10:00.000Z") };
+			const viaProviders = await resolveProxyConfigAsync({
+				...common,
+				proxyPolicy: {
+					mode: "required",
+					providers: ["smartproxy"],
+					geo: { country: "KR" },
+					session,
+				},
+			});
+			const viaProvider = await resolveProxyConfigAsync({
+				...common,
+				proxyPolicy: { mode: "required", provider: "smartproxy", geo: { country: "KR" }, session },
+			});
+			expect(viaProviders).toMatchObject({ source: "smartproxy-gateway", sticky: true });
+			expect(viaProvider).toEqual(viaProviders);
 		});
 	});
 });

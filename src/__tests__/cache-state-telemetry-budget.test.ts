@@ -238,8 +238,8 @@ describe("cache/state header budget", () => {
 		const proxy = new ProxyTelemetryCollector();
 		proxy.recordProxyResolution({
 			provider: "smartproxy",
-			cacheStatus: "memory_hit",
-			cacheHit: true,
+			cacheStatus: "disabled",
+			cacheHit: false,
 			resolutionMs: 120,
 			attempts: 2,
 		});
