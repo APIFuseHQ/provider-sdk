@@ -1775,9 +1775,13 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 		 * 5xx, the request is sent exactly once more through the next pool entry,
 		 * and the call keeps that offset. The second answer is final: a refusal
 		 * there is returned or thrown as usual. The refused attempt is recorded in
-		 * proxy telemetry as outcome `exit_refused` with the exit hash and status,
-		 * so an exit refusal and an upstream 5xx are distinct classes. Default off.
-		 * A classified challenge is never rotated: it is solvable where it was served.
+		 * proxy telemetry as outcome `error` with `errorCode: "PROXY_EXIT_REFUSED"`,
+		 * the exit hash and status, so an exit refusal and an upstream 5xx are
+		 * distinct classes. Default off. A classified challenge is never rotated:
+		 * it is solvable where it was served. Rotation follows the transport-retry
+		 * method policy: safe methods (GET, HEAD, OPTIONS) with no body by default;
+		 * an unsafe method only when `retry.methods` lists it together with
+		 * `retry.unsafeMethodPolicy: "allow_explicit_unsafe"`, and never with a body.
 		 */
 		rotateExitOnAdmissionRefusal?: boolean;
 	};

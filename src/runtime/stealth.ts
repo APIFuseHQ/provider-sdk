@@ -1924,7 +1924,6 @@ function createSessionFetcher(
 				...(requestBody === undefined ? {} : { body: requestBody }),
 			};
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
-			const rotateExitOnAdmissionRefusal = options.stealth?.rotateExitOnAdmissionRefusal === true;
 			let exitRotationSpent = false;
 			let challengeSolveAttempted = false;
 			let challengeRefetchAttempted = false;
@@ -1957,6 +1956,18 @@ function createSessionFetcher(
 					throw redactSensitiveRequestError(error, url, options.sensitiveParams);
 				}
 			})();
+			// Exit rotation re-sends the request through another exit after the origin
+			// may already have processed it, so it follows the transport-retry method
+			// policy (safe methods by default; an unsafe method only when the caller
+			// opted in through `retry.methods` + `retry.unsafeMethodPolicy`) and never
+			// re-sends a body.
+			const rotateExitOnAdmissionRefusal =
+				options.stealth?.rotateExitOnAdmissionRefusal === true &&
+				isProxyTransportRetryMethod(
+					method,
+					stealthRetryOptions ?? createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
+					{ body: requestBody },
+				);
 			throwIfAmbientAborted(clientOptions.signal);
 			const hasPolicyProxy = isPolicyManagedProxy(clientOptions);
 			const usesPolicyAllocator = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
@@ -2013,7 +2024,7 @@ function createSessionFetcher(
 					let attemptRecorded = false;
 					const attemptEgressGeneration = currentEgressGeneration();
 					const recordProxyAttempt = (
-						outcome: "ok" | "error" | "exit_refused",
+						outcome: "ok" | "error",
 						errorCode?: string,
 						status?: number,
 					) => {
@@ -2557,7 +2568,7 @@ function createSessionFetcher(
 						return finalizeAttempt(response, normalized);
 					} catch (error) {
 						if (error instanceof TransportError && error.code === PROXY_EXIT_REFUSED_CODE) {
-							recordProxyAttempt("exit_refused", PROXY_EXIT_REFUSED_CODE, error.status);
+							recordProxyAttempt("error", PROXY_EXIT_REFUSED_CODE, error.status);
 							lastError = redactAttemptError(error);
 							continue;
 						}

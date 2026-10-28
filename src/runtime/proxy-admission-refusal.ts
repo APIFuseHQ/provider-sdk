@@ -3,7 +3,7 @@ import { TransportError } from "../errors.js";
 /**
  * Internal attempt classification for a proxy exit the origin's admission
  * layer refused. Surfaces only in proxy telemetry (`attemptSamples[].o ===
- * "exit_refused"`, `c === "PROXY_EXIT_REFUSED"`); the request itself is sent
+ * "error"`, `c === "PROXY_EXIT_REFUSED"`); the request itself is sent
  * once more through the next pool entry, and that attempt's answer is what the
  * caller sees.
  */

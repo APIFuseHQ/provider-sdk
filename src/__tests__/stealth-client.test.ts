@@ -8362,7 +8362,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 				status,
 			]),
 		).toEqual([
-			[1, 0, "exit_refused", "PROXY_EXIT_REFUSED", 403],
+			[1, 0, "error", "PROXY_EXIT_REFUSED", 403],
 			[2, 1, "ok", undefined, 200],
 		]);
 		expect(attempts[0]?.proxyHash).toEqual(expect.any(String));
@@ -8373,7 +8373,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 				.toLogPayload()
 				?.attemptSamples?.map(({ a, i, h, o, c, s }) => ({ a, i, h, o, c, s })),
 		).toEqual([
-			{ a: 1, i: 0, h: attempts[0]?.proxyHash, o: "exit_refused", c: "PROXY_EXIT_REFUSED", s: 403 },
+			{ a: 1, i: 0, h: attempts[0]?.proxyHash, o: "error", c: "PROXY_EXIT_REFUSED", s: 403 },
 			{ a: 2, i: 1, h: attempts[1]?.proxyHash, o: "ok", c: undefined, s: 200 },
 		]);
 		client.close?.();
@@ -8394,7 +8394,7 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 		expect(allWreqCalls()).toHaveLength(2);
 		expect(mockStealthState.queuedResponses).toHaveLength(1);
 		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
-			["exit_refused", 503, "PROXY_EXIT_REFUSED"],
+			["error", 503, "PROXY_EXIT_REFUSED"],
 			["error", 503, "upstream_http_error"],
 		]);
 		client.close?.();
@@ -8414,9 +8414,9 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 
 		expect(response).toMatchObject({ status: 403, body: "<html>Forbidden again</html>" });
 		expect(allWreqCalls()).toHaveLength(2);
-		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([
-			["exit_refused", 403],
-			["ok", 403],
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 403, "PROXY_EXIT_REFUSED"],
+			["ok", 403, undefined],
 		]);
 		client.close?.();
 	});
@@ -8460,6 +8460,118 @@ describe("stealth.rotateExitOnAdmissionRefusal", () => {
 		expect(response.status).toBe(403);
 		expect(allWreqCalls()).toHaveLength(1);
 		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([["ok", 403]]);
+		client.close?.();
+	});
+
+	it("does not rotate a POST with a body: the 503 is thrown after exactly one request", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(2);
+
+		await expect(
+			client.fetch("/orders", {
+				method: "POST",
+				body: JSON.stringify({ sku: "a-1", qty: 1 }),
+				headers: { "content-type": "application/json" },
+				stealth: { rotateExitOnAdmissionRefusal: true },
+			}),
+		).rejects.toMatchObject({ code: "upstream_http_error", status: 503 });
+
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 503, "upstream_http_error"],
+		]);
+		client.close?.();
+	});
+
+	it("returns the 503 of a POST with a body to a throwOnHttpError: false caller without rotating", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(2);
+
+		const response = await client.fetch("/orders", {
+			method: "POST",
+			body: JSON.stringify({ sku: "a-1", qty: 1 }),
+			headers: { "content-type": "application/json" },
+			throwOnHttpError: false,
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 503, body: "upstream down" });
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(attempts.map(({ outcome, status }) => [outcome, status])).toEqual([["ok", 503]]);
+		client.close?.();
+	});
+
+	it("does not rotate a bodiless POST unless the caller opted the method into retry", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "must not be reached", headers: {} },
+		);
+		const { client } = await createPooledClient(2);
+
+		await expect(
+			client.fetch("/orders", {
+				method: "POST",
+				stealth: { rotateExitOnAdmissionRefusal: true },
+			}),
+		).rejects.toMatchObject({ code: "upstream_http_error", status: 503 });
+
+		expect(allWreqCalls()).toHaveLength(1);
+		client.close?.();
+	});
+
+	it("rotates a bodiless POST when retry.methods and unsafeMethodPolicy opt it in", async () => {
+		const { HttpRetryUnsafeMethodPolicy } = await import("../types.js");
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "admitted", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(2);
+
+		const response = await client.fetch("/orders", {
+			method: "POST",
+			retry: {
+				methods: ["POST"],
+				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.AllowExplicitUnsafe,
+			},
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 200, body: "admitted" });
+		expect(allWreqCalls()).toHaveLength(2);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 503, "PROXY_EXIT_REFUSED"],
+			["ok", 200, undefined],
+		]);
+		client.close?.();
+	});
+
+	it("still rotates a GET on a first-attempt 503", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 503, body: "upstream down", headers: {} },
+			{ status: 200, body: "admitted", headers: {} },
+		);
+		const { client, attempts } = await createPooledClient(2);
+
+		const response = await client.fetch("/gated", {
+			method: "GET",
+			stealth: { rotateExitOnAdmissionRefusal: true },
+		});
+
+		expect(response).toMatchObject({ status: 200, body: "admitted" });
+		expect(allWreqCalls()).toHaveLength(2);
+		const [first, second] = usedProxies();
+		expect(second).not.toBe(first);
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["error", 503, "PROXY_EXIT_REFUSED"],
+			["ok", 200, undefined],
+		]);
 		client.close?.();
 	});
 
