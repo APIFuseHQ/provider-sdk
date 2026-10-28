@@ -150,11 +150,11 @@ proxy: {
 },
 ```
 
-Each attempt encodes one carrier, `isp[poolIndex % isp.length]`. When an
+Each attempt encodes one carrier, `isp[attempt % isp.length]`. When an
 upstream's edge answers with a block page that issues a session cookie, do not
 retry by hand: declare the cookie as session state (below). The SDK re-sends
-the blocked request once carrying the cookie, on the next pool slot (next
-carrier, new sid), exactly as a caller retry with `proxyAttemptOffset: 1`
+the blocked request once carrying the cookie, on the next attempt (next
+carrier, new session id), exactly as a caller retry with `proxyAttemptOffset: 1`
 would, and later calls carry the pooled cookie from the start.
 
 ### Session state (`sessionState`)
