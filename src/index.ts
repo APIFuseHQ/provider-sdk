@@ -319,8 +319,11 @@ export {
 export { createUnsupportedResolverClient } from "./runtime/resolver-shared.js";
 export type { ResolverRuntimeOptions } from "./runtime/resolver.js";
 export {
+	createResolverVendorHealthRegistry,
 	getResolverVendorHealthSnapshot,
+	type ResolverVendorBalanceRecord,
 	type ResolverVendorCooldownReason,
+	type ResolverVendorHealthRegistry,
 	type ResolverVendorHealthSnapshot,
 	type ResolverVendorSolveStats,
 } from "./runtime/resolver-vendor-health.js";

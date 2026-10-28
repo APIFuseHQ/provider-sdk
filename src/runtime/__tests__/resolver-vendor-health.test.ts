@@ -15,6 +15,7 @@ import {
 	APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS,
 	createResolverClient,
 	createResolverClientFromEnvForTests,
+	createResolverVendorHealthRegistry,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
 	DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS,
 	getResolverSolutionSource,
@@ -32,6 +33,7 @@ import {
 import {
 	getResolverVendorHealthSnapshot,
 	resetResolverVendorHealthForTests,
+	type ResolverVendorHealthRegistry,
 } from "../resolver-vendor-health.js";
 import { createCapsolverResolverVendorAdapter } from "../resolver-vendors/capsolver.js";
 import { createTwoCaptchaResolverVendorAdapter } from "../resolver-vendors/twocaptcha.js";
@@ -235,6 +237,7 @@ describe("A1 token-form solution cache", () => {
 describe("A2 detached completion and in-flight joining", () => {
 	it("keeps polling after the caller aborts, writes the cache, and reports detached_completed", async () => {
 		const { cache } = createRecordingCache();
+		const vendorHealth = createResolverVendorHealthRegistry();
 		const poll = deferred<ChallengeSolution>();
 		const vendor = createStubAdapter("2captcha", () => poll.promise);
 		const first = createEventSink();
@@ -243,6 +246,7 @@ describe("A2 detached completion and in-flight joining", () => {
 			adapters: [vendor.adapter],
 			cache,
 			telemetry: first.sink,
+			vendorHealth,
 		});
 		const caller = new AbortController();
 		const callerLeft = new Error("caller closed the connection");
@@ -258,7 +262,7 @@ describe("A2 detached completion and in-flight joining", () => {
 		poll.resolve(tokenSolution("waf-token-late"));
 		await detached;
 
-		expect(getResolverVendorHealthSnapshot().find((entry) => entry.vendor === "2captcha")).toMatchObject({
+		expect(vendorHealth.snapshot().find((entry) => entry.vendor === "2captcha")).toMatchObject({
 			detached: { completed: 1, failed: 0 },
 		});
 		const second = createEventSink();
@@ -275,6 +279,7 @@ describe("A2 detached completion and in-flight joining", () => {
 
 	it("reports detached_failed when the abandoned poll fails", async () => {
 		const { cache } = createRecordingCache();
+		const vendorHealth = createResolverVendorHealthRegistry();
 		const poll = deferred<ChallengeSolution>();
 		const vendor = createStubAdapter("2captcha", () => poll.promise);
 		const sink = createEventSink();
@@ -284,6 +289,7 @@ describe("A2 detached completion and in-flight joining", () => {
 			adapters: [vendor.adapter],
 			cache,
 			telemetry: sink.sink,
+			vendorHealth,
 		}).solve(CHALLENGE, caller.signal);
 		await vendor.called();
 		caller.abort(new Error("gone"));
@@ -292,7 +298,7 @@ describe("A2 detached completion and in-flight joining", () => {
 		const failed = sink.nextOutcome("detached_failed");
 		poll.reject(new ResolverVendorUnavailableError("2captcha", "transport_failure"));
 		await failed;
-		expect(getResolverVendorHealthSnapshot().find((entry) => entry.vendor === "2captcha")).toMatchObject({
+		expect(vendorHealth.snapshot().find((entry) => entry.vendor === "2captcha")).toMatchObject({
 			detached: { completed: 0, failed: 1 },
 		});
 	});
@@ -391,9 +397,15 @@ describe("A3 solve budget", () => {
 			clock += 2_000;
 			return tokenSolution("fast");
 		});
-		const warmup = createResolverClient({ kinds: ["aws_waf"], adapters: [slow.adapter], now });
+		const vendorHealth = createResolverVendorHealthRegistry();
+		const warmup = createResolverClient({
+			kinds: ["aws_waf"],
+			adapters: [slow.adapter],
+			vendorHealth,
+			now,
+		});
 		for (let call = 0; call < 3; call += 1) await warmup.solve(CHALLENGE);
-		expect(getResolverVendorHealthSnapshot(now()).find((entry) => entry.vendor === "capsolver")).toMatchObject({
+		expect(vendorHealth.snapshot(now()).find((entry) => entry.vendor === "capsolver")).toMatchObject({
 			solves: [{ kind: "aws_waf", samples: 3, successes: 3, p50Ms: 30_000 }],
 		});
 
@@ -403,6 +415,7 @@ describe("A3 solve budget", () => {
 			adapters: [slow.adapter, fast.adapter],
 			deadlineAtMs: now() + 20_000 + RESOLVER_BUDGET_MARGIN_MS,
 			telemetry: sink.sink,
+			vendorHealth,
 			now,
 		}).solve(CHALLENGE);
 
@@ -446,17 +459,19 @@ describe("A4 vendor cooldown", () => {
 	it("skips a zero-balance vendor without a call for the cooldown window, then retries it", async () => {
 		let clock = 1_700_000_000_000;
 		const now = () => clock;
+		const vendorHealth = createResolverVendorHealthRegistry();
 		const capsolver = exhaustedVendor("capsolver");
 		const twoCaptcha = createStubAdapter("2captcha", async () => tokenSolution("fallback"));
 		const chain = () =>
 			createResolverClient({
 				kinds: ["aws_waf"],
 				adapters: [capsolver.adapter, twoCaptcha.adapter],
+				vendorHealth,
 				now,
 			});
 		await chain().solve(CHALLENGE);
 		expect(capsolver.state.solveCalls).toBe(1);
-		expect(getResolverVendorHealthSnapshot(now()).find((entry) => entry.vendor === "capsolver")).toMatchObject({
+		expect(vendorHealth.snapshot(now()).find((entry) => entry.vendor === "capsolver")).toMatchObject({
 			cooldown: {
 				reason: "allocation_exhausted",
 				startedAtMs: clock,
@@ -470,6 +485,7 @@ describe("A4 vendor cooldown", () => {
 			kinds: ["aws_waf"],
 			adapters: [capsolver.adapter, twoCaptcha.adapter],
 			telemetry: sink.sink,
+			vendorHealth,
 			now,
 		}).solve(CHALLENGE);
 		expect(capsolver.state.solveCalls).toBe(1);
@@ -485,27 +501,35 @@ describe("A4 vendor cooldown", () => {
 		expect(capsolver.state.solveCalls).toBe(2);
 	});
 
-	it("reads the cooldown window from the resolver environment", async () => {
-		let clock = 1_700_000_000_000;
+	it("reads the cooldown window from the resolver environment and shares it per env object", async () => {
 		const capsolver = exhaustedVendor("capsolver");
 		const twoCaptcha = createStubAdapter("2captcha", async () => tokenSolution("fallback"));
-		const chain = () =>
-			createResolverClientFromEnvForTests(
-				{ kinds: ["aws_waf"] },
-				{
-					[APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-capsolver",
-					[APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-2captcha",
-					[APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS]: "1000",
-				},
-				{},
-				{ capsolver: () => capsolver.adapter, "2captcha": () => twoCaptcha.adapter },
-			);
+		const env = {
+			[APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-capsolver",
+			[APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-2captcha",
+			[APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS]: "1000",
+		};
+		const vendorHealth = createResolverVendorHealthRegistry();
+		const chain = (options: { vendorHealth?: ResolverVendorHealthRegistry } = {}) =>
+			createResolverClientFromEnvForTests({ kinds: ["aws_waf"] }, env, options, {
+				capsolver: () => capsolver.adapter,
+				"2captcha": () => twoCaptcha.adapter,
+			});
+		const startedAt = Date.now();
+		await chain({ vendorHealth }).solve(CHALLENGE);
+		const cooldown = vendorHealth.snapshot(startedAt).find((entry) => entry.vendor === "capsolver")
+			?.cooldown;
+		expect(cooldown).toBeDefined();
+		expect((cooldown?.untilMs ?? 0) - (cooldown?.startedAtMs ?? 0)).toBe(1_000);
+		expect(
+			vendorHealth.snapshot((cooldown?.untilMs ?? 0) + 1).find((entry) => entry.vendor === "capsolver")
+				?.cooldown,
+		).toBeUndefined();
+
 		await chain().solve(CHALLENGE);
-		expect(getResolverVendorHealthSnapshot(clock).find((entry) => entry.vendor === "capsolver")?.cooldown)
-			.toBeDefined();
-		clock = Date.now() + 1_000;
-		expect(getResolverVendorHealthSnapshot(clock).find((entry) => entry.vendor === "capsolver")?.cooldown)
-			.toBeUndefined();
+		await chain().solve(CHALLENGE);
+		expect(capsolver.state.solveCalls).toBe(2);
+		expect(getResolverVendorHealthSnapshot().find((entry) => entry.vendor === "capsolver")).toBeUndefined();
 	});
 });
 
@@ -578,13 +602,16 @@ describe("A5 vendor balance and health snapshot", () => {
 				throw new Error("solve must not run during a balance refresh");
 			},
 		};
+		const env = {
+			[APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-capsolver",
+			[APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-2captcha",
+		};
+		const vendorHealth = createResolverVendorHealthRegistry();
 		const snapshot = await refreshResolverVendorBalancesForTests(
 			{ kinds: ["aws_waf"] },
-			{
-				[APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-capsolver",
-				[APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-2captcha",
-			},
+			env,
 			{ capsolver: () => capsolver.adapter, "2captcha": () => twoCaptcha },
+			{ vendorHealth },
 		);
 
 		expect(capsolver.state.solveCalls).toBe(0);
@@ -596,9 +623,13 @@ describe("A5 vendor balance and health snapshot", () => {
 			balanceError: { reason: "transport_failure" },
 		});
 
-		await createResolverClient({ kinds: ["aws_waf"], adapters: [capsolver.adapter] }).solve(CHALLENGE);
+		await createResolverClient({
+			kinds: ["aws_waf"],
+			adapters: [capsolver.adapter],
+			vendorHealth,
+		}).solve(CHALLENGE);
 		expect(capsolver.state.balanceCalls).toBe(1);
-		expect(getResolverVendorHealthSnapshot().find((entry) => entry.vendor === "capsolver")).toMatchObject({
+		expect(vendorHealth.snapshot().find((entry) => entry.vendor === "capsolver")).toMatchObject({
 			balance: { amount: 1 },
 			solves: [{ kind: "aws_waf", samples: 1, successes: 1 }],
 		});

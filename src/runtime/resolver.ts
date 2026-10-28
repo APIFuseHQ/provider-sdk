@@ -69,15 +69,10 @@ import {
 	resolverTokenSolutionTtlMs,
 } from "./resolver-config.js";
 import {
-	getResolverVendorHealthSnapshot,
-	recordResolverVendorBalance,
-	recordResolverVendorDetachedOutcome,
-	recordResolverVendorSolveSample,
-	resetResolverVendorHealthForTests,
-	resolverVendorCooldownUntilMs,
-	resolverVendorSolveP50Ms,
+	createResolverVendorHealthRegistry,
+	type ResolverVendorHealthRegistry,
 	type ResolverVendorHealthSnapshot,
-	startResolverVendorCooldown,
+	resolverVendorHealthForEnv,
 } from "./resolver-vendor-health.js";
 import { resolverSpanAttributes } from "./resolver-span-attributes.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
@@ -108,8 +103,11 @@ export {
 	RESOLVER_TOKEN_SOLUTION_TTL_MS_BY_KIND,
 } from "./resolver-config.js";
 export {
+	createResolverVendorHealthRegistry,
 	getResolverVendorHealthSnapshot,
+	type ResolverVendorBalanceRecord,
 	type ResolverVendorCooldownReason,
+	type ResolverVendorHealthRegistry,
 	type ResolverVendorHealthSnapshot,
 	type ResolverVendorSolveStats,
 } from "./resolver-vendor-health.js";
@@ -176,6 +174,8 @@ export interface ResolverRuntimeOptions {
 	 * measured median solve cannot finish in the time left.
 	 */
 	readonly deadlineAtMs?: number;
+	/** Vendor cooldown, solve statistics and balances; defaults to the registry bound to the env. */
+	readonly vendorHealth?: ResolverVendorHealthRegistry;
 	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
 	readonly transport?: ResolverVendorTransport;
 	/** Creates an SDK-owned transport bound to the declared profile and server-owned scope. */
@@ -276,12 +276,6 @@ function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
 /** Internal test seam; deliberately not re-exported from the package root. */
 export function resetResolverInFlightSolvesForTests(): void {
 	inFlightResolverSolves.clear();
-}
-
-/** Internal test seam: clears in-flight solves and the process-wide vendor health state. */
-export function resetResolverRuntimeStateForTests(): void {
-	inFlightResolverSolves.clear();
-	resetResolverVendorHealthForTests();
 }
 const resolverCaches = new WeakMap<object, ProviderCache | null>();
 const solutionIssuerDigests = new WeakMap<object, string>();
@@ -1245,6 +1239,7 @@ function createResolverChainClient(options: {
 	readonly timeoutMs?: number;
 	readonly deadlineAtMs?: number;
 	readonly cooldownMs?: number;
+	readonly vendorHealth?: ResolverVendorHealthRegistry;
 	/** Test-only clock override for budget and health measurements. */
 	readonly now?: () => number;
 }): ResolverChainClient {
@@ -1254,6 +1249,7 @@ function createResolverChainClient(options: {
 	const timeoutMs = options.timeoutMs ?? DEFAULT_RESOLVER_TIMEOUT_MS;
 	const cooldownMs = options.cooldownMs ?? DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS;
 	const now = options.now ?? Date.now;
+	const vendorHealth = options.vendorHealth ?? createResolverVendorHealthRegistry();
 	const defaultUserAgent = (): string | undefined => {
 		try {
 			return resolveDefaultResolverUserAgent();
@@ -1415,13 +1411,13 @@ function createResolverChainClient(options: {
 					};
 					signal.throwIfAborted();
 					const loopNowMs = now();
-					if (resolverVendorCooldownUntilMs(entry.id, loopNowMs) !== undefined) {
+					if (vendorHealth.cooldownUntilMs(entry.id, loopNowMs) !== undefined) {
 						skipVendor("cooldown");
 						continue;
 					}
 					if (budgetDeadlineAtMs !== undefined) {
 						const remainingMs = budgetDeadlineAtMs - loopNowMs;
-						const p50Ms = resolverVendorSolveP50Ms(entry.id, challenge.kind);
+						const p50Ms = vendorHealth.solveP50Ms(entry.id, challenge.kind);
 						if (
 							budget?.signal.aborted ||
 							remainingMs <= 0 ||
@@ -1524,7 +1520,7 @@ function createResolverChainClient(options: {
 										},
 									})
 								: await solveAttempt();
-							recordResolverVendorSolveSample(adapter.id, challenge.kind, {
+							vendorHealth.recordSolveSample(adapter.id, challenge.kind, {
 								ms: now() - attemptStartedAt,
 								ok: true,
 							});
@@ -1533,14 +1529,14 @@ function createResolverChainClient(options: {
 							if (error instanceof ResolverVendorUnavailableError) {
 								if (error.reason === "allocation_exhausted") {
 									const exhaustedAt = now();
-									startResolverVendorCooldown(
+									vendorHealth.startCooldown(
 										adapter.id,
 										"allocation_exhausted",
 										exhaustedAt,
 										exhaustedAt + cooldownMs,
 									);
 								}
-								recordResolverVendorSolveSample(adapter.id, challenge.kind, {
+								vendorHealth.recordSolveSample(adapter.id, challenge.kind, {
 									ms: now() - attemptStartedAt,
 									ok: false,
 								});
@@ -1616,7 +1612,7 @@ function createResolverChainClient(options: {
 							const detachedVendor = adapter.id;
 							settled.then(
 								() => {
-									recordResolverVendorDetachedOutcome(detachedVendor, "completed");
+									vendorHealth.recordDetachedOutcome(detachedVendor, "completed");
 									options.telemetry?.recordOutcome({
 										outcome: "detached_completed",
 										solveMs: now() - solveStartedAt,
@@ -1624,7 +1620,7 @@ function createResolverChainClient(options: {
 									});
 								},
 								() => {
-									recordResolverVendorDetachedOutcome(detachedVendor, "failed");
+									vendorHealth.recordDetachedOutcome(detachedVendor, "failed");
 									options.telemetry?.recordOutcome({
 										outcome: "detached_failed",
 										solveMs: now() - solveStartedAt,
@@ -1764,6 +1760,8 @@ export function createResolverClient(options: {
 	readonly timeoutMs?: number;
 	readonly deadlineAtMs?: number;
 	readonly cooldownMs?: number;
+	/** Shared vendor health; omitted means this chain keeps its own cooldowns and statistics. */
+	readonly vendorHealth?: ResolverVendorHealthRegistry;
 	/** Test-only clock override for budget and health measurements. */
 	readonly now?: () => number;
 }): ResolverChainClient {
@@ -1790,6 +1788,7 @@ export function createResolverClient(options: {
 		timeoutMs: options.timeoutMs,
 		deadlineAtMs: options.deadlineAtMs,
 		cooldownMs: options.cooldownMs,
+		vendorHealth: options.vendorHealth,
 		now: options.now,
 	});
 }
@@ -1908,15 +1907,21 @@ function createResolverClientFromEnvInternal(
 		timeoutMs,
 		deadlineAtMs: options.deadlineAtMs,
 		cooldownMs,
+		vendorHealth: options.vendorHealth ?? resolverVendorHealthForEnv(env),
 	});
 }
 
 async function refreshResolverVendorBalancesInternal(
 	config: ProviderResolverConfig | undefined,
 	env: EnvLike,
-	options: { readonly signal?: AbortSignal; readonly timeoutMs?: number },
+	options: {
+		readonly signal?: AbortSignal;
+		readonly timeoutMs?: number;
+		readonly vendorHealth?: ResolverVendorHealthRegistry;
+	},
 	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
 ): Promise<readonly ResolverVendorHealthSnapshot[]> {
+	const vendorHealth = options.vendorHealth ?? resolverVendorHealthForEnv(env);
 	if (config && (config.vendors === undefined || config.vendors.length > 0)) {
 		const timeoutMs = options.timeoutMs ?? DEFAULT_RESOLVER_BALANCE_TIMEOUT_MS;
 		await Promise.all(
@@ -1933,9 +1938,9 @@ async function refreshResolverVendorBalancesInternal(
 					: boundSignal;
 				try {
 					const { balance } = await adapter.getBalance(signal);
-					recordResolverVendorBalance(adapter.id, { balance, checkedAtMs });
+					vendorHealth.recordBalance(adapter.id, { balance, checkedAtMs });
 				} catch (error) {
-					recordResolverVendorBalance(adapter.id, {
+					vendorHealth.recordBalance(adapter.id, {
 						error:
 							error instanceof ResolverVendorUnavailableError
 								? error.reason
@@ -1948,17 +1953,22 @@ async function refreshResolverVendorBalancesInternal(
 			}),
 		);
 	}
-	return getResolverVendorHealthSnapshot();
+	return vendorHealth.snapshot();
 }
 
 /**
- * Polls each configured vendor's balance endpoint once and returns the vendor health snapshot.
- * Never called by the solve path: a host (health monitor) runs it on its own cadence.
+ * Polls each configured vendor's balance endpoint once and returns the vendor health snapshot
+ * of the registry bound to `env` (the process-wide one for `process.env`). Never called by the
+ * solve path: a host (health monitor) runs it on its own cadence.
  */
 export function refreshResolverVendorBalances(
 	config: ProviderResolverConfig | undefined,
 	env: EnvLike = process.env,
-	options: { readonly signal?: AbortSignal; readonly timeoutMs?: number } = {},
+	options: {
+		readonly signal?: AbortSignal;
+		readonly timeoutMs?: number;
+		readonly vendorHealth?: ResolverVendorHealthRegistry;
+	} = {},
 ): Promise<readonly ResolverVendorHealthSnapshot[]> {
 	return refreshResolverVendorBalancesInternal(config, env, options, RESOLVER_ADAPTER_REGISTRY);
 }
@@ -1968,7 +1978,11 @@ export function refreshResolverVendorBalancesForTests(
 	config: ProviderResolverConfig | undefined,
 	env: EnvLike,
 	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
-	options: { readonly signal?: AbortSignal; readonly timeoutMs?: number } = {},
+	options: {
+		readonly signal?: AbortSignal;
+		readonly timeoutMs?: number;
+		readonly vendorHealth?: ResolverVendorHealthRegistry;
+	} = {},
 ): Promise<readonly ResolverVendorHealthSnapshot[]> {
 	return refreshResolverVendorBalancesInternal(config, env, options, adapterFactories);
 }

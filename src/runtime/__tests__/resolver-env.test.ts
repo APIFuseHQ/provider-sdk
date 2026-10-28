@@ -14,12 +14,8 @@ import {
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	createResolverClientFromEnv,
 	swapResolverAdapterFactoryForTests,
-	resetResolverRuntimeStateForTests,
 } from "../resolver.js";
-
-beforeEach(() => {
-	resetResolverRuntimeStateForTests();
-});
+import { resetResolverVendorHealthForTests } from "../resolver-vendor-health.js";
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,
@@ -53,6 +49,11 @@ function installNodemavenTestCredentials(): () => void {
 		else process.env[NODEMAVEN_PASSWORD_ENV] = originalPassword;
 	};
 }
+
+beforeEach(() => {
+	// The server wiring under test shares the process-wide vendor registry (process.env).
+	resetResolverVendorHealthForTests();
+});
 
 describe("resolver env availability", () => {
 	it("fails closed when the provider does not declare resolver capability", async () => {

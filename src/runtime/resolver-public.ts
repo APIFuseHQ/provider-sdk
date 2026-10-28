@@ -9,6 +9,7 @@ export {
 	bindResolverSignal,
 	createResolverClient,
 	createResolverClientFromEnv,
+	createResolverVendorHealthRegistry,
 	createUnsupportedResolverClient,
 	DEFAULT_RESOLVER_VENDOR_PREFERENCE,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
@@ -27,7 +28,9 @@ export {
 	type ResolverInstrumentationMetadata,
 	type ResolverRuntimeOptions,
 	type ResolverSolutionSource,
+	type ResolverVendorBalanceRecord,
 	type ResolverVendorCooldownReason,
+	type ResolverVendorHealthRegistry,
 	type ResolverVendorHealthSnapshot,
 	type ResolverVendorSolveStats,
 } from "./resolver.js";
