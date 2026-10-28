@@ -9,27 +9,39 @@
  * - Modules: every import the module graph resolves (static `import`,
  *   `export … from`, `require()`, and `import()` with a literal specifier)
  *   passes through a resolve plugin. Node and Bun built-ins outside
- *   `RUNTIME_MODULE_ALLOWLIST`, the browser driver packages, and the SDK's
+ *   `RUNTIME_MODULE_ALLOWLIST` (any `node:` specifier counts as a built-in,
+ *   known to this Bun or not), the browser driver packages, and the SDK's
  *   own browser runtime subpath are violations. An `import()` or `require()`
  *   whose specifier is not a literal cannot be resolved at build time and is a
- *   violation on its own.
- * - Globals: `process`, `Bun`, `globalThis`, `global`, `fetch`, `WebSocket`,
- *   `Worker`, `import.meta.env` and `import.meta.require` are rewritten by the
- *   bundler's `define` to a per-build sentinel. The bundler's own scope
- *   analysis decides what is a free reference (a shadowing parameter or local
- *   is left alone), so the check cannot be fooled by aliasing or by reaching
- *   the global through `globalThis`. The bundle is then parsed and every
- *   sentinel reference is judged by member path: `process.env.APIFUSE__RUNTIME__*`
- *   and a few read-only `process` members, `Bun` helpers that touch neither the
- *   filesystem nor the network nor processes, and `globalThis.<anything not
- *   on the denied list>` are allowed. Everything else is a violation.
+ *   violation on its own, and so is `require` used as a value (`const r =
+ *   require`, `require.main.require(...)`): the bundler rewrites `require` to
+ *   its own helper, and every reference to that helper that is not a direct
+ *   call is reported.
+ * - Globals: `process`, `Bun`, `globalThis`, `global`, `self`, `fetch`,
+ *   `WebSocket`, `Worker`, `import.meta.env` and `import.meta.require` are
+ *   rewritten by the bundler's `define` to a per-build sentinel. The bundler's
+ *   own scope analysis decides what is a free reference (a shadowing parameter
+ *   or local is left alone), so the check cannot be fooled by aliasing or by
+ *   reaching the global through `globalThis`, `global` or `self` (the three
+ *   names Bun binds to the global object; `window`, `frames`, `top` and
+ *   `parent` do not exist in Bun), chained to any depth. The bundle is then
+ *   parsed and every sentinel reference is judged by member path:
+ *   `process.env.APIFUSE__RUNTIME__*` and a few read-only `process` members,
+ *   `Bun` helpers that touch neither the filesystem nor the network nor
+ *   processes, and `globalThis.<anything not on the denied list>` are allowed.
+ *   Everything else is a violation.
  *
  * Positions come from the bundle's source map, so every violation names the
- * provider file, line and column. Only code reachable from the entry is
- * judged, and only bindings the bundler keeps (an imported-but-unused binding
- * is dropped before resolution): this is the code the pod executes, not a
- * directory walk. Tests, scripts and the root bootstrap files are outside the
- * graph by construction.
+ * provider file, line and column. The graph is rooted at `index.ts` (the
+ * provider definition) and at `start.ts` when it exists (the file the pod
+ * runs with `bun run start`), so a module reached only from the bootstrap is
+ * judged too. Only code reachable from those roots is judged, and only
+ * bindings the bundler keeps (an imported-but-unused binding is dropped before
+ * resolution): this is the code the pod executes, not a directory walk.
+ * Findings inside the root bootstrap files themselves (`dev.ts`, `start.ts`,
+ * `deploy.ts`) are dropped, as the source rules this check replaced dropped
+ * them: they read the port and pod identity before a context exists. Tests
+ * and scripts are outside the graph by construction.
  *
  * Browser driver findings are warnings in `standalone` lint mode (the bounty
  * mode `apifuse submit-check` runs in) and errors otherwise; every other
@@ -68,9 +80,18 @@ export type ProviderBundle = {
 
 export type BundleProviderOptions = {
 	mode?: ProviderLintMode;
-	/** Entry file relative to the provider root; defaults to `index.ts`. */
-	entry?: string;
 };
+
+/** The provider definition; always a graph root. */
+const PROVIDER_ENTRY_FILE = "index.ts";
+/** What the pod runs (`bun run start`); a graph root when present. */
+const POD_ENTRY_FILE = "start.ts";
+/**
+ * Root bootstrap files `serve()` / `startDevServer()` are called from. They
+ * are in the graph (so what they import is judged) but their own findings are
+ * dropped, as the retired source rules dropped them.
+ */
+const BOOTSTRAP_FILE_PATTERN = /^(?:dev|start|deploy)\.[cm]?[jt]sx?$/;
 
 /**
  * Node built-ins provider runtime code may import (with or without `node:`).
@@ -181,6 +202,7 @@ const DEFINED_GLOBALS: Readonly<Record<string, string>> = Object.freeze({
 	Bun: "Bun",
 	globalThis: "globalThis",
 	global: "global",
+	self: "self",
 	fetch: "fetch",
 	WebSocket: "WebSocket",
 	Worker: "Worker",
@@ -188,6 +210,8 @@ const DEFINED_GLOBALS: Readonly<Record<string, string>> = Object.freeze({
 	"import.meta.require": "import_meta_require",
 });
 
+/** The names Bun binds to the global object itself (`self === globalThis`). */
+const GLOBAL_OBJECT_ALIASES: ReadonlySet<string> = new Set(["globalThis", "global", "self"]);
 const PROCESS_MEMBERS: ReadonlySet<string> = new Set(PROCESS_MEMBER_ALLOWLIST);
 const BUN_MEMBERS: ReadonlySet<string> = new Set(BUN_MEMBER_ALLOWLIST);
 const ALLOWED_MODULES: ReadonlySet<string> = new Set(RUNTIME_MODULE_ALLOWLIST);
@@ -212,9 +236,18 @@ function matchesPackage(specifier: string, packageName: string): boolean {
 	return specifier === packageName || specifier.startsWith(`${packageName}/`);
 }
 
+/**
+ * A node built-in: one this Bun knows, or any `node:` specifier. A `node:`
+ * module this Bun does not ship (`node:sqlite`) is still a reach outside the
+ * boundary once a Bun that ships it runs the pod.
+ */
+function isNodeModule(specifier: string): boolean {
+	return (isBuiltin(specifier) && !isBunModule(specifier)) || specifier.startsWith("node:");
+}
+
 /** Specifier as the bundle names it, so plugin decisions and output positions meet. */
 function moduleKey(specifier: string): string {
-	return isBuiltin(specifier) && !isBunModule(specifier) ? stripNodePrefix(specifier) : specifier;
+	return isNodeModule(specifier) ? stripNodePrefix(specifier) : specifier;
 }
 
 function decideModule(specifier: string, mode: ProviderLintMode): ModuleDecision {
@@ -226,7 +259,7 @@ function decideModule(specifier: string, mode: ProviderLintMode): ModuleDecision
 			message: `"${specifier}" is outside the provider runtime boundary. ${CONTEXT_HINT}`,
 		};
 	}
-	if (isBuiltin(specifier)) {
+	if (isNodeModule(specifier)) {
 		if (ALLOWED_MODULES.has(stripNodePrefix(specifier))) return { allowed: true };
 		return {
 			allowed: false,
@@ -271,7 +304,8 @@ function judgeGlobal(root: string, chain: readonly ChainSegment[]): string | und
 	const subject = formatChain(root, chain);
 	switch (root) {
 		case "globalThis":
-		case "global": {
+		case "global":
+		case "self": {
 			const first = chain[0];
 			if (!first) {
 				return `${root} is passed around as a value; provider runtime code reaches globals by name, and only the ones the SDK context does not already cover.`;
@@ -445,11 +479,14 @@ function scanBundle(
 	sourceFile: import("typescript").SourceFile;
 	modules: Array<{ specifier: string; offset: number }>;
 	dynamic: Array<{ subject: string; offset: number }>;
+	/** The bundler's `require` helper referenced other than as a call's callee. */
+	requireValues: Array<{ offset: number }>;
 	globals: Array<{ root: string; chain: ChainSegment[]; offset: number }>;
 } {
 	const sourceFile = ts.createSourceFile("bundle.js", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 	const modules: Array<{ specifier: string; offset: number }> = [];
 	const dynamic: Array<{ subject: string; offset: number }> = [];
+	const requireValues: Array<{ offset: number }> = [];
 	const globals: Array<{ root: string; chain: ChainSegment[]; offset: number }> = [];
 
 	const recordLoad = (argument: import("typescript").Node | undefined, call: import("typescript").CallExpression, form: string) => {
@@ -474,6 +511,15 @@ function scanBundle(
 			} else if (ts.isIdentifier(node.expression) && BUNDLER_REQUIRE_HELPER_PATTERN.test(node.expression.text)) {
 				recordLoad(node.arguments[0], node, "require");
 			}
+		} else if (ts.isIdentifier(node) && BUNDLER_REQUIRE_HELPER_PATTERN.test(node.text)) {
+			// The helper's own declaration (`var __require = createRequire(...)`)
+			// and a direct call (handled above) are the bundler's doing; any other
+			// reference is provider code holding `require` as a value.
+			const parent = node.parent;
+			const declared = ts.isVariableDeclaration(parent) && parent.name === node;
+			const called = ts.isCallExpression(parent) && parent.expression === node;
+			const probed = ts.isTypeOfExpression(parent);
+			if (!declared && !called && !probed) requireValues.push({ offset: node.getStart(sourceFile) });
 		} else if (ts.isIdentifier(node) && node.text === sentinel) {
 			const chain: ChainSegment[] = [];
 			let current: import("typescript").Node = node;
@@ -495,7 +541,7 @@ function scanBundle(
 			const probed =
 				current.parent !== undefined &&
 				ts.isTypeOfExpression(current.parent) &&
-				(chain.length === 1 || (chain.length === 2 && (root === "globalThis" || root === "global")));
+				(chain.length === 1 || (chain.length === 2 && root !== undefined && GLOBAL_OBJECT_ALIASES.has(root)));
 			if (!probed && root !== undefined) {
 				globals.push({ root, chain: chain.slice(1), offset: node.getStart(sourceFile) });
 			}
@@ -503,14 +549,15 @@ function scanBundle(
 		ts.forEachChild(node, visit);
 	};
 	visit(sourceFile);
-	return { sourceFile, modules, dynamic, globals };
+	return { sourceFile, modules, dynamic, requireValues, globals };
 }
 
 /**
- * Bundle the provider entry and report everything the runtime graph reaches
- * outside the boundary. Throws only when the entry file is missing; a bundle
- * that does not build (syntax error, unresolvable relative import) is reported
- * as violations carrying the bundler's own file and line.
+ * Bundle the provider roots (`index.ts`, and `start.ts` when present) and
+ * report everything the runtime graph reaches outside the boundary. Throws
+ * only when `index.ts` is missing; a bundle that does not build (syntax error,
+ * unresolvable relative import) is reported as violations carrying the
+ * bundler's own file and line.
  */
 export async function bundleProvider(
 	providerRoot: string,
@@ -518,16 +565,18 @@ export async function bundleProvider(
 ): Promise<ProviderBundle> {
 	const mode = options.mode ?? "official";
 	const root = resolve(providerRoot);
-	const entry = resolve(root, options.entry ?? "index.ts");
+	const entry = resolve(root, PROVIDER_ENTRY_FILE);
 	if (!existsSync(entry)) {
 		throw new Error(`Provider entry not found: ${entry}`);
 	}
+	const podEntry = resolve(root, POD_ENTRY_FILE);
+	const entrypoints = existsSync(podEntry) ? [entry, podEntry] : [entry];
 
 	const sentinel = `__apifuse_boundary_${randomBytes(8).toString("hex")}__`;
 	const reached = new Map<string, ReachedModule>();
 
 	const result = await Bun.build({
-		entrypoints: [entry],
+		entrypoints,
 		root,
 		target: "node",
 		format: "esm",
@@ -552,7 +601,7 @@ export async function bundleProvider(
 						// An allowed package (or a tsconfig path alias) is left to Bun's own
 						// resolver; a built-in or a denied specifier is pinned external so the
 						// bundle keeps the reference the source map can point at.
-						const builtin = isBuiltin(specifier) || isBunModule(specifier);
+						const builtin = isNodeModule(specifier) || isBunModule(specifier);
 						if (decision.allowed && !builtin) return undefined;
 						if (!decision.allowed) {
 							reached.set(`${args.importer}\u0000${moduleKey(specifier)}`, {
@@ -587,20 +636,17 @@ export async function bundleProvider(
 		return { ok: false, violations };
 	}
 
-	const output = result.outputs.find((artifact) => artifact.kind === "entry-point");
-	const mapArtifact = result.outputs.find((artifact) => artifact.kind === "sourcemap");
-	if (!output || !mapArtifact) {
-		throw new Error("Bun.build produced no entry-point output or source map");
+	// Each root is emitted as its own bundle (no code splitting), so a module
+	// both roots reach appears in both outputs and its findings are deduplicated
+	// below. The source map is paired by path: `<output>.map`.
+	const outputs = result.outputs.filter((artifact) => artifact.kind === "entry-point");
+	const mapsByPath = new Map(
+		result.outputs.filter((artifact) => artifact.kind === "sourcemap").map((artifact) => [artifact.path, artifact]),
+	);
+	if (outputs.length !== entrypoints.length) {
+		throw new Error(`Bun.build produced ${outputs.length} entry-point outputs for ${entrypoints.length} roots`);
 	}
-	const code = await output.text();
-	const sourceMap = new SourceMapIndex(JSON.parse(await mapArtifact.text()), root);
 	const ts = getTypeScript();
-	const scan = scanBundle(ts, code, sentinel);
-
-	const positionOf = (offset: number): Position | undefined => {
-		const { line, character } = scan.sourceFile.getLineAndCharacterOfPosition(offset);
-		return sourceMap.lookup(line, character);
-	};
 
 	// Module reaches: the bundle names where each kept import sits; a reach the
 	// bundle did not keep (a side-effect-free re-export the bundler folded away)
@@ -612,23 +658,74 @@ export async function bundleProvider(
 		deniedBySpecifier.set(key, [...(deniedBySpecifier.get(key) ?? []), item]);
 	}
 	const located = new Set<ReachedModule>();
-	for (const { specifier, offset } of scan.modules) {
-		const candidates = deniedBySpecifier.get(moduleKey(specifier));
-		if (!candidates) continue;
-		const position = positionOf(offset);
-		const item =
-			candidates.find((candidate) => position && displayPath(root, candidate.importer) === position.file) ??
-			candidates[0];
-		if (!item || item.decision.allowed) continue;
-		located.add(item);
-		violations.push({
-			kind: "module",
-			level: item.decision.level,
-			subject: item.specifier,
-			...(position ?? locateSpecifier(root, item.importer, item.specifier)),
-			message: item.decision.message,
-		});
+
+	for (const output of outputs) {
+		const mapArtifact = mapsByPath.get(`${output.path}.map`);
+		if (!mapArtifact) {
+			throw new Error(`Bun.build produced no source map for ${output.path}`);
+		}
+		const sourceMap = new SourceMapIndex(JSON.parse(await mapArtifact.text()), root);
+		const scan = scanBundle(ts, await output.text(), sentinel);
+		const positionOf = (offset: number): Position | undefined => {
+			const { line, character } = scan.sourceFile.getLineAndCharacterOfPosition(offset);
+			return sourceMap.lookup(line, character);
+		};
+
+		for (const { specifier, offset } of scan.modules) {
+			const candidates = deniedBySpecifier.get(moduleKey(specifier));
+			if (!candidates) continue;
+			const position = positionOf(offset);
+			const item =
+				candidates.find((candidate) => position && displayPath(root, candidate.importer) === position.file) ??
+				candidates[0];
+			if (!item || item.decision.allowed) continue;
+			located.add(item);
+			violations.push({
+				kind: "module",
+				level: item.decision.level,
+				subject: item.specifier,
+				...(position ?? locateSpecifier(root, item.importer, item.specifier)),
+				message: item.decision.message,
+			});
+		}
+
+		for (const { subject, offset } of scan.dynamic) {
+			violations.push({
+				kind: "dynamic-import",
+				level: "error",
+				subject,
+				...(positionOf(offset) ?? { file: "", line: 0, column: 0 }),
+				message: `${subject} loads a module the build cannot resolve. Use a literal module path so the import is part of the checked runtime graph.`,
+			});
+		}
+
+		for (const { offset } of scan.requireValues) {
+			violations.push({
+				kind: "dynamic-import",
+				level: "error",
+				subject: "require",
+				...(positionOf(offset) ?? { file: "", line: 0, column: 0 }),
+				message:
+					"require is used as a value, so what it loads is outside the build-time check. Call require(<literal>) directly or use a static import.",
+			});
+		}
+
+		for (const { root: globalRoot, chain, offset } of scan.globals) {
+			const message = judgeGlobal(globalRoot, chain);
+			if (message === undefined) continue;
+			const displayRoot = globalRoot
+				.replace("import_meta_env", "import.meta.env")
+				.replace("import_meta_require", "import.meta.require");
+			violations.push({
+				kind: "global",
+				level: "error",
+				subject: formatChain(displayRoot, chain),
+				...(positionOf(offset) ?? { file: "", line: 0, column: 0 }),
+				message,
+			});
+		}
 	}
+
 	for (const item of reached.values()) {
 		if (item.decision.allowed || located.has(item)) continue;
 		violations.push({
@@ -640,31 +737,16 @@ export async function bundleProvider(
 		});
 	}
 
-	for (const { subject, offset } of scan.dynamic) {
-		violations.push({
-			kind: "dynamic-import",
-			level: "error",
-			subject,
-			...(positionOf(offset) ?? { file: "", line: 0, column: 0 }),
-			message: `${subject} loads a module the build cannot resolve. Use a literal module path so the import is part of the checked runtime graph.`,
-		});
-	}
-
-	for (const { root: globalRoot, chain, offset } of scan.globals) {
-		const message = judgeGlobal(globalRoot, chain);
-		if (message === undefined) continue;
-		const displayRoot = globalRoot.replace("import_meta_env", "import.meta.env").replace("import_meta_require", "import.meta.require");
-		violations.push({
-			kind: "global",
-			level: "error",
-			subject: formatChain(displayRoot, chain),
-			...(positionOf(offset) ?? { file: "", line: 0, column: 0 }),
-			message,
-		});
-	}
-
-	violations.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.column - b.column);
-	return { ok: violations.every((violation) => violation.level !== "error"), violations };
+	const seen = new Set<string>();
+	const kept = violations.filter((violation) => {
+		if (BOOTSTRAP_FILE_PATTERN.test(violation.file)) return false;
+		const key = [violation.kind, violation.file, violation.line, violation.column, violation.subject].join("\u0000");
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+	kept.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.column - b.column);
+	return { ok: kept.every((violation) => violation.level !== "error"), violations: kept };
 }
 
 /** `ERROR module upstream/session.ts:3:1: node:fs — message`, the line `apifuse check` prints. */

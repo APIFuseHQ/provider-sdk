@@ -201,6 +201,25 @@ export interface LintDiagnostic {
 export type ProviderLintMode = "official" | "standalone";
 
 /**
+ * @deprecated `lintProvider` takes no options: the browser-driver level the
+ * mode used to drive now belongs to `bundleProvider(providerRoot, { mode })`.
+ * The argument is ignored and is removed in the next major.
+ */
+type ProviderLintOptions = {
+	mode?: ProviderLintMode;
+};
+
+let warnedProviderLintOptions = false;
+
+function warnProviderLintOptionsOnce(options: ProviderLintOptions | undefined): void {
+	if (options === undefined || warnedProviderLintOptions) return;
+	warnedProviderLintOptions = true;
+	console.warn(
+		"[@apifuse/provider-sdk] lintProvider(provider, options) is deprecated: the options argument is ignored and is removed in the next major; pass mode to bundleProvider(providerRoot, { mode }) instead.",
+	);
+}
+
+/**
  * A non-blocking audit line: a finding the author acknowledged with
  * `// @apifuse-allow <rule>: <reason>`, kept visible in `apifuse check` output.
  */
@@ -3905,14 +3924,19 @@ export function lintProvider(
 		handle?: unknown;
 		state?: unknown;
 	},
+	/** @deprecated Ignored; pass `mode` to `bundleProvider(providerRoot, { mode })`. Removed in the next major. */
+	options?: ProviderLintOptions,
 ): LintDiagnostic[] {
-	return lintProviderWithInformation(provider).diagnostics;
+	return lintProviderWithInformation(provider, options).diagnostics;
 }
 
 /** Internal detailed result used by the CLI to render suppression audits. */
 export function lintProviderWithInformation(
 	provider: Parameters<typeof lintProvider>[0],
+	/** @deprecated Ignored; pass `mode` to `bundleProvider(providerRoot, { mode })`. Removed in the next major. */
+	options?: ProviderLintOptions,
 ): ProviderLintResult {
+	warnProviderLintOptionsOnce(options);
 	const diagnostics: LintDiagnostic[] = [
 		...lintAllowedHosts(provider.id, provider.allowedHosts),
 		...lintReviewed(provider.id, provider.reviewed),

@@ -1004,7 +1004,6 @@ export function bundleProvider(providerRoot: string, options?: BundleProviderOpt
 // @public (undocumented)
 export type BundleProviderOptions = {
     mode?: ProviderLintMode;
-    entry?: string;
 };
 
 // @public (undocumented)
@@ -3336,6 +3335,8 @@ export function lintOperation(op: {
     fixtures?: unknown;
 }): LintDiagnostic[];
 
+// Warning: (ae-forgotten-export) The symbol "ProviderLintOptions" needs to be exported by the entry point index.d.ts
+//
 // @public (undocumented)
 export function lintProvider(provider: {
     id?: string;
@@ -3380,7 +3381,16 @@ export function lintProvider(provider: {
     reviewed?: string;
     handle?: unknown;
     state?: unknown;
-}): LintDiagnostic[];
+},
+options?: ProviderLintOptions): LintDiagnostic[];
+
+// @public @deprecated
+export function lintRuntimeBoundarySources(files: Record<string, string>, options?: LintRuntimeBoundarySourcesOptions): ProviderLintResult;
+
+// @public @deprecated (undocumented)
+export type LintRuntimeBoundarySourcesOptions = {
+    typescript?: TypeScriptCompilerModuleLike;
+};
 
 // @public
 export function listMissingRequiredSecrets(provider: ProviderDefinition, env: EnvContext): string[];
@@ -5673,6 +5683,11 @@ export interface ProviderLintInformation {
 // @public
 export type ProviderLintMode = "official" | "standalone";
 
+// @public @deprecated (undocumented)
+type ProviderLintOptions = {
+    mode?: ProviderLintMode;
+};
+
 // @public
 export interface ProviderLintResult {
     // (undocumented)
@@ -7059,8 +7074,14 @@ export const RetryPolicySchema: z.ZodType<RetryPolicy, unknown, z.core.$ZodTypeI
 // @public (undocumented)
 export type Rfc3339Instant = string;
 
+// @public @deprecated (undocumented)
+export const RUNTIME_BOUNDARY_RULES: readonly ["process-env-direct-read", "node-runtime-module-import", "direct-fetch-call"];
+
 // @public
 export const RUNTIME_MODULE_ALLOWLIST: readonly string[];
+
+// @public @deprecated (undocumented)
+export type RuntimeBoundaryRule = (typeof RUNTIME_BOUNDARY_RULES)[number];
 
 // @public (undocumented)
 export type SafeRegex = {
@@ -9258,8 +9279,8 @@ export { z }
 // dist/define.d.ts:117:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:149:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:5:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:60:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:99:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:68:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:107:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts

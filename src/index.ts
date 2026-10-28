@@ -157,6 +157,12 @@ export {
 	SDK_BROWSER_RUNTIME_SUBPATH,
 } from "./cli/bundle.js";
 export {
+	type LintRuntimeBoundarySourcesOptions,
+	lintRuntimeBoundarySources,
+	RUNTIME_BOUNDARY_RULES,
+	type RuntimeBoundaryRule,
+} from "./runtime-boundary-lint.js";
+export {
 	TYPESCRIPT_COMPILER_MODULE_SPECIFIERS,
 	type TypeScriptCompilerModuleLike,
 } from "./typescript-module.js";
