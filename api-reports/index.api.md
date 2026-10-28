@@ -2411,10 +2411,7 @@ interface HealthCheckInputPreparationContext<TInput = unknown> {
 
 // @public
 export interface HealthCheckSuite<TInput = unknown, TOutput = unknown> {
-    cases: [
-    HealthCheckCase<TInput, TOutput>,
-    ...HealthCheckCase<TInput, TOutput>[]
-    ];
+    cases: [HealthCheckCase<TInput, TOutput>, ...HealthCheckCase<TInput, TOutput>[]];
     degradedThresholdMs?: number;
     interval: ProbeInterval;
     requiresConnection?: boolean;

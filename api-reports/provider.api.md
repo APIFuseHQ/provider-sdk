@@ -1788,10 +1788,7 @@ interface HealthCheckInputPreparationContext<TInput = unknown> {
 
 // @public
 export interface HealthCheckSuite<TInput = unknown, TOutput = unknown> {
-    cases: [
-    HealthCheckCase<TInput, TOutput>,
-    ...HealthCheckCase<TInput, TOutput>[]
-    ];
+    cases: [HealthCheckCase<TInput, TOutput>, ...HealthCheckCase<TInput, TOutput>[]];
     degradedThresholdMs?: number;
     // Warning: (ae-forgotten-export) The symbol "ProbeInterval" needs to be exported by the entry point provider.d.ts
     interval: ProbeInterval;
