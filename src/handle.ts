@@ -29,6 +29,14 @@ import {
 	type HandleKindType,
 	isHandleIssuedBy,
 } from "./handle-meta.js";
+import {
+	HANDLE_KIND_INTERNALS,
+	HANDLE_META_KIND,
+	type HandleKindInternals,
+	type LegacyHandleOption,
+	type MutableHandleFieldMeta,
+	type ResolvedHandleContract,
+} from "./handle/contract.js";
 import type { ProviderErrorCategory } from "./observability.js";
 import {
 	BOUND_HANDLE_WORD_COUNT,
@@ -59,6 +67,21 @@ export type HandleStrength = "standard" | "high";
 /** Words issued per handle: 2 for bound kinds, 4 for public, 5 for high-strength public. */
 export type HandleWordCount = 2 | 4 | 5;
 
+declare const HANDLE_FIELD_KIND: unique symbol;
+
+/**
+ * The zod schema `kind.field()` returns: a non-empty string carrying the
+ * `x-apifuse-handle` meta, branded at the type level with the kind that issued
+ * it so a field can be traced back to its kind (`HandleKindOfField`). The
+ * brand is type-only; parsing yields a plain `string`.
+ */
+export type HandleField<K extends HandleKindDeclaration = HandleKindDeclaration> = ZodString & {
+	readonly [HANDLE_FIELD_KIND]?: K;
+};
+
+/** Recovers the kind a `HandleField` was created from. */
+export type HandleKindOfField<F> = F extends { readonly [HANDLE_FIELD_KIND]?: infer K } ? K : never;
+
 export interface HandleKindBase<TSchema extends ZodType = ZodType> extends HandleKindDeclaration {
 	/**
 	 * Zod schema validated on `create`/`update`. Writes accept its *input* type
@@ -75,14 +98,18 @@ export interface HandleKindBase<TSchema extends ZodType = ZodType> extends Handl
 	 * Schema for the handle field, usable in output and input positions. Carries
 	 * the `x-apifuse-handle` meta and an SDK-owned English description.
 	 *
-	 * One schema serves both directions even when the kind declares separate
-	 * `input` / `output` property keys: the meta carries both names and lint
-	 * checks the key against the side the field actually appears on.
+	 * The property key you place it under IS the field name: `defineProvider`
+	 * reads it from the operation schemas (one key per direction) together with
+	 * the operations whose output carries the field, and binds both onto the kind
+	 * for error text and the meta.
 	 */
-	field(): ZodString;
+	field(): HandleField<this>;
 }
 
-export interface CursorKind<TSchema extends ZodType = ZodType> extends HandleKindBase<TSchema> {
+export interface CursorKind<TSchema extends ZodType = ZodType, TName extends string = string>
+	extends HandleKindBase<TSchema> {
+	/** Kind name; a literal type, so two kinds with the same schema stay distinct for `ctx.handle`. */
+	readonly name: TName;
 	readonly type: "cursor";
 	readonly ttl: ProviderStateDurationString;
 	readonly ttlMs: number;
@@ -92,7 +119,10 @@ export interface CursorKind<TSchema extends ZodType = ZodType> extends HandleKin
 export interface DraftKind<
 	TSchema extends ZodType = ZodType,
 	TResultSchema extends ZodType | undefined = ZodType | undefined,
+	TName extends string = string,
 > extends HandleKindBase<TSchema> {
+	/** Kind name; a literal type, so two kinds with the same schema stay distinct for `ctx.handle`. */
+	readonly name: TName;
 	readonly type: "draft";
 	/** `"bound"` (default): connection-scoped, 2 words. `"public"`: provider-scoped, 4-5 words. */
 	readonly access: HandleAccess;
@@ -112,14 +142,14 @@ export interface DraftKind<
 
 // `any` here is variance-only: a concrete `CursorKind<{ page: number }>` must be
 // assignable to the union without callers spelling out the data type.
-export type HandleKind = CursorKind<any> | DraftKind<any, any>;
+export type HandleKind = CursorKind<any, any> | DraftKind<any, any, any>;
 
 /** Stored record data type (schema output); what `read`, `update`, and `commit` callbacks receive. */
 export type DataOf<K extends HandleKind> = z.output<K["schema"]>;
 /** What `create` and `update` accept (schema input); differs from `DataOf` when the schema transforms or defaults. */
 export type InputOf<K extends HandleKind> = z.input<K["schema"]>;
 export type ResultOf<K extends HandleKind> =
-	K extends DraftKind<any, infer R> ? (R extends ZodType ? z.output<R> : unknown) : never;
+	K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
 
 export type HandleStatus = "active" | "committing" | "committed";
 
@@ -140,31 +170,36 @@ export interface HandleCommitResult<K extends HandleKind> {
 	readonly result: ResultOf<K>;
 }
 
-export interface HandleContext {
+/**
+ * `ctx.handle`. `TKind` is the union of kinds the provider declared in
+ * `handle: [...]`, so a kind outside that list is refused by the compiler; the
+ * default (every kind) is what the runtime constructs.
+ */
+export interface HandleContext<TKind extends HandleKind = HandleKind> {
 	/** Validates `data` with `kind.schema`, stores it, and returns the canonical handle. */
-	create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
+	create<K extends TKind>(kind: K, data: InputOf<K>): Promise<string>;
 	/**
 	 * Same as `create` but returns the full record (`handle`, `status`, `data`,
 	 * `createdAt`, `expiresAt`) so a provider can expose `expires_at` without
 	 * recomputing ttl math. `create` is the string-returning shortcut.
 	 */
-	createRecord<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
+	createRecord<K extends TKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
 	/** Tolerantly parses `handle`, loads the record; drafts get their idle TTL touched. */
-	read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
+	read<K extends TKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
 	/** CAS update of an active draft (3 retries) with sliding TTL. */
-	update<K extends DraftKind>(
+	update<K extends Extract<TKind, DraftKind<any, any, any>>>(
 		kind: K,
 		handle: string,
 		updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>,
 	): Promise<HandleRecord<K>>;
 	/** One-shot commit with result replay; see runtime docs for the state machine. */
-	commit<K extends DraftKind>(
+	commit<K extends Extract<TKind, DraftKind<any, any, any>>>(
 		kind: K,
 		handle: string,
 		work: (data: DataOf<K>) => Promise<ResultOf<K>>,
 	): Promise<HandleCommitResult<K>>;
 	/** Deletes the record; idempotent. */
-	discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
+	discard<K extends TKind>(kind: K, handle: string): Promise<void>;
 }
 
 export type HandleOperation = "create" | "read" | "update" | "commit" | "discard";
@@ -334,17 +369,15 @@ export function parseHandleDurationMs(value: ProviderStateDurationString, label:
 // Kind definitions
 // ---------------------------------------------------------------------------
 
-export interface DefineCursorOptions<TSchema extends ZodType> {
+export interface DefineCursorOptions<TSchema extends ZodType, TName extends string = string> {
 	/** Kind name, `/^[a-z]{2,12}$/`; becomes the handle prefix. */
-	readonly name: string;
+	readonly name: TName;
 	/**
-	 * Schema property key carrying the handle. Default `${name}_token`.
-	 *
-	 * Pass `{ input, output }` when the caller-facing contract names the same
-	 * handle differently in each direction — the canon's `{ input: "cursor",
-	 * output: "next_cursor" }`. Both keys must be given; the handle's identity
-	 * stays the kind, so a value issued under `output` is still only valid when
-	 * sent back under `input`.
+	 * @deprecated The property key is read from the operation schemas where
+	 * `kind.field()` is placed (one key per direction; `{ cursor: Page.field() }`
+	 * on input and `{ next_cursor: Page.field() }` on output need no
+	 * declaration). Delete this option; `scripts/codemods/handles.yml` does it.
+	 * Removed in the next release.
 	 */
 	readonly fieldName?: string | HandleFieldNames;
 	readonly schema: TSchema;
@@ -357,19 +390,25 @@ export interface DefineCursorOptions<TSchema extends ZodType> {
 	readonly maxValueBytes?: number;
 	/** Public only; `"high"` forces 5 words. Auto-high when ttl > 1h. */
 	readonly strength?: HandleStrength;
-	/** Operation key(s) that issue this handle; used in error text and lint. */
+	/**
+	 * @deprecated The issuing operations are the ones whose output schema
+	 * contains `kind.field()`; `defineProvider` binds them for error text and the
+	 * field description. Delete this option; `scripts/codemods/handles.yml` does
+	 * it. Removed in the next release.
+	 */
 	readonly issuedBy?: HandleIssuedBy;
 }
 
 export interface DefineDraftOptions<
 	TSchema extends ZodType,
 	TResultSchema extends ZodType | undefined,
+	TName extends string = string,
 > {
-	readonly name: string;
+	readonly name: TName;
 	/**
-	 * Schema property key carrying the handle. Default `${name}_token`. Accepts
-	 * `{ input, output }` for a contract that names the handle differently in
-	 * each direction; see {@link DefineCursorOptions.fieldName}.
+	 * @deprecated The property key is read from the operation schemas where
+	 * `kind.field()` is placed (one key per direction). Delete this option;
+	 * `scripts/codemods/handles.yml` does it. Removed in the next release.
 	 */
 	readonly fieldName?: string | HandleFieldNames;
 	readonly schema: TSchema;
@@ -393,7 +432,11 @@ export interface DefineDraftOptions<
 	readonly maxValueBytes?: number;
 	/** Public only; `"high"` forces 5 words. Auto-high when ttl.max > 1h. */
 	readonly strength?: HandleStrength;
-	/** Operation key(s) that issue this handle; used in error text and lint. */
+	/**
+	 * @deprecated The issuing operations are the ones whose output schema
+	 * contains `kind.field()`; `defineProvider` binds them. Delete this option;
+	 * `scripts/codemods/handles.yml` does it. Removed in the next release.
+	 */
 	readonly issuedBy?: HandleIssuedBy;
 }
 
@@ -418,21 +461,22 @@ function assertFieldName(
 }
 
 /**
- * Resolves the `fieldName` option to the input key and, when the two differ,
- * the output key.
+ * Resolves the deprecated `fieldName` option to the input key and, when the
+ * two differ, the output key; undefined when the option is absent, so the
+ * contract bound by `defineProvider` (or the `${name}_token` default) applies.
  *
- * The string form names one key for both directions and is unchanged. The
- * object form requires BOTH keys: a half-declaration would leave one side
- * silently defaulting to `${name}_token`, which is the kind of mismatch this
- * option exists to make explicit. `outputFieldName` is left undefined when the
- * two keys are equal so a one-name kind emits exactly the meta it always did.
+ * The string form names one key for both directions. The object form requires
+ * BOTH keys: a half-declaration would leave one side silently defaulting,
+ * which is the kind of mismatch this option existed to make explicit.
+ * `outputFieldName` is left undefined when the two keys are equal so a
+ * one-name kind emits exactly the meta it always did.
  */
 function resolveFieldNames(
 	value: string | HandleFieldNames | undefined,
 	define: string,
 	name: string,
-): { fieldName: string; outputFieldName?: string } {
-	if (value === undefined) return { fieldName: `${name}_token` };
+): { fieldName?: string; outputFieldName?: string } {
+	if (value === undefined) return {};
 	if (typeof value === "string") {
 		assertFieldName(value, define, "fieldName");
 		return { fieldName: value };
@@ -509,17 +553,104 @@ function wordCountFor(
 		: PUBLIC_HANDLE_WORD_COUNT;
 }
 
-function createHandleField(meta: HandleFieldMeta): ZodString {
+const warnedLegacyHandleOptions = new Set<string>();
+
+function warnLegacyHandleOptions(define: string, name: string, declared: readonly string[]): void {
+	const token = `${define}:${name}`;
+	if (warnedLegacyHandleOptions.has(token)) return;
+	warnedLegacyHandleOptions.add(token);
+	console.warn(
+		`[provider-sdk] ${define} "${name}": ${declared.join(" and ")} ${declared.length > 1 ? "are" : "is"} deprecated; the property key and the issuing operation are read from the operation schemas where ${name}.field() is placed. Delete the option(s) (codemod: scripts/codemods/handles.yml).`,
+	);
+}
+
+/**
+ * The names and issuers a kind reports. Options passed on the deprecated path
+ * win outright so an unmigrated provider sees byte-identical text; otherwise
+ * the contract `defineProvider` bound from the schemas applies; otherwise the
+ * historical `${name}_token` default.
+ */
+interface HandleKindContract {
+	readonly name: string;
+	readonly type: HandleKindType;
+	readonly declared: { fieldName?: string; outputFieldName?: string; issuedBy?: HandleIssuedBy };
+	resolved: ResolvedHandleContract;
+}
+
+function contractFieldName(contract: HandleKindContract): string {
+	return contract.declared.fieldName ?? contract.resolved.fieldName ?? `${contract.name}_token`;
+}
+
+function contractOutputFieldName(contract: HandleKindContract): string | undefined {
+	if (contract.declared.fieldName !== undefined) return contract.declared.outputFieldName;
+	return contract.resolved.outputFieldName;
+}
+
+function contractIssuedBy(contract: HandleKindContract): HandleIssuedBy | undefined {
+	return contract.declared.issuedBy ?? contract.resolved.issuedBy;
+}
+
+function createHandleKindInternals(
+	contract: HandleKindContract,
+	declared: readonly LegacyHandleOption[],
+): HandleKindInternals {
+	const refreshMeta = (meta: MutableHandleFieldMeta): void => {
+		meta.fieldName = contractFieldName(contract);
+		const outputFieldName = contractOutputFieldName(contract);
+		if (outputFieldName === undefined) delete meta.outputFieldName;
+		else meta.outputFieldName = outputFieldName;
+		const issuedBy = contractIssuedBy(contract);
+		if (issuedBy === undefined) delete meta.issuedBy;
+		else meta.issuedBy = issuedBy;
+	};
+	const internals: HandleKindInternals = {
+		declared,
+		get resolved() {
+			return contract.resolved;
+		},
+		set resolved(value) {
+			contract.resolved = value;
+		},
+		metas: new Set(),
+		refreshMeta,
+	};
+	return internals;
+}
+
+function createHandleField<K extends HandleKindDeclaration>(
+	kind: K,
+	contract: HandleKindContract,
+	internals: HandleKindInternals,
+): HandleField<K> {
+	const meta: MutableHandleFieldMeta = { kind: contract.name, type: contract.type, fieldName: "" };
+	internals.refreshMeta(meta);
+	Object.defineProperty(meta, HANDLE_META_KIND, { value: kind, enumerable: false });
+	internals.metas.add(meta);
 	const described = z.string().min(1).describe(handleFieldDescription(meta));
 	// zod v4 `.meta()` replaces the registry entry, so carry the description over.
 	const existing = described.meta() ?? {};
 	return described.meta({ ...existing, [APIFUSE_HANDLE_META_KEY]: meta });
 }
 
+function declaredLegacyOptions(options: {
+	readonly fieldName?: unknown;
+	readonly issuedBy?: unknown;
+}): LegacyHandleOption[] {
+	const declared: LegacyHandleOption[] = [];
+	if (options.fieldName !== undefined) declared.push("fieldName");
+	if (options.issuedBy !== undefined) declared.push("issuedBy");
+	return declared;
+}
+
+function attachHandleKindInternals<K extends object>(kind: K, internals: HandleKindInternals): K {
+	Object.defineProperty(kind, HANDLE_KIND_INTERNALS, { value: internals, enumerable: false });
+	return Object.freeze(kind);
+}
+
 /** Defines an immutable cursor kind (pagination, offered option lists). */
-export function defineCursor<TSchema extends ZodType>(
-	options: DefineCursorOptions<TSchema>,
-): CursorKind<TSchema> {
+export function defineCursor<TSchema extends ZodType, const TName extends string = string>(
+	options: DefineCursorOptions<TSchema, TName>,
+): CursorKind<TSchema, TName> {
 	const define = "defineCursor";
 	assertKindName(options.name, define);
 	const { fieldName, outputFieldName } = resolveFieldNames(options.fieldName, define, options.name);
@@ -539,20 +670,28 @@ export function defineCursor<TSchema extends ZodType>(
 	const maxValueBytes = options.maxValueBytes ?? DEFAULT_CURSOR_MAX_VALUE_BYTES;
 	assertPositiveInteger(maxValueBytes, "maxValueBytes", define);
 	const wordCount = wordCountFor(access, strength, ttlMs);
-	const meta: HandleFieldMeta = {
-		kind: options.name,
-		type: "cursor",
-		fieldName,
-		...(outputFieldName ? { outputFieldName } : {}),
-		...(issuedBy ? { issuedBy } : {}),
-	};
-	return Object.freeze({
+	const declared = declaredLegacyOptions(options);
+	if (declared.length > 0) warnLegacyHandleOptions(define, options.name, declared);
+	const contract: HandleKindContract = {
 		name: options.name,
 		type: "cursor",
-		fieldName,
-		outputFieldName,
+		declared: { fieldName, outputFieldName, issuedBy },
+		resolved: {},
+	};
+	const internals = createHandleKindInternals(contract, declared);
+	const kind: CursorKind<TSchema, TName> = {
+		name: options.name,
+		type: "cursor",
+		get fieldName() {
+			return contractFieldName(contract);
+		},
+		get outputFieldName() {
+			return contractOutputFieldName(contract);
+		},
 		access,
-		issuedBy,
+		get issuedBy() {
+			return contractIssuedBy(contract);
+		},
 		schema: options.schema,
 		ttl: options.ttl,
 		ttlMs,
@@ -560,8 +699,9 @@ export function defineCursor<TSchema extends ZodType>(
 		maxEntries,
 		maxValueBytes,
 		wordCount,
-		field: () => createHandleField(meta),
-	});
+		field: () => createHandleField(kind, contract, internals),
+	};
+	return attachHandleKindInternals(kind, internals);
 }
 
 /**
@@ -572,7 +712,10 @@ export function defineCursor<TSchema extends ZodType>(
 export function defineDraft<
 	TSchema extends ZodType,
 	TResultSchema extends ZodType | undefined = undefined,
->(options: DefineDraftOptions<TSchema, TResultSchema>): DraftKind<TSchema, TResultSchema> {
+	const TName extends string = string,
+>(
+	options: DefineDraftOptions<TSchema, TResultSchema, TName>,
+): DraftKind<TSchema, TResultSchema, TName> {
 	const define = "defineDraft";
 	assertKindName(options.name, define);
 	const { fieldName, outputFieldName } = resolveFieldNames(options.fieldName, define, options.name);
@@ -609,21 +752,29 @@ export function defineDraft<
 	assertPositiveInteger(maxValueBytes, "maxValueBytes", define);
 	// A public draft's guessable lifetime is its hard `max` ttl (idle only shortens it).
 	const wordCount = wordCountFor(access, strength, maxTtlMs);
-	const meta: HandleFieldMeta = {
-		kind: options.name,
-		type: "draft",
-		fieldName,
-		...(outputFieldName ? { outputFieldName } : {}),
-		...(issuedBy ? { issuedBy } : {}),
-	};
-	return Object.freeze({
+	const declared = declaredLegacyOptions(options);
+	if (declared.length > 0) warnLegacyHandleOptions(define, options.name, declared);
+	const contract: HandleKindContract = {
 		name: options.name,
 		type: "draft",
-		fieldName,
-		outputFieldName,
+		declared: { fieldName, outputFieldName, issuedBy },
+		resolved: {},
+	};
+	const internals = createHandleKindInternals(contract, declared);
+	const kind: DraftKind<TSchema, TResultSchema, TName> = {
+		name: options.name,
+		type: "draft",
+		get fieldName() {
+			return contractFieldName(contract);
+		},
+		get outputFieldName() {
+			return contractOutputFieldName(contract);
+		},
 		access,
 		strength,
-		issuedBy,
+		get issuedBy() {
+			return contractIssuedBy(contract);
+		},
 		schema: options.schema,
 		result: options.result,
 		ttl: options.ttl,
@@ -634,15 +785,16 @@ export function defineDraft<
 		maxEntries,
 		maxValueBytes,
 		wordCount,
-		field: () => createHandleField(meta),
-	});
+		field: () => createHandleField(kind, contract, internals),
+	};
+	return attachHandleKindInternals(kind, internals);
 }
 
-export function isDraftKind(kind: HandleKind): kind is DraftKind<any, any> {
+export function isDraftKind(kind: HandleKind): kind is DraftKind<any, any, any> {
 	return kind.type === "draft";
 }
 
-export function isCursorKind(kind: HandleKind): kind is CursorKind<any> {
+export function isCursorKind(kind: HandleKind): kind is CursorKind<any, any> {
 	return kind.type === "cursor";
 }
 

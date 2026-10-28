@@ -6,16 +6,12 @@ import {
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 	SDK_UPSTREAM_ERROR_CODE_REGISTRY,
 } from "./error-resolution.js";
+import { legacyHandleOptionsOf } from "./handle/contract.js";
 import {
 	APIFUSE_HANDLE_META_KEY,
 	type HandleFieldMeta,
-	type HandleKindDeclaration,
 	handleFieldDescription,
-	handleFieldNameFor,
-	handleHasDirectionalFieldNames,
-	handleIssuerList,
 	isHandleFieldMeta,
-	isHandleIssuedBy,
 } from "./handle-meta.js";
 import { PROVIDER_ERROR_CATALOG_NAMESPACE } from "./i18n/error-messages.js";
 import {
@@ -700,27 +696,6 @@ function isSchemaWrapperNodeKey(key: string): boolean {
 function getOwnHandleFieldMeta(schema: SchemaLike): HandleFieldMeta | undefined {
 	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_HANDLE_META_KEY);
 	return isHandleFieldMeta(value) ? value : undefined;
-}
-
-/**
- * Handle meta placed by `kind.field()` lives on the string schema itself; zod
- * wrappers (`.optional()`, `.nullable()`, `.default()`, pipes) do not inherit
- * registry metadata, so look through wrapper nodes until a non-wrapper is hit.
- */
-function getHandleFieldMeta(
-	schema: unknown,
-	seen = new Set<SchemaLike>(),
-): HandleFieldMeta | undefined {
-	if (!isSchema(schema) || seen.has(schema)) return undefined;
-	seen.add(schema);
-	const own = getOwnHandleFieldMeta(schema);
-	if (own) return own;
-	for (const child of getChildSchemas(schema)) {
-		if (child.origin === "shape" || !isSchemaWrapperNodeKey(child.key)) continue;
-		const found = getHandleFieldMeta(child.schema, seen);
-		if (found) return found;
-	}
-	return undefined;
 }
 
 /**
@@ -2026,239 +2001,34 @@ function errorLocaleKeyDiagnostic(
 			};
 }
 
-type HandleFieldOccurrence = {
-	/** Diagnostic path, e.g. `output.offers[].waiting_token`. */
-	path: string;
-	/** Property key the field is declared under (inherited through arrays/wrappers). */
-	key: string;
-	meta: HandleFieldMeta;
-};
-
-function collectHandleFields(
-	schema: unknown,
-	basePath: string,
-	key: string | undefined = undefined,
-	seen = new Set<SchemaLike>(),
-): HandleFieldOccurrence[] {
-	if (!isSchema(schema)) return [];
-
-	// Record before the cycle guard so one `kind.field()` instance reused under
-	// two property keys is still reported at both positions.
-	const own = getOwnHandleFieldMeta(schema);
-	if (own && key !== undefined) {
-		return [{ path: basePath, key, meta: own }];
-	}
-	// Path-local cycle guard: the same wrapped schema instance may legitimately
-	// appear under several property keys (`Kind.field().optional()` reused), and
-	// each position must be checked. Only true ancestor cycles are cut.
-	if (seen.has(schema)) return [];
-	seen.add(schema);
-	try {
-		return collectHandleFieldChildren(schema, basePath, key, seen);
-	} finally {
-		seen.delete(schema);
-	}
-}
-
-function collectHandleFieldChildren(
-	schema: SchemaLike,
-	basePath: string,
-	key: string | undefined,
-	seen: Set<SchemaLike>,
-): HandleFieldOccurrence[] {
-	const out: HandleFieldOccurrence[] = [];
-	// zod exposes the same inner schema under several structural edges
-	// (`unwrap`/`innerType`, `element`/`def.element`); traverse each structural
-	// child object once. Shape children are always traversed: the same instance
-	// under two property keys is two fields.
-	const structuralSeen = new Set<SchemaLike>();
-	for (const child of getChildSchemas(schema)) {
-		if (child.origin !== "shape") {
-			if (structuralSeen.has(child.schema)) continue;
-			structuralSeen.add(child.schema);
-		}
-		if (child.origin === "shape") {
-			// Provider-chosen property key: always a real field, even when it is
-			// spelled like a structural edge (`item`, `type`, `schema`, ...).
-			out.push(...collectHandleFields(child.schema, `${basePath}.${child.key}`, child.key, seen));
-		} else if (isSchemaWrapperNodeKey(child.key)) {
-			out.push(...collectHandleFields(child.schema, basePath, key, seen));
-		} else if (child.key === "element" || child.key.startsWith("element.")) {
-			out.push(...collectHandleFields(child.schema, `${basePath}[]`, key, seen));
-		} else if (/^\d+$/.test(child.key)) {
-			out.push(...collectHandleFields(child.schema, `${basePath}[${child.key}]`, key, seen));
-		} else {
-			out.push(...collectHandleFields(child.schema, `${basePath}.${child.key}`, child.key, seen));
-		}
-	}
-	return out;
-}
-
 /**
- * Reads `provider.handle` structurally. The declaration type is owned by
- * define.ts/types.ts; lint only needs the HandleKindDeclaration view, so
- * malformed entries are skipped rather than reported.
+ * Handle contract (ADR-0012, amended 2026-10-28): the property key and the
+ * issuing operation of a kind are read from the operation schemas by
+ * `defineProvider`, `ctx.handle` is typed to the declared kinds, and
+ * `handle: [...]` without `state` is a compile error. The only rule left is the
+ * one for the deprecated declaration path, which the codemod removes.
  */
-function readHandleKindDeclarations(value: unknown): HandleKindDeclaration[] {
-	if (!Array.isArray(value)) return [];
-	return value.filter((entry): entry is HandleKindDeclaration => {
-		if (typeof entry !== "object" || entry === null) return false;
-		const record = entry as Record<string, unknown>;
-		return (
-			typeof record.name === "string" &&
-			(record.type === "cursor" || record.type === "draft") &&
-			typeof record.fieldName === "string" &&
-			(record.outputFieldName === undefined || typeof record.outputFieldName === "string") &&
-			(record.issuedBy === undefined || isHandleIssuedBy(record.issuedBy))
-		);
-	});
-}
-
-/**
- * ADR-0012 handle rules: every `x-apifuse-handle` schema field must belong to
- * a declared kind under its declared property key; every declared kind must be
- * both issued (some output) and accepted (some input); every `issuedBy` entry
- * must be an operation key and at least one of them must output the field; and
- * `ctx.handle` needs `state`.
- */
-function lintHandleDeclarations(provider: {
+function lintLegacyHandleDeclarations(provider: {
 	id?: string;
 	handle?: unknown;
-	state?: unknown;
-	operations?: Record<string, { input: unknown; output: unknown }>;
 }): LintDiagnostic[] {
-	const diagnostics: LintDiagnostic[] = [];
+	if (!Array.isArray(provider.handle)) return [];
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	const kinds = readHandleKindDeclarations(provider.handle);
-	const kindByName = new Map(kinds.map((kind) => [kind.name, kind]));
-	const operations = provider.operations ?? {};
-
-	if (kinds.length > 0 && !provider.state) {
+	const diagnostics: LintDiagnostic[] = [];
+	for (const kind of provider.handle) {
+		const declared = legacyHandleOptionsOf(kind);
+		if (declared.length === 0) continue;
+		const name =
+			typeof kind === "object" && kind !== null && typeof Reflect.get(kind, "name") === "string"
+				? (Reflect.get(kind, "name") as string)
+				: "?";
 		diagnostics.push({
-			rule: "handle-requires-state",
+			rule: "legacy-handle-declaration",
 			level: "warn",
-			field: "handle",
-			message: `${providerLabel} declares handle kinds but not the state capability; ctx.handle stores records through ctx.state, so declare state: true.`,
+			field: `handle.${name}`,
+			message: `${providerLabel} handle kind "${name}" still declares ${declared.join(" and ")}; the property key and the issuing operation are read from the operation schemas where ${name}.field() is placed. Delete the option(s): bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml --update-all .`,
 		});
 	}
-
-	const kindsInInputs = new Set<string>();
-	const kindsInOutputs = new Set<string>();
-	const outputKindsByOperation = new Map<string, Set<string>>();
-
-	for (const [operationKey, operation] of Object.entries(operations)) {
-		const positions = [
-			{ side: "input", fields: collectHandleFields(operation.input, "input") },
-			{ side: "output", fields: collectHandleFields(operation.output, "output") },
-		] as const;
-		for (const { side, fields } of positions) {
-			for (const occurrence of fields) {
-				const field = `operations.${operationKey}.${occurrence.path}`;
-				const { kind } = occurrence.meta;
-				// A kind may name one handle differently in each direction (the canon's
-				// `cursor` in, `next_cursor` out). The rule is still exact: each side
-				// must use the key declared for THAT side, so the handle's identity
-				// stays readable from the property key and the round trip has exactly
-				// one edge — read `output`, send back under `input`.
-				const expected = handleFieldNameFor(occurrence.meta, side);
-
-				if (!kindByName.has(kind)) {
-					diagnostics.push({
-						rule: "handle-kind-undeclared",
-						level: "error",
-						field,
-						message: `${providerLabel} operation "${operationKey}" ${side} field "${occurrence.path}" is a handle of kind "${kind}", which is not declared in provider.handle. Add the kind to handle: [...] or remove the field.`,
-					});
-				}
-
-				if (occurrence.key !== expected) {
-					const directional = handleHasDirectionalFieldNames(occurrence.meta);
-					const advice = directional
-						? `Use the kind's ${side} fieldName on every ${side} schema; its ${side === "input" ? "output" : "input"} fieldName is "${handleFieldNameFor(occurrence.meta, side === "input" ? "output" : "input")}".`
-						: "Use the same key in every schema so the LLM sees one name.";
-					diagnostics.push({
-						rule: "handle-field-name",
-						level: "error",
-						field,
-						message: `${providerLabel} operation "${operationKey}" ${side} declares handle kind "${kind}" under property "${occurrence.key}" but the kind's ${directional ? `${side} ` : ""}fieldName is "${expected}". ${advice}`,
-					});
-				}
-
-				if (side === "input") {
-					kindsInInputs.add(kind);
-				} else {
-					kindsInOutputs.add(kind);
-					let outputKinds = outputKindsByOperation.get(operationKey);
-					if (!outputKinds) {
-						outputKinds = new Set<string>();
-						outputKindsByOperation.set(operationKey, outputKinds);
-					}
-					outputKinds.add(kind);
-				}
-			}
-		}
-	}
-
-	for (const kind of kinds) {
-		const field = `handle.${kind.name}`;
-		const issued = kindsInOutputs.has(kind.name);
-		const accepted = kindsInInputs.has(kind.name);
-
-		if (!issued) {
-			diagnostics.push({
-				rule: "handle-field-parity",
-				level: "error",
-				field,
-				message: `${providerLabel} handle kind "${kind.name}" is never issued: no operation output contains its field "${handleFieldNameFor(kind, "output")}". Add ${kind.name}.field() to the issuing operation's output.`,
-			});
-		}
-		if (!accepted) {
-			diagnostics.push({
-				rule: "handle-field-parity",
-				level: "error",
-				field,
-				message: `${providerLabel} handle kind "${kind.name}" is never accepted: no operation input contains its field "${handleFieldNameFor(kind, "input")}". Add ${kind.name}.field() to the consuming operation's input.`,
-			});
-		}
-
-		if (kind.issuedBy === undefined) continue;
-		const issuers = handleIssuerList(kind.issuedBy);
-		const known = issuers.filter((operationKey) => Object.hasOwn(operations, operationKey));
-		for (const operationKey of issuers) {
-			if (known.includes(operationKey)) continue;
-			diagnostics.push({
-				rule: "handle-issued-by",
-				level: "error",
-				field,
-				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${operationKey}", which is not an operation key.`,
-			});
-		}
-		if (known.length === 0) continue;
-		const issuing = known.filter((operationKey) =>
-			outputKindsByOperation.get(operationKey)?.has(kind.name),
-		);
-		if (issuing.length > 0) continue;
-		if (known.length === 1) {
-			diagnostics.push({
-				rule: "handle-issued-by",
-				level: "error",
-				field,
-				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${known[0]}", but that operation's output has no "${handleFieldNameFor(kind, "output")}" handle field.`,
-			});
-		} else {
-			diagnostics.push({
-				rule: "handle-issued-by",
-				level: "error",
-				field,
-				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy ${known
-					.map((operationKey) => `"${operationKey}"`)
-					.join(
-						", ",
-					)}, but none of those operations' outputs has a "${handleFieldNameFor(kind, "output")}" handle field. At least one listed issuer must output it.`,
-			});
-		}
-	}
-
 	return diagnostics;
 }
 
@@ -3920,7 +3690,7 @@ export function lintProvider(
 			contract?: ProviderContractMetaLike;
 		};
 		reviewed?: string;
-		/** Declared handle kinds (ADR-0012); read structurally, see readHandleKindDeclarations. */
+		/** Declared handle kinds (ADR-0012); read structurally, see lintLegacyHandleDeclarations. */
 		handle?: unknown;
 		state?: unknown;
 	},
@@ -3950,7 +3720,7 @@ export function lintProviderWithInformation(
 		...lintErrorMessageLocalization(provider),
 		...lintLegacyChoiceUsage(provider),
 		...lintProviderMetaNarrowing(provider),
-		...lintHandleDeclarations(provider),
+		...lintLegacyHandleDeclarations(provider),
 		...lintHealthCheckMonitorability(provider),
 		...lintHealthCheckExpectedErrors(provider),
 	];
