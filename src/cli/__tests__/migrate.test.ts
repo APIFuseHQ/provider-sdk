@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cpSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import {
+	cpSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
@@ -251,6 +259,14 @@ describe("apifuse migrate", () => {
 			'operations/detail.ts:8:10 Raw .describe() prose on property itemId; replaced by describeKey("schema.itemId").',
 		);
 		expect(text).toContain("run without --dry-run to apply the rewrites.");
+	});
+
+	it("rejects a failed scan instead of reading its empty output as clean", async () => {
+		const broken = join(providerRoot, "broken-ast-grep");
+		writeFileSync(broken, "#!/bin/sh\necho 'scanner broke' >&2\nexit 2\n", { mode: 0o755 });
+		await expect(runMigrate({ providerRoot, dryRun: true, astGrep: broken })).rejects.toThrow(
+			/ast-grep scan failed .*exit 2.*scanner broke/,
+		);
 	});
 
 	it("fails loudly when the ast-grep binary does not exist", async () => {

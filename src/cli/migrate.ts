@@ -280,7 +280,13 @@ async function scan(
 		providerRoot,
 	);
 	// `scan` exits 1 when an error-severity rule matched; the JSON is still
-	// the whole result, so the exit code alone is not a failure.
+	// the whole result. Any other non-zero exit is a failed scan, and empty
+	// output from a failed scan must not read as "nothing to migrate".
+	if (code !== 0 && code !== 1) {
+		throw new Error(
+			`ast-grep scan failed for ${relative(CODEMODS_DIR, ruleFile)} (exit ${code}): ${stderr.trim() || stdout.trim()}`,
+		);
+	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(stdout.trim() === "" ? "[]" : stdout);
