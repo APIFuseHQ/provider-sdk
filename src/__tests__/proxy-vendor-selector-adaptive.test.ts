@@ -215,6 +215,25 @@ describe("adaptive proxy vendor selector", () => {
 		expect(vendorsOf(selector, 0, retryAt)[0]).toBe("smartproxy");
 	});
 
+	it("serves from a closed vendor earlier in the chain when every vendor of the attempt's share is open", () => {
+		const selector = createAdaptiveProxyVendorSelector();
+		for (let i = 0; i < consecutiveFailureThreshold; i += 1) {
+			selector.report(failure("nodemaven", T0));
+		}
+		// Attempts 3..5 are nodemaven's share, so the baseline names nodemaven only.
+		for (
+			let attempt = PROXY_ATTEMPTS_PER_VENDOR;
+			attempt < chain.length * PROXY_ATTEMPTS_PER_VENDOR;
+			attempt += 1
+		) {
+			const directives = selector.select(request(attempt, T0 + 1));
+			expect(directives.map((directive) => directive.vendor)).toEqual(["smartproxy", "nodemaven"]);
+			// A session index past smartproxy's own share (0..2), one per attempt.
+			expect(directives[0]?.vendorAttempt).toBe(attempt);
+			expect(selector.lastSelectionReason()).toBe("vendor_open");
+		}
+	});
+
 	it("fails open to the declared order when every vendor is open", () => {
 		const selector = createAdaptiveProxyVendorSelector();
 		for (let i = 0; i < consecutiveFailureThreshold; i += 1) {

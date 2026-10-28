@@ -465,7 +465,19 @@ export function createAdaptiveProxyVendorSelector(
 			// the fallback reachable inside the budget when the primary keeps failing
 			// below the breaker threshold. The breaker only removes vendors from it.
 			const baseline = staticOrderProxyVendorSelector.select(request);
-			const head = baseline.find((directive) => available(directive.vendor));
+			// The baseline only names the vendors from this attempt's share onward. When
+			// none of them is usable, a usable vendor earlier in the chain serves before
+			// the selector fails open.
+			let head = baseline.find((directive) => available(directive.vendor));
+			let promotedFromChain = false;
+			if (!head) {
+				const vendor = request.chain.find(available);
+				const session = baseline[0]?.session;
+				if (vendor !== undefined && session !== undefined) {
+					head = { vendor, vendorAttempt: request.attempt, session };
+					promotedFromChain = true;
+				}
+			}
 			if (!head) {
 				// Fail open: nothing is known to be healthy, so the declared order stands.
 				lastReason = "all_open";
@@ -507,7 +519,11 @@ export function createAdaptiveProxyVendorSelector(
 				headEntry.probeRequestId = request.requestId;
 				probing = true;
 			}
-			lastReason = probing ? "half_open_probe" : aheadUnavailable ? "vendor_open" : "chain_order";
+			lastReason = probing
+				? "half_open_probe"
+				: aheadUnavailable || promotedFromChain
+					? "vendor_open"
+					: "chain_order";
 			publish(lastReason, request.chain);
 			const tail = resolutionFallbacks(baseline, head.vendor);
 			return [
