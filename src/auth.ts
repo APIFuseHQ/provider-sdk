@@ -1,4 +1,4 @@
-import { AuthError, ProviderError } from "./errors.js";
+import { AuthError, ProviderError, ValidationError } from "./errors.js";
 import {
 	declarationInvalidError,
 	DECLARATION_RULE_IDS,
@@ -698,6 +698,12 @@ export function defineCredentialsAuth<
 			fix: 'Pass fields such as { email: { type: "email" }, password: { type: "password" } }.',
 		});
 	}
+	const [firstCredentialKey, ...restCredentialKeys] = options.credentialKeys;
+	if (typeof firstCredentialKey !== "string" || firstCredentialKey.length === 0) {
+		throw new ValidationError("defineCredentialsAuth requires at least one credential key", {
+			fix: 'Pass credentialKeys naming every key login stores, e.g. credentialKeys: ["session"] as const.',
+		});
+	}
 
 	const expectedInput = expectedInputFromFields(options.fields);
 	const retryTurnId = options.retryTurnId ?? "credentials.retry";
@@ -802,7 +808,7 @@ export function defineCredentialsAuth<
 			},
 		},
 		credential: {
-			keys: [options.credentialKeys[0], ...options.credentialKeys.slice(1)],
+			keys: [firstCredentialKey, ...restCredentialKeys],
 			...(options.storesReusableSecret === undefined
 				? {}
 				: { storesReusableSecret: options.storesReusableSecret }),

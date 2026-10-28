@@ -1334,6 +1334,11 @@ export function defineOperation<TContext>(): <TInput extends SchemaLike, TOutput
 // @public
 export function defineProvider<const TConfig extends ProviderDeclaration>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TConfig> & HandleRequiresStateGuard<TConfig> & AuthModeCredentialGuard<TConfig> & CredentialSecretGuard<TConfig>): ProviderBuilder<TConfig>;
 
+// Warning: (ae-forgotten-export) The symbol "WidenedAuthModeGuard" needs to be exported by the entry point provider.d.ts
+//
+// @public @deprecated (undocumented)
+export function defineProvider<const TConfig extends ProviderDeclarationWithAuthConfig>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & WidenedAuthModeGuard<TConfig> & AuthStartNoInputGuard<TConfig> & HandleRequiresStateGuard<TConfig> & CredentialSecretGuard<TConfig>): ProviderBuilder<TConfig>;
+
 // @public (undocumented)
 export function defineSmsOtpMatcher(config: Omit<SmsOtpMatcherDefinition, "extractOtp">): SmsOtpMatcherDefinition;
 
@@ -3851,7 +3856,7 @@ export type ProviderAuthDeclaration = ({
 } & NoAuthExchange);
 
 // @public
-export type ProviderBuilder<TConfig extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
+export type ProviderBuilder<TConfig extends ProviderDeclaration | ProviderDeclarationWithAuthConfig> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
     operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 }) => Omit<ProviderDefinition, "operations"> & {
     operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
@@ -4126,14 +4131,17 @@ export interface ProviderDeclaration {
     version: string;
 }
 
+// @public
+export type ProviderDeclarationWithAuthConfig = Omit<ProviderDeclaration, "auth"> & {
+    auth: AuthConfig;
+};
+
 // @public (undocumented)
 export interface ProviderDefinition<TContext = ProviderContext> {
     // (undocumented)
     access?: ProviderAccessConfig;
     // (undocumented)
     allowedHosts?: string[];
-    // Warning: (ae-forgotten-export) The symbol "AuthConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     auth?: AuthConfig;
     // (undocumented)
@@ -6744,6 +6752,15 @@ interface VerificationCodeExtractionResult {
 }
 
 // @public
+type WidenedAuthModeGuard<TConfig> = TConfig extends {
+    auth: {
+        mode: infer TMode;
+    };
+} ? AuthMode extends TMode ? unknown : {
+    "this overload is for an auth block typed AuthConfig; a literal auth block is checked by ProviderAuthDeclaration": never;
+} : unknown;
+
+// @public
 export function withFreshnessGuards(scenario: HealthScenario, staleServingOperations: ReadonlySet<string>): HealthScenario;
 
 export { z }
@@ -6761,6 +6778,7 @@ export { z }
 // dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:264:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:296:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:313:5 - (ae-forgotten-export) The symbol "AuthConfig" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:57:5 - (ae-forgotten-export) The symbol "NativeTelemetrySink" needs to be exported by the entry point provider.d.ts

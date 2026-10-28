@@ -122,7 +122,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			CheckedDefineErrorsInput SDK_ERROR_REGISTRY
-			CredentialKeysName DeclaresCapability DeclaresReusableSecret NoAuthExchange RELOGIN_SECRET_KEY_WORDS REUSABLE_SECRET_KEY_WORDS ReloginSecretKeyWord ReusableSecretKeyWord
+			CredentialKeysName DeclaresCapability DeclaresReusableSecret NoAuthExchange RELOGIN_SECRET_KEY_WORDS REUSABLE_SECRET_KEY_WORDS ReloginSecretKeyWord ReusableSecretKeyWord WidenedAuthModeGuard
 		`,
 	),
 	"provider.api.md": forgottenExports(
@@ -151,7 +151,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			NativeConnectTelemetryEvent NativeLifecycleTelemetryEvent NativeTelemetryDiagnostics NativeTelemetryErrorCode NativeTelemetryKind NativeTelemetryLifecycleKind NativeTelemetryOutcome NativeTelemetrySink NativeTelemetryVendorSkipReason NativeVendorSkipTelemetryEvent ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent ProxyVendorName
 			CheckedDefineErrorsInput SDK_ERROR_REGISTRY
-			CredentialKeysName DeclaresCapability DeclaresReusableSecret NoAuthExchange RELOGIN_SECRET_KEY_WORDS REUSABLE_SECRET_KEY_WORDS ReloginSecretKeyWord ReusableSecretKeyWord
+			CredentialKeysName DeclaresCapability DeclaresReusableSecret NoAuthExchange RELOGIN_SECRET_KEY_WORDS REUSABLE_SECRET_KEY_WORDS ReloginSecretKeyWord ReusableSecretKeyWord WidenedAuthModeGuard
 		`,
 	),
 	"runtime-browser.api.md": forgottenExports(

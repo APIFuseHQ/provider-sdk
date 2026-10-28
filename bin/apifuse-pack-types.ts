@@ -66,8 +66,8 @@ const NEGATIVE_CONTROLS = [
 	},
 	{
 		filename: "negative-control-define-provider-resolver-vendor.ts",
-		expectedCode: "TS2322",
-		description: "defineProvider rejects an unknown resolver vendor",
+		expectedCode: "TS2769",
+		description: "defineProvider rejects an unknown resolver vendor (no overload accepts it)",
 		source: [
 			'import { defineProvider, z } from "@apifuse/provider-sdk";',
 			"",

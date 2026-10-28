@@ -443,6 +443,7 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(() =>
+			// @ts-expect-error test-invalid: auth.exchange is refused by the type; this test covers the runtime refusal behind it.
 			defineProvider({
 				allowedHosts: ["example.com"],
 				reviewed: "community",
@@ -460,7 +461,6 @@ describe("ProviderDefinition types", () => {
 						start: async () => ({ kind: "form", turnId: "start" }),
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
-					// @ts-expect-error test-invalid: auth.exchange is refused by the type; this test covers the runtime refusal behind it.
 					exchange: async () => ({ session: "cookie" }),
 				},
 				credential: { keys: ["account_id"] },

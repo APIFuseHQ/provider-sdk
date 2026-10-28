@@ -119,6 +119,11 @@ describe("defineProvider", () => {
 				"must not declare credential.keys because platform-managed auth mode",
 			],
 			[
+				"a credential key that is not a string",
+				{ auth: { mode: "none" }, credential: { keys: [undefined] } },
+				"credential.keys must contain non-empty strings",
+			],
+			[
 				"a reusable secret key without the opt-in",
 				{ auth: { mode: "oauth2", flow: credentialsFlow }, credential: { keys: ["refresh_token"] } },
 				"must set credential.storesReusableSecret and credential.justification when credential.keys includes reusable secrets",

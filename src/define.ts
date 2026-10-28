@@ -41,7 +41,9 @@ import type { HandleKind } from "./handle.js";
 import { bindHandleContracts } from "./handle/contract.js";
 import { warnUndeclaredFields } from "./schema-fields.js";
 import type {
+	AuthConfig,
 	AuthFlowDefinition,
+	AuthMode,
 	BrowserEngine,
 	ContextDeclaration,
 	CredentialDeclaration,
@@ -638,6 +640,7 @@ type ReloginSecretKeyWord = (typeof RELOGIN_SECRET_KEY_WORDS)[number];
 
 function credentialKeysName(keys: readonly string[], words: readonly string[]): boolean {
 	return keys.some((key) => {
+		if (typeof key !== "string") return false;
 		const lower = key.toLowerCase();
 		return words.some((word) => lower.includes(word));
 	});
@@ -3653,7 +3656,9 @@ function validateProviderDeployment(providerId: string, deployment: unknown): vo
 }
 
 /** The second authoring phase for a declaration established by defineProvider. */
-export type ProviderBuilder<TConfig extends ProviderDeclaration> = <
+export type ProviderBuilder<
+	TConfig extends ProviderDeclaration | ProviderDeclarationWithAuthConfig,
+> = <
 	TOperations extends Record<string, ProviderOperation>,
 >(implementation: {
 	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
@@ -3675,6 +3680,29 @@ export type OperationDefinitionFor<
 /** Annotate a built provider while preserving the declaration-derived context. */
 export type ProviderDefinitionFor<TBuilder> = ProviderDefinition<ProviderContextOf<TBuilder>>;
 
+/**
+ * A declaration whose `auth` block reaches the call typed as `AuthConfig`
+ * (an annotated `const x: AuthConfig = {...}`), so `mode` is the whole union
+ * and no {@link ProviderAuthDeclaration} arm applies. Accepted for one release
+ * through the deprecated `defineProvider` overload.
+ */
+export type ProviderDeclarationWithAuthConfig = Omit<ProviderDeclaration, "auth"> & {
+	auth: AuthConfig;
+};
+
+/**
+ * Admits the deprecated overload only when `auth.mode` really is the widened
+ * union, so a literal auth block with a single mode is still judged by the
+ * strict overload and its per-mode messages.
+ */
+type WidenedAuthModeGuard<TConfig> = TConfig extends { auth: { mode: infer TMode } }
+	? AuthMode extends TMode
+		? unknown
+		: {
+				"this overload is for an auth block typed AuthConfig; a literal auth block is checked by ProviderAuthDeclaration": never;
+			}
+	: unknown;
+
 /** Establish a provider declaration before its operations are contextually typed. */
 export function defineProvider<const TConfig extends ProviderDeclaration>(
 	declaration: TConfig &
@@ -3683,8 +3711,26 @@ export function defineProvider<const TConfig extends ProviderDeclaration>(
 		HandleRequiresStateGuard<TConfig> &
 		AuthModeCredentialGuard<TConfig> &
 		CredentialSecretGuard<TConfig>,
-): ProviderBuilder<TConfig> {
-	validateProviderDeclaration(declaration);
+): ProviderBuilder<TConfig>;
+/**
+ * @deprecated The `auth` block is typed `AuthConfig`, which widens `mode` to
+ * every auth mode, so the per-mode checks of `ProviderAuthDeclaration` cannot
+ * run. Write `const auth = {...} satisfies AuthConfig` (the codemod
+ * `scripts/codemods/declaration.yml` rewrites the annotation) so the literal
+ * mode reaches the call. This overload is removed in the next release.
+ */
+export function defineProvider<const TConfig extends ProviderDeclarationWithAuthConfig>(
+	declaration: TConfig &
+		Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> &
+		WidenedAuthModeGuard<TConfig> &
+		AuthStartNoInputGuard<TConfig> &
+		HandleRequiresStateGuard<TConfig> &
+		CredentialSecretGuard<TConfig>,
+): ProviderBuilder<TConfig>;
+export function defineProvider<
+	const TConfig extends ProviderDeclaration | ProviderDeclarationWithAuthConfig,
+>(declaration: TConfig): ProviderBuilder<TConfig> {
+	validateProviderDeclaration(declaration as ProviderDeclaration);
 	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(implementation: {
 		operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 	}) =>
@@ -3731,6 +3777,10 @@ function validateDeclaredAuthModel(config: ProviderDeclaration): void {
 	if ((mode === "credentials" || mode === "oauth2") && typeof flow?.continue !== "function")
 		throw new ValidationError(`${label} must define auth.flow.continue for ${mode} auth mode`, {
 			fix: "Add auth.flow with start(ctx) and continue(ctx, input); put the login or token exchange in continue",
+		});
+	if (keys.some((key) => typeof key !== "string" || key.length === 0))
+		throw new ValidationError(`${label} credential.keys must contain non-empty strings`, {
+			fix: 'List each stored key by name, e.g. credential: { keys: ["session"] }',
 		});
 	if (mode === "credentials" && keys.length === 0)
 		throw new ValidationError(`${label} must declare credential.keys for credentials auth mode`, {

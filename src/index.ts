@@ -86,6 +86,7 @@ export {
 	type ProviderBuilder,
 	type ProviderContextOf,
 	type ProviderDeclaration,
+	type ProviderDeclarationWithAuthConfig,
 	type ProviderDefinitionFor,
 } from "./define.js";
 export {

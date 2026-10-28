@@ -29,6 +29,7 @@ export type {
 	ProviderBuilder,
 	ProviderContextOf,
 	ProviderDeclaration,
+	ProviderDeclarationWithAuthConfig,
 	ProviderDefinitionFor,
 } from "./define.js";
 export {

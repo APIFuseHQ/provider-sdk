@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { ProviderError } from "../errors.js";
+import { ProviderError, ValidationError } from "../errors.js";
 import { DECLARATION_RULE_IDS } from "../declaration-validation.js";
 import { credentialsAuthChallenge, defineCredentialsAuth } from "../provider.js";
 import { createFlowContext as createRuntimeFlowContext } from "../runtime/auth-flow.js";
@@ -21,6 +21,18 @@ function createFlowContext(initialContext: Record<string, unknown> = {}): FlowCo
 }
 
 describe("defineCredentialsAuth", () => {
+	it("refuses an empty credentialKeys list with a ValidationError", () => {
+		const defineWithoutKeys = () =>
+			defineCredentialsAuth({
+				fields: { email: { type: "email" } },
+				// test-invalid: the type requires one key; the runtime must refuse a widened empty list.
+				credentialKeys: [] as never,
+				login: async () => ({ credential: {} }),
+			});
+		expect(defineWithoutKeys).toThrow(ValidationError);
+		expect(defineWithoutKeys).toThrow(/at least one credential key/);
+	});
+
 	it("rejects every half-declared challenge and accepts interactive, polling, and hybrid shapes", () => {
 		let caught: unknown;
 		try {

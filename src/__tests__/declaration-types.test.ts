@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { defineProvider, type ProviderContextOf, type ProviderDeclaration } from "../define.js";
-import type { ProviderMeta } from "../types.js";
+import type { AuthConfig, ProviderMeta } from "../types.js";
 
 /**
  * Compile-time fixture: `tsc --noEmit` is the assertion. Every provider below
@@ -152,12 +152,8 @@ function probeAuthModes(): void {
 	});
 	// @ts-expect-error test-invalid: oauth2_proxied needs auth.proxied.
 	defineProvider({ ...base, meta, auth: { mode: "oauth2_proxied" } });
-	defineProvider({
-		...base,
-		meta,
-		// @ts-expect-error test-invalid: auth.exchange is not part of the auth contract.
-		auth: { mode: "none", exchange: async () => ({}) },
-	});
+	// @ts-expect-error test-invalid: auth.exchange is not part of the auth contract.
+	defineProvider({ ...base, meta, auth: { mode: "none", exchange: async () => ({}) } });
 	// @ts-expect-error test-invalid: a reusable secret key needs storesReusableSecret and justification (CredentialSecretGuard).
 	defineProvider({
 		...base,
@@ -199,9 +195,41 @@ function probeAuthModes(): void {
 	void ctx.files;
 }
 
+// The one-release path for an auth block annotated `: AuthConfig` (goodchoice
+// auth.ts:917): the deprecated overload accepts it and the context stays
+// narrowed; `satisfies AuthConfig` reaches the strict overload.
+const annotatedAuth: AuthConfig = { mode: "credentials", flow: credentialsFlow };
+const satisfiesAuth = { mode: "credentials", flow: credentialsFlow } satisfies AuthConfig;
+
+function probeAnnotatedAuthConfig(): void {
+	const legacy = defineProvider({
+		...base,
+		meta,
+		auth: annotatedAuth,
+		credential: { keys: ["id"] },
+	});
+	const legacyCtx = {} as ProviderContextOf<typeof legacy>;
+	void legacyCtx.http;
+	void legacyCtx.credential;
+	// @ts-expect-error test-invalid: files was never declared; the deprecated overload keeps the key set.
+	void legacyCtx.files;
+
+	const strict = defineProvider({
+		...base,
+		meta,
+		auth: satisfiesAuth,
+		credential: { keys: ["id"] },
+	});
+	const strictCtx = {} as ProviderContextOf<typeof strict>;
+	void strictCtx.credential;
+	// @ts-expect-error test-invalid: with the literal mode the credentials arm applies and keys are required.
+	defineProvider({ ...base, meta, auth: satisfiesAuth });
+}
+
 describe("declaration types", () => {
 	it("is a type-level fixture; tsc is the assertion", () => {
 		expect(typeof probeNarrowing).toBe("function");
 		expect(typeof probeAuthModes).toBe("function");
+		expect(typeof probeAnnotatedAuthConfig).toBe("function");
 	});
 });
