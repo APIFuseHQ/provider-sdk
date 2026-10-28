@@ -5,7 +5,10 @@ import {
 	statefulDeadlineAbortReason,
 } from "./deadline-expiry.js";
 import { StatefulRoutingDeadlineError } from "./errors.js";
-import { statefulProviderMetricRegistry } from "./stateful-provider-metric-registry.js";
+import {
+	STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS,
+	statefulProviderMetricRegistry,
+} from "./stateful-provider-metric-registry.js";
 import type { StatefulProviderMetricEmitter } from "./stateful-provider-observability.js";
 import type {
 	SessionOwnerRecord,
@@ -298,7 +301,8 @@ export class StatefulSessionRouter {
 
 	/**
 	 * Counts a request whose deadline expired before routing, while forwarding,
-	 * or while executing locally.
+	 * or while executing locally, under the error code the registry declares
+	 * the counter's series with.
 	 */
 	private recordDeadlineExpired(request: StatefulOperationRequest): void {
 		this.#metricEmitter.increment("apifuse_stateful_provider_routing_deadline_expired_total", {
@@ -308,7 +312,7 @@ export class StatefulSessionRouter {
 			serviceAccountId: request.serviceAccountId,
 			operationId: request.operationId,
 			sessionKey: request.sessionKey,
-			redactedErrorCode: "deadline_expired",
+			...STATEFUL_PROVIDER_ROUTING_COUNTER_LABELS.apifuse_stateful_provider_routing_deadline_expired_total,
 		});
 	}
 
