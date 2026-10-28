@@ -17,7 +17,8 @@ export type CodemodId =
 	| "health-refs"
 	| "handles"
 	| "runtime-boundary-allow-comments"
-	| "schema";
+	| "schema"
+	| "declaration";
 
 export type CodemodManifest = {
 	readonly id: CodemodId;
@@ -64,6 +65,12 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		file: "schema.yml",
 		manualStep:
 			'add each `schema.<name>` key with the prose the note quotes to locales/en.json (and ko.json, ja.json where present); wrap a reported non-property .describe() as describeKey(<schema>, "<key>")',
+	},
+	{
+		id: "declaration",
+		file: "declaration.yml",
+		manualStep:
+			'add the missing `allowedHosts` / `reviewed` field, give `auth` the shape its `mode` requires, and move a reported `auth.exchange` or `reviewed: "staging"` to a supported value',
 	},
 ];
 

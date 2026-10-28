@@ -93,6 +93,7 @@ describe("apifuse migrate", () => {
 			"handles",
 			"runtime-boundary-allow-comments",
 			"schema",
+			"declaration",
 		]);
 		expect(CODEMOD_IDS).toEqual(CODEMODS.map((codemod) => codemod.id));
 	});
@@ -112,6 +113,7 @@ describe("apifuse migrate", () => {
 			handles: [["index.ts"], 2, 0],
 			"runtime-boundary-allow-comments": [["operations/search.ts"], 1, 0],
 			schema: [["operations/detail.ts"], 1, 0],
+			declaration: [[], 0, 0],
 		});
 		expect(residueTable(report)).toEqual(DRY_RUN_RESIDUES);
 		expect(report.clean).toBe(false);
@@ -164,6 +166,7 @@ describe("apifuse migrate", () => {
 			handles: [["index.ts"], 2, 0],
 			"runtime-boundary-allow-comments": [["operations/search.ts"], 1, 0],
 			schema: [["operations/detail.ts"], 1, 0],
+			declaration: [[], 0, 0],
 		});
 		// health-refs ran after errors-factory: its residue sits at the line the
 		// collapsed error table left it on, not at the pre-migration line.
@@ -186,7 +189,7 @@ describe("apifuse migrate", () => {
 		expect(migrateExitCode(report)).toBe(1);
 
 		const again = await runMigrate({ providerRoot, dryRun: true });
-		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0]);
+		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0]);
 		expect(residueTable(again)).toEqual([
 			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
 			"health-refs health-stale-window-per-call operations/search.ts:20",
