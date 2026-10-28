@@ -5,7 +5,6 @@ export type {
 	ProxyProtocol,
 	ProxyUserAgentSource,
 	ProxyVendorName,
-	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
 export type {
 	ProxyTelemetryHeaderPayload,

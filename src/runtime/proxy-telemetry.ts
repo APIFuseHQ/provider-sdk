@@ -7,7 +7,6 @@ import type {
 	ProxyUserAgentSource,
 	ProxyVendorFailoverTelemetryEvent,
 	ProxyVendorName,
-	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
 import {
 	closedEnum,
@@ -31,21 +30,10 @@ export type ProxyTelemetryResolvedPayload = {
 	cacheStatus: ProxyCacheStatus;
 	cacheHit: boolean;
 	resolutionMs: number;
-	allocatorMs?: number;
-	allocatorStatus?: number;
-	allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-	allocatorAttempts?: number;
-	lockWaitMs?: number;
-	redisReadMs?: number;
-	redisWriteMs?: number;
-	poolAgeMs?: number;
-	poolExpiresInMs?: number;
 	attempts: number;
-	refreshes?: number;
 	attemptSamples?: {
 		n: number;
 		a: number;
-		i?: number;
 		h?: string;
 		o: ProxyAttemptTelemetryEvent["outcome"];
 		c?: string;
@@ -71,17 +59,7 @@ export type ProxyTelemetryUnresolvedPayload = {
 	cacheStatus?: ProxyCacheStatus;
 	cacheHit?: boolean;
 	resolutionMs?: number;
-	allocatorMs?: number;
-	allocatorStatus?: number;
-	allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-	allocatorAttempts?: number;
-	lockWaitMs?: number;
-	redisReadMs?: number;
-	redisWriteMs?: number;
-	poolAgeMs?: number;
-	poolExpiresInMs?: number;
 	attempts?: number;
-	refreshes?: number;
 	failovers?: {
 		v: ProxyVendorName;
 		nx?: ProxyVendorName;
@@ -92,7 +70,6 @@ export type ProxyTelemetryUnresolvedPayload = {
 	attemptSamples?: {
 		n: number;
 		a: number;
-		i?: number;
 		h?: string;
 		o: ProxyAttemptTelemetryEvent["outcome"];
 		c?: string;
@@ -105,7 +82,12 @@ export type ProxyTelemetryLogPayload =
 	| ProxyTelemetryResolvedPayload
 	| ProxyTelemetryUnresolvedPayload;
 
-/** Concrete gateway-safe projection of the unchanged proxy sibling. */
+/**
+ * Concrete gateway-safe projection of the unchanged proxy sibling. The gateway
+ * reads every field as optional; the allocator-era fields (allocator timings,
+ * lock wait, pool age, pool index `i`) are no longer emitted and persist as
+ * NULL, as they already did for NodeMaven.
+ */
 export type ProxyTelemetryHeaderPayload = {
 	kind: ClosedEnum<"resolved" | "unresolved">;
 	provider?: ClosedEnum<ProxyVendorName>;
@@ -114,21 +96,10 @@ export type ProxyTelemetryHeaderPayload = {
 	cacheStatus?: ClosedEnum<ProxyCacheStatus>;
 	cacheHit?: boolean;
 	resolutionMs?: number;
-	allocatorMs?: number;
-	allocatorStatus?: number;
-	allocatorBodyClass?: ClosedEnum<SmartproxyAllocatorBodyClass>;
-	allocatorAttempts?: number;
-	lockWaitMs?: number;
-	redisReadMs?: number;
-	redisWriteMs?: number;
-	poolAgeMs?: number;
-	poolExpiresInMs?: number;
 	attempts?: number;
-	refreshes?: number;
 	attemptSamples?: {
 		n: number;
 		a: number;
-		i?: number;
 		h?: ProxyHash;
 		o: ClosedEnum<ProxyAttemptTelemetryEvent["outcome"]>;
 		c?: ClosedEnum<string>;
@@ -151,31 +122,6 @@ const MAX_RETAINED_PROXY_RESOLUTIONS = 64;
 const PROXY_HEADER_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 const PROXY_HEADER_HASH = /^[0-9a-f]{1,16}$/;
 
-const CACHE_STATUS_SEVERITY: Record<ProxyCacheStatus, number> = {
-	disabled: 0,
-	memory_hit: 1,
-	redis_hit: 2,
-	soft_stale_refresh: 3,
-	redis_corrupt: 4,
-	redis_error: 5,
-	lock_wait: 6,
-	allocator: 7,
-};
-
-function sumOptional(left: number | undefined, right: number | undefined): number | undefined {
-	const total = (left ?? 0) + (right ?? 0);
-	return total > 0 ? total : undefined;
-}
-
-function maxOptional(left: number | undefined, right: number | undefined): number | undefined {
-	const values = [left, right].filter((value): value is number => typeof value === "number");
-	return values.length > 0 ? Math.max(...values) : undefined;
-}
-
-function worseStatus(left: ProxyCacheStatus, right: ProxyCacheStatus): ProxyCacheStatus {
-	return CACHE_STATUS_SEVERITY[right] > CACHE_STATUS_SEVERITY[left] ? right : left;
-}
-
 function aggregateResolution(
 	acc: ProxyResolutionTelemetryEvent,
 	event: ProxyResolutionTelemetryEvent,
@@ -183,20 +129,10 @@ function aggregateResolution(
 	return {
 		provider: event.provider,
 		userAgentSource: event.userAgentSource ?? acc.userAgentSource,
-		cacheStatus: worseStatus(acc.cacheStatus, event.cacheStatus),
+		cacheStatus: "disabled",
 		cacheHit: acc.cacheHit && event.cacheHit,
 		resolutionMs: acc.resolutionMs + event.resolutionMs,
-		allocatorMs: sumOptional(acc.allocatorMs, event.allocatorMs),
-		allocatorStatus: event.allocatorStatus ?? acc.allocatorStatus,
-		allocatorBodyClass: event.allocatorBodyClass ?? acc.allocatorBodyClass,
-		allocatorAttempts: sumOptional(acc.allocatorAttempts, event.allocatorAttempts),
-		lockWaitMs: sumOptional(acc.lockWaitMs, event.lockWaitMs),
-		redisReadMs: sumOptional(acc.redisReadMs, event.redisReadMs),
-		redisWriteMs: sumOptional(acc.redisWriteMs, event.redisWriteMs),
-		poolAgeMs: maxOptional(acc.poolAgeMs, event.poolAgeMs),
-		poolExpiresInMs: maxOptional(acc.poolExpiresInMs, event.poolExpiresInMs),
 		attempts: acc.attempts + event.attempts,
-		refreshes: sumOptional(acc.refreshes, event.refreshes),
 	};
 }
 
@@ -225,32 +161,7 @@ export class ProxyTelemetryCollector
 			cacheStatus: event.cacheStatus,
 			cacheHit: event.cacheHit,
 			resolutionMs: Math.max(0, Math.floor(event.resolutionMs)),
-			allocatorMs:
-				event.allocatorMs === undefined ? undefined : Math.max(0, Math.floor(event.allocatorMs)),
-			allocatorStatus:
-				event.allocatorStatus === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.allocatorStatus)),
-			allocatorBodyClass: event.allocatorBodyClass,
-			allocatorAttempts:
-				event.allocatorAttempts === undefined
-					? undefined
-					: Math.max(1, Math.floor(event.allocatorAttempts)),
-			lockWaitMs:
-				event.lockWaitMs === undefined ? undefined : Math.max(0, Math.floor(event.lockWaitMs)),
-			redisReadMs:
-				event.redisReadMs === undefined ? undefined : Math.max(0, Math.floor(event.redisReadMs)),
-			redisWriteMs:
-				event.redisWriteMs === undefined ? undefined : Math.max(0, Math.floor(event.redisWriteMs)),
-			poolAgeMs:
-				event.poolAgeMs === undefined ? undefined : Math.max(0, Math.floor(event.poolAgeMs)),
-			poolExpiresInMs:
-				event.poolExpiresInMs === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.poolExpiresInMs)),
 			attempts: Math.max(1, Math.floor(event.attempts || 1)),
-			refreshes:
-				event.refreshes === undefined ? undefined : Math.max(0, Math.floor(event.refreshes)),
 		};
 		this.#resolutionCount += 1;
 		if (this.#events.length < MAX_RETAINED_PROXY_RESOLUTIONS) this.#events.push(normalized);
@@ -293,9 +204,6 @@ export class ProxyTelemetryCollector
 		this.#attempts.push({
 			provider: event.provider,
 			attempt: Math.max(1, Math.floor(event.attempt || 1)),
-			...(event.poolIndex === undefined
-				? {}
-				: { poolIndex: Math.max(0, Math.floor(event.poolIndex)) }),
 			...(event.proxyHash ? { proxyHash: event.proxyHash.slice(0, 16) } : {}),
 			outcome: event.outcome === "ok" ? "ok" : "error",
 			...(event.errorCode ? { errorCode: event.errorCode.slice(0, 80) } : {}),
@@ -311,7 +219,6 @@ export class ProxyTelemetryCollector
 		const attemptSamples = this.#attempts.map((attempt, index) => ({
 			n: index + 1,
 			a: attempt.attempt,
-			...(attempt.poolIndex === undefined ? {} : { i: attempt.poolIndex }),
 			...(attempt.proxyHash ? { h: attempt.proxyHash } : {}),
 			o: attempt.outcome,
 			...(attempt.errorCode ? { c: attempt.errorCode } : {}),
@@ -336,31 +243,7 @@ export class ProxyTelemetryCollector
 							cacheStatus: aggregate.cacheStatus,
 							cacheHit: aggregate.cacheHit,
 							resolutionMs: aggregate.resolutionMs,
-							...(aggregate.allocatorMs !== undefined
-								? { allocatorMs: aggregate.allocatorMs }
-								: {}),
-							...(aggregate.allocatorStatus !== undefined
-								? { allocatorStatus: aggregate.allocatorStatus }
-								: {}),
-							...(aggregate.allocatorBodyClass !== undefined
-								? { allocatorBodyClass: aggregate.allocatorBodyClass }
-								: {}),
-							...(aggregate.allocatorAttempts !== undefined
-								? { allocatorAttempts: aggregate.allocatorAttempts }
-								: {}),
-							...(aggregate.lockWaitMs !== undefined ? { lockWaitMs: aggregate.lockWaitMs } : {}),
-							...(aggregate.redisReadMs !== undefined
-								? { redisReadMs: aggregate.redisReadMs }
-								: {}),
-							...(aggregate.redisWriteMs !== undefined
-								? { redisWriteMs: aggregate.redisWriteMs }
-								: {}),
-							...(aggregate.poolAgeMs !== undefined ? { poolAgeMs: aggregate.poolAgeMs } : {}),
-							...(aggregate.poolExpiresInMs !== undefined
-								? { poolExpiresInMs: aggregate.poolExpiresInMs }
-								: {}),
 							attempts: aggregate.attempts,
-							...(aggregate.refreshes !== undefined ? { refreshes: aggregate.refreshes } : {}),
 						}
 					: {}),
 				...(failovers.length > 0 ? { failovers } : {}),
@@ -379,25 +262,7 @@ export class ProxyTelemetryCollector
 			cacheStatus: aggregate.cacheStatus,
 			cacheHit: aggregate.cacheHit,
 			resolutionMs: aggregate.resolutionMs,
-			...(aggregate.allocatorMs !== undefined ? { allocatorMs: aggregate.allocatorMs } : {}),
-			...(aggregate.allocatorStatus !== undefined
-				? { allocatorStatus: aggregate.allocatorStatus }
-				: {}),
-			...(aggregate.allocatorBodyClass !== undefined
-				? { allocatorBodyClass: aggregate.allocatorBodyClass }
-				: {}),
-			...(aggregate.allocatorAttempts !== undefined
-				? { allocatorAttempts: aggregate.allocatorAttempts }
-				: {}),
-			...(aggregate.lockWaitMs !== undefined ? { lockWaitMs: aggregate.lockWaitMs } : {}),
-			...(aggregate.redisReadMs !== undefined ? { redisReadMs: aggregate.redisReadMs } : {}),
-			...(aggregate.redisWriteMs !== undefined ? { redisWriteMs: aggregate.redisWriteMs } : {}),
-			...(aggregate.poolAgeMs !== undefined ? { poolAgeMs: aggregate.poolAgeMs } : {}),
-			...(aggregate.poolExpiresInMs !== undefined
-				? { poolExpiresInMs: aggregate.poolExpiresInMs }
-				: {}),
 			attempts: aggregate.attempts,
-			...(aggregate.refreshes !== undefined ? { refreshes: aggregate.refreshes } : {}),
 			...(attemptSamples.length > 0 ? { attemptSamples } : {}),
 			...(this.#vendors.length > 1 ? { vendors: [...this.#vendors] } : {}),
 			...(failovers.length > 0 ? { failovers } : {}),
@@ -408,7 +273,6 @@ export class ProxyTelemetryCollector
 		const attemptSamples = log.attemptSamples?.map((sample) => ({
 			n: sample.n,
 			a: sample.a,
-			...(sample.i === undefined ? {} : { i: sample.i }),
 			...(sample.h && PROXY_HEADER_HASH.test(sample.h)
 				? { h: closedEnum(sample.h) as ProxyHash }
 				: {}),
@@ -432,9 +296,6 @@ export class ProxyTelemetryCollector
 				...(log.userAgentSource ? { userAgentSource: closedEnum(log.userAgentSource) } : {}),
 				...(log.protocol ? { protocol: closedEnum(log.protocol) } : {}),
 				cacheStatus: closedEnum(log.cacheStatus),
-				...(log.allocatorBodyClass
-					? { allocatorBodyClass: closedEnum(log.allocatorBodyClass) }
-					: {}),
 				...(attemptSamples ? { attemptSamples } : {}),
 				...(log.vendors ? { vendors: log.vendors.map((vendor) => closedEnum(vendor)) } : {}),
 				...(failovers ? { failovers } : {}),
@@ -445,7 +306,6 @@ export class ProxyTelemetryCollector
 			kind: closedEnum(log.kind),
 			vendors: log.vendors.map((vendor) => closedEnum(vendor)),
 			...(log.cacheStatus ? { cacheStatus: closedEnum(log.cacheStatus) } : {}),
-			...(log.allocatorBodyClass ? { allocatorBodyClass: closedEnum(log.allocatorBodyClass) } : {}),
 			...(failovers ? { failovers } : {}),
 			...(attemptSamples ? { attemptSamples } : {}),
 		} as ProxyTelemetryHeaderPayload;

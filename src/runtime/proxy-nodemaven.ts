@@ -1,7 +1,14 @@
 import { readDiagnosticEnv } from "./diagnostic-env.js";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type { NodemavenConnectionType, ProviderProxyPolicy } from "../types.js";
+import {
+	deriveProxySessionId,
+	isStickyProxyPolicy,
+	type ProxySessionDirective,
+	type ProxySessionWindow,
+	proxySessionWindow,
+} from "./proxy-session-id.js";
 
 export const NODEMAVEN_USERNAME_ENV = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
 export const NODEMAVEN_PASSWORD_ENV = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
@@ -33,11 +40,8 @@ const NODEMAVEN_PORTS: Record<ProxyProtocol, { min: number; max: number }> = {
 
 const NODEMAVEN_FILTERS = new Set(["medium", "high"]);
 const DEFAULT_NODEMAVEN_FILTER = "medium";
-const DEFAULT_NODEMAVEN_POOL_SIZE = 20;
-export const NODEMAVEN_MAX_POOL_SIZE = 50;
 /** NodeMaven sticky sessions persist up to 24h server-side, keyed by the sid. */
 const NODEMAVEN_MAX_LIFETIME_MINUTES = 1440;
-const SID_LENGTH = 10;
 
 /**
  * `-isp-` carrier slug grammar: lowercase letters, digits and `_` (NodeMaven
@@ -90,25 +94,18 @@ function resolveNodemavenFilter(
 }
 
 /**
- * One carrier per attempt: `isp[poolIndex % isp.length]`. The first attempt
- * (pool index 0) takes the first slug and a caller-managed retry with
+ * One carrier per attempt: `isp[attempt % isp.length]`. The first attempt
+ * takes the first slug and a caller-managed retry with
  * `proxyAttemptOffset: 1` takes the next, so a blocked carrier is not retried
  * back to back.
  */
 function selectNodemavenIsp(
 	isp: readonly string[] | undefined,
-	poolIndex: number,
+	attempt: number,
 ): string | undefined {
 	if (!isp || isp.length === 0) return undefined;
-	const index = Number.isFinite(poolIndex) ? Math.max(0, Math.floor(poolIndex)) : 0;
+	const index = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
 	return isp[index % isp.length];
-}
-
-export function nodemavenPoolSize(policy: ProviderProxyPolicy): number {
-	return Math.min(
-		NODEMAVEN_MAX_POOL_SIZE,
-		Math.max(1, Math.floor(policy.session?.poolSize ?? DEFAULT_NODEMAVEN_POOL_SIZE)),
-	);
 }
 
 /**
@@ -118,8 +115,11 @@ export function nodemavenPoolSize(policy: ProviderProxyPolicy): number {
  * expiry, ceremony lease and native drain timers never outlive the sticky IP
  * the gateway keeps for the `-ttl-` token.
  */
-export function nodemavenLifetimeMinutes(policy: ProviderProxyPolicy): number {
-	const configured = policy.session?.lifetimeMinutes;
+export function nodemavenLifetimeMinutes(
+	policy: ProviderProxyPolicy,
+	lifetimeOverride?: number,
+): number {
+	const configured = lifetimeOverride ?? policy.session?.lifetimeMinutes;
 	const sessionMinutes =
 		typeof configured !== "number" || !Number.isFinite(configured) || configured <= 0
 			? NODEMAVEN_MAX_LIFETIME_MINUTES
@@ -129,22 +129,13 @@ export function nodemavenLifetimeMinutes(policy: ProviderProxyPolicy): number {
 	return Math.min(sessionMinutes, Math.max(1, Math.floor(ttlSeconds / 60)));
 }
 
-export type NodemavenSessionWindow = {
-	refreshEpoch: number;
-	expiresAt: string;
-};
-
 /** Stable wall-clock window shared by every process deriving the same sticky sid. */
 export function nodemavenSessionWindow(
 	policy: ProviderProxyPolicy,
 	now = Date.now(),
-): NodemavenSessionWindow {
-	const lifetimeMs = nodemavenLifetimeMinutes(policy) * 60_000;
-	const refreshEpoch = Math.floor(now / lifetimeMs);
-	return {
-		refreshEpoch,
-		expiresAt: new Date((refreshEpoch + 1) * lifetimeMs).toISOString(),
-	};
+	lifetimeOverride?: number,
+): ProxySessionWindow {
+	return proxySessionWindow(nodemavenLifetimeMinutes(policy, lifetimeOverride), now);
 }
 
 /** NodeMaven username tokens accept `[a-z0-9]`; slugify geo values to that set. */
@@ -157,36 +148,11 @@ function slugifyGeo(value: string | undefined): string | undefined {
 	return slug || undefined;
 }
 
-function isStickyAffinity(policy: ProviderProxyPolicy): boolean {
-	return (policy.session?.affinity ?? "request") !== "request";
-}
-
-/**
- * A sticky sid is deterministic from the affinity key so every process serving
- * the same connection derives the same egress IP without shared storage. A
- * rotating sid is random per call (a fresh egress IP per request).
- */
-function deriveSid(
-	policy: ProviderProxyPolicy,
-	affinityKey: string | undefined,
-	poolIndex: number,
-	refreshEpoch: number,
-): string {
-	if (!isStickyAffinity(policy) || !affinityKey) {
-		return randomBytes(SID_LENGTH).toString("hex").slice(0, SID_LENGTH);
-	}
-	const digest = createHash("sha256")
-		.update(`${affinityKey}:${refreshEpoch}:${poolIndex}`)
-		.digest("hex");
-	// hex digits are a subset of the allowed [a-z0-9] sid charset.
-	return digest.slice(0, SID_LENGTH);
-}
-
-function selectPort(protocol: ProxyProtocol, sid: string, poolIndex: number): number {
+function selectPort(protocol: ProxyProtocol, sid: string, attempt: number): number {
 	const { min, max } = NODEMAVEN_PORTS[protocol];
 	const span = max - min + 1;
 	const hashInt = Number.parseInt(
-		createHash("sha256").update(`${sid}:${poolIndex}`).digest("hex").slice(0, 8),
+		createHash("sha256").update(`${sid}:${attempt}`).digest("hex").slice(0, 8),
 		16,
 	);
 	return min + (hashInt % span);
@@ -198,13 +164,17 @@ export type NodemavenSynthesisInput = {
 	credentials: NodemavenCredentials;
 	affinityKey: string | undefined;
 	protocol: ProxyProtocol;
-	poolIndex: number;
-	refreshEpoch: number;
+	/** Zero-based attempt within this vendor's share of the request's attempt budget. */
+	attempt: number;
+	/** Sticky session window epoch (`nodemavenSessionWindow`); ignored for rotating policies. */
+	windowEpoch: number;
+	/** Session kind and lifetime chosen by the vendor selector; absent means the policy's own. */
+	session?: ProxySessionDirective;
 	/** ISO 3166-1 alpha-2, already resolved by the caller (falls back to env). */
 	country?: string;
 	/** Clock injection used by native sticky-expiry lifecycle tests. */
 	now?: number;
-	/** Stable caller-owned hard expiry when the refresh epoch is wall-clock-derived. */
+	/** Stable caller-owned hard expiry when the window epoch is wall-clock-derived. */
 	expiresAt?: string;
 };
 
@@ -214,6 +184,7 @@ export type NodemavenSynthesis = {
 	sticky: boolean;
 	sessionId: string;
 	expiresAt?: string;
+	lifetimeMinutes: number;
 	diagnostics: Record<string, string | number | boolean>;
 };
 
@@ -227,14 +198,14 @@ export type NodemavenSynthesis = {
  *          -ipv4-true -sid-<sid> -ttl-<XmYs> -filter-<tier>
  *
  * - `-isp-`, `-type-mobile` and `-ttl-` come from `policy.nodemaven` (type,
- *   isp[poolIndex % isp.length], ttlSeconds via `formatNodemavenTtl`).
+ *   isp[attempt % isp.length], ttlSeconds via `formatNodemavenTtl`).
  * - Residential policies keep the token set and values of earlier releases
  *   (`country`, `region`, `city`, `ipv4-true`, `sid`, `filter`); only the
  *   position of `-ipv4-true` moved ahead of `-sid-` to match the documented
- *   order. The sid derivation and the port choice are unchanged, so sticky
- *   sessions keep their egress. The gateway assigned exits for both orders
- *   in the 2026-10-22 measurements (59 with the earlier order, 5 with the
- *   documented one).
+ *   order. The sid derivation (`deriveProxySessionId`, attempt 0) and the port
+ *   choice are unchanged, so sticky sessions keep their egress. The gateway
+ *   assigned exits for both orders in the 2026-10-22 measurements (59 with the
+ *   earlier order, 5 with the documented one).
  * - Mobile policies emit `-filter-` only when `APIFUSE__PROXY__NODEMAVEN_FILTER`
  *   is set explicitly; the measured passing shape
  *   (`<user>-country-kr-type-mobile-ipv4-true-sid-<sid>`, 12/15 on
@@ -256,13 +227,20 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 	const options = input.policy.nodemaven;
 	const connectionType: NodemavenConnectionType = options?.type ?? "residential";
 	const filter = resolveNodemavenFilter(input.credentials.filter, connectionType);
-	const isp = selectNodemavenIsp(options?.isp, input.poolIndex);
+	const isp = selectNodemavenIsp(options?.isp, input.attempt);
 	const ttl =
 		options?.ttlSeconds === undefined ? undefined : formatNodemavenTtl(options.ttlSeconds);
-	const sid = deriveSid(input.policy, input.affinityKey, input.poolIndex, input.refreshEpoch);
-	const port = selectPort(input.protocol, sid, input.poolIndex);
-	const lifetimeMinutes = nodemavenLifetimeMinutes(input.policy);
-	const sticky = isStickyAffinity(input.policy);
+	const sticky = input.session
+		? input.session.kind === "sticky"
+		: isStickyProxyPolicy(input.policy);
+	const sid = deriveProxySessionId({
+		sticky,
+		affinityKey: input.affinityKey,
+		windowEpoch: input.windowEpoch,
+		attempt: input.attempt,
+	});
+	const port = selectPort(input.protocol, sid, input.attempt);
+	const lifetimeMinutes = nodemavenLifetimeMinutes(input.policy, input.session?.lifetimeMinutes);
 
 	const country = slugifyGeo(input.country ?? input.policy.geo?.country);
 	const region = slugifyGeo(input.policy.geo?.subdivision);
@@ -290,6 +268,7 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 		protocol: input.protocol,
 		sticky,
 		sessionId: sid,
+		lifetimeMinutes,
 		...(sticky
 			? {
 					expiresAt:

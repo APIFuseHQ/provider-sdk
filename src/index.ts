@@ -13,9 +13,23 @@ export type {
 	ProxyVendorName,
 	ResolvedProxyConfig,
 	SessionConfig,
-	SmartproxyAllocatorBodyClass,
+	ProxyAttemptOutcome,
+	ProxyAttemptRequest,
+	ProxyAttemptSlot,
+	ProxySessionDirective,
+	ProxyVendorDirective,
+	ProxyVendorSelector,
 } from "./config/loader.js";
-export { defineConfig, loadApiFuseConfig, resolveProxy } from "./config/loader.js";
+export {
+	defineConfig,
+	getProxyVendorSelector,
+	loadApiFuseConfig,
+	mapAttemptToVendor,
+	PROXY_ATTEMPTS_PER_VENDOR,
+	resolveProxy,
+	setProxyVendorSelector,
+	staticOrderProxyVendorSelector,
+} from "./config/loader.js";
 export {
 	canonicalJson,
 	digestProviderContract,

@@ -1846,7 +1846,7 @@ export interface EmailOtpReceipt extends OtpReceiptBase {
 export function encodeSseEvent(input: SseEvent): string;
 
 // @public
-export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
+export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_USERNAME", "APIFUSE__PROXY__SMARTPROXY_PASSWORD", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
 
 // @public
 export const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__RESOLVER__2CAPTCHA__API_KEY", "APIFUSE__RESOLVER__CAPSOLVER__API_KEY", "APIFUSE__RESOLVER__CAPMONSTER__API_KEY", "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"];
@@ -2089,6 +2089,9 @@ export function getProviderLocalePath(catalog: ProviderLocaleCatalog, key: Provi
 
 // @public
 export function getProviderLocaleSegments(catalog: ProviderLocaleCatalog, segments: readonly string[]): ProviderLocaleValue | undefined;
+
+// @public
+export function getProxyVendorSelector(): ProxyVendorSelector;
 
 // @public (undocumented)
 export function getStealthProfile(selection?: StealthProfileSelection): StealthProfile;
@@ -2411,10 +2414,7 @@ interface HealthCheckInputPreparationContext<TInput = unknown> {
 
 // @public
 export interface HealthCheckSuite<TInput = unknown, TOutput = unknown> {
-    cases: [
-    HealthCheckCase<TInput, TOutput>,
-    ...HealthCheckCase<TInput, TOutput>[]
-    ];
+    cases: [HealthCheckCase<TInput, TOutput>, ...HealthCheckCase<TInput, TOutput>[]];
     degradedThresholdMs?: number;
     interval: ProbeInterval;
     requiresConnection?: boolean;
@@ -3406,6 +3406,9 @@ export type ManualTriggerPolicy = {
 
 // @public (undocumented)
 export const ManualTriggerPolicySchema: z.ZodType<ManualTriggerPolicy, unknown, z.core.$ZodTypeInternals<ManualTriggerPolicy, unknown>>;
+
+// @public
+export function mapAttemptToVendor(attempt: number, chainLength: number, attemptCap: number): ProxyAttemptSlot;
 
 // @public
 export const MAX_INTERPOLATED_PARAM_LENGTH = 200;
@@ -5796,7 +5799,6 @@ export interface ProviderProxyPolicy {
     session?: {
         affinity?: ProviderProxySessionAffinity;
         lifetimeMinutes?: number;
-        poolSize?: number;
         drainLeadSeconds?: number;
     };
 }
@@ -6258,14 +6260,46 @@ export interface ProxiedOAuthConfig {
     tokenUrl: string;
 }
 
+// @public
+export const PROXY_ATTEMPTS_PER_VENDOR = 3;
+
 // @public (undocumented)
 const PROXY_HASH: unique symbol;
+
+// @public (undocumented)
+export type ProxyAttemptOutcome = {
+    readonly vendor: ProxyVendorName;
+    readonly phase: "resolution" | "transport";
+    readonly outcome: "ok" | "error";
+    readonly attempt?: number;
+    readonly vendorAttempt?: number;
+    readonly sessionId?: string;
+    readonly errorCode?: string;
+    readonly status?: number;
+    readonly durationMs?: number;
+    readonly now: number;
+};
+
+// @public (undocumented)
+export type ProxyAttemptRequest = {
+    readonly policy: ProviderProxyPolicy;
+    readonly chain: readonly ProxyVendorName[];
+    readonly attempt: number;
+    readonly attemptCap: number;
+    readonly affinityKey?: string;
+    readonly now: number;
+};
+
+// @public (undocumented)
+export type ProxyAttemptSlot = {
+    readonly vendorIndex: number;
+    readonly vendorAttempt: number;
+};
 
 // @public (undocumented)
 type ProxyAttemptTelemetryEvent = {
     provider: ProxyVendorName;
     attempt: number;
-    poolIndex?: number;
     proxyHash?: string;
     outcome: "ok" | "error";
     errorCode?: string;
@@ -6273,8 +6307,8 @@ type ProxyAttemptTelemetryEvent = {
     durationMs?: number;
 };
 
-// @public (undocumented)
-export type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+// @public
+export type ProxyCacheStatus = "disabled";
 
 // @public
 export type ProxyHash = ClosedEnum<string> & {
@@ -6293,15 +6327,17 @@ export type ProxyResolutionOptions = {
     proxyPolicy?: ProviderProxyPolicy;
     affinityKey?: string;
     proxyAttempt?: number;
+    proxyAttemptCap?: number;
     transportProtocols?: readonly ProxyProtocol[];
     protocol?: ProxyProtocol;
-    proxyRefreshEpoch?: number;
+    now?: number;
+    vendorSelector?: ProxyVendorSelector;
     telemetry?: ProxyTelemetrySink;
     engineCredentials?: Readonly<Record<string, string>>;
 };
 
 // @public (undocumented)
-export type ProxyResolutionSource = "explicit" | "env" | "config" | "smartproxy-allocator" | "nodemaven-gateway";
+export type ProxyResolutionSource = "explicit" | "env" | "config" | "smartproxy-gateway" | "nodemaven-gateway";
 
 // @public (undocumented)
 type ProxyResolutionTelemetryEvent = {
@@ -6312,17 +6348,13 @@ type ProxyResolutionTelemetryEvent = {
     cacheStatus: ProxyCacheStatus;
     cacheHit: boolean;
     resolutionMs: number;
-    allocatorMs?: number;
-    allocatorStatus?: number;
-    allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-    allocatorAttempts?: number;
-    lockWaitMs?: number;
-    redisReadMs?: number;
-    redisWriteMs?: number;
-    poolAgeMs?: number;
-    poolExpiresInMs?: number;
     attempts: number;
-    refreshes?: number;
+};
+
+// @public
+export type ProxySessionDirective = {
+    readonly kind: "sticky" | "rotating";
+    readonly lifetimeMinutes?: number;
 };
 
 // @public
@@ -6334,21 +6366,10 @@ export type ProxyTelemetryHeaderPayload = {
     cacheStatus?: ClosedEnum<ProxyCacheStatus>;
     cacheHit?: boolean;
     resolutionMs?: number;
-    allocatorMs?: number;
-    allocatorStatus?: number;
-    allocatorBodyClass?: ClosedEnum<SmartproxyAllocatorBodyClass>;
-    allocatorAttempts?: number;
-    lockWaitMs?: number;
-    redisReadMs?: number;
-    redisWriteMs?: number;
-    poolAgeMs?: number;
-    poolExpiresInMs?: number;
     attempts?: number;
-    refreshes?: number;
     attemptSamples?: {
         n: number;
         a: number;
-        i?: number;
         h?: ProxyHash;
         o: ClosedEnum<ProxyAttemptTelemetryEvent["outcome"]>;
         c?: ClosedEnum<string>;
@@ -6377,21 +6398,10 @@ export type ProxyTelemetryResolvedPayload = {
     cacheStatus: ProxyCacheStatus;
     cacheHit: boolean;
     resolutionMs: number;
-    allocatorMs?: number;
-    allocatorStatus?: number;
-    allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-    allocatorAttempts?: number;
-    lockWaitMs?: number;
-    redisReadMs?: number;
-    redisWriteMs?: number;
-    poolAgeMs?: number;
-    poolExpiresInMs?: number;
     attempts: number;
-    refreshes?: number;
     attemptSamples?: {
         n: number;
         a: number;
-        i?: number;
         h?: string;
         o: ProxyAttemptTelemetryEvent["outcome"];
         c?: string;
@@ -6422,17 +6432,7 @@ export type ProxyTelemetryUnresolvedPayload = {
     cacheStatus?: ProxyCacheStatus;
     cacheHit?: boolean;
     resolutionMs?: number;
-    allocatorMs?: number;
-    allocatorStatus?: number;
-    allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-    allocatorAttempts?: number;
-    lockWaitMs?: number;
-    redisReadMs?: number;
-    redisWriteMs?: number;
-    poolAgeMs?: number;
-    poolExpiresInMs?: number;
     attempts?: number;
-    refreshes?: number;
     failovers?: {
         v: ProxyVendorName;
         nx?: ProxyVendorName;
@@ -6443,7 +6443,6 @@ export type ProxyTelemetryUnresolvedPayload = {
     attemptSamples?: {
         n: number;
         a: number;
-        i?: number;
         h?: string;
         o: ProxyAttemptTelemetryEvent["outcome"];
         c?: string;
@@ -6456,6 +6455,13 @@ export type ProxyTelemetryUnresolvedPayload = {
 export type ProxyUserAgentSource = "declared" | "defaulted";
 
 // @public (undocumented)
+export type ProxyVendorDirective = {
+    readonly vendor: ProxyVendorName;
+    readonly vendorAttempt: number;
+    readonly session: ProxySessionDirective;
+};
+
+// @public (undocumented)
 type ProxyVendorFailoverTelemetryEvent = {
     vendor: ProxyVendorName;
     nextVendor?: ProxyVendorName;
@@ -6466,6 +6472,12 @@ type ProxyVendorFailoverTelemetryEvent = {
 
 // @public
 export type ProxyVendorName = "smartproxy" | "nodemaven";
+
+// @public (undocumented)
+export interface ProxyVendorSelector {
+    report(outcome: ProxyAttemptOutcome): void;
+    select(request: ProxyAttemptRequest): readonly ProxyVendorDirective[];
+}
 
 // @public
 export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema;
@@ -6641,6 +6653,10 @@ export type ResolvedProxyConfig = {
     vendor?: ProxyVendorName;
     source?: ProxyResolutionSource;
     protocol?: ProxyProtocol;
+    sticky?: boolean;
+    sessionId?: string;
+    expiresAt?: string;
+    lifetimeMinutes?: number;
     diagnostics?: Record<string, string | number | boolean>;
 };
 
@@ -7949,8 +7965,8 @@ export interface SessionStateValidity {
     readonly ttl?: SessionStateDuration;
 }
 
-// @public (undocumented)
-export type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
+// @public
+export function setProxyVendorSelector(selector: ProxyVendorSelector | undefined): void;
 
 // @public (undocumented)
 export type SmsOrigin = {
@@ -8254,6 +8270,9 @@ export interface StateWriteOptions {
     // (undocumented)
     ttl?: ProviderStateDurationString;
 }
+
+// @public
+export const staticOrderProxyVendorSelector: ProxyVendorSelector;
 
 // @public (undocumented)
 export type StealthBrowser = "chrome" | "firefox" | "safari";
@@ -9125,7 +9144,7 @@ export { z }
 // Warnings were encountered during analysis:
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/config/loader.d.ts:120:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:117:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:149:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
@@ -9134,8 +9153,8 @@ export { z }
 // dist/lint.d.ts:58:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:97:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:83:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:92:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:67:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:71:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:189:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
@@ -9144,11 +9163,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:287:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:732:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2076:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2164:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2172:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2173:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2360:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2086:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2174:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2182:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2183:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2370:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

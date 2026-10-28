@@ -9,15 +9,15 @@ import type {
 
 import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.js";
 import {
-	DEFAULT_SMARTPROXY_POOL_SIZE,
-	invalidateProxyResolutionCacheAsync,
+	PROXY_ATTEMPTS_PER_VENDOR,
 	ProxyResolutionError,
 	policyResolvesRegistryVendorChain,
-	resolvePolicyProxyPoolSpan,
+	resolvePolicyProxyAttemptSpan,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 	vendorFromResolvedSource,
 } from "../config/loader.js";
+import { getProxyVendorSelector } from "./proxy-vendor-selector.js";
 import { SDKError, TransportError } from "../errors.js";
 import {
 	DEFAULT_STEALTH_BROWSER,
@@ -1110,30 +1110,12 @@ function shouldRunProxyAuthDiagnostic(error: unknown): boolean {
 
 type ResolvedAttemptProxy = {
 	url?: string;
-	poolIndex?: number;
 	proxyHash?: string;
 	vendor?: ProxyVendorName;
-	refreshEpoch?: number;
+	/** Vendor session id the URL carries; differs per attempt. */
+	sessionId?: string;
 	lifetimeMinutes?: number;
 };
-
-function proxyPoolIndexFromDiagnostics(
-	diagnostics: Record<string, string | number | boolean> | undefined,
-): number | undefined {
-	const value = diagnostics?.poolIndex;
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-		return undefined;
-	}
-	return Math.floor(value);
-}
-
-function positiveDiagnosticNumber(
-	diagnostics: Record<string, string | number | boolean> | undefined,
-	name: string,
-): number | undefined {
-	const value = diagnostics?.[name];
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
-}
 
 function proxyEndpointHash(proxyUrl: string | undefined): string | undefined {
 	if (!proxyUrl) return undefined;
@@ -1372,10 +1354,7 @@ function stripStealthCookieMaterial(text: string, cookieNames: readonly string[]
 		/(^|[^\p{L}\p{N}_-])[\t ]*(?:cookie|set-cookie)[\t ]*(?::|=)[^\r\n]*/giu,
 		"$1[REDACTED]",
 	);
-	result = result.replace(
-		/"(?:cookie|set-cookie)"[\t ]*:[\t ]*"(?:\\.|[^"\\])*"/giu,
-		"[REDACTED]",
-	);
+	result = result.replace(/"(?:cookie|set-cookie)"[\t ]*:[\t ]*"(?:\\.|[^"\\])*"/giu, "[REDACTED]");
 	for (const name of cookieNames) {
 		const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		result = result.replace(
@@ -1798,7 +1777,7 @@ function createSessionFetcher(
 	async function resolveRequestProxy(
 		options?: StealthFetchOptions,
 		proxyAttempt?: number,
-		refreshEpoch?: number,
+		attemptCap?: number,
 	): Promise<ResolvedAttemptProxy> {
 		const pinned = (options as SessionStatePinnedFetchOptions | undefined)?.[
 			SESSION_STATE_PINNED_EGRESS
@@ -1817,10 +1796,9 @@ function createSessionFetcher(
 			}
 			return {
 				url: bound.proxyUrl,
-				poolIndex: bound.poolIndex,
 				proxyHash: proxyEndpointHash(bound.proxyUrl),
 				vendor: bound.vendor,
-				refreshEpoch: bound.refreshEpoch,
+				...(bound.sessionId ? { sessionId: bound.sessionId } : {}),
 				lifetimeMinutes: bound.lifetimeMinutes,
 			};
 		}
@@ -1836,7 +1814,7 @@ function createSessionFetcher(
 			// The stealth transport tunnels both HTTP CONNECT and SOCKS5,
 			// preserving the client TLS fingerprint end-to-end.
 			transportProtocols: ["http", "socks5"],
-			...(refreshEpoch === undefined ? {} : { proxyRefreshEpoch: refreshEpoch }),
+			...(attemptCap === undefined ? {} : { proxyAttemptCap: attemptCap }),
 			telemetry: clientOptions.telemetry,
 			engineCredentials: clientOptions.engineCredentials,
 		});
@@ -1848,15 +1826,12 @@ function createSessionFetcher(
 
 		return {
 			url: resolvedProxy.url,
-			poolIndex: proxyPoolIndexFromDiagnostics(resolvedProxy.diagnostics),
 			proxyHash: proxyEndpointHash(resolvedProxy.url),
 			vendor: vendorFromResolvedSource(resolvedProxy.source),
-			refreshEpoch: refreshEpoch ?? 0,
-			...(positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes") === undefined
+			...(resolvedProxy.sessionId ? { sessionId: resolvedProxy.sessionId } : {}),
+			...(resolvedProxy.lifetimeMinutes === undefined
 				? {}
-				: {
-						lifetimeMinutes: positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes"),
-					}),
+				: { lifetimeMinutes: resolvedProxy.lifetimeMinutes }),
 		};
 	}
 
@@ -1878,13 +1853,9 @@ function createSessionFetcher(
 			}
 			return;
 		}
-		if (
-			attemptProxy.poolIndex === undefined ||
-			attemptProxy.lifetimeMinutes === undefined ||
-			!clientOptions.affinityKey
-		) {
-			// Registry vendors always report pool index and session lifetime; missing either
-			// is an SDK fault, not something the caller can correct.
+		if (attemptProxy.lifetimeMinutes === undefined || !clientOptions.affinityKey) {
+			// Registry vendors always report the session lifetime; missing it is an SDK
+			// fault, not something the caller can correct.
 			throw new SDKError("The selected egress cannot be represented by a ceremony lease", {
 				code: "EGRESS_LEASE_BINDING_INVALID",
 			});
@@ -1892,9 +1863,8 @@ function createSessionFetcher(
 		const binding: CeremonyEgressBinding = {
 			vendor: attemptProxy.vendor,
 			proxyUrl: attemptProxy.url,
-			poolIndex: attemptProxy.poolIndex,
 			affinityKey: clientOptions.affinityKey,
-			refreshEpoch: attemptProxy.refreshEpoch ?? 0,
+			...(attemptProxy.sessionId ? { sessionId: attemptProxy.sessionId } : {}),
 			lifetimeMinutes: attemptProxy.lifetimeMinutes,
 		};
 		lease.bind(binding);
@@ -1964,13 +1934,11 @@ function createSessionFetcher(
 				(typeof clientOptions.upstream?.proxy === "object"
 					? clientOptions.upstream.proxy
 					: undefined);
-			// The pool span is already bounded by each vendor's max pool size
-			// (smartproxy ≤20, nodemaven ≤50), so the configured span never exceeds
-			// the chain's true maximum — a large NodeMaven pool stays fully
-			// reachable rather than being truncated at an arbitrary ceiling.
+			// Each vendor gets an equal share of the attempt budget; the chain span is
+			// the entitlement when no explicit retry pins a larger budget.
 			const policyProxyAttemptCap = Math.max(
-				1,
-				policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
+				retryAttemptCap,
+				policyProxy ? resolvePolicyProxyAttemptSpan(policyProxy) : PROXY_ATTEMPTS_PER_VENDOR,
 			);
 			// A registry vendor chain (smartproxy/nodemaven) is the only policy whose
 			// successive attempts resolve a *different* endpoint, so it is the only one
@@ -2018,15 +1986,26 @@ function createSessionFetcher(
 						clientOptions.telemetry?.recordProxyAttempt?.({
 							provider: attemptProxy?.vendor ?? "smartproxy",
 							attempt: attempt + 1,
-							...(attemptProxy?.poolIndex === undefined
-								? {}
-								: { poolIndex: attemptProxy.poolIndex }),
 							...(attemptProxy?.proxyHash ? { proxyHash: attemptProxy.proxyHash } : {}),
 							outcome,
 							...(errorCode ? { errorCode } : {}),
 							...(status === undefined ? {} : { status }),
 							durationMs: Date.now() - attemptStartedAt,
 						});
+						if (attemptProxy?.vendor) {
+							const now = Date.now();
+							getProxyVendorSelector().report({
+								vendor: attemptProxy.vendor,
+								phase: "transport",
+								outcome,
+								attempt,
+								...(attemptProxy.sessionId ? { sessionId: attemptProxy.sessionId } : {}),
+								...(errorCode ? { errorCode } : {}),
+								...(status === undefined ? {} : { status }),
+								durationMs: Math.max(0, now - attemptStartedAt),
+								now,
+							});
+						}
 					};
 					// Shared tail of the first fetch, the automatic refetch, and an explicit replay: a
 					// classified challenge is returned whatever `throwOnHttpError` says (documented on
@@ -2115,7 +2094,7 @@ function createSessionFetcher(
 						fallbackRequestUrl = url;
 						fallbackRedactedUrl = structural.redactedUrl;
 						assertNoUnsupportedFingerprintOverrides(options);
-						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
+						attemptProxy = await resolveRequestProxy(options, attempt, unboundMaxAttempts);
 						throwIfAmbientAborted(clientOptions.signal);
 						proxy = attemptProxy.url;
 						if (proxy && dedupeAllocatorEndpoints) {
@@ -2594,7 +2573,7 @@ function createSessionFetcher(
 						// static/non-registry vendors keep the per-endpoint retry budget.
 						const transportRetryCap = resolvePolicyTransportAttemptCap({
 							policy: policyProxy,
-							usesPolicyAllocator,
+							usesPolicyProxy: usesPolicyAllocator,
 							retryAttempts: stealthRetryOptions?.attempts ?? 1,
 							explicitRetry: hasExplicitRetryPolicy,
 							method,
@@ -2628,12 +2607,9 @@ function createSessionFetcher(
 					refreshAttempt < MAX_POLICY_PROXY_POOL_REFRESHES
 				) {
 					throwIfAmbientAborted(clientOptions.signal);
+					// Gateway vendors keep no pool to refresh: the second pass derives the
+					// same sticky sessions and is skipped by the endpoint dedupe below.
 					emitStealthTelemetry(clientOptions.stealthTelemetry, (sink) => sink.recordPoolRefresh());
-					await invalidateProxyResolutionCacheAsync({
-						proxyPolicy: clientOptions.proxyPolicy,
-						upstream: clientOptions.upstream,
-						affinityKey: clientOptions.affinityKey,
-					});
 					throwIfAmbientAborted(clientOptions.signal);
 					continue;
 				}
@@ -2971,7 +2947,9 @@ function createSessionFetcher(
 		]);
 		const profile = resolveStealthProfileSelection(callerOptions.stealth, defaultProfile);
 		const exchange = (response: StealthResponse, fallbackUrl: string): SessionStateExchange => {
-			const egress = (response as unknown as Record<symbol, unknown>)[SESSION_STATE_RESPONSE_EGRESS];
+			const egress = (response as unknown as Record<symbol, unknown>)[
+				SESSION_STATE_RESPONSE_EGRESS
+			];
 			return {
 				view: createSessionStateResponseView({
 					url: response.url ?? fallbackUrl,
@@ -3016,7 +2994,7 @@ function createSessionFetcher(
 					...(headers ? { headers } : {}),
 					...(sensitiveParams ? { sensitiveParams } : {}),
 					throwOnHttpError: false,
-					// A re-sent request moves to the next pool slot, as a caller retry would.
+					// A re-sent request moves to the next attempt (a new vendor session), as a caller retry would.
 					...(replay > 0
 						? { proxyAttemptOffset: (callerOptions.proxyAttemptOffset ?? 0) + replay }
 						: {}),

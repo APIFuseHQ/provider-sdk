@@ -1,9 +1,10 @@
-import type { ProxyResolutionOptions } from "../config/loader.js";
+import type { ProxyResolutionOptions, ResolvedProxyConfig } from "../config/loader.js";
 import {
 	policyRotatesTransportVendorChain,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 } from "../config/loader.js";
+import { getProxyVendorSelector } from "./proxy-vendor-selector.js";
 import { ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
@@ -758,12 +759,13 @@ async function fetchWithHttpRedirectPolicy(
 	}
 }
 
-async function resolveNativeProxy(
+async function resolveNativeProxyConfig(
 	options: RequestOptions,
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
 	proxyAttemptOffset = 0,
-): Promise<string | undefined> {
+	proxyAttemptCap?: number,
+): Promise<ResolvedProxyConfig> {
 	const resolvedProxy = await resolveProxyConfigAsync({
 		proxy: options.proxy ?? clientOptions.proxy,
 		upstream: clientOptions.upstream,
@@ -773,6 +775,7 @@ async function resolveNativeProxy(
 			baseProxyAttempt: clientOptions.proxyAttempt,
 			retryAttemptOffset: proxyAttemptOffset,
 		}),
+		...(proxyAttemptCap === undefined ? {} : { proxyAttemptCap }),
 		// Bun's native fetch proxy option tunnels HTTP CONNECT only; SOCKS5 is not
 		// supported here, so a socks5 policy fails loudly rather than downgrading.
 		transportProtocols: ["http"],
@@ -784,7 +787,40 @@ async function resolveNativeProxy(
 			"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.",
 		);
 	}
-	return resolvedProxy.url;
+	return resolvedProxy;
+}
+
+async function resolveNativeProxy(
+	options: RequestOptions,
+	clientOptions: HttpClientOptions,
+	warn: (message: string) => void,
+	proxyAttemptOffset = 0,
+): Promise<string | undefined> {
+	return (await resolveNativeProxyConfig(options, clientOptions, warn, proxyAttemptOffset)).url;
+}
+
+/** Hand one transport attempt's outcome to the vendor selector (no-op for the static selector). */
+function reportNativeProxyAttempt(
+	resolvedProxy: ResolvedProxyConfig | undefined,
+	attempt: number,
+	startedAt: number,
+	outcome: "ok" | "error",
+	errorCode?: string,
+	status?: number,
+): void {
+	if (!resolvedProxy?.vendor) return;
+	const now = Date.now();
+	getProxyVendorSelector().report({
+		vendor: resolvedProxy.vendor,
+		phase: "transport",
+		outcome,
+		attempt,
+		...(resolvedProxy.sessionId ? { sessionId: resolvedProxy.sessionId } : {}),
+		...(errorCode ? { errorCode } : {}),
+		...(status === undefined ? {} : { status }),
+		durationMs: Math.max(0, now - startedAt),
+		now,
+	});
 }
 
 function assertNoHttpTransportOverrides(options: RequestOptions): void {
@@ -834,6 +870,7 @@ async function fetchNativeHttp(
 	dedupe?: { attempted: Set<string> },
 	observeProxy?: (used: boolean, status?: number) => void,
 	nextHeaderAttempt: () => number = () => 1,
+	proxyAttemptCap?: number,
 ): Promise<NativeHttpAttemptOutcome> {
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
@@ -849,18 +886,25 @@ async function fetchNativeHttp(
 	};
 
 	let proxy: string | undefined;
+	let resolvedProxy: ResolvedProxyConfig | undefined;
+	const attemptStartedAt = Date.now();
 	try {
 		throwIfAmbientAborted(options.signal);
-		// Resolve inside the try (and after the timeout is armed) so allocator
-		// failures are branded as TransportErrors and count against the request
-		// deadline, exactly as an inline resolve would.
-		proxy = await resolveNativeProxy(options, clientOptions, warn, proxyAttemptOffset);
+		// Resolve inside the try (and after the timeout is armed) so vendor
+		// resolution failures are branded as TransportErrors and count against the
+		// request deadline, exactly as an inline resolve would.
+		resolvedProxy = await resolveNativeProxyConfig(
+			options,
+			clientOptions,
+			warn,
+			proxyAttemptOffset,
+			proxyAttemptCap,
+		);
+		proxy = resolvedProxy.url;
 		observeProxy?.(Boolean(proxy));
 		throwIfAmbientAborted(options.signal);
-		// For a registry allocator chain, skip an endpoint a prior attempt already
-		// tried rather than re-issuing the same request. Returning the sentinel
-		// (instead of breaking) lets the loop keep advancing the flat offset until
-		// it crosses into the fallback vendor's pool span.
+		// Every attempt on a gateway vendor resolves its own session, so a repeated
+		// URL only appears when a caller pins one. Skip it rather than re-issuing.
 		if (dedupe && proxy) {
 			if (dedupe.attempted.has(proxy)) {
 				return { kind: "dedupe-skip" };
@@ -891,6 +935,14 @@ async function fetchNativeHttp(
 			options.redirectPolicy,
 		);
 		observeProxy?.(Boolean(proxy), response.status);
+		reportNativeProxyAttempt(
+			resolvedProxy,
+			proxyAttemptOffset,
+			attemptStartedAt,
+			response.status >= 400 ? "error" : "ok",
+			undefined,
+			response.status,
+		);
 		const headers = Object.fromEntries(response.headers.entries());
 
 		if (statusRetryCodes && response.status >= 400) {
@@ -937,6 +989,14 @@ async function fetchNativeHttp(
 			serializedUrl.redactedUrl,
 		);
 		transportError.proxyUsed = Boolean(proxy);
+		reportNativeProxyAttempt(
+			resolvedProxy,
+			proxyAttemptOffset,
+			attemptStartedAt,
+			"error",
+			transportError.code,
+			transportError.status,
+		);
 		throw transportError;
 	} finally {
 		disarmTimeout();
@@ -1239,7 +1299,7 @@ export function createHttpClient(
 			const transportAttemptCap = retryOptions
 				? resolvePolicyTransportAttemptCap({
 						policy: policyProxy,
-						usesPolicyAllocator,
+						usesPolicyProxy: usesPolicyAllocator,
 						retryAttempts: retryOptions.attempts,
 						explicitRetry,
 						method: methodName,
@@ -1263,7 +1323,7 @@ export function createHttpClient(
 			// a `poolSize: 1` + `attempts: 3` request to a single fetch).
 			const dedupeAllocatorEndpoints = policyRotatesTransportVendorChain({
 				policy: policyProxy,
-				usesPolicyAllocator,
+				usesPolicyProxy: usesPolicyAllocator,
 				explicitRetry,
 				method: methodName,
 			});
@@ -1302,6 +1362,7 @@ export function createHttpClient(
 							observedStatus = status;
 						},
 						nextHeaderAttempt,
+						transportAttemptCap,
 					);
 					if (!isDedupeSkipOutcome(outcome))
 						record({

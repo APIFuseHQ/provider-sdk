@@ -7,12 +7,12 @@ import { SocksClient } from "socks";
 import {
 	assertTunnelingScheme,
 	ProxyResolutionError,
-	SMARTPROXY_APP_KEY_ENV,
 	type ProxyProtocol,
 	VENDOR_DEFAULT_PROTOCOL,
 	resolveWithVendor,
 	type ProxyTelemetrySink,
 } from "../config/loader.js";
+import { SMARTPROXY_PASSWORD_ENV, SMARTPROXY_USERNAME_ENV } from "./proxy-smartproxy.js";
 import {
 	type DynamicEgressRuleSnapshot,
 	NativeEgressPolicyValidationError,
@@ -154,7 +154,7 @@ export type NativeNetworkClientOptions = {
 
 const VENDOR_CREDENTIAL_NAMES: Readonly<Partial<Record<ProviderProxyProvider, readonly string[]>>> =
 	{
-		smartproxy: [SMARTPROXY_APP_KEY_ENV],
+		smartproxy: [SMARTPROXY_USERNAME_ENV, SMARTPROXY_PASSWORD_ENV],
 		nodemaven: [NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV],
 	};
 
@@ -220,8 +220,8 @@ function synthesizeNodemavenGateway(
 		},
 		affinityKey: input.affinityKey,
 		protocol: input.protocol,
-		poolIndex: 0,
-		refreshEpoch: sessionWindow.refreshEpoch,
+		attempt: 0,
+		windowEpoch: sessionWindow.windowEpoch,
 		now: input.now,
 		expiresAt: sessionWindow.expiresAt,
 	});
@@ -257,11 +257,10 @@ async function synthesizeSmartproxyGateway(
 			},
 			{
 				protocol: input.protocol,
-				poolIndex: 0,
-				refreshEpoch: 0,
+				attempt: 0,
+				now: input.now,
 				credentials: lookup.values,
 				ambientDefaults: false,
-				sharedCache: false,
 			},
 		);
 		if (!resolved.url) {
@@ -270,7 +269,9 @@ async function synthesizeSmartproxyGateway(
 		return {
 			url: resolved.url,
 			vendor: "smartproxy",
-			sticky: isStickyPolicy(input.policy),
+			sticky: resolved.sticky ?? isStickyPolicy(input.policy),
+			...(resolved.sessionId ? { sessionId: resolved.sessionId } : {}),
+			...(resolved.expiresAt ? { expiresAt: resolved.expiresAt } : {}),
 		};
 	} catch (error) {
 		if (error instanceof ProxyResolutionError && error.telemetry) {

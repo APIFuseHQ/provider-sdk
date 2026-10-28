@@ -276,7 +276,6 @@ interface ProviderProxyPolicy {
     session?: {
         affinity?: ProviderProxySessionAffinity;
         lifetimeMinutes?: number;
-        poolSize?: number;
         drainLeadSeconds?: number;
     };
 }
@@ -288,10 +287,33 @@ type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "connection";
 
 // @public (undocumented)
+type ProxyAttemptOutcome = {
+    readonly vendor: ProxyVendorName;
+    readonly phase: "resolution" | "transport";
+    readonly outcome: "ok" | "error";
+    readonly attempt?: number;
+    readonly vendorAttempt?: number;
+    readonly sessionId?: string;
+    readonly errorCode?: string;
+    readonly status?: number;
+    readonly durationMs?: number;
+    readonly now: number;
+};
+
+// @public (undocumented)
+type ProxyAttemptRequest = {
+    readonly policy: ProviderProxyPolicy;
+    readonly chain: readonly ProxyVendorName[];
+    readonly attempt: number;
+    readonly attemptCap: number;
+    readonly affinityKey?: string;
+    readonly now: number;
+};
+
+// @public (undocumented)
 type ProxyAttemptTelemetryEvent = {
     provider: ProxyVendorName;
     attempt: number;
-    poolIndex?: number;
     proxyHash?: string;
     outcome: "ok" | "error";
     errorCode?: string;
@@ -299,8 +321,8 @@ type ProxyAttemptTelemetryEvent = {
     durationMs?: number;
 };
 
-// @public (undocumented)
-type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+// @public
+type ProxyCacheStatus = "disabled";
 
 // @public
 type ProxyProtocol = "http" | "socks5";
@@ -314,9 +336,11 @@ type ProxyResolutionOptions = {
     proxyPolicy?: ProviderProxyPolicy;
     affinityKey?: string;
     proxyAttempt?: number;
+    proxyAttemptCap?: number;
     transportProtocols?: readonly ProxyProtocol[];
     protocol?: ProxyProtocol;
-    proxyRefreshEpoch?: number;
+    now?: number;
+    vendorSelector?: ProxyVendorSelector;
     telemetry?: ProxyTelemetrySink;
     engineCredentials?: Readonly<Record<string, string>>;
 };
@@ -330,17 +354,13 @@ type ProxyResolutionTelemetryEvent = {
     cacheStatus: ProxyCacheStatus;
     cacheHit: boolean;
     resolutionMs: number;
-    allocatorMs?: number;
-    allocatorStatus?: number;
-    allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-    allocatorAttempts?: number;
-    lockWaitMs?: number;
-    redisReadMs?: number;
-    redisWriteMs?: number;
-    poolAgeMs?: number;
-    poolExpiresInMs?: number;
     attempts: number;
-    refreshes?: number;
+};
+
+// @public
+type ProxySessionDirective = {
+    readonly kind: "sticky" | "rotating";
+    readonly lifetimeMinutes?: number;
 };
 
 // @public (undocumented)
@@ -354,6 +374,13 @@ type ProxyTelemetrySink = {
 type ProxyUserAgentSource = "declared" | "defaulted";
 
 // @public (undocumented)
+type ProxyVendorDirective = {
+    readonly vendor: ProxyVendorName;
+    readonly vendorAttempt: number;
+    readonly session: ProxySessionDirective;
+};
+
+// @public (undocumented)
 type ProxyVendorFailoverTelemetryEvent = {
     vendor: ProxyVendorName;
     nextVendor?: ProxyVendorName;
@@ -364,6 +391,15 @@ type ProxyVendorFailoverTelemetryEvent = {
 
 // @public
 type ProxyVendorName = "smartproxy" | "nodemaven";
+
+// @public (undocumented)
+interface ProxyVendorSelector {
+    // Warning: (ae-forgotten-export) The symbol "ProxyAttemptOutcome" needs to be exported by the entry point stealth.d.ts
+    report(outcome: ProxyAttemptOutcome): void;
+    // Warning: (ae-forgotten-export) The symbol "ProxyAttemptRequest" needs to be exported by the entry point stealth.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ProxyVendorDirective" needs to be exported by the entry point stealth.d.ts
+    select(request: ProxyAttemptRequest): readonly ProxyVendorDirective[];
+}
 
 // @public (undocumented)
 type RedirectRunReason = "completed" | "stopped" | "max_hops" | "missing_location" | "loop";
@@ -419,9 +455,6 @@ interface SessionStateClassification {
     readonly name: string;
     readonly outcome: "reacquire_exhausted" | "acquire_failed" | "replay_required" | "credential_invalid";
 }
-
-// @public (undocumented)
-type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
 
 // @public
 type StealthChallengeClassification = {
@@ -685,23 +718,24 @@ type StealthTransportResponse = {
 
 // Warnings were encountered during analysis:
 //
-// dist/config/loader.d.ts:34:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:46:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:71:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:73:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:78:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:89:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:61:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:72:5 - (ae-forgotten-export) The symbol "ProxyVendorSelector" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:73:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:88:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:90:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:120:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:121:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:122:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/proxy-vendor-selector.d.ts:28:5 - (ae-forgotten-export) The symbol "ProxySessionDirective" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/proxy-vendor-selector.d.ts:31:5 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/proxy-vendor-selector.d.ts:42:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:49:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:51:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1040:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1660:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1032:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1045:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1670:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1720:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1720:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

@@ -295,7 +295,6 @@ interface ProviderProxyPolicy {
     session?: {
         affinity?: ProviderProxySessionAffinity;
         lifetimeMinutes?: number;
-        poolSize?: number;
         drainLeadSeconds?: number;
     };
 }
@@ -321,10 +320,33 @@ type ProviderResolverConfig = {
 type ProviderResolverVendor = "browser" | "capsolver" | "capmonster" | "2captcha" | "hypersolutions" | "custom";
 
 // @public (undocumented)
+type ProxyAttemptOutcome = {
+    readonly vendor: ProxyVendorName;
+    readonly phase: "resolution" | "transport";
+    readonly outcome: "ok" | "error";
+    readonly attempt?: number;
+    readonly vendorAttempt?: number;
+    readonly sessionId?: string;
+    readonly errorCode?: string;
+    readonly status?: number;
+    readonly durationMs?: number;
+    readonly now: number;
+};
+
+// @public (undocumented)
+type ProxyAttemptRequest = {
+    readonly policy: ProviderProxyPolicy;
+    readonly chain: readonly ProxyVendorName[];
+    readonly attempt: number;
+    readonly attemptCap: number;
+    readonly affinityKey?: string;
+    readonly now: number;
+};
+
+// @public (undocumented)
 type ProxyAttemptTelemetryEvent = {
     provider: ProxyVendorName;
     attempt: number;
-    poolIndex?: number;
     proxyHash?: string;
     outcome: "ok" | "error";
     errorCode?: string;
@@ -332,8 +354,8 @@ type ProxyAttemptTelemetryEvent = {
     durationMs?: number;
 };
 
-// @public (undocumented)
-type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+// @public
+type ProxyCacheStatus = "disabled";
 
 // @public
 type ProxyProtocol = "http" | "socks5";
@@ -347,9 +369,11 @@ type ProxyResolutionOptions = {
     proxyPolicy?: ProviderProxyPolicy;
     affinityKey?: string;
     proxyAttempt?: number;
+    proxyAttemptCap?: number;
     transportProtocols?: readonly ProxyProtocol[];
     protocol?: ProxyProtocol;
-    proxyRefreshEpoch?: number;
+    now?: number;
+    vendorSelector?: ProxyVendorSelector;
     telemetry?: ProxyTelemetrySink;
     engineCredentials?: Readonly<Record<string, string>>;
 };
@@ -363,17 +387,13 @@ type ProxyResolutionTelemetryEvent = {
     cacheStatus: ProxyCacheStatus;
     cacheHit: boolean;
     resolutionMs: number;
-    allocatorMs?: number;
-    allocatorStatus?: number;
-    allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-    allocatorAttempts?: number;
-    lockWaitMs?: number;
-    redisReadMs?: number;
-    redisWriteMs?: number;
-    poolAgeMs?: number;
-    poolExpiresInMs?: number;
     attempts: number;
-    refreshes?: number;
+};
+
+// @public
+type ProxySessionDirective = {
+    readonly kind: "sticky" | "rotating";
+    readonly lifetimeMinutes?: number;
 };
 
 // @public (undocumented)
@@ -387,6 +407,13 @@ type ProxyTelemetrySink = {
 type ProxyUserAgentSource = "declared" | "defaulted";
 
 // @public (undocumented)
+type ProxyVendorDirective = {
+    readonly vendor: ProxyVendorName;
+    readonly vendorAttempt: number;
+    readonly session: ProxySessionDirective;
+};
+
+// @public (undocumented)
 type ProxyVendorFailoverTelemetryEvent = {
     vendor: ProxyVendorName;
     nextVendor?: ProxyVendorName;
@@ -397,6 +424,15 @@ type ProxyVendorFailoverTelemetryEvent = {
 
 // @public
 type ProxyVendorName = "smartproxy" | "nodemaven";
+
+// @public (undocumented)
+interface ProxyVendorSelector {
+    // Warning: (ae-forgotten-export) The symbol "ProxyAttemptOutcome" needs to be exported by the entry point resolver-public.d.ts
+    report(outcome: ProxyAttemptOutcome): void;
+    // Warning: (ae-forgotten-export) The symbol "ProxyAttemptRequest" needs to be exported by the entry point resolver-public.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ProxyVendorDirective" needs to be exported by the entry point resolver-public.d.ts
+    select(request: ProxyAttemptRequest): readonly ProxyVendorDirective[];
+}
 
 // @public
 export function resolveProviderResolverVendors(config: ProviderResolverConfig): readonly ProviderResolverVendor[];
@@ -615,9 +651,6 @@ interface ResolverVendorTransport {
 export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_proxy_identity" | "missing_client_profile" | "missing_challenge_input" | "missing_transport" | "allocation_exhausted" | "transport_failure" | "timeout" | "not_implemented";
 
 // @public (undocumented)
-type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
-
-// @public (undocumented)
 type SpanHookOptions<T> = {
     attributes?: Record<string, unknown>;
     onSuccess?: (value: T) => Record<string, unknown> | undefined;
@@ -634,16 +667,17 @@ interface TraceRecorder {
 
 // Warnings were encountered during analysis:
 //
-// dist/config/loader.d.ts:34:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:46:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:71:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:73:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:78:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:89:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:61:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:72:5 - (ae-forgotten-export) The symbol "ProxyVendorSelector" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:73:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:88:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:90:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:120:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:121:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:122:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/proxy-vendor-selector.d.ts:28:5 - (ae-forgotten-export) The symbol "ProxySessionDirective" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/proxy-vendor-selector.d.ts:31:5 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/proxy-vendor-selector.d.ts:42:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:12:5 - (ae-forgotten-export) The symbol "TraceRecorder" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:24:9 - (ae-forgotten-export) The symbol "ProxyResolutionOptions" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:64:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point resolver-public.d.ts
@@ -652,8 +686,8 @@ interface TraceRecorder {
 // dist/runtime/resolver.d.ts:68:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:70:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
 // dist/types.d.ts:406:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:1040:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:1032:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:1045:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 
 // (No @packageDocumentation comment for this package)
 

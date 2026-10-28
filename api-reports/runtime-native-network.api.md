@@ -538,7 +538,6 @@ interface ProviderProxyPolicy {
     session?: {
         affinity?: ProviderProxySessionAffinity;
         lifetimeMinutes?: number;
-        poolSize?: number;
         drainLeadSeconds?: number;
     };
 }
@@ -553,7 +552,6 @@ type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "con
 type ProxyAttemptTelemetryEvent = {
     provider: ProxyVendorName;
     attempt: number;
-    poolIndex?: number;
     proxyHash?: string;
     outcome: "ok" | "error";
     errorCode?: string;
@@ -561,8 +559,8 @@ type ProxyAttemptTelemetryEvent = {
     durationMs?: number;
 };
 
-// @public (undocumented)
-type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+// @public
+type ProxyCacheStatus = "disabled";
 
 // @public
 type ProxyProtocol = "http" | "socks5";
@@ -576,17 +574,7 @@ type ProxyResolutionTelemetryEvent = {
     cacheStatus: ProxyCacheStatus;
     cacheHit: boolean;
     resolutionMs: number;
-    allocatorMs?: number;
-    allocatorStatus?: number;
-    allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-    allocatorAttempts?: number;
-    lockWaitMs?: number;
-    redisReadMs?: number;
-    redisWriteMs?: number;
-    poolAgeMs?: number;
-    poolExpiresInMs?: number;
     attempts: number;
-    refreshes?: number;
 };
 
 // @public (undocumented)
@@ -613,9 +601,6 @@ type ProxyVendorName = "smartproxy" | "nodemaven";
 
 // @public
 export function resolveNativeGatewayProxy(input: NativeGatewayProxyResolutionInput): Promise<NativeGatewayProxy | undefined>;
-
-// @public (undocumented)
-type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
 
 // @public
 export function snapshotNativeConnectInput(input: NativeNetworkConnectInput): NativeNetworkConnectInput;
@@ -655,13 +640,12 @@ export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => Vendor
 
 // Warnings were encountered during analysis:
 //
-// dist/config/loader.d.ts:71:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point native-network.d.ts
-// dist/config/loader.d.ts:73:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point native-network.d.ts
-// dist/config/loader.d.ts:78:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point native-network.d.ts
-// dist/config/loader.d.ts:89:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point native-network.d.ts
-// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point native-network.d.ts
-// dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point native-network.d.ts
-// dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point native-network.d.ts
+// dist/config/loader.d.ts:88:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point native-network.d.ts
+// dist/config/loader.d.ts:90:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point native-network.d.ts
+// dist/config/loader.d.ts:96:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point native-network.d.ts
+// dist/config/loader.d.ts:120:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point native-network.d.ts
+// dist/config/loader.d.ts:121:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point native-network.d.ts
+// dist/config/loader.d.ts:122:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point native-network.d.ts
 // dist/errors.d.ts:9:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point native-network.d.ts
 // dist/errors.d.ts:12:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point native-network.d.ts
 // dist/errors.d.ts:23:5 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point native-network.d.ts
@@ -684,10 +668,10 @@ export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => Vendor
 // dist/runtime/native-telemetry.d.ts:40:5 - (ae-forgotten-export) The symbol "NativeTelemetryDiagnostics" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-telemetry.d.ts:44:5 - (ae-forgotten-export) The symbol "NativeTelemetryVendorSkipReason" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-telemetry.d.ts:48:5 - (ae-forgotten-export) The symbol "NativeTelemetryLifecycleKind" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1035:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1040:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1917:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1918:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1032:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1045:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1927:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1928:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point native-network.d.ts
 
 // (No @packageDocumentation comment for this package)
 
