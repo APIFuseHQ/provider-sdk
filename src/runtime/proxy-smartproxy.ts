@@ -1,5 +1,9 @@
 import type { ProviderProxyPolicy } from "../types.js";
-import type { ProxyProtocol } from "./proxy-nodemaven.js";
+import {
+	formatProxyGatewayEndpoint,
+	type ProxyGatewayEndpoint,
+	type ProxyProtocol,
+} from "./proxy-nodemaven.js";
 import {
 	deriveProxySessionId,
 	isStickyProxyPolicy,
@@ -98,6 +102,8 @@ export type SmartproxySynthesisInput = {
 	readonly now?: number;
 	/** Stable caller-owned hard expiry when the window epoch is wall-clock-derived. */
 	readonly expiresAt?: string;
+	/** Fixed gateway endpoint in place of `proxy.smartproxy.net:3120`. */
+	readonly gateway?: ProxyGatewayEndpoint;
 };
 
 export type SmartproxySynthesis = {
@@ -177,7 +183,10 @@ export function synthesizeSmartproxyProxy(input: SmartproxySynthesisInput): Smar
 	tokens.push(`session-${assertTokenValue("session", sessionId)}`);
 	const proxyUsername = tokens.join("_");
 
-	const url = `${input.protocol}://${encodeURIComponent(proxyUsername)}:${encodeURIComponent(password)}@${SMARTPROXY_GATEWAY_HOST}:${SMARTPROXY_GATEWAY_PORT}`;
+	const gateway = input.gateway
+		? formatProxyGatewayEndpoint(input.gateway)
+		: `${SMARTPROXY_GATEWAY_HOST}:${SMARTPROXY_GATEWAY_PORT}`;
+	const url = `${input.protocol}://${encodeURIComponent(proxyUsername)}:${encodeURIComponent(password)}@${gateway}`;
 
 	return {
 		url,

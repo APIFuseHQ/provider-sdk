@@ -8,6 +8,7 @@ import {
 	NODEMAVEN_FILTER_ENV,
 	NODEMAVEN_PASSWORD_ENV,
 	NODEMAVEN_USERNAME_ENV,
+	type ProxyGatewayEndpoint,
 	type ProxyProtocol,
 	nodemavenSessionWindow,
 	synthesizeNodemavenProxy,
@@ -23,16 +24,18 @@ import {
 import {
 	getProxyVendorSelector,
 	PROXY_ATTEMPTS_PER_VENDOR,
+	type ProxyAttemptRecord,
 	type ProxySessionDirective,
 	type ProxyVendorSelector,
 } from "../runtime/proxy-vendor-selector.js";
 
-export type { ProxyProtocol } from "../runtime/proxy-nodemaven.js";
+export type { ProxyGatewayEndpoint, ProxyProtocol } from "../runtime/proxy-nodemaven.js";
 export {
 	getProxyVendorSelector,
 	mapAttemptToVendor,
 	PROXY_ATTEMPTS_PER_VENDOR,
 	type ProxyAttemptOutcome,
+	type ProxyAttemptRecord,
 	type ProxyAttemptRequest,
 	type ProxyAttemptSlot,
 	type ProxySessionDirective,
@@ -114,12 +117,40 @@ export type ProxyResolutionOptions = {
 	protocol?: ProxyProtocol;
 	/** Clock for the sticky session window. Tests inject it; callers omit it. */
 	now?: number;
-	/** Vendor selector for this call; defaults to the process selector (`getProxyVendorSelector`). */
+	/**
+	 * Vendor selector for this call; defaults to the process selector
+	 * (`getProxyVendorSelector`). The transports pin one selector per request
+	 * and report every attempt's outcome to that same instance.
+	 */
 	vendorSelector?: ProxyVendorSelector;
+	/**
+	 * Identifier of the request this resolution serves, forwarded to the
+	 * selector as `ProxyAttemptRequest.requestId` and on every outcome reported
+	 * for it. The transports set it once per request; callers omit it.
+	 */
+	proxyRequestId?: string;
+	/**
+	 * Transport outcomes of the request's earlier attempts, oldest first,
+	 * forwarded to the selector as `ProxyAttemptRequest.history`. The transports
+	 * accumulate it across their retry loop; callers omit it.
+	 */
+	proxyAttemptHistory?: readonly ProxyAttemptRecord[];
+	/**
+	 * Gateway endpoint per vendor in place of the vendor's fixed gateway.
+	 * Internal: for assembly tests and the verification harness that point a
+	 * vendor at a loopback fake gateway. Not an env var and not a provider-policy
+	 * field; the username grammar, session id and credentials are unchanged.
+	 */
+	gatewayOverrides?: ProxyGatewayOverrides;
 	telemetry?: ProxyTelemetrySink;
 	/** Engine-owned credential snapshot. Provider code must never populate this field. */
 	engineCredentials?: Readonly<Record<string, string>>;
 };
+
+/** Gateway endpoint overrides keyed by vendor (`ProxyResolutionOptions.gatewayOverrides`). */
+export type ProxyGatewayOverrides = Readonly<
+	Partial<Record<ProxyVendorName, ProxyGatewayEndpoint>>
+>;
 
 /**
  * Gateway vendors synthesize the proxy URL locally, so no resolution is served
@@ -369,6 +400,8 @@ export async function resolveProxyConfigAsync(
 		attemptCap,
 		...(options.affinityKey === undefined ? {} : { affinityKey: options.affinityKey }),
 		now,
+		...(options.proxyRequestId ? { requestId: options.proxyRequestId } : {}),
+		...(options.proxyAttemptHistory ? { history: [...options.proxyAttemptHistory] } : {}),
 	});
 	const reportResolution = (
 		vendor: ProxyVendorName,
@@ -376,16 +409,21 @@ export async function resolveProxyConfigAsync(
 		outcome: "ok" | "error",
 		detail: { sessionId?: string; errorCode?: string } = {},
 	): void => {
-		selector.report({
-			vendor,
-			phase: "resolution",
-			outcome,
-			attempt,
-			vendorAttempt,
-			...(detail.sessionId ? { sessionId: detail.sessionId } : {}),
-			...(detail.errorCode ? { errorCode: detail.errorCode } : {}),
-			now,
-		});
+		try {
+			selector.report({
+				vendor,
+				phase: "resolution",
+				outcome,
+				attempt,
+				vendorAttempt,
+				...(detail.sessionId ? { sessionId: detail.sessionId } : {}),
+				...(detail.errorCode ? { errorCode: detail.errorCode } : {}),
+				now,
+				...(options.proxyRequestId ? { requestId: options.proxyRequestId } : {}),
+			});
+		} catch {
+			// A selector cannot fail the resolution it observes.
+		}
 	};
 
 	let lastError: unknown;
@@ -473,7 +511,10 @@ export async function resolveProxyConfigAsync(
 		throw new ProxyResolutionError(
 			"PROXY_REQUIRED",
 			`Proxy egress is required but no vendor credentials are configured. Missing: ${chain
-				.map((vendor) => `${missingCredentialEnv(vendor)} (${vendor})`)
+				.map(
+					(vendor) =>
+						`${missingCredentialEnvNames(vendor, options.engineCredentials).join(" and ")} (${vendor})`,
+				)
 				.join(", ")}.`,
 			{ vendorChain: chain },
 		);
@@ -590,6 +631,9 @@ export async function resolveWithVendor(
 			country,
 			now: context.now,
 			expiresAt: window.expiresAt,
+			...(options.gatewayOverrides?.nodemaven
+				? { gateway: options.gatewayOverrides.nodemaven }
+				: {}),
 		});
 		options.telemetry?.recordProxyResolution({
 			provider: "nodemaven",
@@ -645,6 +689,9 @@ export async function resolveWithVendor(
 		defaultLifetimeMinutes,
 		now: context.now,
 		expiresAt: window.expiresAt,
+		...(options.gatewayOverrides?.smartproxy
+			? { gateway: options.gatewayOverrides.smartproxy }
+			: {}),
 	});
 	options.telemetry?.recordProxyResolution({
 		provider: "smartproxy",
@@ -714,24 +761,32 @@ function envDefaultProvider(): ProviderProxyProvider | undefined {
 	return (raw as ProviderProxyProvider | undefined) ?? undefined;
 }
 
+const VENDOR_CREDENTIAL_ENV_NAMES: Readonly<Record<ProxyVendorName, readonly string[]>> = {
+	smartproxy: [SMARTPROXY_USERNAME_ENV, SMARTPROXY_PASSWORD_ENV],
+	nodemaven: [NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV],
+};
+
 function vendorHasCredentials(
 	vendor: ProxyVendorName,
 	credentials?: Readonly<Record<string, string>>,
 ): boolean {
-	if (vendor === "nodemaven") {
-		return Boolean(
-			readCredential(NODEMAVEN_USERNAME_ENV, credentials) &&
-				readCredential(NODEMAVEN_PASSWORD_ENV, credentials),
-		);
-	}
-	return Boolean(
-		readCredential(SMARTPROXY_USERNAME_ENV, credentials) &&
-			readCredential(SMARTPROXY_PASSWORD_ENV, credentials),
+	return VENDOR_CREDENTIAL_ENV_NAMES[vendor].every((name) =>
+		Boolean(readCredential(name, credentials)),
 	);
 }
 
-function missingCredentialEnv(vendor: ProxyVendorName): string {
-	return vendor === "nodemaven" ? NODEMAVEN_USERNAME_ENV : SMARTPROXY_USERNAME_ENV;
+/**
+ * The credential names a vendor still lacks, so a required policy fails with
+ * the exact secrets to provision. Smartproxy reads only the gateway sub-account
+ * pair; the extraction `APIFUSE__PROXY__SMARTPROXY_APP_KEY` is not a substitute.
+ */
+function missingCredentialEnvNames(
+	vendor: ProxyVendorName,
+	credentials: Readonly<Record<string, string>> | undefined,
+): readonly string[] {
+	const names = VENDOR_CREDENTIAL_ENV_NAMES[vendor];
+	const missing = names.filter((name) => !readCredential(name, credentials));
+	return missing.length > 0 ? missing : names;
 }
 
 /**

@@ -1,10 +1,17 @@
+import { randomUUID } from "node:crypto";
+
 import type { ProxyResolutionOptions, ResolvedProxyConfig } from "../config/loader.js";
 import {
 	policyRotatesTransportVendorChain,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
+	vendorFromResolvedSource,
 } from "../config/loader.js";
-import { getProxyVendorSelector } from "./proxy-vendor-selector.js";
+import {
+	getProxyVendorSelector,
+	type ProxyAttemptRecord,
+	type ProxyVendorSelector,
+} from "./proxy-vendor-selector.js";
 import { ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
@@ -139,14 +146,36 @@ type HttpStatusOutcome = {
 };
 
 /**
- * Sentinel returned when a policy-allocator attempt resolved an endpoint that a
- * prior attempt already tried (an under-filled pool repeats endpoints via the
- * modulo mapping before the flat offset crosses into the next vendor). The retry
- * loop advances to the next offset rather than re-issuing the request — but does
- * NOT treat it as chain exhaustion, so the offset still walks into the fallback
- * vendor's span.
+ * Sentinel returned when a policy-managed attempt resolved an endpoint that a
+ * prior attempt already tried (every gateway attempt mints its own session, so
+ * this only happens when an endpoint repeats). The retry loop advances to the
+ * next attempt rather than re-issuing the request, and does NOT treat it as
+ * chain exhaustion, so the attempt index still walks into the fallback vendor's
+ * share of the budget.
  */
 type NativeHttpSkipOutcome = { kind: "dedupe-skip" };
+
+/** One request's vendor selection state, shared by every attempt of its retry loop. */
+type HttpProxyAttemptContext = {
+	readonly attemptCap?: number;
+	/** The selector that picks each attempt's vendor and receives each attempt's outcome. */
+	readonly vendorSelector: ProxyVendorSelector;
+	readonly requestId: string;
+	/** Transport outcomes of the attempts made so far, oldest first. */
+	readonly history: ProxyAttemptRecord[];
+};
+
+function createHttpProxyAttemptContext(
+	clientOptions: HttpClientOptions,
+	attemptCap?: number,
+): HttpProxyAttemptContext {
+	return {
+		...(attemptCap === undefined ? {} : { attemptCap }),
+		vendorSelector: clientOptions.vendorSelector ?? getProxyVendorSelector(),
+		requestId: randomUUID(),
+		history: [],
+	};
+}
 
 type NativeHttpAttemptOutcome = HttpResponse | HttpStatusOutcome | NativeHttpSkipOutcome;
 
@@ -763,8 +792,8 @@ async function resolveNativeProxyConfig(
 	options: RequestOptions,
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
-	proxyAttemptOffset = 0,
-	proxyAttemptCap?: number,
+	proxyAttemptOffset: number,
+	request: HttpProxyAttemptContext,
 ): Promise<ResolvedProxyConfig> {
 	const resolvedProxy = await resolveProxyConfigAsync({
 		proxy: options.proxy ?? clientOptions.proxy,
@@ -775,7 +804,11 @@ async function resolveNativeProxyConfig(
 			baseProxyAttempt: clientOptions.proxyAttempt,
 			retryAttemptOffset: proxyAttemptOffset,
 		}),
-		...(proxyAttemptCap === undefined ? {} : { proxyAttemptCap }),
+		...(request.attemptCap === undefined ? {} : { proxyAttemptCap: request.attemptCap }),
+		vendorSelector: request.vendorSelector,
+		proxyRequestId: request.requestId,
+		proxyAttemptHistory: request.history,
+		...(clientOptions.gatewayOverrides ? { gatewayOverrides: clientOptions.gatewayOverrides } : {}),
 		// Bun's native fetch proxy option tunnels HTTP CONNECT only; SOCKS5 is not
 		// supported here, so a socks5 policy fails loudly rather than downgrading.
 		transportProtocols: ["http"],
@@ -790,17 +823,14 @@ async function resolveNativeProxyConfig(
 	return resolvedProxy;
 }
 
-async function resolveNativeProxy(
-	options: RequestOptions,
-	clientOptions: HttpClientOptions,
-	warn: (message: string) => void,
-	proxyAttemptOffset = 0,
-): Promise<string | undefined> {
-	return (await resolveNativeProxyConfig(options, clientOptions, warn, proxyAttemptOffset)).url;
-}
-
-/** Hand one transport attempt's outcome to the vendor selector (no-op for the static selector). */
+/**
+ * Hand one transport attempt's outcome to the selector that served the
+ * request and append it to the request's history. An attempt whose response
+ * reached the origin is `ok` for the vendor session whatever the status; only
+ * a transport failure is `error`.
+ */
 function reportNativeProxyAttempt(
+	request: HttpProxyAttemptContext,
 	resolvedProxy: ResolvedProxyConfig | undefined,
 	attempt: number,
 	startedAt: number,
@@ -808,19 +838,26 @@ function reportNativeProxyAttempt(
 	errorCode?: string,
 	status?: number,
 ): void {
-	if (!resolvedProxy?.vendor) return;
+	const vendor = vendorFromResolvedSource(resolvedProxy?.source);
+	if (!vendor || !resolvedProxy?.url) return;
 	const now = Date.now();
-	getProxyVendorSelector().report({
-		vendor: resolvedProxy.vendor,
-		phase: "transport",
-		outcome,
-		attempt,
-		...(resolvedProxy.sessionId ? { sessionId: resolvedProxy.sessionId } : {}),
-		...(errorCode ? { errorCode } : {}),
-		...(status === undefined ? {} : { status }),
-		durationMs: Math.max(0, now - startedAt),
-		now,
-	});
+	request.history.push({ vendor, outcome, ...(errorCode ? { errorCode } : {}) });
+	try {
+		request.vendorSelector.report({
+			vendor,
+			phase: "transport",
+			outcome,
+			attempt,
+			...(resolvedProxy.sessionId ? { sessionId: resolvedProxy.sessionId } : {}),
+			...(errorCode ? { errorCode } : {}),
+			...(status === undefined ? {} : { status }),
+			durationMs: Math.max(0, now - startedAt),
+			now,
+			requestId: request.requestId,
+		});
+	} catch {
+		// A selector cannot fail the request it observes.
+	}
 }
 
 function assertNoHttpTransportOverrides(options: RequestOptions): void {
@@ -870,7 +907,7 @@ async function fetchNativeHttp(
 	dedupe?: { attempted: Set<string> },
 	observeProxy?: (used: boolean, status?: number) => void,
 	nextHeaderAttempt: () => number = () => 1,
-	proxyAttemptCap?: number,
+	proxyAttemptContext: HttpProxyAttemptContext = createHttpProxyAttemptContext(clientOptions),
 ): Promise<NativeHttpAttemptOutcome> {
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
@@ -898,7 +935,7 @@ async function fetchNativeHttp(
 			clientOptions,
 			warn,
 			proxyAttemptOffset,
-			proxyAttemptCap,
+			proxyAttemptContext,
 		);
 		proxy = resolvedProxy.url;
 		observeProxy?.(Boolean(proxy));
@@ -936,10 +973,11 @@ async function fetchNativeHttp(
 		);
 		observeProxy?.(Boolean(proxy), response.status);
 		reportNativeProxyAttempt(
+			proxyAttemptContext,
 			resolvedProxy,
 			proxyAttemptOffset,
 			attemptStartedAt,
-			response.status >= 400 ? "error" : "ok",
+			"ok",
 			undefined,
 			response.status,
 		);
@@ -990,6 +1028,7 @@ async function fetchNativeHttp(
 		);
 		transportError.proxyUsed = Boolean(proxy);
 		reportNativeProxyAttempt(
+			proxyAttemptContext,
 			resolvedProxy,
 			proxyAttemptOffset,
 			attemptStartedAt,
@@ -1022,7 +1061,16 @@ async function fetchNativeHttpStream(
 
 	try {
 		throwIfAmbientAborted(options.signal);
-		const proxy = await resolveNativeProxy(options, clientOptions, warn);
+		// Streams never retry: one attempt, one session, on the selector's first vendor.
+		const proxy = (
+			await resolveNativeProxyConfig(
+				options,
+				clientOptions,
+				warn,
+				0,
+				createHttpProxyAttemptContext(clientOptions),
+			)
+		).url;
 		observeProxy?.(Boolean(proxy));
 		throwIfAmbientAborted(options.signal);
 		// Streams never retry: a header factory is resolved once, as attempt 1.
@@ -1280,14 +1328,13 @@ export function createHttpClient(
 				: headersOptions;
 
 			// Span the whole vendor chain on transport failures. Like ctx.stealth, a
-			// policy-managed proxy resolves a *different* endpoint/vendor per attempt
-			// (the flat proxyAttemptOffset rotates across the concatenated vendor pool
-			// spans), so a transport failure should advance to the next endpoint —
-			// potentially crossing into the fallback vendor — rather than stopping at
-			// the per-endpoint retry budget and stranding the request on the primary
+			// policy-managed proxy resolves a *different* vendor session per attempt
+			// and, past a vendor's share of the attempt budget, the next vendor, so a
+			// transport failure should advance to the next session rather than stop at
+			// the per-endpoint retry budget and strand the request on the primary
 			// vendor. resolvePolicyTransportAttemptCap widens the cap to the chain span
-			// only for implicit, safe-method allocator requests; explicit retry
-			// policies (their documented `attempts` ceiling), unsafe methods, and
+			// only for implicit, safe-method policy requests; explicit retry policies
+			// (their documented `attempts` ceiling), unsafe methods, and
 			// static/non-registry vendors keep the retry budget. Status-code retries
 			// stay bounded by the retry budget regardless; only transport rotation gets
 			// the full span.
@@ -1295,39 +1342,38 @@ export function createHttpClient(
 				const policy = clientOptions.proxyPolicy ?? clientOptions.upstream?.proxy;
 				return policy && typeof policy === "object" ? policy : undefined;
 			})();
-			const usesPolicyAllocator = Boolean(policyProxy) && !options.proxy && !clientOptions.proxy;
+			const usesPolicyProxy = Boolean(policyProxy) && !options.proxy && !clientOptions.proxy;
 			const transportAttemptCap = retryOptions
 				? resolvePolicyTransportAttemptCap({
 						policy: policyProxy,
-						usesPolicyProxy: usesPolicyAllocator,
+						usesPolicyProxy,
 						retryAttempts: retryOptions.attempts,
 						explicitRetry,
 						method: methodName,
 					})
 				: 1;
 
-			// Track resolved endpoints across a policy-allocator chain. Successive
-			// attempts rotate the flat offset across the concatenated vendor pool
-			// spans, but an under-filled allocation (fewer live endpoints than the
-			// configured pool size) makes the modulo mapping repeat endpoints before
-			// the offset reaches the next vendor. Rather than re-hammering an
-			// already-tried endpoint under backoff, fetchNativeHttp returns a skip
-			// sentinel for a duplicate; the loop then advances the flat offset without
-			// issuing the request, so it keeps walking toward — and into — the fallback
-			// vendor's pool span instead of stalling on the primary vendor.
+			// Track resolved endpoints across a policy-managed vendor chain. Every
+			// gateway attempt mints its own session, so an endpoint repeats only when a
+			// pinned one comes back; rather than re-hammering it under backoff,
+			// fetchNativeHttp returns a skip sentinel for a duplicate and the loop
+			// advances the attempt without issuing the request, so it keeps walking
+			// toward the fallback vendor's share instead of stalling on the primary.
 			// De-duplication is gated on the SAME predicate that widens the attempt cap
 			// (implicit, safe-method, registry-chain rotation). It must NOT engage for
 			// an explicit retry policy: there the caller's `attempts` count is the
-			// contract and each attempt must issue against whatever endpoint it resolves
-			// — even a repeat — instead of being silently skipped (which would collapse
-			// a `poolSize: 1` + `attempts: 3` request to a single fetch).
-			const dedupeAllocatorEndpoints = policyRotatesTransportVendorChain({
+			// contract and each attempt must issue against whatever endpoint it
+			// resolves, even a repeat, instead of being silently skipped.
+			const dedupeProxyEndpoints = policyRotatesTransportVendorChain({
 				policy: policyProxy,
-				usesPolicyProxy: usesPolicyAllocator,
+				usesPolicyProxy,
 				explicitRetry,
 				method: methodName,
 			});
-			const dedupeContext = dedupeAllocatorEndpoints ? { attempted: new Set<string>() } : undefined;
+			const dedupeContext = dedupeProxyEndpoints ? { attempted: new Set<string>() } : undefined;
+			// One selector serves the whole request: it names each attempt's vendor and
+			// receives each attempt's outcome, and sees the request's own history.
+			const proxyAttemptContext = createHttpProxyAttemptContext(clientOptions, transportAttemptCap);
 
 			// Numbers the attempts a header factory sees: only requests that reached
 			// header resolution count, so a failed proxy allocation (which increments
@@ -1362,7 +1408,7 @@ export function createHttpClient(
 							observedStatus = status;
 						},
 						nextHeaderAttempt,
-						transportAttemptCap,
+						proxyAttemptContext,
 					);
 					if (!isDedupeSkipOutcome(outcome))
 						record({

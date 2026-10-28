@@ -1072,21 +1072,21 @@ export type ProviderProxyMode = "disabled" | "optional" | "required";
  * Proxy egress vendors. These are FOUR DISTINCT services — do not conflate them
  * (a common mistake because the names collide with a well-known rebrand):
  *
- * - `smartproxy` — **api.smartproxy.org**, a residential proxy with an IP
- *	 *extraction/allocation* API (app_key → a pool of raw `ip:port` CONNECT
- *	 endpoints). This is our own vendor. It is NOT the company formerly named
- *	 "Smartproxy". Credentials: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ * - `smartproxy` — **smartproxy.ai** (api.smartproxy.org), a residential
+ *	 *gateway* proxy at `proxy.smartproxy.net:3120`; geo, lifetime and session
+ *	 encoded in the username (`<user>_area-<CC>_life-<min>_session-<id>`). This
+ *	 is our own vendor. It is NOT the company formerly named "Smartproxy".
+ *	 Credentials: the gateway sub-account `APIFUSE__PROXY__SMARTPROXY_USERNAME`
+ *	 and `APIFUSE__PROXY__SMARTPROXY_PASSWORD`.
  * - `nodemaven` — **gate.nodemaven.com**, a *gateway* proxy with static
  *	 credentials; geo/session encoded in the username, no allocation API.
  * - `decodo` — **decodo.com**, the *gateway* proxy that was named "Smartproxy"
  *	 (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
  *	 username params. A different company from `smartproxy` above.
  *	 **@deprecated** — unused; no managed adapter. Declare a
- *	 `ProviderProxyPolicy` using `smartproxy` or `nodemaven` instead; the
- *	 `smartproxy` allocator requires `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ *	 `ProviderProxyPolicy` using `smartproxy` or `nodemaven` instead.
  * - `custom` — **@deprecated** static proxy marker with no managed adapter.
- *	 Use `ProviderProxyPolicy` with `smartproxy`/`nodemaven`; the `smartproxy`
- *	 allocator requires `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ *	 Use `ProviderProxyPolicy` with `smartproxy`/`nodemaven`.
  */
 export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
@@ -1135,8 +1135,8 @@ export interface ProviderProxyNodemavenOptions {
 
 export interface ProviderProxyPolicy {
 	/**
-	 * Provider intent only. Transport details such as raw CONNECT, origin
-	 * certificate verification, and vendor allocator endpoints are SDK-owned.
+	 * Provider intent only. Transport details such as the vendor gateway, the
+	 * session id and origin certificate verification are SDK-owned.
 	 */
 	mode: ProviderProxyMode;
 	/**
@@ -1145,10 +1145,11 @@ export interface ProviderProxyPolicy {
 	 */
 	provider?: ProviderProxyProvider;
 	/**
-	 * Ordered proxy-vendor fallback chain. The SDK tries each vendor in order and
-	 * fails over to the next when a vendor lacks credentials or its allocation /
-	 * transport is exhausted. When omitted, `provider` (or the platform default)
-	 * is used as a single-vendor chain.
+	 * Ordered proxy-vendor fallback chain. A request's transport attempt budget
+	 * is split evenly across the vendors in this order (`mapAttemptToVendor`),
+	 * and within one attempt the SDK moves to the next vendor when one lacks
+	 * credentials or cannot synthesize a proxy. When omitted, `provider` (or the
+	 * platform default) is used as a single-vendor chain.
 	 */
 	providers?: ProviderProxyProvider[];
 	geo?: {
@@ -1573,7 +1574,7 @@ export interface HttpAttemptContext {
 	/**
 	 * 1-based number of this request build: the first request is `1`, its first
 	 * retry `2`. Only attempts that reach header resolution count; a failed
-	 * proxy allocation or a skipped duplicate proxy offset builds no request
+	 * proxy resolution or a skipped duplicate proxy endpoint builds no request
 	 * and is not numbered.
 	 */
 	attempt: number;
@@ -1741,10 +1742,12 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	 */
 	maxBodyBytes?: number;
 	/**
-	 * Offsets policy-managed proxy pool selection for caller-managed retries.
-	 * Use when a request receives an upstream challenge page rather than a
-	 * transport error, so the next logical retry does not restart at the same
-	 * operation-affinity proxy.
+	 * Offsets the policy-managed proxy attempt for caller-managed retries: the
+	 * request resolves the vendor session of that attempt (a new session id,
+	 * and past a vendor's share of the attempt budget the next vendor). Use when
+	 * a request receives an upstream challenge page rather than a transport
+	 * error, so the next logical retry does not restart on the same
+	 * operation-affinity egress.
 	 */
 	proxyAttemptOffset?: number;
 	/**

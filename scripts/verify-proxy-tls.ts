@@ -15,7 +15,7 @@
  * the ctx.http protocol-capability set enforced by the resolver.
  *
  * Usage:
- *   APIFUSE__PROXY__SMARTPROXY_APP_KEY=... \
+ *   APIFUSE__PROXY__SMARTPROXY_USERNAME=... APIFUSE__PROXY__SMARTPROXY_PASSWORD=... \
  *   APIFUSE__PROXY__NODEMAVEN_USERNAME=... APIFUSE__PROXY__NODEMAVEN_PASSWORD=... \
  *   bun run scripts/verify-proxy-tls.ts [--country=kr] [--cf-origin=https://...]
  */
@@ -54,7 +54,12 @@ const COUNTRY = arg("country", "kr").toUpperCase();
 const CF_ORIGIN = arg("cf-origin", "https://www.catchtable.co.kr/");
 
 function vendorHasCreds(vendor: Vendor): boolean {
-	if (vendor === "smartproxy") return Boolean(process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY);
+	if (vendor === "smartproxy") {
+		return Boolean(
+			process.env.APIFUSE__PROXY__SMARTPROXY_USERNAME &&
+				process.env.APIFUSE__PROXY__SMARTPROXY_PASSWORD,
+		);
+	}
 	return Boolean(
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME &&
 			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD,

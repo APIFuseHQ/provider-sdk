@@ -32,6 +32,14 @@ export type ProxyVendorDirective = {
 	readonly session: ProxySessionDirective;
 };
 
+/** One earlier transport attempt of the same request, as the transport saw it. */
+export type ProxyAttemptRecord = {
+	readonly vendor: ProxyVendorName;
+	readonly outcome: "ok" | "error";
+	/** Transport error code of a failed attempt, when one was classified. */
+	readonly errorCode?: string;
+};
+
 export type ProxyAttemptRequest = {
 	readonly policy: ProviderProxyPolicy;
 	/** Registry vendors declared by the policy, in declaration order. */
@@ -42,6 +50,17 @@ export type ProxyAttemptRequest = {
 	readonly attemptCap: number;
 	readonly affinityKey?: string;
 	readonly now: number;
+	/**
+	 * Identifier the transport gives one request; every attempt of its retry loop
+	 * and every outcome it reports carry the same value. Absent when the caller
+	 * resolves outside a transport retry loop.
+	 */
+	readonly requestId?: string;
+	/**
+	 * Transport outcomes of this request's earlier attempts, oldest first. A
+	 * selector can use it to leave a vendor that already failed in this request.
+	 */
+	readonly history?: readonly ProxyAttemptRecord[];
 };
 
 export type ProxyAttemptOutcome = {
@@ -57,6 +76,8 @@ export type ProxyAttemptOutcome = {
 	readonly status?: number;
 	readonly durationMs?: number;
 	readonly now: number;
+	/** The `requestId` of the attempt request this outcome belongs to, when it had one. */
+	readonly requestId?: string;
 };
 
 export interface ProxyVendorSelector {
@@ -67,7 +88,12 @@ export interface ProxyVendorSelector {
 	 * protocol, adapter error). An empty list resolves no vendor.
 	 */
 	select(request: ProxyAttemptRequest): readonly ProxyVendorDirective[];
-	/** Attempt result fed back from the resolver and the transports. */
+	/**
+	 * Attempt result fed back from the resolver and the transports. Outcomes go
+	 * to the selector instance that served `select` for the attempt (the one
+	 * passed as `ProxyResolutionOptions.vendorSelector`, else the process
+	 * selector at the start of the request).
+	 */
 	report(outcome: ProxyAttemptOutcome): void;
 }
 

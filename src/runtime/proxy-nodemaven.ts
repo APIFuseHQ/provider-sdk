@@ -26,6 +26,33 @@ export type NodemavenCredentials = {
 export type ProxyProtocol = "http" | "socks5";
 
 /**
+ * Host and port a gateway vendor's proxy URL points at. Every vendor has one
+ * fixed gateway; an endpoint is only ever supplied through
+ * `ProxyResolutionOptions.gatewayOverrides`, by assembly tests and the
+ * verification harness that point a vendor at a loopback fake gateway. The
+ * username grammar, the session id and the credentials are unchanged by it.
+ */
+export type ProxyGatewayEndpoint = {
+	/** Hostname or IPv4 address. */
+	readonly host: string;
+	readonly port: number;
+};
+
+const GATEWAY_HOST_PATTERN = /^[A-Za-z0-9.-]+$/;
+
+/** `host:port` of a gateway endpoint override, validated so it cannot rewrite the URL around it. */
+export function formatProxyGatewayEndpoint(endpoint: ProxyGatewayEndpoint): string {
+	const host = typeof endpoint.host === "string" ? endpoint.host.trim() : "";
+	if (!host || !GATEWAY_HOST_PATTERN.test(host)) {
+		throw new Error("Proxy gateway override host must be a hostname or IPv4 address");
+	}
+	if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65_535) {
+		throw new Error("Proxy gateway override port must be an integer between 1 and 65535");
+	}
+	return `${host}:${endpoint.port}`;
+}
+
+/**
  * NodeMaven's fastest protocol: HTTP CONNECT. Benchmarks (KR, cold + warm)
  * showed socks5 through the gateway adds ~500ms per request over http, so
  * NodeMaven never defaults to socks5.
@@ -176,6 +203,8 @@ export type NodemavenSynthesisInput = {
 	now?: number;
 	/** Stable caller-owned hard expiry when the window epoch is wall-clock-derived. */
 	expiresAt?: string;
+	/** Fixed gateway endpoint in place of `gate.nodemaven.com` and the per-session port. */
+	gateway?: ProxyGatewayEndpoint;
 };
 
 export type NodemavenSynthesis = {
@@ -239,7 +268,9 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 		windowEpoch: input.windowEpoch,
 		attempt: input.attempt,
 	});
-	const port = selectPort(input.protocol, sid, input.attempt);
+	const gateway = input.gateway
+		? formatProxyGatewayEndpoint(input.gateway)
+		: `${NODEMAVEN_GATEWAY_HOST}:${selectPort(input.protocol, sid, input.attempt)}`;
 	const lifetimeMinutes = nodemavenLifetimeMinutes(input.policy, input.session?.lifetimeMinutes);
 
 	const country = slugifyGeo(input.country ?? input.policy.geo?.country);
@@ -261,7 +292,7 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 
 	// Username tokens are [a-z0-9_-] only (carrier slugs add `_`), which survive
 	// URL encoding unchanged.
-	const url = `${input.protocol}://${proxyUsername}:${encodeURIComponent(password)}@${NODEMAVEN_GATEWAY_HOST}:${port}`;
+	const url = `${input.protocol}://${proxyUsername}:${encodeURIComponent(password)}@${gateway}`;
 
 	return {
 		url,

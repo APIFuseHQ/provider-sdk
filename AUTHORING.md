@@ -126,8 +126,9 @@ Declare `runtimeTarget: "vanilla"` for portable provider business logic. Use
 `runtimeTarget: "engine"` only for an approved session-bearing provider that
 must remain engine-resident. A vanilla target cannot declare `native`.
 
-Proxy vendor application keys, usernames, and passwords are engine-owned. Do
-not list `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
+Proxy vendor usernames, passwords, and application keys are engine-owned. Do
+not list `APIFUSE__PROXY__SMARTPROXY_USERNAME`,
+`APIFUSE__PROXY__SMARTPROXY_PASSWORD`, `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
 `APIFUSE__PROXY__NODEMAVEN_USERNAME`, or
 `APIFUSE__PROXY__NODEMAVEN_PASSWORD` in provider `secrets`; `proxy` contains
 policy intent only.
@@ -1604,8 +1605,8 @@ const network = createNativeNetworkClient({
 ```
 
 Never include credential values in adapter skip messages or thrown errors. The
-SDK redacts built-in proxy URL userinfo, CONNECT authentication, and allocator
-causes, but a custom adapter remains responsible for not publishing secrets in
+SDK redacts built-in proxy URL userinfo, CONNECT authentication, and vendor
+resolution causes, but a custom adapter remains responsible for not publishing secrets in
 its own diagnostics.
 
 ### Limiting stealth response bodies

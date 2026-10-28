@@ -59,10 +59,17 @@ export const PROVIDER_ENGINE_MODE_ENV = "APIFUSE__ENGINE__MODE";
  */
 export type ProviderEngineMode = "in-process" | "remote" | (string & {});
 
-/** Credential names owned by the engine and forbidden in provider declarations. */
+/**
+ * Credential names owned by the engine and forbidden in provider declarations.
+ * `APIFUSE__PROXY__SMARTPROXY_APP_KEY` is no longer read by the SDK (smartproxy
+ * egress uses the gateway sub-account pair), but the extraction key still
+ * exists in deployments, so it stays engine-owned: a provider cannot declare it
+ * and a pod that still receives it never exposes it to provider code.
+ */
 export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES = [
 	"APIFUSE__PROXY__SMARTPROXY_USERNAME",
 	"APIFUSE__PROXY__SMARTPROXY_PASSWORD",
+	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
 	"APIFUSE__PROXY__NODEMAVEN_USERNAME",
 	"APIFUSE__PROXY__NODEMAVEN_PASSWORD",
 ] as const;

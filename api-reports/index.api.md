@@ -1846,7 +1846,7 @@ export interface EmailOtpReceipt extends OtpReceiptBase {
 export function encodeSseEvent(input: SseEvent): string;
 
 // @public
-export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_USERNAME", "APIFUSE__PROXY__SMARTPROXY_PASSWORD", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
+export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_USERNAME", "APIFUSE__PROXY__SMARTPROXY_PASSWORD", "APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
 
 // @public
 export const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__RESOLVER__2CAPTCHA__API_KEY", "APIFUSE__RESOLVER__CAPSOLVER__API_KEY", "APIFUSE__RESOLVER__CAPMONSTER__API_KEY", "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"];
@@ -6278,6 +6278,14 @@ export type ProxyAttemptOutcome = {
     readonly status?: number;
     readonly durationMs?: number;
     readonly now: number;
+    readonly requestId?: string;
+};
+
+// @public
+export type ProxyAttemptRecord = {
+    readonly vendor: ProxyVendorName;
+    readonly outcome: "ok" | "error";
+    readonly errorCode?: string;
 };
 
 // @public (undocumented)
@@ -6288,6 +6296,8 @@ export type ProxyAttemptRequest = {
     readonly attemptCap: number;
     readonly affinityKey?: string;
     readonly now: number;
+    readonly requestId?: string;
+    readonly history?: readonly ProxyAttemptRecord[];
 };
 
 // @public (undocumented)
@@ -6311,6 +6321,15 @@ type ProxyAttemptTelemetryEvent = {
 export type ProxyCacheStatus = "disabled";
 
 // @public
+export type ProxyGatewayEndpoint = {
+    readonly host: string;
+    readonly port: number;
+};
+
+// @public
+export type ProxyGatewayOverrides = Readonly<Partial<Record<ProxyVendorName, ProxyGatewayEndpoint>>>;
+
+// @public
 export type ProxyHash = ClosedEnum<string> & {
     readonly [PROXY_HASH]: true;
 };
@@ -6332,6 +6351,9 @@ export type ProxyResolutionOptions = {
     protocol?: ProxyProtocol;
     now?: number;
     vendorSelector?: ProxyVendorSelector;
+    proxyRequestId?: string;
+    proxyAttemptHistory?: readonly ProxyAttemptRecord[];
+    gatewayOverrides?: ProxyGatewayOverrides;
     telemetry?: ProxyTelemetrySink;
     engineCredentials?: Readonly<Record<string, string>>;
 };
@@ -9144,7 +9166,7 @@ export { z }
 // Warnings were encountered during analysis:
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:120:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/config/loader.d.ts:145:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:117:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:149:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
@@ -9163,11 +9185,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:287:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:732:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2086:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2174:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2182:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2183:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2370:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2089:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2177:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2185:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2186:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2373:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
