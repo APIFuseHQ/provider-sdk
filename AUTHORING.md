@@ -133,6 +133,20 @@ not list `APIFUSE__PROXY__SMARTPROXY_USERNAME`,
 `APIFUSE__PROXY__NODEMAVEN_PASSWORD` in provider `secrets`; `proxy` contains
 policy intent only.
 
+`proxy.providers` is a preference order, not a fixed walk. A served process
+keeps a circuit breaker per vendor: after 5 consecutive attempts that failed
+because of the vendor (the tunnel never opened, the proxy refused, the
+connection broke through the proxy, or no proxy could be synthesized) it skips
+that vendor for 30 s, longer on each repeat up to 300 s, and one probe attempt
+decides when the vendor returns. Timeouts, cancellation and every upstream
+status never count against a vendor, and when every vendor is skipped the
+declared order is used as is. Nothing in the policy changes; an operator keeps
+the fixed order with `APIFUSE__PROXY__VENDOR_SELECTION=ordered`. The request
+log's `proxy.selection.reason` (`chain_order`, `vendor_open`,
+`half_open_probe`, `all_open`) and `proxy.vendorStates` say why an attempt went
+where it did, and every state change logs one `proxy_vendor_state` line. See
+`docs/adr/0016-adaptive-proxy-vendor-selection.md`.
+
 When only some operations need proxy egress, scope the provider-level policy
 with `proxy.operations`. Listed operations get the policy on `ctx.http`,
 `ctx.stealth`, `ctx.native.network` and the resolver chain; every other

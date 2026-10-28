@@ -1,7 +1,7 @@
 # ADR-0016: Adaptive proxy vendor selection (per-vendor circuit breaker)
 
-- Status: **Proposed**. The owner asked on 2026-10-28 for the vendor fallback to adopt the intelligent selection widely used elsewhere; the method combination, the value bundle, the failure boundary, the state scope and the operator knob are open owner decisions. This ADR records the proposed design and is updated with the chosen options before the change lands.
-- Builds on: the vendor selector seam introduced with the smartproxy gateway-session change (`ProxyVendorSelector`, `staticOrderProxyVendorSelector`, `PROXY_ATTEMPTS_PER_VENDOR`), whose ADR precedes this one on the same branch stack.
+- Status: **Proposed**. The owner asked on 2026-10-28 for the vendor fallback to adopt the intelligent selection widely used elsewhere; the method combination, the value bundle, the failure boundary, the state scope and the operator knob are open owner decisions. The change implements the proposed option of each (below); a different choice is applied on the same branch, and this ADR updated, before the change lands.
+- Builds on: ADR-0015 (smartproxy gateway sessions), which introduced the vendor selector seam (`ProxyVendorSelector`, `staticOrderProxyVendorSelector`, `PROXY_ATTEMPTS_PER_VENDOR`) on the same branch stack.
 - Extends: ADR-0001 consequence "The vendor gateway becomes an availability dependency for native egress. Mitigated by the existing ordered vendor fallback chain" from a fixed order to a learned one.
 
 ## Context
@@ -73,18 +73,31 @@ observed incident shape.
    wasted requests per additional replica. A process starts closed, that is,
    on the declared order.
 
-5. **The static order stays the default and the rollback.** Nothing in this
-   change registers the adaptive selector; `setProxyVendorSelector` is the
-   registration point and `APIFUSE__PROXY__VENDOR_SELECTION`
-   (`ordered` | `adaptive`, parsed by `resolveProxyVendorSelectionMode`) is
-   the operator switch. Which value is the default, and whether providers get
-   a policy field, is an open owner decision; no provider policy changes
-   either way.
+5. **Served processes run the adaptive selector; the static order is the
+   rollback.** `serve()` registers it through
+   `installProcessProxyVendorSelector`, one selector per process shared by
+   every server and released when the last of them closes.
+   `APIFUSE__PROXY__VENDOR_SELECTION` (`ordered` | `adaptive`, parsed by
+   `resolveProxyVendorSelectionMode`, default
+   `DEFAULT_PROXY_VENDOR_SELECTION_MODE` = `adaptive`) is the operator switch:
+   `ordered` keeps the static declaration order. A selector the host
+   registered with `setProxyVendorSelector` is never replaced. There is no
+   policy field, so no provider policy changes.
 
 6. **Observation is additive.** The selector exposes `snapshot()` and an
-   `onTransition` hook; the runtime logs one line per state transition and
-   adds the selection reason and per-vendor states to the request's proxy
-   telemetry without changing the telemetry envelope version.
+   `onTransition` hook. The server logs one `proxy_vendor_state` line per
+   state transition (`warn` when a vendor is opened) with the vendor, the
+   from and to states, the reason (`failure_threshold`, `open_elapsed`,
+   `probe_succeeded`, `probe_failed`, `probe_timed_out`), the failure streak,
+   the ejection count, the end of the open period and the error code that
+   opened it. Each selection is tied to the request that asked for it
+   (`observeProxyVendorSelections`), and the request's proxy telemetry gains
+   `selection` (`{ kind, reason }` with reason `chain_order`, `vendor_open`,
+   `half_open_probe` or `all_open`), `vendorStates` (`[{ v, s, e }]`: vendor,
+   state, consecutive ejections) and the vendor `v` of every attempt sample,
+   in the log and in the telemetry header, without changing the envelope
+   version. The gateway ignores unknown keys; persisting any of them is a
+   separate gateway change.
 
 ## Consequences
 
