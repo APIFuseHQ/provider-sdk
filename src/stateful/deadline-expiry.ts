@@ -1,8 +1,13 @@
 // Internal to the SDK: not re-exported from the stateful entry point.
-import { isSdkIssuedError, issueSdkError, type PlatformFault } from "../sdk-issued-errors.js";
+import {
+	isSdkIssuedError,
+	issueSdkError,
+	type PlatformFault,
+	platformFaultOf,
+} from "../sdk-issued-errors.js";
 import { StatefulRoutingDeadlineError } from "./errors.js";
 
-const DEADLINE_EXPIRED_CODE = "STATEFUL_FORWARDING_DEADLINE_EXPIRED";
+export const DEADLINE_EXPIRED_CODE = "STATEFUL_FORWARDING_DEADLINE_EXPIRED";
 
 /**
  * The platform fault every deadline error the SDK raises stands for, before
@@ -189,16 +194,6 @@ export function statefulRoutingDeadlineErrorCausedBy(
 	return expiry;
 }
 
-function ownErrorCode(error: unknown): unknown {
-	if (error === null || typeof error !== "object") return undefined;
-	try {
-		const code = Object.getOwnPropertyDescriptor(error, "code");
-		return code && Object.hasOwn(code, "value") ? code.value : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
 type DeadlineRequest = { readonly requestId: string; readonly deadlineAt?: string };
 
 /**
@@ -223,12 +218,15 @@ function abortedByDeadline(
  * its 504, so the owner's answer usually never arrives: the forwarder reports
  * its own aborted request (`STATEFUL_FORWARDING_REQUEST_FAILED`), with the
  * timer's abort reason as the cause. When the owner's 504 does arrive first
- * (for example, its clock runs ahead), the forwarder relays the owner's
- * `STATEFUL_FORWARDING_DEADLINE_EXPIRED` code instead. Both are this
+ * (for example, its clock runs ahead), the SDK's forwarder records on the
+ * failure it relays that the owner reported this deadline as a platform
+ * fault: only the owner's own report counts, never a code its provider can
+ * throw too (ownerReportedForwardingDeadline in the forwarder). Both are this
  * request's deadline expiring, so both become the StatefulRoutingDeadlineError
  * the router already throws for a deadline that expired before routing, with
  * the forwarding failure as its cause. Any other forwarding failure, such as
- * an unreachable owner or a broken connection, keeps its own error.
+ * an unreachable owner, a broken connection or a provider failure the owner
+ * relayed, keeps its own error.
  */
 export function forwardingDeadlineExpiryOrSelf(
 	error: unknown,
@@ -238,7 +236,7 @@ export function forwardingDeadlineExpiryOrSelf(
 	if (request.deadlineAt === undefined || isIssuedStatefulRoutingDeadlineError(error)) {
 		return error;
 	}
-	const ownerReportedDeadline = ownErrorCode(error) === DEADLINE_EXPIRED_CODE;
+	const ownerReportedDeadline = platformFaultOf(error)?.category === "stateful_forwarding_deadline";
 	if (!abortedByDeadline(error, request, deadlineSignal) && !ownerReportedDeadline) return error;
 	return statefulRoutingDeadlineErrorCausedBy(request.requestId, request.deadlineAt, error);
 }

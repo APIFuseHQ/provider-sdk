@@ -1,11 +1,21 @@
 import { z } from "zod";
 import {
+	type ErrorObservabilityDetails,
+	type LegacyErrorObservabilityDetails,
+	PLATFORM_FAULT_CATEGORIES,
+	PROVIDER_ERROR_CATEGORIES,
+	PROVIDER_FAILURE_CATEGORIES,
+} from "../observability.js";
+import { issueSdkError } from "../sdk-issued-errors.js";
+import {
+	ERROR_OBSERVABILITY_HEADER,
 	type OperationConnection,
 	OperationErrorResponseSchema,
 	OperationSuccessResponseSchema,
 } from "../server/index.js";
 import type { ProviderServerStatefulForwardEnvelope } from "../server/serve.js";
 import { signStatefulRequestBody, statefulSignedHeaders } from "../stateful-signing.js";
+import { DEADLINE_EXPIRED_CODE } from "./deadline-expiry.js";
 import type { SessionKey } from "./session-key.js";
 import type { StatefulForwardingRuntimeContext } from "./stateful-provider-runtime-context.js";
 import type {
@@ -44,6 +54,41 @@ const ForwardedOperationErrorResponseSchema = OperationErrorResponseSchema.exten
 		retryable: z.boolean().optional().default(false),
 	}),
 });
+// The owner pod's `X-ApiFuse-Error-Observability`, as either shape a pod in the
+// fleet writes: tagged with the origin that reported the category
+// (ErrorObservabilityDetails), or from an SDK released before the tag, without
+// one (LegacyErrorObservabilityDetails).
+const ForwardedObservabilityFields = {
+	taxonomyVersion: z.string(),
+	retryable: z.boolean(),
+	upstreamStatus: z.number().optional(),
+};
+const ForwardedProviderObservabilitySchema = z.object({
+	reason: z.string().optional(),
+	fingerprint: z.string().optional(),
+	messageLength: z.number().optional(),
+});
+const ForwardedErrorObservabilitySchema: z.ZodType<
+	ErrorObservabilityDetails | LegacyErrorObservabilityDetails
+> = z.union([
+	z.object({
+		origin: z.literal("platform"),
+		category: z.enum(PLATFORM_FAULT_CATEGORIES),
+		...ForwardedObservabilityFields,
+	}),
+	z.object({
+		origin: z.literal("provider"),
+		category: z.enum(PROVIDER_FAILURE_CATEGORIES),
+		...ForwardedObservabilityFields,
+		providerObservability: ForwardedProviderObservabilitySchema.optional(),
+	}),
+	z.object({
+		origin: z.undefined().optional(),
+		category: z.enum(PROVIDER_ERROR_CATEGORIES),
+		...ForwardedObservabilityFields,
+		providerObservability: ForwardedProviderObservabilitySchema.optional(),
+	}),
+]);
 const SENSITIVE_HEADER_NAMES = new Set([
 	"authorization",
 	"cookie",
@@ -329,11 +374,21 @@ async function parseForwardedResponse(
 
 	const error = ForwardedOperationErrorResponseSchema.safeParse(body);
 	if (error.success) {
-		throw new StatefulOwnerForwardingError({
+		const forwardingError = new StatefulOwnerForwardingError({
 			code: error.data.error.code,
 			message: error.data.error.message,
 			status: response.status,
 		});
+		// The router turns the owner's deadline into its own from this record
+		// (forwardingDeadlineExpiryOrSelf), never from the relayed code.
+		throw ownerReportedForwardingDeadline(response.headers, error.data.error.code)
+			? issueSdkError(forwardingError, {
+					category: "stateful_forwarding_deadline",
+					code: error.data.error.code,
+					status: response.status,
+					retryable: error.data.error.retryable,
+				})
+			: forwardingError;
 	}
 
 	throw new StatefulOwnerForwardingError({
@@ -341,6 +396,41 @@ async function parseForwardedResponse(
 		message: `Stateful owner returned an invalid response with status ${response.status}.`,
 		status: response.status,
 	});
+}
+
+/**
+ * Whether the owner pod reported that the forwarded request's deadline expired
+ * there. Only the owner's own report of that platform fault is trusted: its
+ * observability header with origin `platform` and category
+ * `stateful_forwarding_deadline`. The body's code is not, because provider code
+ * on the owner pod can throw STATEFUL_FORWARDING_DEADLINE_EXPIRED as well, and
+ * the owner serves that as a provider failure. An owner pod on an SDK released
+ * before the origin tag writes a header without one, or none at all; for that
+ * response alone the body's code is still the report, while the fleet runs such
+ * SDKs. A header this pod cannot read reports nothing.
+ */
+function ownerReportedForwardingDeadline(headers: Headers, code: string): boolean {
+	const header = headers.get(ERROR_OBSERVABILITY_HEADER);
+	if (header === null) return code === DEADLINE_EXPIRED_CODE;
+	const observability = readForwardedErrorObservability(header);
+	if (observability === undefined) return false;
+	if (observability.origin === undefined) return code === DEADLINE_EXPIRED_CODE;
+	return (
+		observability.origin === "platform" && observability.category === "stateful_forwarding_deadline"
+	);
+}
+
+function readForwardedErrorObservability(
+	header: string,
+): ErrorObservabilityDetails | LegacyErrorObservabilityDetails | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(header);
+	} catch {
+		return undefined;
+	}
+	const observability = ForwardedErrorObservabilitySchema.safeParse(parsed);
+	return observability.success ? observability.data : undefined;
 }
 
 /**
