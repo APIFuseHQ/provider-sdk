@@ -310,12 +310,26 @@ export {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
+	APIFUSE__RESOLVER__VENDOR_COOLDOWN_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	DEFAULT_RESOLVER_VENDOR_COOLDOWN_MS,
+	RESOLVER_BUDGET_MARGIN_MS,
+	RESOLVER_TOKEN_SOLUTION_TTL_MS_BY_KIND,
 } from "./runtime/resolver-config.js";
 export { createUnsupportedResolverClient } from "./runtime/resolver-shared.js";
 export type { ResolverRuntimeOptions } from "./runtime/resolver.js";
+export {
+	createResolverVendorHealthRegistry,
+	getResolverVendorHealthSnapshot,
+	type ResolverVendorBalanceRecord,
+	type ResolverVendorCooldownReason,
+	type ResolverVendorHealthRegistry,
+	type ResolverVendorHealthSnapshot,
+	type ResolverVendorSolveStats,
+} from "./runtime/resolver-vendor-health.js";
 export type {
 	ResolverPaidUsageContext,
+	ResolverVendorBalance,
 	ResolverVendorTransport,
 	ResolverVendorUnavailableReason,
 } from "./runtime/resolver-vendors/types.js";

@@ -430,7 +430,12 @@ export type ProviderChallengeKind = ProviderChallenge["kind"];
  * only the next protected GET can verify it (the safe refetch is Phase 2).
  */
 export type ChallengeSolution =
-	| { readonly form: "token"; readonly token: string }
+	| {
+			readonly form: "token";
+			readonly token: string;
+			/** Epoch seconds reported by the vendor when the token carries its own expiry. */
+			readonly expires?: number;
+	  }
 	| {
 			readonly form: "cookies";
 			readonly cookies: Readonly<Record<string, string>>;

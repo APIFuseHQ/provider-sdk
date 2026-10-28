@@ -84,6 +84,8 @@ export const RESOLVER_CLOSED_ENUM_SPAN_ATTRIBUTES = {
 		"transport_failure",
 		"timeout",
 		"not_implemented",
+		"cooldown",
+		"budget_exceeded",
 	]),
 	verdict_reason: closedEnumValues<ResolverChallengeVerdictReason>()([
 		"human_puzzle",
