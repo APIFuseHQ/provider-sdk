@@ -27,6 +27,7 @@ import {
 } from "../runtime/engine-mode.js";
 import { SDK_VERSION } from "./sdk-version.js";
 import { CLIENT_CANCELLED_STATUS } from "./client-cancelled.js";
+import { resolveResolverDeadlineAtMs } from "./resolver-deadline.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
@@ -927,6 +928,7 @@ function createProviderContext(
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	scope: RequestScopeContext,
 	signal?: AbortSignal,
+	envelopeDeadlineAtMs?: number,
 ): ProviderContext {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
@@ -951,7 +953,11 @@ function createProviderContext(
 		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
 	);
 	const { capabilityModules } = options;
-	const operationTimeoutMs = provider.operations[operationId]?.timeoutMs;
+	const resolverDeadlineAtMs = resolveResolverDeadlineAtMs(
+		Date.now(),
+		provider.operations[operationId]?.timeoutMs,
+		envelopeDeadlineAtMs,
+	);
 	const resolverOptions: ResolverRuntimeOptions = {
 		...createResolverRuntimeOptions(
 			provider,
@@ -963,11 +969,7 @@ function createProviderContext(
 			scope.resolverTelemetry,
 			scope.browserTelemetry,
 		),
-		// The declared operation timeout is the budget the hub enforces; a solve that
-		// outlives it is paid for nothing.
-		...(operationTimeoutMs !== undefined && operationTimeoutMs > 0
-			? { deadlineAtMs: Date.now() + operationTimeoutMs }
-			: {}),
+		...(resolverDeadlineAtMs !== undefined ? { deadlineAtMs: resolverDeadlineAtMs } : {}),
 	};
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
@@ -4235,6 +4237,7 @@ function createServerAppWithCapabilityModules(
 					state,
 					requestScope as RequestScope,
 					signal,
+					deadlineAtMs,
 				);
 				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);

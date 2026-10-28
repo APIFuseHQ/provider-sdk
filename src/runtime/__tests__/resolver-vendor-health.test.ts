@@ -425,6 +425,74 @@ describe("A3 solve budget", () => {
 		expect(sink.failovers).toEqual([{ from: "capsolver", to: "2captcha", reason: "budget_exceeded" }]);
 	});
 
+	it("still tries the only vendor when its measured p50 exceeds the remaining budget", async () => {
+		let clock = 1_700_000_000_000;
+		const now = () => clock;
+		const slow = createStubAdapter("capsolver", async () => {
+			clock += 30_000;
+			return tokenSolution("slow");
+		});
+		const vendorHealth = createResolverVendorHealthRegistry();
+		const warmup = createResolverClient({
+			kinds: ["aws_waf"],
+			adapters: [slow.adapter],
+			vendorHealth,
+			now,
+		});
+		for (let call = 0; call < 3; call += 1) await warmup.solve(CHALLENGE);
+		expect(vendorHealth.solveP50Ms("capsolver", "aws_waf")).toBe(30_000);
+
+		const sink = createEventSink();
+		const solved = await createResolverClient({
+			kinds: ["aws_waf"],
+			adapters: [slow.adapter],
+			deadlineAtMs: now() + 20_000 + RESOLVER_BUDGET_MARGIN_MS,
+			telemetry: sink.sink,
+			vendorHealth,
+			now,
+		}).solve(CHALLENGE);
+
+		expect(solved).toEqual({ form: "token", token: "slow" });
+		expect(slow.state.solveCalls).toBe(4);
+		expect(sink.failovers).toEqual([]);
+		expect(vendorHealth.snapshot(now()).find((entry) => entry.vendor === "capsolver")).toMatchObject({
+			solves: [{ kind: "aws_waf", samples: 4, successes: 4 }],
+		});
+	});
+
+	it("does not skip on p50 when every later vendor is over budget too", async () => {
+		let clock = 1_700_000_000_000;
+		const now = () => clock;
+		const first = createStubAdapter("capsolver", async () => {
+			clock += 30_000;
+			return tokenSolution("first");
+		});
+		const second = createStubAdapter("2captcha", async () => {
+			clock += 25_000;
+			return tokenSolution("second");
+		});
+		const vendorHealth = createResolverVendorHealthRegistry();
+		for (const adapter of [first.adapter, second.adapter]) {
+			const warmup = createResolverClient({ kinds: ["aws_waf"], adapters: [adapter], vendorHealth, now });
+			for (let call = 0; call < 3; call += 1) await warmup.solve(CHALLENGE);
+		}
+
+		const sink = createEventSink();
+		const solved = await createResolverClient({
+			kinds: ["aws_waf"],
+			adapters: [first.adapter, second.adapter],
+			deadlineAtMs: now() + 20_000 + RESOLVER_BUDGET_MARGIN_MS,
+			telemetry: sink.sink,
+			vendorHealth,
+			now,
+		}).solve(CHALLENGE);
+
+		expect(solved).toEqual({ form: "token", token: "first" });
+		expect(first.state.solveCalls).toBe(4);
+		expect(second.state.solveCalls).toBe(3);
+		expect(sink.failovers).toEqual([]);
+	});
+
 	it("cuts an uncacheable solve at the budget deadline and reports budget_exceeded", async () => {
 		const vendor = createStubAdapter(
 			"2captcha",

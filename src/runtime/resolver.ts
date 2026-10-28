@@ -1417,12 +1417,26 @@ function createResolverChainClient(options: {
 					}
 					if (budgetDeadlineAtMs !== undefined) {
 						const remainingMs = budgetDeadlineAtMs - loopNowMs;
-						const p50Ms = vendorHealth.solveP50Ms(entry.id, challenge.kind);
-						if (
-							budget?.signal.aborted ||
-							remainingMs <= 0 ||
-							(p50Ms !== undefined && p50Ms > remainingMs)
-						) {
+						if (budget?.signal.aborted || remainingMs <= 0) {
+							skipVendor("budget_exceeded");
+							continue;
+						}
+						// The measured median only moves when an attempt runs, so a vendor skipped on
+						// its p50 can never recover unless something else gets tried. The p50 skip
+						// therefore applies only while a later vendor would still be tried; otherwise
+						// the attempt runs under the deadline, which still cuts it.
+						const overBudget = (vendor: ProviderResolverVendor) => {
+							const p50Ms = vendorHealth.solveP50Ms(vendor, challenge.kind);
+							return p50Ms !== undefined && p50Ms > remainingMs;
+						};
+						const laterVendorEligible = supportingEntries
+							.slice(entryIndex + 1)
+							.some(
+								(later) =>
+									vendorHealth.cooldownUntilMs(later.id, loopNowMs) === undefined &&
+									!overBudget(later.id),
+							);
+						if (laterVendorEligible && overBudget(entry.id)) {
 							skipVendor("budget_exceeded");
 							continue;
 						}
