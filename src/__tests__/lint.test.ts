@@ -1,14 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { lintOperation, lintProvider } from "../lint.js";
-import { describeKey, fields, publicField } from "../schema.js";
+import { describeKey, fields } from "../schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "../types.js";
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
-
-function withDescriptionKey<TSchema extends z.ZodType>(schema: TSchema, key: string): TSchema {
-	return describeKey(schema, key);
-}
 
 describe("lintOperation", () => {
 	it("reports expected diagnostics for weak operation metadata", () => {
@@ -20,54 +16,24 @@ describe("lintOperation", () => {
 			fixtures: { request: { filters: { ids: ["btc"] } } },
 		});
 
-		expect(diagnostics.some((item) => item.rule === "description-key-required")).toBe(true);
-		expect(diagnostics.some((item) => item.rule === "schema-description-key-required")).toBe(true);
-		expect(diagnostics.some((item) => item.rule === "fixtures-both-directions")).toBe(true);
-	});
-
-	it("accepts key-only operation descriptions", () => {
-		const diagnostics = lintOperation({
-			descriptionKey: "operations.search.description",
-			input: withDescriptionKey(
-				z.object({
-					query: withDescriptionKey(z.string(), "operations.search.fields.query.description"),
-				}),
-				"operations.search.input.description",
-			),
-			output: withDescriptionKey(
-				z.object({
-					result: withDescriptionKey(z.string(), "operations.search.fields.result.description"),
-				}),
-				"operations.search.output.description",
-			),
-			fixtures: {
-				request: { query: "cup" },
-				response: { result: "cup" },
-			},
-		});
-
-		expect(diagnostics.some((item) => item.rule === "description-key-required")).toBe(false);
-		expect(
-			diagnostics.some(
-				(item) =>
-					item.rule === "schema-description-raw-prose" ||
-					item.rule === "schema-description-key-required",
-			),
-		).toBe(false);
+		expect(diagnostics.map((item) => item.rule)).toEqual([
+			"description-key-required",
+			"fixtures-both-directions",
+		]);
 	});
 
 	it("accepts key-owned simple operations", () => {
 		const diagnostics = lintOperation({
 			descriptionKey: "operations.price.description",
-			input: withDescriptionKey(
+			input: describeKey(
 				z.object({
-					symbol: withDescriptionKey(z.string(), "operations.price.fields.symbol.description"),
+					symbol: describeKey(z.string(), "operations.price.fields.symbol.description"),
 				}),
 				"operations.price.input.description",
 			),
-			output: withDescriptionKey(
+			output: describeKey(
 				z.object({
-					price: withDescriptionKey(z.number(), "operations.price.fields.price.description"),
+					price: describeKey(z.number(), "operations.price.fields.price.description"),
 				}),
 				"operations.price.output.description",
 			),
@@ -80,213 +46,18 @@ describe("lintOperation", () => {
 		expect(diagnostics).toEqual([]);
 	});
 
-	it("rejects raw schema descriptions", () => {
+	it("does not lint schema descriptions or sensitive-looking names; defineProvider owns the declarations", () => {
 		const diagnostics = lintOperation({
-			descriptionKey: "operations.search.description",
-			input: z.object({ query: z.string().describe("Search keyword") }).describe("Search input"),
-			output: withDescriptionKey(
-				z.object({
-					ok: withDescriptionKey(z.boolean(), "operations.search.fields.ok.description"),
-				}),
-				"operations.search.output.description",
-			),
-			fixtures: { request: { query: "desk" }, response: { ok: true } },
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({ rule: "schema-description-raw-prose" }),
-		);
-	});
-
-	it("does not require duplicate descriptions on transparent wrapper internals", () => {
-		const diagnostics = lintOperation({
-			descriptionKey:
-				"Use this operation when a caller needs described optional, defaulted, array, and record fields and when wrapper internals should inherit the public field description instead of producing duplicate diagnostics.",
-			input: z
-				.object({
-					keyword: z.string().default("").describe("Keyword filter supplied by the caller"),
-					page: z.number().int().optional().describe("Optional page number"),
-				})
-				.describe("Wrapped input schema"),
-			output: z
-				.object({
-					items: z
-						.array(
-							z.object({
-								id: z.string().describe("Stable item id"),
-								metadata: z.record(z.string(), z.string()).describe("Open-world metadata map"),
-							}),
-						)
-						.describe("Returned item rows"),
-				})
-				.describe("Wrapped output schema"),
+			descriptionKey: "operations.login.description",
+			input: z.object({ password: z.string(), phoneNumber: z.string() }),
+			output: z.object({ accessToken: fields.token(), ok: z.boolean() }),
 			fixtures: {
-				request: { keyword: "cup", page: 1 },
-				response: { items: [{ id: "1", metadata: { color: "red" } }] },
+				request: { password: "secret", phoneNumber: "02-000-0000" },
+				response: { accessToken: "token", ok: true },
 			},
 		});
 
-		expect(diagnostics.filter((item) => item.rule === "all-fields-described")).toEqual([]);
-	});
-
-	it("does not require duplicate descriptions on pipe input and output internals", () => {
-		const normalizedCode = z
-			.preprocess(
-				(value) => (typeof value === "string" ? value.trim().toUpperCase() : value),
-				z.enum(["A", "B"]).describe("Normalized finite code"),
-			)
-			.describe("Normalized finite code");
-
-		const diagnostics = lintOperation({
-			descriptionKey:
-				"Use this operation when callers may provide friendly code aliases and when the provider must normalize those aliases into a documented finite code before sending the upstream request.",
-			input: z
-				.object({
-					code: normalizedCode.describe("Code or supported alias to normalize"),
-				})
-				.describe("Normalization input schema"),
-			output: z
-				.object({
-					code: z.enum(["A", "B"]).describe("Normalized finite code"),
-				})
-				.describe("Normalization output schema"),
-			fixtures: {
-				request: { code: "a" },
-				response: { code: "A" },
-			},
-		});
-
-		expect(diagnostics.filter((item) => item.rule === "all-fields-described")).toEqual([]);
-	});
-
-	it("still requires descriptions for indexed union branches", () => {
-		const diagnostics = lintOperation({
-			descriptionKey:
-				"Use this operation when callers need one of several documented response envelopes and each indexed union branch must remain part of the public contract surface instead of being hidden as an internal wrapper.",
-			input: z
-				.object({
-					mode: z
-						.enum(["success", "failure"])
-						.describe("Fixture mode that selects the response branch"),
-				})
-				.describe("Union branch fixture input"),
-			output: z
-				.union([
-					z.object({
-						ok: z.string().describe("Successful branch payload"),
-					}),
-					z.object({
-						error: z.string().describe("Failure branch payload"),
-					}),
-				])
-				.describe("Union output schema"),
-			fixtures: {
-				request: { mode: "success" },
-				response: { ok: "yes" },
-			},
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				field: "output[0]",
-				rule: "schema-description-key-required",
-			}),
-		);
-	});
-
-	it("does not treat public fields prefixed with element as array wrappers", () => {
-		const diagnostics = lintOperation({
-			descriptionKey:
-				"Use this operation when public field names happen to start with element and those fields must still be linted as ordinary response contract properties.",
-			input: z
-				.object({
-					id: z.string().describe("Identifier to look up"),
-				})
-				.describe("Element field fixture input"),
-			output: z
-				.object({
-					elementId: z.string(),
-				})
-				.describe("Element field output"),
-			fixtures: {
-				request: { id: "abc" },
-				response: { elementId: "el_123" },
-			},
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				field: "output.elementId",
-				rule: "schema-description-key-required",
-			}),
-		);
-	});
-
-	it("warns when suspicious sensitive fields are not marked", () => {
-		const diagnostics = lintOperation({
-			descriptionKey:
-				"Use this operation when callers submit credential-bearing login details and when invocation observability must redact sensitive provider payload fields automatically.",
-			input: z
-				.object({
-					password: z.string().describe("Password credential"),
-				})
-				.describe("Login input"),
-			output: z
-				.object({
-					accessToken: fields.token().describe("Access token returned upstream"),
-				})
-				.describe("Login output"),
-			fixtures: {
-				request: { password: "secret" },
-				response: { accessToken: "token" },
-			},
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				field: "input.password",
-				rule: "sensitive-field-unmarked",
-			}),
-		);
-		expect(
-			diagnostics.find(
-				(item) => item.field === "output.accessToken" && item.rule === "sensitive-field-unmarked",
-			),
-		).toBeUndefined();
-	});
-
-	it("accepts an explicit public declaration on a sensitive-looking field", () => {
-		const diagnostics = lintOperation({
-			input: z.object({ id: z.string() }),
-			output: z.object({
-				phone: publicField(z.string()),
-				phoneNumber: z.string(),
-				faxPhone: publicField(z.string()).nullable(),
-				phone_number: z.string().pipe(publicField(z.string())),
-				Phone: z.preprocess((value) => value, publicField(z.string())),
-				token: fields.token().optional(),
-				// Credential-shaped keys cannot be declared public.
-				password: publicField(z.string()),
-				apiKey: publicField(z.string()).optional(),
-			}),
-			fixtures: {
-				request: { id: "hospital-1" },
-				response: {
-					phone: "02-000-0000",
-					phoneNumber: "02-000-0001",
-					phone_number: "02-000-0002",
-					Phone: "02-000-0003",
-					token: "t",
-					password: "p",
-					apiKey: "k",
-				},
-			},
-		});
-
-		const unmarked = diagnostics
-			.filter((item) => item.rule === "sensitive-field-unmarked")
-			.map((item) => item.field);
-		expect(unmarked).toEqual(["output.phoneNumber", "output.password", "output.apiKey"]);
+		expect(diagnostics).toEqual([]);
 	});
 });
 
@@ -300,12 +71,19 @@ describe("lintProvider", () => {
 					descriptionKey: "Short description",
 					input: z.object({ symbol: z.string() }),
 					output: z.object({ price: z.number() }),
+					fixtures: { request: { symbol: "BTC" } },
 				},
 			},
 			reviewed: "first-party",
 		});
 
-		expect(diagnostics[0]?.field?.startsWith("operations.lookup")).toBe(true);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				rule: "fixtures-both-directions",
+				field: "operations.lookup.fixtures",
+				message: "[lookup] Fixtures must include both request and response.",
+			}),
+		);
 	});
 
 	it("rejects empty allowedHosts", () => {
@@ -420,10 +198,10 @@ describe("lintProvider", () => {
 			operations: {
 				"auth-login-with-password": {
 					descriptionKey: "operations.authLogin.description",
-					input: withDescriptionKey(z.object({}), "operations.authLogin.input.description"),
-					output: withDescriptionKey(
+					input: describeKey(z.object({}), "operations.authLogin.input.description"),
+					output: describeKey(
 						z.object({
-							ok: withDescriptionKey(z.boolean(), "operations.authLogin.fields.ok.description"),
+							ok: describeKey(z.boolean(), "operations.authLogin.fields.ok.description"),
 						}),
 						"operations.authLogin.output.description",
 					),
@@ -431,10 +209,10 @@ describe("lintProvider", () => {
 				},
 				"login-with-password": {
 					descriptionKey: "operations.login.description",
-					input: withDescriptionKey(z.object({}), "operations.login.input.description"),
-					output: withDescriptionKey(
+					input: describeKey(z.object({}), "operations.login.input.description"),
+					output: describeKey(
 						z.object({
-							ok: withDescriptionKey(z.boolean(), "operations.login.fields.ok.description"),
+							ok: describeKey(z.boolean(), "operations.login.fields.ok.description"),
 						}),
 						"operations.login.output.description",
 					),
@@ -539,8 +317,8 @@ describe("lintProvider", () => {
 				search: {
 					descriptionKey:
 						"Use this operation when callers need a fixture that proves operation handlers cannot write credentials.",
-					input: z.object({ query: z.string().describe("Search query") }),
-					output: z.object({ ok: z.boolean().describe("Success flag") }),
+					input: z.object({ query: z.string() }),
+					output: z.object({ ok: z.boolean() }),
 					fixtures: { request: { query: "desk" }, response: { ok: true } },
 					source:
 						"async function handler(ctx) { ctx.credential.set('session', 'bad'); return { ok: true }; }",
@@ -584,8 +362,8 @@ describe("lintProvider", () => {
 				search: {
 					descriptionKey:
 						"Use this operation when callers need protected search results and when the provider must explicitly opt into browser-like stealth transport instead of relying on implicit HTTP behavior.",
-					input: z.object({ query: z.string().describe("Search query") }),
-					output: z.object({ ok: z.boolean().describe("Success flag") }),
+					input: z.object({ query: z.string() }),
+					output: z.object({ ok: z.boolean() }),
 					fixtures: { request: { query: "desk" }, response: { ok: true } },
 					source: "async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
 				},
@@ -612,8 +390,8 @@ describe("lintProvider", () => {
 				search: {
 					descriptionKey:
 						"Use this operation when callers need protected search results and when the provider has explicitly declared the stealth profile required by the source code.",
-					input: z.object({ query: z.string().describe("Search query") }),
-					output: z.object({ ok: z.boolean().describe("Success flag") }),
+					input: z.object({ query: z.string() }),
+					output: z.object({ ok: z.boolean() }),
 					fixtures: { request: { query: "desk" }, response: { ok: true } },
 					source: "async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
 				},
@@ -783,8 +561,8 @@ describe("flat operation safety lint", () => {
 				lookup: {
 					...operation,
 					descriptionKey: "operations.lookup.description",
-					input: withDescriptionKey(z.object({}), "operations.lookup.input.description"),
-					output: withDescriptionKey(z.object({}), "operations.lookup.output.description"),
+					input: describeKey(z.object({}), "operations.lookup.input.description"),
+					output: describeKey(z.object({}), "operations.lookup.output.description"),
 					fixtures: { request: {}, response: {} },
 				},
 			},
@@ -872,8 +650,8 @@ export function apply(headers: Headers, tuples: Array<[string, string]>) {
 					riskClass: READ_RISK_CLASS,
 					descriptionKey:
 						"Use this operation when callers need upstream search results and when header ownership between ctx.stealth and ctx.http must be linted.",
-					input: z.object({ query: z.string().describe("Search query") }),
-					output: z.object({ ok: z.boolean().describe("Success flag") }),
+					input: z.object({ query: z.string() }),
+					output: z.object({ ok: z.boolean() }),
 					fixtures: { request: { query: "desk" }, response: { ok: true } },
 					handler: async () => ({ ok: true }),
 				},

@@ -482,11 +482,17 @@ export {
 	redactPayload,
 	type SensitiveFieldKind,
 	type SensitiveFieldOptions,
+	type SensitivePresetOptions,
 	type SensitivePath,
 	sensitive,
 	untrustedContent,
 	z,
 } from "./schema.js";
+export {
+	collectUndeclaredFields,
+	type UndeclaredField,
+	type UndeclaredFieldReason,
+} from "./schema-fields.js";
 export {
 	APIFUSE_IMAGE_ROLE_META_KEY,
 	APIFUSE_URL_KIND_META_KEY,

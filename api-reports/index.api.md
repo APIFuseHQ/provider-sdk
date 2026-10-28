@@ -1252,6 +1252,9 @@ type CloudflareWorkersAiOcrClientOptions = {
 // @public (undocumented)
 export function collectSensitivePaths(schema: unknown): SensitivePath[];
 
+// @public
+export function collectUndeclaredFields(schema: unknown, side: string): UndeclaredField[];
+
 // @public (undocumented)
 export function combineCeremonies(...ceremonies: AuthFlowDefinition[]): AuthFlowDefinition;
 
@@ -2124,34 +2127,17 @@ export function field<TSchema extends ZodType>(schema: TSchema, options?: Sensit
 
 // @public (undocumented)
 export const fields: {
-    readonly apiKey: (options?: {
-        description?: string;
-    }) => ZodString;
-    readonly authorization: (options?: {
-        description?: string;
-    }) => ZodString;
-    readonly cookie: (options?: {
-        description?: string;
-    }) => ZodString;
-    readonly otp: (options?: {
-        description?: string;
-    }) => ZodString;
-    readonly password: (options?: {
-        description?: string;
+    readonly apiKey: (options?: SensitivePresetOptions) => ZodString;
+    readonly authorization: (options?: SensitivePresetOptions) => ZodString;
+    readonly cookie: (options?: SensitivePresetOptions) => ZodString;
+    readonly otp: (options?: SensitivePresetOptions) => ZodString;
+    readonly password: (options?: SensitivePresetOptions & {
         minLength?: number;
     }) => ZodString;
-    readonly paymentUrl: (options?: {
-        description?: string;
-    }) => ZodString;
-    readonly phone: (options?: {
-        description?: string;
-    }) => ZodString;
-    readonly secret: (options?: {
-        description?: string;
-    }) => ZodString;
-    readonly token: (options?: {
-        description?: string;
-    }) => ZodString;
+    readonly paymentUrl: (options?: SensitivePresetOptions) => ZodString;
+    readonly phone: (options?: SensitivePresetOptions) => ZodString;
+    readonly secret: (options?: SensitivePresetOptions) => ZodString;
+    readonly token: (options?: SensitivePresetOptions) => ZodString;
 };
 
 // @public (undocumented)
@@ -8412,6 +8398,7 @@ export type SensitiveFieldKind = "api_key" | "authorization" | "cookie" | "crede
 
 // @public (undocumented)
 export interface SensitiveFieldOptions {
+    // @deprecated (undocumented)
     description?: string;
     kind?: SensitiveFieldKind;
     sensitive?: boolean;
@@ -8424,6 +8411,12 @@ export type SensitivePath = readonly SensitivePathSegment[];
 
 // @public (undocumented)
 type SensitivePathSegment = string | "*";
+
+// @public (undocumented)
+export interface SensitivePresetOptions {
+    // @deprecated (undocumented)
+    description?: string;
+}
 
 // Warning: (ae-forgotten-export) The symbol "ProviderServerHandle" needs to be exported by the entry point index.d.ts
 //
@@ -9626,6 +9619,17 @@ export type TypeScriptCompilerModuleLike = {
     readonly ScriptTarget?: object;
     readonly version?: string;
 };
+
+// @public (undocumented)
+export interface UndeclaredField {
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    readonly reason: UndeclaredFieldReason;
+}
+
+// @public (undocumented)
+export type UndeclaredFieldReason = "raw-prose" | "missing-key";
 
 // @public (undocumented)
 export class UnsupportedProviderStateError extends ProviderError {

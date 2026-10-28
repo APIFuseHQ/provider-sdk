@@ -291,6 +291,7 @@ export {
 	redactPayload,
 	type SensitiveFieldKind,
 	type SensitiveFieldOptions,
+	type SensitivePresetOptions,
 	type SensitivePath,
 	sensitive,
 	untrustedContent,

@@ -39,6 +39,7 @@ import {
 import { resolveHealthCheckInputDateTokens } from "./server/self-test-input-tokens.js";
 import type { HandleKind } from "./handle.js";
 import { bindHandleContracts } from "./handle/contract.js";
+import { warnUndeclaredFields } from "./schema-fields.js";
 import type {
 	AuthConfig,
 	BrowserEngine,
@@ -3615,6 +3616,7 @@ function finalizeProvider<TOperations extends Record<string, ProviderOperation>,
 	validateOperationTransports(config.id, config.operations);
 	validateOperationContracts(config.id, config.operations);
 	bindHandleContracts(config.id, config.operations, config.handle);
+	warnUndeclaredFields(config.id, config.operations);
 	validateOperationMetadata(config.id, config.operations);
 	// Validated with the freshness guards attached: the 64-step budget and the
 	// id and binding uniqueness hold for what the monitor receives.

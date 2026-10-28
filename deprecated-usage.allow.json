@@ -189,6 +189,26 @@
 			"file": "src/__tests__/stealth-client.test.ts",
 			"symbol": "retryable",
 			"reason": "Tests the SDK's own TransportError retryability, carried on the instance for SDK-owned transport codes."
+		},
+		{
+			"file": "src/schema.ts",
+			"symbol": "description",
+			"reason": "field() applies the deprecated SensitiveFieldOptions.description for one release and fields.*() presets write their SDK-owned wording through the same option."
+		},
+		{
+			"file": "src/__tests__/schema-fields.test.ts",
+			"symbol": "description",
+			"reason": "The test builds the deprecated raw .describe() prose shape on purpose to pin how the SDK reports it."
+		},
+		{
+			"file": "src/__tests__/handle-contract.test.ts",
+			"symbol": "describe",
+			"reason": "The test pins that a provider's own .describe() text over a handle field is never rewritten."
+		},
+		{
+			"file": "src/__tests__/public-schema-fields-lint.test.ts",
+			"symbol": "describe",
+			"reason": "Field-name lint fixtures carry raw prose because the rule under test ignores descriptions; the shape is the deprecated one."
 		}
 	]
 }

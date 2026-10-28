@@ -22,6 +22,13 @@ import {
 	isHandleFieldDescription,
 	isHandleFieldMeta,
 } from "../handle-meta.js";
+import {
+	type SchemaEdgeKind,
+	type SchemaNode,
+	isSchemaNode,
+	schemaChildren,
+	schemaDef,
+} from "../schema-walk.js";
 import type { SchemaLike } from "../types.js";
 
 /**
@@ -103,31 +110,7 @@ export interface HandleFieldOccurrence {
 	readonly node: SchemaLike;
 }
 
-type SchemaRecord = Record<string, unknown> & SchemaLike;
-
-function isSchema(value: unknown): value is SchemaRecord {
-	return (
-		!!value &&
-		typeof value === "object" &&
-		"safeParse" in value &&
-		typeof (value as { safeParse?: unknown }).safeParse === "function"
-	);
-}
-
-function schemaDef(schema: SchemaRecord): Record<string, unknown> {
-	const def = schema.def ?? schema._def;
-	return def && typeof def === "object" ? (def as Record<string, unknown>) : {};
-}
-
-function objectShape(schema: SchemaRecord): Record<string, unknown> {
-	const own = typeof schema.shape === "function" ? schema.shape() : schema.shape;
-	if (own && typeof own === "object") return own as Record<string, unknown>;
-	const fromDef = schemaDef(schema).shape;
-	const resolved = typeof fromDef === "function" ? fromDef() : fromDef;
-	return resolved && typeof resolved === "object" ? (resolved as Record<string, unknown>) : {};
-}
-
-function ownHandleMeta(schema: SchemaRecord): HandleFieldMeta | undefined {
+function ownHandleMeta(schema: SchemaNode): HandleFieldMeta | undefined {
 	const meta = z.globalRegistry.get(schema as never);
 	const value = meta ? Reflect.get(meta, APIFUSE_HANDLE_META_KEY) : undefined;
 	return isHandleFieldMeta(value) ? value : undefined;
@@ -142,51 +125,17 @@ function ownHandleMeta(schema: SchemaRecord): HandleFieldMeta | undefined {
  */
 type ChildMode = "always" | "list" | "branch";
 
-/** zod internals that are transparent for the property key (wrappers, pipes, branches). */
-const STRUCTURAL_DEF_KEYS: readonly (readonly [key: string, mode: ChildMode])[] = [
-	["innerType", "always"],
-	["in", "always"],
-	["out", "always"],
-	["left", "always"],
-	["right", "always"],
-	["element", "list"],
-	["valueType", "list"],
-	["keyType", "list"],
-	["catchall", "list"],
-	["rest", "list"],
-];
+const EDGE_MODES: Record<SchemaEdgeKind, ChildMode> = {
+	property: "always",
+	wrapper: "always",
+	item: "always",
+	element: "list",
+	entry: "list",
+	option: "branch",
+};
 
 /** Wrappers whose value may be absent or null, so nothing below them is required. */
 const OPTIONAL_DEF_TYPES = new Set(["optional", "nullable", "default", "prefault", "catch"]);
-
-function* childSchemas(
-	schema: SchemaRecord,
-): Generator<{ readonly schema: SchemaRecord; readonly key?: string; readonly mode: ChildMode }> {
-	const def = schemaDef(schema);
-	for (const [key, value] of Object.entries(objectShape(schema))) {
-		if (isSchema(value)) yield { schema: value, key, mode: "always" };
-	}
-	for (const [name, mode] of STRUCTURAL_DEF_KEYS) {
-		const value = def[name];
-		if (isSchema(value)) yield { schema: value, mode };
-	}
-	if (typeof def.getter === "function") {
-		const value = (def.getter as () => unknown)();
-		if (isSchema(value)) yield { schema: value, mode: "always" };
-	}
-	for (const [listKey, mode] of [
-		["items", "always"],
-		["options", "branch"],
-	] as const) {
-		const value = def[listKey];
-		const entries = Array.isArray(value)
-			? value
-			: value instanceof Set || value instanceof Map
-				? Array.from(value.values())
-				: [];
-		for (const entry of entries) if (isSchema(entry)) yield { schema: entry, mode };
-	}
-}
 
 function kindOf(meta: HandleFieldMeta): object | undefined {
 	return Reflect.get(meta, HANDLE_META_KIND) as object | undefined;
@@ -202,21 +151,21 @@ function collect(
 	side: HandleFieldDirection,
 	path: string,
 	key: string | undefined,
-	ancestors: Set<SchemaRecord>,
+	ancestors: Set<SchemaNode>,
 	out: HandleFieldOccurrence[],
 ): Set<object> {
-	if (!isSchema(schema)) return new Set();
+	if (!isSchemaNode(schema)) return new Set();
 	const type = schemaDef(schema).type;
 	const required = collectBelow(schema, side, path, key, ancestors, out);
 	return typeof type === "string" && OPTIONAL_DEF_TYPES.has(type) ? new Set() : required;
 }
 
 function collectBelow(
-	schema: SchemaRecord,
+	schema: SchemaNode,
 	side: HandleFieldDirection,
 	path: string,
 	key: string | undefined,
-	ancestors: Set<SchemaRecord>,
+	ancestors: Set<SchemaNode>,
 	out: HandleFieldOccurrence[],
 ): Set<object> {
 	const required = new Set<object>();
@@ -233,20 +182,21 @@ function collectBelow(
 	ancestors.add(schema);
 	try {
 		const branches: Set<object>[] = [];
-		for (const child of childSchemas(schema)) {
+		for (const child of schemaChildren(schema)) {
+			const mode = EDGE_MODES[child.kind];
 			const below =
-				child.key !== undefined
+				child.kind === "property" && child.key !== undefined
 					? collect(child.schema, side, `${path}.${child.key}`, child.key, ancestors, out)
 					: collect(
 							child.schema,
 							side,
-							child.mode === "list" ? `${path}[]` : path,
+							mode === "list" ? `${path}[]` : path,
 							key,
 							ancestors,
 							out,
 						);
-			if (child.mode === "always") for (const kind of below) required.add(kind);
-			else if (child.mode === "branch") branches.push(below);
+			if (mode === "always") for (const kind of below) required.add(kind);
+			else if (mode === "branch") branches.push(below);
 		}
 		if (branches.length > 0) {
 			for (const kind of branches[0]!) {

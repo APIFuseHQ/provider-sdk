@@ -114,7 +114,9 @@ export interface SensitiveFieldOptions {
 	 */
 	kind?: SensitiveFieldKind;
 	/**
-	 * Optional public description applied with Zod's `.describe()`.
+	 * @deprecated Raw prose is not localized. Call `.describeKey("<locale key>")`
+	 * on the returned field instead; the next release refuses raw prose on public
+	 * schemas. Codemod: `scripts/codemods/schema.yml`.
 	 */
 	description?: string;
 }
@@ -148,6 +150,13 @@ export function untrustedContent<TSchema extends ZodType>(schema: TSchema): TSch
 
 declare module "zod" {
 	interface ZodType {
+		/**
+		 * @deprecated Raw prose on a public schema is not localized. Use
+		 * `.describeKey("<locale key>")` (or `describeKey(schema, key)`) backed by
+		 * `locales/<lang>.json`; `defineProvider` warns on raw prose now and refuses
+		 * it in the next release. Codemod: `scripts/codemods/schema.yml`.
+		 */
+		describe(description: string): this;
 		describeKey(key: ProviderLocaleKey | string): this;
 	}
 }
@@ -205,10 +214,9 @@ export function field<TSchema extends ZodType>(
 	schema: TSchema,
 	options: SensitiveFieldOptions = {},
 ): TSchema {
-	const described =
-		options.description && typeof schema.describe === "function"
-			? schema.describe(options.description)
-			: schema;
+	const described = options.description
+		? schema.meta({ ...(schema.meta() ?? {}), description: options.description })
+		: schema;
 	const metadata = described.meta() ?? {};
 	const isSensitive = options.sensitive ?? true;
 	// A public declaration only rewrites the meta of the node it receives;
@@ -253,11 +261,45 @@ export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema {
 	return field(schema, { sensitive: false });
 }
 
+/** SDK-owned wording of each `fields.*()` preset; a public schema may carry it without a locale key. */
+const SENSITIVE_FIELD_PRESETS = {
+	apiKey: { kind: "api_key", description: "Provider API key or credential secret." },
+	authorization: {
+		kind: "authorization",
+		description: "Authorization header value or bearer credential.",
+	},
+	cookie: { kind: "cookie", description: "Cookie header or browser session secret." },
+	otp: { kind: "otp", description: "One-time verification code." },
+	password: { kind: "password", description: "Password credential." },
+	paymentUrl: { kind: "payment_url", description: "Sensitive payment or checkout URL." },
+	phone: { kind: "phone", description: "Phone number or phone-based identity." },
+	secret: { kind: "secret", description: "Provider secret material." },
+	token: { kind: "token", description: "Provider access or refresh token." },
+} as const satisfies Record<string, { kind: SensitiveFieldKind; description: string }>;
+
+const SDK_FIELD_DESCRIPTIONS: ReadonlySet<string> = new Set(
+	Object.values(SENSITIVE_FIELD_PRESETS).map((preset) => preset.description),
+);
+
+/** True when `text` is the wording a `fields.*()` preset writes, as opposed to provider prose. */
+export function isSdkFieldDescription(text: string): boolean {
+	return SDK_FIELD_DESCRIPTIONS.has(text);
+}
+
+export interface SensitivePresetOptions {
+	/**
+	 * @deprecated Raw prose is not localized. Call `.describeKey("<locale key>")`
+	 * on the returned field instead; the next release refuses raw prose on public
+	 * schemas. Codemod: `scripts/codemods/schema.yml`.
+	 */
+	description?: string;
+}
+
 function sensitiveString(
-	kind: SensitiveFieldKind,
-	description: string,
-	options: { description?: string; minLength?: number } = {},
+	preset: keyof typeof SENSITIVE_FIELD_PRESETS,
+	options: SensitivePresetOptions & { minLength?: number } = {},
 ): ZodString {
+	const { kind, description } = SENSITIVE_FIELD_PRESETS[preset];
 	const schema = options.minLength === undefined ? z.string() : z.string().min(options.minLength);
 	return field(schema, {
 		kind,
@@ -266,24 +308,16 @@ function sensitiveString(
 }
 
 export const fields = {
-	apiKey: (options?: { description?: string }) =>
-		sensitiveString("api_key", "Provider API key or credential secret.", options),
-	authorization: (options?: { description?: string }) =>
-		sensitiveString("authorization", "Authorization header value or bearer credential.", options),
-	cookie: (options?: { description?: string }) =>
-		sensitiveString("cookie", "Cookie header or browser session secret.", options),
-	otp: (options?: { description?: string }) =>
-		sensitiveString("otp", "One-time verification code.", options),
-	password: (options?: { description?: string; minLength?: number }) =>
-		sensitiveString("password", "Password credential.", options),
-	paymentUrl: (options?: { description?: string }) =>
-		sensitiveString("payment_url", "Sensitive payment or checkout URL.", options),
-	phone: (options?: { description?: string }) =>
-		sensitiveString("phone", "Phone number or phone-based identity.", options),
-	secret: (options?: { description?: string }) =>
-		sensitiveString("secret", "Provider secret material.", options),
-	token: (options?: { description?: string }) =>
-		sensitiveString("token", "Provider access or refresh token.", options),
+	apiKey: (options?: SensitivePresetOptions) => sensitiveString("apiKey", options),
+	authorization: (options?: SensitivePresetOptions) => sensitiveString("authorization", options),
+	cookie: (options?: SensitivePresetOptions) => sensitiveString("cookie", options),
+	otp: (options?: SensitivePresetOptions) => sensitiveString("otp", options),
+	password: (options?: SensitivePresetOptions & { minLength?: number }) =>
+		sensitiveString("password", options),
+	paymentUrl: (options?: SensitivePresetOptions) => sensitiveString("paymentUrl", options),
+	phone: (options?: SensitivePresetOptions) => sensitiveString("phone", options),
+	secret: (options?: SensitivePresetOptions) => sensitiveString("secret", options),
+	token: (options?: SensitivePresetOptions) => sensitiveString("token", options),
 } as const;
 
 export function isSensitiveSchema(schema: unknown): boolean {
