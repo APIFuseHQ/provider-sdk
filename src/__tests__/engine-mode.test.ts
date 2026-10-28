@@ -427,6 +427,8 @@ describe("serve engine mode telemetry", () => {
 describe("secret issuer declaration", () => {
 	function secretProvider(secret: ProviderSecretDeclaration) {
 		return defineTestProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "issuer-provider",
 			version: "1.0.0",
 			runtime: "standard" as const,

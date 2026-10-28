@@ -201,8 +201,10 @@ function stayProvider(id: string, sessionState?: Record<string, ProviderSessionS
 		runtime: "standard",
 		meta: meta(id),
 		allowedHosts: [HOST],
+		reviewed: "community",
 		stealth: { browser: "chrome", os: "macos" },
 		...(sessionState ? { sessionState } : {}),
+		credential: { keys: ["account_id"] },
 		auth: {
 			mode: "credentials",
 			flow: {
@@ -296,6 +298,7 @@ const apps = {
 			runtime: "standard",
 			meta: meta("wire-header"),
 			allowedHosts: [HOST],
+			reviewed: "community",
 			http: {},
 			sessionState: {
 				guest: {
@@ -337,8 +340,13 @@ const apps = {
 			runtime: "standard",
 			meta: meta("wire-member"),
 			allowedHosts: [HOST],
+			reviewed: "community",
 			stealth: { browser: "chrome", os: "macos" },
-			credential: { keys: ["cookie"] },
+			credential: {
+				keys: ["cookie"],
+				storesReusableSecret: true,
+				justification: "wire fixture: the member session cookie is the credential",
+			},
 			sessionState: {
 				member: {
 					acquire: { from: "credential", capture: { credential: { cookie: "cookie" } } },

@@ -176,6 +176,7 @@ function stayApp(id: string, egress: "independent" | "pinned") {
 		runtime: "standard",
 		meta: { displayName: id, descriptionKey: `${id}.description`, category: "test" },
 		allowedHosts: ["127.0.0.1"],
+		reviewed: "community",
 		stealth: { browser: "chrome", os: "macos" },
 		proxy: {
 			mode: "required",

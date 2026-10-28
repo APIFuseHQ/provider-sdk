@@ -4,9 +4,10 @@ Applies when bumping `@apifuse/provider-sdk` past the release that lands
 ADR-0012 (`docs/adr/0012-llm-friendly-handles.md`). The change is breaking and
 has no compatibility alias: `ctx.choice`, inline tokens, and every
 `ProviderChoice*` export are gone. After the pin bump, the `tsc` error list is
-your worklist, and the lint rule `legacy-choice-usage` catches the identifiers
-`tsc` cannot see (string references in tests, comments that point contributors
-at the old API).
+your worklist: every import of a removed export and every `ctx.choice` read is
+a type error. (The `legacy-choice-usage` lint rule that used to mirror this
+was retired once `tsc` covered it; grep for `ProviderChoice` to find string
+references in tests and comments.)
 
 Tokens minted by the previous version are invalid the moment the new version
 serves. Consumers receive one uniform invalid result and restart the flow. Land
@@ -591,9 +592,9 @@ asserted a synchronous `string` return from inline `issue` become `await`.
    `request.connectionId`.
 10. Remove `APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET` from every
     env file, compose file, and deployment manifest the repository owns.
-11. Run the provider lint. `legacy-choice-usage` must be 0 and
-    `legacy-handle-declaration` must not warn (no `fieldName` / `issuedBy`
-    left on a kind). `handle: [...]` without `state` does not compile.
+11. Run the provider lint. `legacy-handle-declaration` must not warn (no
+    `fieldName` / `issuedBy` left on a kind). `handle: [...]` without `state`
+    does not compile.
 12. Update the consumer-facing contract docs for changed operations (field
     names, removed inputs) in the same PR, and note that in-flight tokens are
     invalidated at deploy.

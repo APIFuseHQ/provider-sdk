@@ -2666,37 +2666,68 @@ export interface ProviderRuntimeState {
 }
 
 /**
+ * True when the declaration states capability `TKey` with a value: the key is
+ * present and not optional. A declaration whose capability keys are all
+ * optional (one annotated `: ProviderDeclaration`, or the constraint fallback
+ * after a failed inference) therefore declares nothing, so the context is the
+ * ambient minimum rather than every capability at once; the provider's own
+ * `ctx.<capability>` reads then fail to compile, which is the diagnostic. The
+ * tuple wrapping keeps a union declaration from distributing. `meta` and the
+ * other data fields never take part, so their literal types do not matter.
+ */
+type DeclaresCapability<TConfig, TKey extends string> = string extends keyof TConfig
+	? true
+	: [TConfig] extends [{ [K in TKey]: NonNullable<unknown> }]
+		? true
+		: false;
+
+/**
  * The operation context exposed for one provider declaration. Capability
- * bindings are present only when their corresponding declaration is present;
- * platform-managed auth itself declares the credential binding. Trace and
- * request remain ambient runtime bindings. Omitting the type parameter
- * preserves the legacy full context shape for existing annotations.
+ * bindings are present only when their corresponding declaration is present
+ * (see {@link DeclaresCapability}); platform-managed auth itself declares the
+ * credential binding. Trace and request remain ambient runtime bindings.
+ * Omitting the type parameter preserves the legacy full context shape for
+ * existing annotations.
  */
 export type ProviderContext<TConfig = Record<string, unknown>> = {
 	request?: ProviderRequestContext;
 	trace: TraceContext;
-} & ("env" extends keyof TConfig ? { env: EnvContext } : Record<never, never>) &
-	("credential" extends keyof TConfig
+} & (DeclaresCapability<TConfig, "env"> extends true ? { env: EnvContext } : Record<never, never>) &
+	(DeclaresCapability<TConfig, "credential"> extends true
 		? { credential: CredentialContext }
-		: TConfig extends { auth: { mode: "platform-managed" } }
+		: [TConfig] extends [{ auth: { mode: "platform-managed" } }]
 			? { credential: CredentialContext }
 			: Record<never, never>) &
-	("http" extends keyof TConfig ? { http: HttpClient } : Record<never, never>) &
-	("files" extends keyof TConfig
+	(DeclaresCapability<TConfig, "http"> extends true ? { http: HttpClient } : Record<never, never>) &
+	(DeclaresCapability<TConfig, "files"> extends true
 		? string extends keyof TConfig
 			? { readonly files?: ProviderFilesContext }
 			: { readonly files: ProviderFilesContext }
 		: Record<never, never>) &
-	("native" extends keyof TConfig ? { readonly native: NativeContext } : Record<never, never>) &
-	("cache" extends keyof TConfig ? { cache: ProviderCache } : Record<never, never>) &
-	("state" extends keyof TConfig ? { state: ProviderRuntimeState } : Record<never, never>) &
-	("stealth" extends keyof TConfig ? { stealth: StealthClient } : Record<never, never>) &
-	("browser" extends keyof TConfig ? { browser: BrowserClient } : Record<never, never>) &
-	("auth" extends keyof TConfig ? { auth: AuthContext } : Record<never, never>) &
-	("ocr" extends keyof TConfig ? { ocr: OcrContext } : Record<never, never>) &
-	("stt" extends keyof TConfig ? { stt: SttContext } : Record<never, never>) &
-	("resolver" extends keyof TConfig ? { resolver: ResolverContext } : Record<never, never>) &
-	("handle" extends keyof TConfig
+	(DeclaresCapability<TConfig, "native"> extends true
+		? { readonly native: NativeContext }
+		: Record<never, never>) &
+	(DeclaresCapability<TConfig, "cache"> extends true
+		? { cache: ProviderCache }
+		: Record<never, never>) &
+	(DeclaresCapability<TConfig, "state"> extends true
+		? { state: ProviderRuntimeState }
+		: Record<never, never>) &
+	(DeclaresCapability<TConfig, "stealth"> extends true
+		? { stealth: StealthClient }
+		: Record<never, never>) &
+	(DeclaresCapability<TConfig, "browser"> extends true
+		? { browser: BrowserClient }
+		: Record<never, never>) &
+	(DeclaresCapability<TConfig, "auth"> extends true
+		? { auth: AuthContext }
+		: Record<never, never>) &
+	(DeclaresCapability<TConfig, "ocr"> extends true ? { ocr: OcrContext } : Record<never, never>) &
+	(DeclaresCapability<TConfig, "stt"> extends true ? { stt: SttContext } : Record<never, never>) &
+	(DeclaresCapability<TConfig, "resolver"> extends true
+		? { resolver: ResolverContext }
+		: Record<never, never>) &
+	(DeclaresCapability<TConfig, "handle"> extends true
 		? { handle: HandleContext<DeclaredHandleKind<TConfig>> }
 		: Record<never, never>);
 

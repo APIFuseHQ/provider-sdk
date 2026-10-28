@@ -62,8 +62,6 @@ describe("public provider schema field lint", () => {
 	it("reports stale pins and treats glob-like paths as exact literals", () => {
 		const diagnostics = lintProvider({
 			id: "literal-pins",
-			allowedHosts: ["checkout.example.com"],
-			reviewed: "first-party",
 			meta: {
 				contract: {
 					publicSchemaFieldNames: "normalized",
@@ -106,6 +104,8 @@ describe("public provider schema field lint", () => {
 
 	it("rejects pinned paths with empty or missing reasons during declaration validation", () => {
 		const declaration = {
+			allowedHosts: ["example.com"] as const,
+			reviewed: "community" as const,
 			id: "pinned-validation",
 			version: "1.0.0",
 			runtime: "standard" as const,
@@ -149,8 +149,6 @@ describe("public provider schema field lint", () => {
 	it("reports upstream-shaped public schema fields with provider and operation context", () => {
 		const diagnostics = lintProvider({
 			id: "example-commerce",
-			allowedHosts: ["openapi.naver.com"],
-			reviewed: "first-party",
 			meta: { contract: { publicSchemaFieldNames: "normalized" } },
 			operations: {
 				search: {
@@ -218,8 +216,6 @@ describe("public provider schema field lint", () => {
 	it("traverses union wrappers before accepting public field names", () => {
 		const diagnostics = lintProvider({
 			id: "union-commerce",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
 			meta: { contract: { publicSchemaFieldNames: "normalized" } },
 			operations: {
 				search: {
@@ -258,8 +254,6 @@ describe("public provider schema field lint", () => {
 	it("accepts normalized APIFuse commerce search fields", () => {
 		const diagnostics = lintProvider({
 			id: "naver-shopping",
-			allowedHosts: ["openapi.naver.com"],
-			reviewed: "first-party",
 			meta: { contract: { publicSchemaFieldNames: "normalized" } },
 			operations: {
 				search: {

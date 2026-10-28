@@ -155,6 +155,8 @@ test.each([
 	const local = createInProcessProviderEngine();
 	let candidateSeen = false;
 	const provider: ProviderDefinition = {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "engine-http-replacement",
 		version: "1.0.0",
 		runtime: "standard",

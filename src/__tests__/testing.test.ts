@@ -19,6 +19,8 @@ import {
 import { executeStandardTestHandler } from "../testing/run.js";
 
 const testProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "test-provider",
 	version: "1.0.0",
 	runtime: "standard",
@@ -97,6 +99,8 @@ const secondStreamEvidenceFixture = {
 };
 
 const fixtureHarnessProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "fixture-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
@@ -123,6 +127,8 @@ const fixtureHarnessProvider = defineProvider({
 	} });
 
 const snapshotHarnessProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
@@ -153,6 +159,8 @@ const snapshotHarnessProvider = defineProvider({
 	} });
 
 const streamSnapshotHarnessProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "stream-snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
@@ -214,6 +222,8 @@ const streamSnapshotHarnessProvider = defineProvider({
 	} });
 
 const multiStreamSnapshotHarnessProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "multi-stream-snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
@@ -246,6 +256,8 @@ const multiStreamSnapshotHarnessProvider = defineProvider({
 	} });
 
 const authHarnessProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "auth-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
@@ -256,7 +268,7 @@ const authHarnessProvider = defineProvider({
 			continue: async () => ({ kind: "complete", turnId: "turn_done" }),
 		},
 	},
-	credential: { keys: ["apiKey"] },
+	credential: { keys: ["account_id"] },
 	meta: {
 		displayName: "Auth Harness Provider",
 		descriptionKey: "auth-harness-provider.description",
@@ -274,6 +286,8 @@ const authHarnessProvider = defineProvider({
 	} });
 
 const handlerE2eProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "handler-e2e-provider",
 	version: "1.0.0",
 	runtime: "standard",
@@ -310,6 +324,8 @@ const handlerE2eProvider = defineProvider({
 	} });
 
 const stealthHeaderHarnessProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "stealth-header-harness",
 	version: "1.0.0",
 	runtime: "standard",
@@ -368,6 +384,9 @@ const stealthHeaderHarnessProvider = defineProvider({
 const { operations: _handlerOperations, ...handlerE2eDeclaration } = handlerE2eProvider;
 const brokenHandlerProvider = defineProvider({
 	...handlerE2eDeclaration,
+	allowedHosts: ["example.com"],
+	reviewed: "community",
+	auth: { mode: "none" },
 	id: "broken-handler-provider",
 	http: true,
 })({ operations: {
@@ -387,6 +406,8 @@ const brokenHandlerProvider = defineProvider({
 	} });
 
 const nativeEgressHarnessProvider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "native-egress-harness",
 	version: "1.0.0",
 	runtime: "standard",

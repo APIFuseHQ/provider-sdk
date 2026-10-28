@@ -7,6 +7,8 @@ import type { ProviderDefinition } from "../types.js";
 
 function provider(): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "lifecycle-test-provider",
 		version: "1.0.0",
 		runtime: "standard",

@@ -24,6 +24,8 @@ function operation() {
 
 function provider(overrides: Partial<ProviderDefinition> = {}): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "declaration-test-provider",
 		version: "1.0.0",
 		runtime: "standard",

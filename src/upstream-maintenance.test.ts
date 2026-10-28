@@ -37,6 +37,8 @@ function providerWith(
 	alias: "healthProbe" | "healthMonitor" = "healthProbe",
 ) {
 	return defineProvider({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "maintenance-test",
 		version: "1.0.0",
 		runtime: "standard",

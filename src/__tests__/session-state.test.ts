@@ -36,6 +36,7 @@ const baseConfig = {
 	version: "1.0.0",
 	runtime: "standard" as const,
 	allowedHosts: [HOST, "api.example"],
+	reviewed: "community" as const,
 	meta: {
 		displayName: "Session state unit",
 		descriptionKey: "meta.description",
@@ -185,7 +186,11 @@ describe("session state: defineProvider", () => {
 		};
 		const provider = defineProvider({
 			...baseConfig,
-			credential: { keys: ["session", "access_token", "expires_at"] },
+			credential: {
+				keys: ["session", "access_token", "expires_at"],
+				storesReusableSecret: true,
+				justification: "unit fixture: the session is the stored credential",
+			},
 			sessionState: { stayEdge: preset(), other: direct, guest, member },
 		});
 		expect(Object.keys(provider.sessionState ?? {})).toEqual([
@@ -262,7 +267,13 @@ describe("session state: defineProvider", () => {
 			validity: { invalidWhen: { status: 401 } },
 			distribute: { hosts: [HOST] },
 		};
-		const credential = { credential: { keys: ["session"] } };
+		const credential = {
+			credential: {
+				keys: ["session"],
+				storesReusableSecret: true,
+				justification: "unit fixture: the session is the stored credential",
+			},
+		};
 		rejects(
 			{ member: { ...member, validity: { invalidWhen: { status: 401 }, reacquire: 1 } } },
 			/reacquire: must be 0 or omitted/,

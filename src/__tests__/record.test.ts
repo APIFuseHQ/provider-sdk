@@ -1594,13 +1594,14 @@ describe("resolveRecordBaseUrls", () => {
 	const provider = (options: {
 		firstBaseUrl?: string;
 		ownBaseUrl?: string;
-		allowedHosts?: string[];
+		allowedHosts?: [string, ...string[]];
 	}) =>
 		defineProvider({
+			reviewed: "community",
 			id: "record-base-urls",
 			version: "1.0.0",
 			runtime: "standard",
-			...(options.allowedHosts ? { allowedHosts: options.allowedHosts } : {}),
+			allowedHosts: options.allowedHosts ?? ["example.com"],
 			meta: {
 				displayName: "Record base URLs",
 				descriptionKey: "record-base-urls.description",
@@ -1623,7 +1624,7 @@ describe("resolveRecordBaseUrls", () => {
 		).toEqual({ http: "https://own.example", stealth: "https://own.example" });
 	});
 
-	it("falls back to the provider-level bases serve binds, and to none when nothing is declared", () => {
+	it("falls back to the provider-level bases serve binds, and to the declared host when no base is declared", () => {
 		expect(
 			resolveRecordBaseUrls(
 				provider({ firstBaseUrl: "https://first.example", allowedHosts: ["hosts.example"] }),
@@ -1633,6 +1634,6 @@ describe("resolveRecordBaseUrls", () => {
 		expect(
 			resolveRecordBaseUrls(provider({ allowedHosts: ["hosts.example"] }), "recorded"),
 		).toEqual({ stealth: "https://hosts.example" });
-		expect(resolveRecordBaseUrls(provider({}), "recorded")).toEqual({});
+		expect(resolveRecordBaseUrls(provider({}), "recorded")).toEqual({ stealth: "https://example.com" });
 	});
 });

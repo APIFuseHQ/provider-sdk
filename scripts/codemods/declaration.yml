@@ -1,0 +1,74 @@
+# Provider declaration migration for the typed declaration (provider-sdk, 2026-10-28).
+#
+# `defineProvider` now checks at the call what ten lint rules used to report
+# afterwards: `allowedHosts` (non-empty) and `reviewed` are required fields,
+# `auth` is discriminated by `mode` (`credentials` / `oauth2` require `flow`,
+# `oauth2_proxied` requires `proxied`), the credential that goes with the mode
+# is checked by `AuthModeCredentialGuard`, and a reusable-secret key requires
+# `storesReusableSecret` plus `justification` (`CredentialSecretGuard`). The
+# same checks run once at runtime in `validateProviderDeclaration` for values
+# the type cannot see.
+#
+# Run from a provider checkout (dry run first):
+#
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/declaration.yml .
+#   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/declaration.yml --update-all .
+#
+# A provider that already passed `apifuse check` has nothing to rewrite: every
+# requirement above was already a lint error. What changes is how a value
+# reaches the call:
+#
+# 1. An auth block annotated `: AuthConfig` widens `mode` to the whole union,
+#    which no discriminated arm accepts. The annotation becomes `satisfies
+#    AuthConfig`, which checks the same shape and keeps the literal `mode`.
+#    (rewritten)
+# 2. A meta block annotated `: ProviderMeta` is fine as it is: the operation
+#    context is narrowed on capability keys only, so `meta` no longer needs
+#    `as const`. Nothing to do.
+# 3. `auth.exchange` is a type error (`exchange?: never`); the runtime already
+#    refused it. Move the exchange into `auth.flow.continue`. (reported)
+# 4. `reviewed: "staging"` is not an authored value. Declare `community` or
+#    `first-party`. (reported)
+#
+# `defineCredentialsAuth(...)` returns the `credentials` arm directly, so
+# `defineProvider({ ...credentialsAuth })` and `auth: credentialsAuth.auth,
+# credential: credentialsAuth.credential` keep compiling.
+id: provider-auth-annotation-to-satisfies
+language: typescript
+severity: warning
+message: "`: AuthConfig` widens auth.mode to every mode; write `satisfies AuthConfig` so the literal mode reaches defineProvider."
+rule:
+  pattern: 'const $NAME: AuthConfig = $VALUE'
+  kind: lexical_declaration
+fix: 'const $NAME = $VALUE satisfies AuthConfig;'
+---
+id: provider-auth-exchange-unsupported
+language: typescript
+severity: error
+message: "auth.exchange is not part of the auth contract (exchange?: never); put the login, token or session exchange inside auth.flow.continue."
+rule:
+  kind: pair
+  has:
+    field: key
+    regex: ^exchange$
+  inside:
+    kind: object
+    inside:
+      kind: pair
+      has:
+        field: key
+        regex: ^auth$
+---
+id: provider-reviewed-staging
+language: typescript
+severity: error
+message: 'reviewed: "staging" is a registry state, not an authored value; declare "community" or "first-party".'
+rule:
+  kind: pair
+  all:
+    - has:
+        field: key
+        regex: ^reviewed$
+    - has:
+        field: value
+        regex: ^["']staging["']$

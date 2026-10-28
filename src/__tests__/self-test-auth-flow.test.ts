@@ -116,6 +116,8 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 	};
 
 	return createProviderDefinitionDouble({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: PROVIDER_ID,
 		version: "1.0.0",
 		runtime: "standard",
@@ -320,6 +322,8 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 
 function createFlowlessProvider(seenIds: string[] = []): ProviderDefinition {
 	return createProviderDefinitionDouble({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: PROVIDER_ID,
 		version: "1.0.0",
 		runtime: "standard",

@@ -87,6 +87,8 @@ function validScenario(): HealthScenario {
 
 function providerWithJourney(journey: unknown) {
 	return defineProvider({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "declarative-health-test",
 		version: "1.0.0",
 		runtime: "shared",
@@ -110,6 +112,8 @@ function providerWithJourney(journey: unknown) {
 
 function providerWithCase(caseValue: unknown): ProviderDefinition {
 	return defineProvider({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "declarative-case-test",
 		version: "1.0.0",
 		runtime: "shared",
@@ -154,6 +158,8 @@ function providerWithStaleCase(
 	providerCache = true,
 ): ProviderDefinition {
 	return defineProvider({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "stale-case-test",
 		version: "1.0.0",
 		runtime: "shared",
@@ -183,6 +189,8 @@ function providerWithStaleCase(
 
 function providerWithStaleJourney(journey: unknown): ProviderDefinition {
 	return defineProvider({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "stale-journey-test",
 		version: "1.0.0",
 		runtime: "shared",

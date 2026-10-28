@@ -47,6 +47,8 @@ const operation = {
 };
 
 const provider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "client-cancelled-wire",
 	version: "1.0.0",
 	runtime: "standard",

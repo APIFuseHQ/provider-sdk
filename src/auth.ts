@@ -6,7 +6,7 @@ import {
 } from "./declaration-validation.js";
 import type {
 	AuthAbortData,
-	AuthConfig,
+	AuthFlowDefinition,
 	AuthFlowTerminalContext,
 	AuthSafeData,
 	AuthSafeJson,
@@ -317,9 +317,14 @@ export interface DefineCredentialsAuthOptions<
 		| Promise<CredentialsAuthLoginResult<TCredentialKeys, keyof TChallenges & string>>;
 }
 
+/**
+ * The declaration fields `defineCredentialsAuth` produces, typed as the
+ * `credentials` arm of `ProviderAuthDeclaration` so they spread straight into
+ * `defineProvider({ ...credentialsAuth })`.
+ */
 export interface DefinedCredentialsAuth {
-	auth: AuthConfig;
-	credential: CredentialDeclaration;
+	auth: { mode: "credentials"; flow: AuthFlowDefinition };
+	credential: CredentialDeclaration & { keys: [string, ...string[]] };
 	context: ContextDeclaration;
 }
 
@@ -797,7 +802,7 @@ export function defineCredentialsAuth<
 			},
 		},
 		credential: {
-			keys: Array.from(options.credentialKeys),
+			keys: [options.credentialKeys[0], ...options.credentialKeys.slice(1)],
 			...(options.storesReusableSecret === undefined
 				? {}
 				: { storesReusableSecret: options.storesReusableSecret }),
@@ -823,8 +828,7 @@ function validateCredentialsAuthChallenges(
 			challenge.fields && typeof challenge.fields === "object"
 				? Object.keys(challenge.fields).length
 				: 0;
-		const fieldsDeclared =
-			challenge.fields !== undefined && challenge.fields !== null;
+		const fieldsDeclared = challenge.fields !== undefined && challenge.fields !== null;
 		const hasFields = fieldCount > 0;
 		const hasVerify = typeof challenge.verify === "function";
 		const hasPoll = typeof challenge.poll === "function";

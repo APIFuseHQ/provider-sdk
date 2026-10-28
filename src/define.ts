@@ -41,7 +41,7 @@ import type { HandleKind } from "./handle.js";
 import { bindHandleContracts } from "./handle/contract.js";
 import { warnUndeclaredFields } from "./schema-fields.js";
 import type {
-	AuthConfig,
+	AuthFlowDefinition,
 	BrowserEngine,
 	ContextDeclaration,
 	CredentialDeclaration,
@@ -75,6 +75,7 @@ import type {
 	ProviderResolverVendor,
 	ProviderReviewed,
 	ProviderRuntimeTarget,
+	ProxiedOAuthConfig,
 	ProviderSecretDeclaration,
 	ProviderStreamEvent,
 	ProviderSttConfig,
@@ -613,6 +614,147 @@ function authStartHasHiddenInput(start: unknown): boolean {
 	return /\s=\s/.test(second);
 }
 
+/**
+ * Credential key names that hold a secret the provider can reuse without the
+ * user. One list serves both the type-level guard (literal keys at the call)
+ * and `validateProviderDeclaration` (every key at runtime). `token` also
+ * covers `access_token` and `refresh_token`.
+ */
+const REUSABLE_SECRET_KEY_WORDS = [
+	"password",
+	"secret",
+	"cookie",
+	"session",
+	"token",
+	"api_key",
+	"api-key",
+	"apikey",
+] as const;
+type ReusableSecretKeyWord = (typeof REUSABLE_SECRET_KEY_WORDS)[number];
+
+/** Key names `auth.flow.refresh` could use to log in again silently. */
+const RELOGIN_SECRET_KEY_WORDS = ["password", "passcode", "secret", "cookie", "session"] as const;
+type ReloginSecretKeyWord = (typeof RELOGIN_SECRET_KEY_WORDS)[number];
+
+function credentialKeysName(keys: readonly string[], words: readonly string[]): boolean {
+	return keys.some((key) => {
+		const lower = key.toLowerCase();
+		return words.some((word) => lower.includes(word));
+	});
+}
+
+/** True when some literal key in `TKeys` contains one of the words; a widened `string` key is unknown and left to the runtime. */
+type CredentialKeysName<TKeys, TWord extends string> = TKeys extends readonly (infer TKey)[]
+	? true extends (
+			TKey extends string
+				? string extends TKey
+					? false
+					: Lowercase<TKey> extends `${string}${TWord}${string}`
+						? true
+						: false
+				: false
+		)
+		? true
+		: false
+	: false;
+
+type DeclaresReusableSecret<TConfig> = TConfig extends {
+	credential: { storesReusableSecret: true; justification: string };
+}
+	? true
+	: false;
+
+/**
+ * A credential whose keys name a reusable secret, or one that `auth.flow.refresh`
+ * could use to log in again, must say so: `storesReusableSecret: true` plus a
+ * `justification`. Decided from the literal key names at the call; keys typed
+ * as plain `string` are checked by `validateProviderDeclaration` instead.
+ */
+export type CredentialSecretGuard<TConfig> = TConfig extends { credential: { keys: infer TKeys } }
+	? CredentialKeysName<TKeys, ReusableSecretKeyWord> extends true
+		? DeclaresReusableSecret<TConfig> extends true
+			? unknown
+			: {
+					"credential.keys names a reusable secret (token, password, cookie, session, api key); declare credential.storesReusableSecret: true and credential.justification": never;
+				}
+		: TConfig extends { auth: { flow: { refresh: (...args: never[]) => unknown } } }
+			? CredentialKeysName<TKeys, ReloginSecretKeyWord> extends true
+				? DeclaresReusableSecret<TConfig> extends true
+					? unknown
+					: {
+							"auth.flow.refresh may log in again with a stored secret (password, passcode, secret, cookie, session); declare credential.storesReusableSecret: true and credential.justification": never;
+						}
+				: unknown
+			: unknown
+	: unknown;
+
+/**
+ * The credential declaration an `auth.mode` needs. The mode and the credential
+ * are two top-level fields, which TypeScript cannot relate inside one object
+ * type without reporting a mismatch against an unrelated mode, so the pair is
+ * checked here with a message that names the fix. Keys typed as plain
+ * `string[]` cannot be judged and are left to `validateProviderDeclaration`.
+ */
+export type AuthModeCredentialGuard<TConfig> = TConfig extends { auth: { mode: "credentials" } }
+	? TConfig extends { credential: { keys: readonly string[] } }
+		? TConfig extends { credential: { keys: readonly [] } }
+			? {
+					"credentials auth mode stores at least one credential key; list the keys the auth flow stores in credential.keys": never;
+				}
+			: unknown
+		: {
+				"credentials auth mode stores a credential; declare credential: { keys: [...] } naming every key the auth flow stores": never;
+			}
+	: TConfig extends { auth: { mode: "platform-managed" } }
+		? TConfig extends { credential: { keys: readonly [string, ...string[]] } }
+			? {
+					"platform-managed auth already implies the unfiltered credential capability; remove credential.keys": never;
+				}
+			: unknown
+		: unknown;
+
+/** At least one host; `validateProviderDeclaration` rejects wildcard entries. */
+export type AllowedHostList = readonly [string, ...string[]];
+
+/** Not part of the auth contract; see {@link ProviderAuthDeclaration}. */
+type NoAuthExchange = {
+	/**
+	 * @deprecated `auth.exchange` is not supported. Gateway calls only
+	 * `auth.flow.start/continue/poll/abort/refresh`; put the login, token or
+	 * session exchange inside `auth.flow.continue`.
+	 */
+	exchange?: never;
+};
+
+/**
+ * The auth block, discriminated by `mode`. Each mode lists the fields the
+ * runtime needs for it as required and the fields it cannot use as `never`,
+ * so the block is checked where it is written:
+ *
+ * - `none`: no flow is required; `auth` may be omitted from the declaration.
+ * - `platform-managed`: the platform supplies the credential; the declaration
+ *   must not list `credential.keys` ({@link AuthModeCredentialGuard}).
+ * - `credentials`: `flow` with `start` and `continue`, and at least one
+ *   `credential.keys` entry ({@link AuthModeCredentialGuard}).
+ * - `oauth2`: `flow` with `start` and `continue`.
+ * - `oauth2_proxied`: `proxied`, the browser reverse-proxy contract.
+ *
+ * `exchange` is not part of the auth contract in any mode: login, token or
+ * session exchange belongs inside `auth.flow.continue`.
+ */
+export type ProviderAuthDeclaration =
+	| ({ mode: "none"; flow?: AuthFlowDefinition; proxied?: never } & NoAuthExchange)
+	| ({ mode: "platform-managed"; flow?: AuthFlowDefinition; proxied?: never } & NoAuthExchange)
+	| ({ mode: "credentials"; flow: AuthFlowDefinition; proxied?: never } & NoAuthExchange)
+	| ({ mode: "oauth2"; flow: AuthFlowDefinition; proxied?: never } & NoAuthExchange)
+	| ({
+			mode: "oauth2_proxied";
+			/** Browser reverse-proxy contract for custom-scheme OAuth callbacks. */
+			proxied: ProxiedOAuthConfig;
+			flow?: AuthFlowDefinition;
+	  } & NoAuthExchange);
+
+/** What `defineProvider` accepts; the operations come in the second phase. */
 export interface ProviderDeclaration {
 	id: string;
 	version: string;
@@ -632,7 +774,7 @@ export interface ProviderDeclaration {
 	/** Declares the HTTP capability binding. A bare object states use without configuration. */
 	http?: Record<string, never> | true;
 	/** Declares upstream host policy; this does not add a `ctx.allowedHosts` member. */
-	allowedHosts?: string[];
+	allowedHosts: AllowedHostList;
 	native?: NativeProviderConfig;
 	stealth?: ProviderStealthConfig;
 	/** Declares proxy policy; this is provider intent and does not add a `ctx.proxy` member. */
@@ -647,7 +789,8 @@ export interface ProviderDeclaration {
 	stt?: ProviderSttConfig;
 	resolver?: ProviderResolverConfig;
 	browser?: { engine: BrowserEngine };
-	auth?: AuthConfig;
+	/** Omitted means `{ mode: "none" }`; see {@link ProviderAuthDeclaration} for what each mode requires. */
+	auth?: ProviderAuthDeclaration;
 	/**
 	 * Declares the handle kinds this provider uses through `ctx.handle`
 	 * (ADR-0012); `ctx.handle` accepts only these kinds. Requires the state
@@ -655,13 +798,18 @@ export interface ProviderDeclaration {
 	 * the operation schemas where `kind.field()` is placed.
 	 */
 	handle?: readonly HandleKind[];
-	reviewed?: ProviderReviewed;
+	/** Who reviewed the provider; `staging` is a registry state, not an authored value. */
+	reviewed: Exclude<ProviderReviewed, "staging">;
 	access?: ProviderAccessConfig;
 	/** Declares secret requirements; this does not add a `ctx.secrets` member. */
 	secrets?: ProviderSecretDeclaration[];
 	/** Declares the environment capability binding. A bare object states use without configuration. */
 	env?: Record<string, never> | true;
-	/** Declares credential keys; platform-managed auth declares this capability without key filtering. */
+	/**
+	 * Declares the credential keys the auth flow stores. Required (non-empty)
+	 * for `credentials` auth, not allowed for `platform-managed` auth, which
+	 * declares the capability without key filtering; see {@link AuthModeCredentialGuard}.
+	 */
 	credential?: CredentialDeclaration;
 	/** Declares provider context metadata; this does not add a `ctx.context` member. */
 	context?: ContextDeclaration;
@@ -3532,7 +3680,9 @@ export function defineProvider<const TConfig extends ProviderDeclaration>(
 	declaration: TConfig &
 		Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> &
 		AuthStartNoInputGuard<TConfig> &
-		HandleRequiresStateGuard<TConfig>,
+		HandleRequiresStateGuard<TConfig> &
+		AuthModeCredentialGuard<TConfig> &
+		CredentialSecretGuard<TConfig>,
 ): ProviderBuilder<TConfig> {
 	validateProviderDeclaration(declaration);
 	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(implementation: {
@@ -3545,12 +3695,84 @@ export function defineProvider<const TConfig extends ProviderDeclaration>(
 	return buildProvider as ProviderBuilder<TConfig>;
 }
 
+const VALID_DECLARED_REVIEWED = ["first-party", "community"] as const;
+
+/**
+ * The declaration checks the type states but a value can still miss (a
+ * declaration built at runtime, keys typed as `string`), plus the one the type
+ * cannot state: wildcard host entries. This is the only runtime site for them.
+ */
+function validateDeclaredHostsAndReview(config: ProviderDeclaration): void {
+	const label = `Provider "${config.id}"`;
+	if (!Array.isArray(config.allowedHosts) || config.allowedHosts.length === 0)
+		throw new ValidationError(`${label} must declare at least one allowed host`, {
+			fix: 'Add allowedHosts: ["api.example.com"] with every upstream host the provider reaches',
+		});
+	const wildcardHost = config.allowedHosts.find(
+		(host) => typeof host !== "string" || host.trim().includes("*"),
+	);
+	if (wildcardHost !== undefined)
+		throw new ValidationError(
+			`${label} must not declare wildcard allowedHosts entries like "${String(wildcardHost)}"`,
+			{ fix: "List each upstream host by its exact name" },
+		);
+	if (!VALID_DECLARED_REVIEWED.some((value) => value === config.reviewed))
+		throw new ValidationError(`${label} must declare reviewed as "first-party" or "community"`, {
+			fix: 'Add reviewed: "community" (or "first-party" for an APIFuse-owned provider)',
+		});
+}
+
+/** The per-mode requirements of {@link ProviderAuthDeclaration}, for values the type did not see. */
+function validateDeclaredAuthModel(config: ProviderDeclaration): void {
+	const label = `Provider "${config.id}"`;
+	const mode = config.auth?.mode ?? "none";
+	const flow = config.auth?.flow;
+	const keys: readonly string[] = config.credential?.keys ?? [];
+	if ((mode === "credentials" || mode === "oauth2") && typeof flow?.continue !== "function")
+		throw new ValidationError(`${label} must define auth.flow.continue for ${mode} auth mode`, {
+			fix: "Add auth.flow with start(ctx) and continue(ctx, input); put the login or token exchange in continue",
+		});
+	if (mode === "credentials" && keys.length === 0)
+		throw new ValidationError(`${label} must declare credential.keys for credentials auth mode`, {
+			fix: 'Add credential: { keys: ["session"] } naming every key the auth flow stores',
+		});
+	if (mode === "platform-managed" && keys.length > 0)
+		throw new ValidationError(
+			`${label} must not declare credential.keys because platform-managed auth mode already implies the unfiltered credential capability`,
+			{ fix: "Remove the credential declaration" },
+		);
+	const declaresReusableSecret =
+		config.credential?.storesReusableSecret === true &&
+		typeof config.credential.justification === "string" &&
+		config.credential.justification.length > 0;
+	if (credentialKeysName(keys, REUSABLE_SECRET_KEY_WORDS) && !declaresReusableSecret)
+		throw new ValidationError(
+			`${label} must set credential.storesReusableSecret and credential.justification when credential.keys includes reusable secrets`,
+			{
+				fix: "Add storesReusableSecret: true and a justification sentence to the credential declaration",
+			},
+		);
+	if (
+		typeof flow?.refresh === "function" &&
+		credentialKeysName(keys, RELOGIN_SECRET_KEY_WORDS) &&
+		!declaresReusableSecret
+	)
+		throw new ValidationError(
+			`${label} must set credential.storesReusableSecret and credential.justification when auth.flow.refresh may silently re-login with reusable credential secrets`,
+			{
+				fix: "Add storesReusableSecret: true and a justification sentence to the credential declaration",
+			},
+		);
+}
+
 function validateProviderDeclaration(config: ProviderDeclaration): void {
 	validateProviderDeclarationShape(config);
 	if (!CONNECTOR_ID_REGEX.test(config.id))
 		throw new ProviderError(`Invalid provider id: "${config.id}"`, {
 			fix: 'Use lowercase alphanumeric with dashes, e.g., "korea-air-quality"',
 		});
+	validateDeclaredHostsAndReview(config);
+	validateDeclaredAuthModel(config);
 	if (config.healthMonitor !== undefined && config.healthProbe !== undefined)
 		throw new ValidationError(
 			`Provider "${config.id}" declares both healthMonitor and healthProbe. They are aliases; declare exactly one.`,
@@ -3643,7 +3865,7 @@ function finalizeProvider<TOperations extends Record<string, ProviderOperation>,
 		// are owned by the APIFuse registry builder, not the SDK.
 		deployment: config.deployment,
 		http: config.http,
-		allowedHosts: config.allowedHosts,
+		allowedHosts: [...config.allowedHosts],
 		native: config.native,
 		stealth: config.stealth,
 		proxy: config.proxy,

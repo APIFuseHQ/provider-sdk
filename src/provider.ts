@@ -20,8 +20,12 @@ export {
 export { createFormCeremony } from "./ceremonies/index.js";
 export type { JsonPrimitive, JsonValue } from "./contract-json.js";
 export type {
+	AllowedHostList,
+	AuthModeCredentialGuard,
+	CredentialSecretGuard,
 	HandleRequiresStateGuard,
 	OperationDefinitionFor,
+	ProviderAuthDeclaration,
 	ProviderBuilder,
 	ProviderContextOf,
 	ProviderDeclaration,

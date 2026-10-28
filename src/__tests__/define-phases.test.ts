@@ -4,6 +4,8 @@ import { defineProvider, type ProviderDeclaration } from "../define.js";
 import { ProviderError, ValidationError } from "../errors.js";
 
 const validDeclaration = {
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "phase-proof",
 	version: "1.0.0",
 	runtime: "standard",

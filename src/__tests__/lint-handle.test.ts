@@ -100,7 +100,6 @@ describe("handle lint rules", () => {
 
 		expect(rulesOf(diagnostics, "handle-")).toEqual([]);
 		expect(byRule(diagnostics, "legacy-handle-declaration")).toEqual([]);
-		expect(byRule(diagnostics, "legacy-choice-usage")).toEqual([]);
 	});
 
 	describe("legacy-handle-declaration", () => {
@@ -167,101 +166,6 @@ describe("handle lint rules", () => {
 			];
 
 			expect(byRule(lintProvider(provider), "legacy-handle-declaration")).toEqual([]);
-		});
-	});
-
-	describe("legacy-choice-usage", () => {
-		const LEGACY_IDENTIFIERS = [
-			"ctx.choice",
-			"createProviderChoiceToken",
-			"parseProviderChoiceToken",
-			"ProviderChoiceTokenError",
-			"createTestProviderChoiceContext",
-		];
-
-		it.each(LEGACY_IDENTIFIERS)("reports %s in provider source files", (identifier) => {
-			const provider = validProvider();
-			provider.providerSourceFiles = {
-				"src/waiting.ts": `export async function run(ctx) {\n\treturn ${identifier}(ctx);\n}\n`,
-			};
-
-			const found = byRule(lintProvider(provider), "legacy-choice-usage");
-
-			expect(found).toEqual([
-				{
-					rule: "legacy-choice-usage",
-					level: "error",
-					field: "sourceFiles.src/waiting.ts",
-					message: `Legacy choice API "${identifier}" is no longer supported. Choice tokens were replaced by handles (ADR-0012). See docs/migrations/handle.md.`,
-				},
-			]);
-		});
-
-		it("reports ctx.choice in an operation handler source", () => {
-			const provider = validProvider();
-			provider.operations["waiting-confirm"] = {
-				...provider.operations["waiting-confirm"]!,
-				source:
-					"async (input, ctx) => { const token = await ctx.choice.issue(input); return token; }",
-			};
-
-			const found = byRule(lintProvider(provider), "legacy-choice-usage");
-
-			expect(found.map((diagnostic) => diagnostic.field)).toEqual([
-				"operations.waiting-confirm.handler",
-			]);
-		});
-
-		it("does not match identifiers that merely contain the legacy names", () => {
-			const provider = validProvider();
-			provider.providerSourceFiles = {
-				"src/ok.ts":
-					"const choices = ctx.choices; const handle = ctx.handle.create('waiting', {}); myParseProviderChoiceTokenShim();",
-			};
-
-			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toEqual([]);
-		});
-
-		it("scans code after template interpolations and ignores prose inside them", () => {
-			const provider = validProvider();
-			provider.providerSourceFiles = {
-				"a.ts": "const t = `hello ${name}`; ctx.choice.issue({});",
-			};
-			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toHaveLength(1);
-
-			provider.providerSourceFiles = {
-				"b.ts": "const t = `hello ${name} — moved off ctx.choice`; export const ok = 1;",
-			};
-			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toEqual([]);
-
-			provider.providerSourceFiles = {
-				"c.ts": "const t = `x ${ctx.choice.issue({})} y`;",
-			};
-			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toHaveLength(1);
-		});
-
-		it("does not flag migration notes in comments or strings", () => {
-			const provider = validProvider();
-			provider.providerSourceFiles = {
-				"index.ts": [
-					"// Migrated from ctx.choice to ctx.handle (ADR-0012)",
-					"/* createProviderChoiceToken was removed */",
-					'const note = "ctx.choice is gone";',
-					"const tpl = `ProviderChoiceTokenError no longer exists`;",
-					"export const ok = 1;",
-				].join("\n"),
-			};
-
-			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toEqual([]);
-		});
-
-		it("still flags real usage next to a comment", () => {
-			const provider = validProvider();
-			provider.providerSourceFiles = {
-				"index.ts": "// fine\nconst token = await ctx.choice.issue({});",
-			};
-
-			expect(byRule(lintProvider(provider), "legacy-choice-usage")).toHaveLength(1);
 		});
 	});
 });

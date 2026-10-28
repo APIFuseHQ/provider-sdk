@@ -184,6 +184,8 @@ export function createProviderDefinitionDouble(
 	overrides: Partial<ProviderDefinition> = {},
 ): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "test-provider",
 		version: "1.0.0",
 		runtime: "standard",

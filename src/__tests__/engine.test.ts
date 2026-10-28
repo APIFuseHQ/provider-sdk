@@ -32,6 +32,8 @@ const trace: TraceContext = {
 
 function definition(overrides: Partial<ProviderDefinition> = {}): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "engine-fixture",
 		version: "1.0.0",
 		runtime: "standard",
@@ -130,6 +132,8 @@ describe("provider engine attachment", () => {
 
 	it("serves platform-managed credentials without an explicit credential declaration", async () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "platform-managed-fixture",
 			version: "1.0.0",
 			runtime: "standard",
@@ -186,6 +190,8 @@ describe("provider engine attachment", () => {
 	it("rejects native on the vanilla runtime during declaration validation", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "vanilla-native",
 				version: "1.0.0",
 				runtime: "standard",
@@ -213,6 +219,8 @@ describe("provider engine attachment", () => {
 	it("accepts native for an engine-resident declaration", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "engine-native",
 				version: "1.0.0",
 				runtime: "standard",
@@ -230,6 +238,8 @@ describe("provider engine attachment", () => {
 	it("rejects a malformed runtime target before building operations", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "invalid-runtime-target",
 				version: "1.0.0",
 				runtime: "standard",

@@ -196,6 +196,8 @@ function isRecordedBlockPage(response: { status: number; body: string }): boolea
 }
 
 const provider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "nodemaven-scope-wire",
 	version: "1.0.0",
 	runtime: "standard",

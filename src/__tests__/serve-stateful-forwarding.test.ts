@@ -29,6 +29,8 @@ function createLocalFetchDouble(
 
 function createTestProvider(state: { defaultExecutions: number }): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "stateful-test-provider",
 		version: "1.0.0",
 		runtime: "standard",

@@ -3,6 +3,8 @@ import type { ProviderContext } from "../../types.js";
 import { factoredOperation } from "./capability-factored-operation.js";
 
 export const declaration = {
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "capability-factored",
 	version: "1.0.0",
 	runtime: "standard",

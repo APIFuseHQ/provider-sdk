@@ -35,6 +35,8 @@ afterAll(() => {
 
 function createProvider(overrides: { caseName?: string } = {}): ProviderDefinition {
 	return createProviderDefinitionDouble({
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "self-test-provider",
 		version: "1.0.0",
 		runtime: "standard",

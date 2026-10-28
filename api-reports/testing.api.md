@@ -586,6 +586,11 @@ type DeclaredHandleKind<TConfig> = TConfig extends {
 } ? [K] extends [never] ? HandleKind : K extends HandleKind ? K : HandleKind : HandleKind;
 
 // @public
+type DeclaresCapability<TConfig, TKey extends string> = string extends keyof TConfig ? true : [TConfig] extends [{
+    [K in TKey]: NonNullable<unknown>;
+}] ? true : false;
+
+// @public
 export function describeTransform<TRaw, TOutput>(name: string, raw: TRaw, expected: TOutput, transformFn: (raw: TRaw) => TOutput): void;
 
 // @public (undocumented)
@@ -2441,45 +2446,47 @@ type ProviderChallenge = {
 // @public (undocumented)
 type ProviderChallengeKind = ProviderChallenge["kind"];
 
+// Warning: (ae-forgotten-export) The symbol "DeclaresCapability" needs to be exported by the entry point index.d.ts
+//
 // @public
 type ProviderContext<TConfig = Record<string, unknown>> = {
     request?: ProviderRequestContext;
     trace: TraceContext;
-} & ("env" extends keyof TConfig ? {
+} & (DeclaresCapability<TConfig, "env"> extends true ? {
     env: EnvContext;
-} : Record<never, never>) & ("credential" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "credential"> extends true ? {
     credential: CredentialContext;
-} : TConfig extends {
+} : [TConfig] extends [{
     auth: {
         mode: "platform-managed";
     };
-} ? {
+}] ? {
     credential: CredentialContext;
-} : Record<never, never>) & ("http" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "http"> extends true ? {
     http: HttpClient;
-} : Record<never, never>) & ("files" extends keyof TConfig ? string extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "files"> extends true ? string extends keyof TConfig ? {
     readonly files?: ProviderFilesContext;
 } : {
     readonly files: ProviderFilesContext;
-} : Record<never, never>) & ("native" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "native"> extends true ? {
     readonly native: NativeContext;
-} : Record<never, never>) & ("cache" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "cache"> extends true ? {
     cache: ProviderCache;
-} : Record<never, never>) & ("state" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "state"> extends true ? {
     state: ProviderRuntimeState;
-} : Record<never, never>) & ("stealth" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "stealth"> extends true ? {
     stealth: StealthClient;
-} : Record<never, never>) & ("browser" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "browser"> extends true ? {
     browser: BrowserClient;
-} : Record<never, never>) & ("auth" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "auth"> extends true ? {
     auth: AuthContext;
-} : Record<never, never>) & ("ocr" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "ocr"> extends true ? {
     ocr: OcrContext;
-} : Record<never, never>) & ("stt" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "stt"> extends true ? {
     stt: SttContext;
-} : Record<never, never>) & ("resolver" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "resolver"> extends true ? {
     resolver: ResolverContext;
-} : Record<never, never>) & ("handle" extends keyof TConfig ? {
+} : Record<never, never>) & (DeclaresCapability<TConfig, "handle"> extends true ? {
     handle: HandleContext<DeclaredHandleKind<TConfig>>;
 } : Record<never, never>);
 
@@ -4397,14 +4404,14 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:2210:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:2211:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:2220:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2371:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2386:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2392:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2398:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2400:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2408:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2408:5 - (ae-forgotten-export) The symbol "DeclaredHandleKind" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2540:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2385:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2400:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2406:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2412:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2414:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2422:5 - (ae-forgotten-export) The symbol "HandleContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2422:5 - (ae-forgotten-export) The symbol "DeclaredHandleKind" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2554:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

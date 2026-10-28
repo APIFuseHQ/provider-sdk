@@ -355,6 +355,8 @@ function servedProvider(id: string) {
 			descriptionKey: `${id}.description`,
 			category: "test",
 		},
+		allowedHosts: ["127.0.0.1"],
+		reviewed: "community",
 		stealth: { browser: "chrome", os: "macos" },
 		proxy: {
 			mode: "required",

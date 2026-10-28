@@ -80,8 +80,6 @@ function lint(
 	};
 	return lintProvider({
 		id: "demo",
-		allowedHosts: ["example.com"],
-		reviewed: "2026-10-12",
 		operations: {
 			[OPERATION_KEY]: operation(
 				{ cases: [{ name: "national", scenario: scenario([read]) }] },
@@ -434,8 +432,6 @@ describe("health-check expectedErrors lint (by-code form)", () => {
 		]);
 		const diagnostics = lintProvider({
 			id: "demo",
-			allowedHosts: ["example.com"],
-			reviewed: "2026-10-12",
 			operations: {
 				[OPERATION_KEY]: operation(
 					{ cases: [{ name: "national", scenario }] },

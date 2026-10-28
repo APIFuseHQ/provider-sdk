@@ -32,6 +32,7 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 		version: "1.2.3",
 		runtime: "shared",
 		allowedHosts: ["api.example.com", "assets.example.com"],
+		reviewed: "community",
 		auth: {
 			mode: "oauth2",
 			flow: {
@@ -157,6 +158,8 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 
 function buildHostileContractProvider(): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "hostile-contract-provider",
 		version: "1.0.0",
 		runtime: "standard",
@@ -377,6 +380,8 @@ describe("provider contract extraction", () => {
 			],
 		});
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "scenario-contract-provider",
 			version: "1.0.0",
 			runtime: "standard",

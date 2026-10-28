@@ -316,6 +316,8 @@ describe("localizeProviderErrorText", () => {
 
 function localizedProvider(): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "locale-provider",
 		version: "1.0.0",
 		runtime: "standard",

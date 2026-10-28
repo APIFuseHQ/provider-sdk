@@ -51,6 +51,8 @@ const operation = {
 };
 
 const provider = defineProvider({
+	allowedHosts: ["example.com"],
+	reviewed: "community",
 	id: "native-provider-abort-wire",
 	version: "1.0.0",
 	runtime: "standard",

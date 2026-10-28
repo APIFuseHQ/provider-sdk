@@ -59,6 +59,8 @@ for (const factory of ["sync", "async"] as const) {
 				return { kind: "complete" as const, turnId: "done", data: { status: 200 } };
 			};
 			const provider: ProviderDefinition = {
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "cache-state-matrix",
 				version: "1.0.0",
 				runtime: "standard",

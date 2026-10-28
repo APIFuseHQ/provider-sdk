@@ -491,6 +491,8 @@ function operationWith(output: z.ZodType, extra: Record<string, unknown> = {}) {
 
 function declaration(operations: ProviderDefinition["operations"]): ProviderDefinition {
 	return {
+		allowedHosts: ["example.com"],
+		reviewed: "community",
 		id: "output-url-test",
 		version: "1.0.0",
 		runtime: "standard",

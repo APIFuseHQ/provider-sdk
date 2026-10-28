@@ -13,15 +13,9 @@ function lintWithOperations(
 ) {
 	return lintProvider({
 		id: "demo-provider",
-		allowedHosts: ["api.example.com"],
-		reviewed: "first-party",
 		auth: {
 			mode: authMode,
 			flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
-		},
-		credential: {
-			keys: ["session_cookie"],
-			justification: "Session cookie is required for private operations.",
 		},
 		operations: Object.fromEntries(
 			operationIds.map((operationId) => [

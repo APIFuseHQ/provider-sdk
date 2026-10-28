@@ -103,12 +103,13 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorObservability ProviderErrorOptions ProviderErrorCategory PROVIDER_ERROR_CATEGORIES
+			DeclaresCapability
 		`,
 	),
 	"index.api.md": forgottenExports(
 		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
 		`
-			AuthAbortRetry AuthFlowTerminalContext AuthModeLike AuthSafeData AuthSafeJson AuthStartHandlerNoInputGuard BrowserChallengeRequest BrowserChallengeResult
+			AuthAbortRetry AuthFlowTerminalContext  AuthSafeData AuthSafeJson AuthStartHandlerNoInputGuard BrowserChallengeRequest BrowserChallengeResult
 			BrowserClient BrowserFrame BrowserLocator BrowserPage CloudflareWorkersAiOcrClientOptions DeclarativeStealthResponse EnvLike EnvLike_2
 			HealthCheckInputPreparationContext HealthMonitorProbeOverride HttpClientOptions HttpStreamOperationConfig JsonObject OTLPExportOptions OpenAiCompatibleOcrClientOptions OperationConfig
 			OperationHttpStreamTransport OperationJsonTransport OperationMapConfig OperationRequest OperationRequestSchema OperationSseTransport OperationWebSocketTransport ProviderAuthLike
@@ -121,6 +122,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			CheckedDefineErrorsInput SDK_ERROR_REGISTRY
+			CredentialKeysName DeclaresCapability DeclaresReusableSecret NoAuthExchange RELOGIN_SECRET_KEY_WORDS REUSABLE_SECRET_KEY_WORDS ReloginSecretKeyWord ReusableSecretKeyWord
 		`,
 	),
 	"provider.api.md": forgottenExports(
@@ -149,6 +151,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			NativeConnectTelemetryEvent NativeLifecycleTelemetryEvent NativeTelemetryDiagnostics NativeTelemetryErrorCode NativeTelemetryKind NativeTelemetryLifecycleKind NativeTelemetryOutcome NativeTelemetrySink NativeTelemetryVendorSkipReason NativeVendorSkipTelemetryEvent ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent ProxyVendorName
 			CheckedDefineErrorsInput SDK_ERROR_REGISTRY
+			CredentialKeysName DeclaresCapability DeclaresReusableSecret NoAuthExchange RELOGIN_SECRET_KEY_WORDS REUSABLE_SECRET_KEY_WORDS ReloginSecretKeyWord ReusableSecretKeyWord
 		`,
 	),
 	"runtime-browser.api.md": forgottenExports(
@@ -239,6 +242,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorOptions
+			DeclaresCapability
 		`,
 	),
 	"stateful.api.md": forgottenExports(
@@ -288,6 +292,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 					InputOf
 			ProviderSessionState ResponseMatcher SessionStateAcquire SessionStateAcquireContext SessionStateAcquireHandler SessionStateAcquireRequest SessionStateCapture SessionStateCarry SessionStateClassification SessionStateDistribute SessionStateDuration SessionStateExpiry SessionStateJudge SessionStateResponseView SessionStateScope SessionStateValidity
 			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorObservability ProviderErrorOptions ProviderErrorCategory PROVIDER_ERROR_CATEGORIES
+			DeclaresCapability
 		`,
 	),
 };

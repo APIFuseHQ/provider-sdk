@@ -108,6 +108,8 @@ describe("health journey authoring", () => {
 
 	it("rejects malformed health journey randomization objects", () => {
 		const baseProvider = {
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "bad-randomize-provider",
 			version: "1.0.0",
 			runtime: "shared" as const,
@@ -317,6 +319,8 @@ describe("health journey authoring", () => {
 
 	it("allows operations to be covered by a health journey", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "journey-provider",
 			version: "1.0.0",
 			runtime: "shared",
@@ -348,6 +352,8 @@ describe("health journey authoring", () => {
 
 	it("validates health journey manual trigger policies", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "manual-journey-provider",
 			version: "1.0.0",
 			runtime: "shared",
@@ -391,6 +397,8 @@ describe("health journey authoring", () => {
 	it("rejects malformed manual trigger policies", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "bad-manual-journey-provider",
 				version: "1.0.0",
 				runtime: "shared",
@@ -426,6 +434,8 @@ describe("health journey authoring", () => {
 	it("rejects disabled manual trigger policies with enabled-only fields", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "bad-disabled-manual-journey-provider",
 				version: "1.0.0",
 				runtime: "shared",
@@ -459,6 +469,8 @@ describe("health journey authoring", () => {
 	it("rejects enabled manual trigger policies with disabled-only reason fields", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "bad-enabled-manual-journey-provider",
 				version: "1.0.0",
 				runtime: "shared",
@@ -495,6 +507,8 @@ describe("health journey authoring", () => {
 	it("rejects zero-length manual trigger intervals", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "zero-interval-manual-journey-provider",
 				version: "1.0.0",
 				runtime: "shared",
@@ -529,6 +543,8 @@ describe("health journey authoring", () => {
 	it("requires acknowledgement for manual triggers with side-effect risk", () => {
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "unacknowledged-risk-manual-journey-provider",
 				version: "1.0.0",
 				runtime: "shared",
@@ -562,6 +578,8 @@ describe("health journey authoring", () => {
 
 	it("types provider-authored journey runtime state and operation events", () => {
 		const provider = defineProvider({
+			allowedHosts: ["example.com"],
+			reviewed: "community",
 			id: "journey-runtime-provider",
 			version: "1.0.0",
 			runtime: "shared",
@@ -620,6 +638,8 @@ describe("health journey authoring", () => {
 
 		expect(() =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "duplicate-matcher-provider",
 				version: "1.0.0",
 				runtime: "shared",
@@ -660,6 +680,8 @@ describe("health journey authoring", () => {
 			smsMatcher: ReturnType<typeof defineSmsOtpMatcher>,
 		) =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "duration-time-element-provider",
 				version: "1.0.0",
 				runtime: "shared",
@@ -731,6 +753,8 @@ describe("health journey authoring", () => {
 			smsMatchers?: ReturnType<typeof defineSmsOtpMatcher>[];
 		}) =>
 			defineProvider({
+				allowedHosts: ["example.com"],
+				reviewed: "community",
 				id: "zero-duration-provider",
 				version: "1.0.0",
 				runtime: "shared",

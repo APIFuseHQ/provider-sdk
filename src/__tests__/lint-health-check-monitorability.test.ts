@@ -43,8 +43,6 @@ function lintFleet(
 ): LintDiagnostic[] {
 	return lintProvider({
 		id: "demo",
-		allowedHosts: ["example.com"],
-		reviewed: "2026-09-14",
 		providerSourceFiles,
 		operations,
 	});

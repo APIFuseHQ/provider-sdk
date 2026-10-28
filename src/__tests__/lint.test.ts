@@ -65,7 +65,6 @@ describe("lintProvider", () => {
 	it("prefixes diagnostics with operation paths", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
 			operations: {
 				lookup: {
 					descriptionKey: "Short description",
@@ -74,7 +73,6 @@ describe("lintProvider", () => {
 					fixtures: { request: { symbol: "BTC" } },
 				},
 			},
-			reviewed: "first-party",
 		});
 
 		expect(diagnostics).toContainEqual(
@@ -86,95 +84,10 @@ describe("lintProvider", () => {
 		);
 	});
 
-	it("rejects empty allowedHosts", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: [],
-			reviewed: "first-party",
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				rule: "allowed-hosts-non-empty",
-				level: "error",
-			}),
-		);
-	});
-
-	it("rejects wildcard allowedHosts", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["*"],
-			reviewed: "first-party",
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				rule: "allowed-hosts-no-wildcards",
-				level: "error",
-			}),
-		);
-	});
-
-	it("flags removed api-key auth mode", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			auth: { mode: "api-key" },
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({ rule: "auth-mode-api-key-removed" }),
-		);
-	});
-
-	it("requires auth.flow.continue for credentials and oauth2 modes", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			auth: { mode: "credentials", flow: { start: async () => ({}) } },
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({ rule: "auth-flow-continue-required" }),
-		);
-	});
-
-	it("rejects legacy auth.exchange so auth has one canonical interface", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			auth: {
-				mode: "credentials",
-				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
-				// test-invalid: lint must reject the removed legacy auth exchange field.
-				exchange: async () => ({ session: "cookie" }),
-				// test-invalid: the legacy auth object deliberately bypasses the current declaration shape.
-			} as never,
-			credential: {
-				keys: ["session"],
-				storesReusableSecret: true,
-				justification: "Session cookie is required for private operations.",
-			},
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				rule: "auth-exchange-unsupported",
-				field: "auth.exchange",
-			}),
-		);
-	});
-
 	it("does not crash when malformed auth is primitive", () => {
 		expect(() =>
 			lintProvider({
 				id: "demo-provider",
-				allowedHosts: ["api.example.com"],
-				reviewed: "first-party",
 				// test-invalid: lint crash resistance deliberately receives primitive auth metadata.
 				auth: "credentials" as never,
 			}),
@@ -184,16 +97,9 @@ describe("lintProvider", () => {
 	it("rejects login-like operations on authenticated providers so auth flow remains canonical", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
 			auth: {
 				mode: "credentials",
 				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
-			},
-			credential: {
-				keys: ["session"],
-				storesReusableSecret: true,
-				justification: "Session cookie is required for private operations.",
 			},
 			operations: {
 				"auth-login-with-password": {
@@ -235,67 +141,9 @@ describe("lintProvider", () => {
 		);
 	});
 
-	it("requires credential keys for credentials mode", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			auth: {
-				mode: "credentials",
-				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
-			},
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				rule: "credential-keys-required-when-credentials-mode",
-			}),
-		);
-	});
-
-	it("requires reusable secret justification when durable secrets are persisted", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			auth: {
-				mode: "oauth2",
-				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
-			},
-			credential: { keys: ["refresh_token"] },
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({ rule: "credential-reusable-secret" }),
-		);
-	});
-
-	it("requires reusable secret opt-in when refresh may silently re-login", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			auth: {
-				mode: "credentials",
-				flow: {
-					start: async () => ({ kind: "input", turnId: "1" }),
-					continue: async () => ({ kind: "complete", turnId: "2" }),
-					refresh: async () => ({ kind: "complete", turnId: "3" }),
-				},
-			},
-			credential: { keys: ["username", "password"] },
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({ rule: "auth-refresh-reusable-secret" }),
-		);
-	});
-
 	it("blocks credential writes in operation handlers but allows return-based refresh handlers", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
 			auth: {
 				mode: "credentials",
 				flow: {
@@ -307,11 +155,6 @@ describe("lintProvider", () => {
 						data: { credential: { session: "fresh" } },
 					}),
 				},
-			},
-			credential: {
-				keys: ["session"],
-				storesReusableSecret: true,
-				justification: "Session cookies are required for upstream calls.",
 			},
 			operations: {
 				search: {
@@ -336,8 +179,6 @@ describe("lintProvider", () => {
 	it("warns when ctx.context is used without declared context keys", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
 			auth: {
 				mode: "oauth2",
 				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
@@ -353,75 +194,9 @@ describe("lintProvider", () => {
 		);
 	});
 
-	it("requires provider.stealth when operation source uses ctx.stealth", () => {
+	it("stays silent on ctx.context once context keys are declared", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			operations: {
-				search: {
-					descriptionKey:
-						"Use this operation when callers need protected search results and when the provider must explicitly opt into browser-like stealth transport instead of relying on implicit HTTP behavior.",
-					input: z.object({ query: z.string() }),
-					output: z.object({ ok: z.boolean() }),
-					fixtures: { request: { query: "desk" }, response: { ok: true } },
-					source: "async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
-				},
-			},
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				field: "operations.search",
-				message:
-					'Provider "demo-provider" operation "search" uses ctx.stealth but provider.stealth is not declared.',
-				rule: "stealth-config-required",
-			}),
-		);
-	});
-
-	it("allows ctx.stealth when provider.stealth is declared", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			stealth: { browser: "chrome", os: "macos" },
-			operations: {
-				search: {
-					descriptionKey:
-						"Use this operation when callers need protected search results and when the provider has explicitly declared the stealth profile required by the source code.",
-					input: z.object({ query: z.string() }),
-					output: z.object({ ok: z.boolean() }),
-					fixtures: { request: { query: "desk" }, response: { ok: true } },
-					source: "async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
-				},
-			},
-		});
-
-		expect(diagnostics.some((diagnostic) => diagnostic.rule === "stealth-config-required")).toBe(
-			false,
-		);
-	});
-
-	it("rejects credential keys for platform-managed auth mode", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
-			auth: { mode: "platform-managed" },
-			credential: { keys: ["access_token"] },
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({ rule: "platform-managed-no-credential-keys" }),
-		);
-	});
-
-	it("passes new auth-model rules for a valid oauth2 provider", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
 			auth: {
 				mode: "oauth2",
 				flow: {
@@ -429,27 +204,13 @@ describe("lintProvider", () => {
 					continue: async () => ({ kind: "complete", turnId: "2" }),
 				},
 			},
-			credential: {
-				keys: ["access_token", "refresh_token"],
-				storesReusableSecret: true,
-				justification: "Tokens must be reused across requests.",
-			},
 			context: { keys: ["state"] },
 			authFlowSource: "async function start(ctx) { return ctx.context.get('state'); }",
 		});
 
-		expect(
-			diagnostics.some((diagnostic) =>
-				[
-					"auth-mode-api-key-removed",
-					"auth-flow-continue-required",
-					"credential-keys-required-when-credentials-mode",
-					"credential-reusable-secret",
-					"context-keys-required",
-					"platform-managed-no-credential-keys",
-				].includes(diagnostic.rule),
-			),
-		).toBe(false);
+		expect(diagnostics.some((diagnostic) => diagnostic.rule === "context-keys-required")).toBe(
+			false,
+		);
 	});
 });
 
@@ -554,8 +315,6 @@ describe("flat operation safety lint", () => {
 	) {
 		return lintProvider({
 			id: "flat-safety-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
 			auth: { mode: authMode },
 			operations: {
 				lookup: {
@@ -642,8 +401,6 @@ export function apply(headers: Headers, tuples: Array<[string, string]>) {
 	function lintSourceFile(source: string) {
 		return lintProvider({
 			id: "demo-provider",
-			allowedHosts: ["api.example.com"],
-			reviewed: "first-party",
 			providerSourceFiles: { "upstream/client.ts": source },
 			operations: {
 				search: {
