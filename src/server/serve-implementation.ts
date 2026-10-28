@@ -124,6 +124,11 @@ import {
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
 import {
+	installProcessProxyVendorSelector,
+	observeProxyVendorSelections,
+	type ProxyVendorStateTransition,
+} from "../runtime/proxy-vendor-selector-adaptive.js";
+import {
 	type ClosedEnum,
 	closedEnum,
 	RequestTelemetry,
@@ -1584,7 +1589,49 @@ export type ProviderServerLogEvent =
 			port: number;
 	  }
 	| ProviderStateBackendLogEvent
-	| SelfTestCancellationLogEvent;
+	| SelfTestCancellationLogEvent
+	| ProxyVendorStateLogEvent;
+
+/**
+ * One line per state transition of the process's adaptive proxy vendor
+ * selector. `warn` when a vendor is opened (skipped), otherwise `info`.
+ */
+export type ProxyVendorStateLogEvent = {
+	level: "info" | "warn";
+	event: "proxy_vendor_state";
+	providerId: string;
+	vendor: ProxyVendorStateTransition["vendor"];
+	from: ProxyVendorStateTransition["from"];
+	to: ProxyVendorStateTransition["to"];
+	reason: ProxyVendorStateTransition["reason"];
+	consecutiveFailures: number;
+	ejections: number;
+	/** End of the open period, ISO 8601; present while open. */
+	openUntil?: string;
+	/** Error code of the attempt that opened the vendor. */
+	errorCode?: string;
+};
+
+export function proxyVendorStateLogEvent(
+	providerId: string,
+	transition: ProxyVendorStateTransition,
+): ProxyVendorStateLogEvent {
+	return {
+		level: transition.to === "open" ? "warn" : "info",
+		event: "proxy_vendor_state",
+		providerId,
+		vendor: transition.vendor,
+		from: transition.from,
+		to: transition.to,
+		reason: transition.reason,
+		consecutiveFailures: transition.consecutiveFailures,
+		ejections: transition.ejections,
+		...(transition.openUntil === undefined
+			? {}
+			: { openUntil: new Date(transition.openUntil).toISOString() }),
+		...(transition.errorCode === undefined ? {} : { errorCode: transition.errorCode }),
+	};
+}
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
@@ -2823,13 +2870,16 @@ function createRequestScope(input: {
 		if (outcome.kind === "cancelled") return clientCancelledError();
 		return undefined;
 	};
-	const root = withDiagnosticEnv(observeEnv, () =>
-		trace.span(`request:${input.kind}:${input.route}`, async () => {
-			rootRunner = AsyncLocalStorage.snapshot();
-			const outcome = await rootTerminal;
-			const error = terminalError(outcome);
-			if (error !== undefined) throw error;
-		}),
+	// Every proxy vendor selection made under this request lands on its collector.
+	const root = observeProxyVendorSelections(proxyCollector, () =>
+		withDiagnosticEnv(observeEnv, () =>
+			trace.span(`request:${input.kind}:${input.route}`, async () => {
+				rootRunner = AsyncLocalStorage.snapshot();
+				const outcome = await rootTerminal;
+				const error = terminalError(outcome);
+				if (error !== undefined) throw error;
+			}),
+		),
 	);
 	void root.catch(() => undefined);
 
@@ -4689,6 +4739,13 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 		}),
 	);
 
+	// The process's proxy vendor selector: adaptive unless the environment says
+	// `ordered`. Released with the server so a stopped server leaves the static
+	// order behind.
+	const proxyVendorSelection = installProcessProxyVendorSelector({
+		onTransition: (transition) => logger(proxyVendorStateLogEvent(provider.id, transition)),
+	});
+
 	const servers: BunServerHandle[] = [];
 	let metricsServer: BunServerHandle | undefined;
 	try {
@@ -4739,12 +4796,19 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 		}
 	} catch (error) {
 		await Promise.allSettled(servers.map((startedServer) => startedServer.stop(true)));
+		proxyVendorSelection.release();
 		throw error;
 	}
 
 	const server = servers[0];
-	if (!server) throw new Error("Provider server failed to create its primary listener.");
-	if (!metricsServer) throw new Error("Provider server failed to create its metrics listener.");
+	if (!server) {
+		proxyVendorSelection.release();
+		throw new Error("Provider server failed to create its primary listener.");
+	}
+	if (!metricsServer) {
+		proxyVendorSelection.release();
+		throw new Error("Provider server failed to create its metrics listener.");
+	}
 	let closePromise: Promise<void> | undefined;
 	let unregisterSignals = () => {};
 
@@ -4757,7 +4821,10 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 			timeoutMs,
 			logger,
 			providerId: provider.id,
-		}).finally(() => unregisterSignals());
+		}).finally(() => {
+			unregisterSignals();
+			proxyVendorSelection.release();
+		});
 		return closePromise;
 	};
 
@@ -4768,6 +4835,7 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 	} catch (error) {
 		unregisterSignals();
 		await Promise.allSettled(servers.map((startedServer) => startedServer.stop(true)));
+		proxyVendorSelection.release();
 		throw error;
 	}
 
