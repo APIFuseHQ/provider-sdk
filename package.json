@@ -134,9 +134,6 @@
 		"format:check": "biome format .",
 		"build": "tsc -p tsconfig.build.json && rm -rf dist/cli/templates && cp -R src/cli/templates dist/cli/templates && rm -rf dist/auth-turn/fixtures && cp -R src/auth-turn/fixtures dist/auth-turn/fixtures && cp src/auth-turn/auth-turn.v1.schema.json dist/auth-turn/auth-turn.v1.schema.json"
 	},
-	"trustedDependencies": [
-		"@ast-grep/cli"
-	],
 	"devDependencies": {
 		"@arethetypeswrong/cli": "^0.18.5",
 		"@ast-grep/cli": "0.44.0",

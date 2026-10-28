@@ -16,7 +16,8 @@ export type CodemodId =
 	| "errors-factory"
 	| "health-refs"
 	| "handles"
-	| "runtime-boundary-allow-comments";
+	| "runtime-boundary-allow-comments"
+	| "schema";
 
 export type CodemodManifest = {
 	readonly id: CodemodId;
@@ -29,8 +30,9 @@ export type CodemodManifest = {
  * Dependency order. `errors-factory` first: it turns the `errorCodes` table
  * into the `defineErrors` map that `health-refs` references as `errors.<CODE>`,
  * so a health scenario rewritten after it points at a name that exists. The
- * other two touch disjoint syntax (handle options, allow comments) and run
- * last so their diagnostics are reported against the migrated error sites.
+ * others touch disjoint syntax (handle options, allow comments, schema
+ * descriptions) and run after so their diagnostics are reported against the
+ * migrated error sites.
  */
 export const CODEMODS: readonly CodemodManifest[] = [
 	{
@@ -56,6 +58,12 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		file: "runtime-boundary-allow-comments.yml",
 		manualStep:
 			"fix what the removed comment acknowledged: the build-time boundary (apifuse check) names the file:line",
+	},
+	{
+		id: "schema",
+		file: "schema.yml",
+		manualStep:
+			'add each `schema.<name>` key with the prose the note quotes to locales/en.json (and ko.json, ja.json where present); wrap a reported non-property .describe() as describeKey(<schema>, "<key>")',
 	},
 ];
 
@@ -87,6 +95,8 @@ export type CodemodResult = {
 	readonly filesChanged: readonly string[];
 	/** Rewrites applied (or pending under --dry-run). */
 	readonly rewrites: number;
+	/** Rewrites whose rule carries a message: what the rewrite moved out of the file (a quoted prose, a dropped option). Not residues. */
+	readonly notes: readonly MigrateResidue[];
 	readonly residues: readonly MigrateResidue[];
 };
 
@@ -169,7 +179,11 @@ export async function runMigrate(options: MigrateOptions): Promise<MigrateReport
 			manualStep: codemod.manualStep,
 			filesChanged: [...new Set(fixable.map((finding) => finding.file))].sort(),
 			rewrites: fixable.length,
-			residues,
+			notes: fixable
+				.filter((finding) => finding.message !== "")
+				.map((finding) => toResidue(codemod.id, finding))
+				.sort(byPosition),
+			residues: residues.sort(byPosition),
 		});
 	}
 
@@ -212,6 +226,9 @@ export function formatMigrateReport(report: MigrateReport): string {
 			lines.push(`  files ${verb}:`);
 			for (const file of result.filesChanged) lines.push(`    ${file}`);
 			lines.push(`  by hand: ${result.manualStep}`);
+			for (const note of result.notes) {
+				lines.push(`    ${note.file}:${note.line}:${note.column} ${note.message}`);
+			}
 		}
 		if (result.residues.length > 0) {
 			lines.push("  residues:");
@@ -318,6 +335,15 @@ function toResidue(codemod: CodemodId, finding: AstGrepFinding): MigrateResidue 
 		message: finding.message,
 		...(finding.note === null || finding.note === undefined ? {} : { note: finding.note }),
 	};
+}
+
+function byPosition(a: MigrateResidue, b: MigrateResidue): number {
+	return (
+		a.file.localeCompare(b.file) ||
+		a.line - b.line ||
+		a.column - b.column ||
+		a.ruleId.localeCompare(b.ruleId)
+	);
 }
 
 function residueScope(residue: MigrateResidue): string {

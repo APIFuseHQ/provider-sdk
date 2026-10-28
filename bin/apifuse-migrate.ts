@@ -8,7 +8,9 @@
  * codemod and the residues the codemods leave to the author, with file:line.
  *
  * Exit codes: 0 when nothing is left (no residue; under --dry-run also no
- * pending rewrite); 1 otherwise. There is no CI detection and no default
+ * pending rewrite); 1 when rewrites are pending or residues remain; 2 on a
+ * usage error (unknown option or codemod, missing path, no ast-grep binary).
+ * There is no CI detection and no default
  * dry run: the command does what its flags say wherever it runs, and a CI
  * gate is `apifuse migrate --dry-run` read through its exit code.
  */
@@ -35,7 +37,8 @@ in dependency order: ${CODEMOD_IDS.join(", ")}.
   --json             Print the report as JSON.
 
 Exit 0 when nothing is left to migrate, 1 when rewrites are pending (--dry-run)
-or residues remain. Needs ast-grep: \`bun add -d @ast-grep/cli\` or on PATH.`;
+or residues remain, 2 on a usage error (unknown option or codemod, missing path,
+no ast-grep). Needs ast-grep: \`bun add -d @ast-grep/cli\` or on PATH.`;
 
 export async function main(): Promise<void> {
 	const args = process.argv[2] === "migrate" ? process.argv.slice(3) : process.argv.slice(2);

@@ -6,9 +6,10 @@ import ts from "typescript";
 
 import {
 	CODEMOD_IDS,
+	CODEMODS,
 	formatMigrateReport,
-	migrateExitCode,
 	type MigrateReport,
+	migrateExitCode,
 	resolveAstGrep,
 	runMigrate,
 } from "../migrate.js";
@@ -69,7 +70,33 @@ function residueTable(report: MigrateReport): string[] {
 	);
 }
 
+function countsByCodemod(report: MigrateReport): Record<string, [string[], number, number]> {
+	return Object.fromEntries(
+		report.codemods.map((result) => [
+			result.id,
+			[[...result.filesChanged], result.rewrites, result.residues.length],
+		]),
+	);
+}
+
+const DRY_RUN_RESIDUES = [
+	"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
+	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
+	"health-refs health-stale-window-per-call operations/search.ts:25",
+];
+
 describe("apifuse migrate", () => {
+	it("runs the codemods in dependency order: errors-factory before the codemods that reference its map", () => {
+		expect(CODEMODS.map((codemod) => codemod.id)).toEqual([
+			"errors-factory",
+			"health-refs",
+			"handles",
+			"runtime-boundary-allow-comments",
+			"schema",
+		]);
+		expect(CODEMOD_IDS).toEqual(CODEMODS.map((codemod) => codemod.id));
+	});
+
 	it("resolves the ast-grep binary from the SDK checkout", () => {
 		expect(resolveAstGrep(providerRoot)).toBe(join(SDK_ROOT, "node_modules/.bin/ast-grep"));
 	});
@@ -79,21 +106,14 @@ describe("apifuse migrate", () => {
 		const report = await runMigrate({ providerRoot, dryRun: true });
 
 		expect(sourceFiles()).toEqual(before);
-		expect(report.codemods.map((result) => result.id)).toEqual([...CODEMOD_IDS]);
-		expect(
-			Object.fromEntries(
-				report.codemods.map((result) => [result.id, [result.filesChanged, result.rewrites]]),
-			),
-		).toEqual({
-			"errors-factory": [["operations/search.ts"], 4],
-			"health-refs": [["operations/search.ts"], 1],
-			handles: [["index.ts"], 2],
-			"runtime-boundary-allow-comments": [["operations/search.ts"], 1],
+		expect(countsByCodemod(report)).toEqual({
+			"errors-factory": [["operations/search.ts"], 4, 2],
+			"health-refs": [["operations/search.ts"], 1, 1],
+			handles: [["index.ts"], 2, 0],
+			"runtime-boundary-allow-comments": [["operations/search.ts"], 1, 0],
+			schema: [["operations/detail.ts"], 1, 0],
 		});
-		expect(residueTable(report)).toEqual([
-			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
-			"health-refs health-stale-window-per-call operations/search.ts:25",
-		]);
+		expect(residueTable(report)).toEqual(DRY_RUN_RESIDUES);
 		expect(report.clean).toBe(false);
 		expect(migrateExitCode(report)).toBe(1);
 	});
@@ -112,40 +132,93 @@ describe("apifuse migrate", () => {
 			'"UPSTREAM_ERROR": { status: 502, description: "The shop answered 5xx.", retryable: false }',
 		);
 		expect(search).toContain('"SHOP_CLOSED": { category: "upstream_rejected", status: 409');
-		expect(search).toContain("errors: [...Object.values(SEARCH_ERRORS)]");
-		expect(search).toContain('errors.NOT_FOUND({ message: "No item matches.", details: {\n');
-		expect(search).not.toContain("retryable: false,\n\t\t\t\tdetails");
-		expect(search).toContain('expectedErrors: [{ error: errors.NOT_FOUND, attribute: "query" }]');
 		expect(search).toContain(
 			'"429": { status: 429, description: "Too many searches.", retryable: true }',
 		);
+		expect(search).toContain("errors: [...Object.values(SEARCH_ERRORS)]");
+		expect(search).toContain('errors.NOT_FOUND({ message: "No item matches.", details: {\n');
 		expect(search).toContain('throw errors["429"]({ message: "Too many searches." });');
 		expect(search).toContain('export const AREAS = [\n\t{ code: "010", name: "Sapporo" },');
+		expect(search).not.toContain("retryable: false,\n\t\t\t\tdetails");
 		expect(search).not.toContain("@apifuse-allow");
+		expect(search).toContain('expectedErrors: [{ error: errors.NOT_FOUND, attribute: "query" }]');
 		expect(search).toContain("staleIfErrorMs: 300_000");
+
+		// An errorCodes list with an inline row carrying its contract is left
+		// whole: nothing is deleted, the row is a residue until it is hoisted.
+		const detail = after["operations/detail.ts"] ?? "";
+		expect(detail).toContain(
+			'errorCodes: [\n\t\t...SEARCH_ERRORS,\n\t\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n\t],',
+		);
+		expect(detail).not.toContain("errors.ITEM_GONE");
+		expect(detail).toContain('itemId: z.string().describeKey("schema.itemId")');
+
 		const index = after["index.ts"] ?? "";
 		expect(index).not.toContain("fieldName");
 		expect(index).not.toContain("issuedBy");
 		expect(index).toContain('name: "page",\n\tschema: CursorSchema,');
 
-		expect(
-			Object.fromEntries(report.codemods.map((result) => [result.id, result.rewrites])),
-		).toEqual({
-			"errors-factory": 4,
-			"health-refs": 1,
-			handles: 2,
-			"runtime-boundary-allow-comments": 1,
+		expect(countsByCodemod(report)).toEqual({
+			"errors-factory": [["operations/search.ts"], 4, 2],
+			"health-refs": [["operations/search.ts"], 1, 1],
+			handles: [["index.ts"], 2, 0],
+			"runtime-boundary-allow-comments": [["operations/search.ts"], 1, 0],
+			schema: [["operations/detail.ts"], 1, 0],
 		});
+		// health-refs ran after errors-factory: its residue sits at the line the
+		// collapsed error table left it on, not at the pre-migration line.
 		expect(residueTable(report)).toEqual([
+			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"health-refs health-stale-window-per-call operations/search.ts:20",
+		]);
+		expect(report.codemods.find((result) => result.id === "schema")?.notes).toEqual([
+			{
+				codemod: "schema",
+				ruleId: "schema-describe-prose-on-property",
+				file: "operations/detail.ts",
+				line: 8,
+				column: 10,
+				message:
+					'Raw .describe() prose on property itemId; replaced by describeKey("schema.itemId"). Add "schema.itemId": "The item id from a search result." to locales/en.json (and the other catalogs).',
+			},
 		]);
 		expect(migrateExitCode(report)).toBe(1);
 
 		const again = await runMigrate({ providerRoot, dryRun: true });
-		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0]);
+		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0]);
 		expect(residueTable(again)).toEqual([
+			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
 			"health-refs health-stale-window-per-call operations/search.ts:20",
+		]);
+	});
+
+	it("rewrites the list once the inline row is hoisted into a table", async () => {
+		const detailPath = join(providerRoot, "operations/detail.ts");
+		const hoisted = readFileSync(detailPath, "utf8").replace(
+			'\terrorCodes: [\n\t\t...SEARCH_ERRORS,\n\t\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n\t],',
+			"\terrorCodes: [...SEARCH_ERRORS, ...DETAIL_ERRORS],",
+		);
+		await Bun.write(
+			detailPath,
+			hoisted.replace(
+				"export const detailOperation",
+				'export const DETAIL_ERRORS = [\n\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n] as const;\n\nexport const detailOperation',
+			),
+		);
+
+		const report = await runMigrate({ providerRoot, dryRun: false, only: ["errors-factory"] });
+		const detail = readFileSync(detailPath, "utf8");
+
+		expect(detail).toContain(
+			'export const DETAIL_ERRORS = defineErrors({ "ITEM_GONE": { category: "upstream_rejected", status: 410, description: "The item was removed.", retryable: false } })',
+		);
+		expect(detail).toContain(
+			"errors: [...Object.values(SEARCH_ERRORS), ...Object.values(DETAIL_ERRORS)]",
+		);
+		expect(parseErrors("operations/detail.ts", detail)).toEqual([]);
+		expect(residueTable(report)).toEqual([
+			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 		]);
 	});
 
@@ -166,10 +239,14 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   1                   4         1");
+		expect(text).toContain("errors-factory                   1                   4         2");
+		expect(text).toContain("operations/detail.ts:16:3 [errors-factory-inline-row-hoist]");
 		expect(text).toContain("operations/search.ts:7:2 [errors-factory-sdk-row-conflict]");
 		expect(text).toContain("operations/search.ts:25:21 [health-stale-window-per-call]");
 		expect(text).toContain("by hand: import { defineErrors, sdkErrors }");
+		expect(text).toContain(
+			'operations/detail.ts:8:10 Raw .describe() prose on property itemId; replaced by describeKey("schema.itemId").',
+		);
 		expect(text).toContain("run without --dry-run to apply the rewrites.");
 	});
 

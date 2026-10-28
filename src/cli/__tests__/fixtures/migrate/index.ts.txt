@@ -1,5 +1,6 @@
 import { defineProvider, defineCursor } from "@apifuse/provider-sdk/provider";
 
+import { detailOperation } from "./operations/detail";
 import { searchOperation } from "./operations/search";
 
 export const PageCursor = defineCursor({
@@ -18,4 +19,4 @@ const buildProvider = defineProvider({
 	state: true,
 });
 
-export default buildProvider({ operations: { search: searchOperation } });
+export default buildProvider({ operations: { search: searchOperation, detail: detailOperation } });

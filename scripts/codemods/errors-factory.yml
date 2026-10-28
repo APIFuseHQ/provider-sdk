@@ -15,16 +15,18 @@
 #     the SDK value (replace the row with `X: sdkErrors.X`) or declare a distinct provider code for
 #     that condition (`UPSTREAM_REJECTED: sdkErrors.UPSTREAM_REJECTED` for a deterministic 4xx
 #     refusal, or a provider code with its own status/retryable) and throw it at those sites;
-#   - rows written inline in an operation's `errorCodes` (no shared table) become `errors.X`
-#     references and their status/description are not carried anywhere: hoist them into a
-#     `const T = [...] as const` table first so rule 3 turns them into the defineErrors map;
+#   - rows written inline in an operation's `errorCodes` that carry `status` or `description`
+#     are NOT rewritten (an `errors.X` reference could not carry them): rule 5 reports each row;
+#     hoist them into a `const T = [...] as const` table and spread it in the list, then re-run,
+#     so rule 3 turns the table into the defineErrors map and rule 2 the list into references;
 #   - a throw site whose `code` is not a string literal (`code: flag ? "A" : "B"`) is left as is.
 #
 # Rules, in order:
 #   1. throw-site          new ProviderError(msg, { code: "X", ...rest })  -> errors.X({ message: msg, ...rest })
 #                          (per-throw category/retryable are dropped: the declaration owns them;
 #                          a code that is not an identifier, e.g. "429", is reached as errors["429"])
-#   2. operation-list      errorCodes: [ { code: "X", ... }, ...TABLE ]     -> errors: [ errors.X, ...Object.values(TABLE) ]
+#   2. operation-list      errorCodes: [ { code: "X" }, ...TABLE ]          -> errors: [ errors.X, ...Object.values(TABLE) ]
+#                          (skipped while any row of the list carries status or description: rule 5)
 #   3. declaration-table   const T = [ { code: "X", status, description, retryable }, ... ] as const
 #                          (only a table whose rows carry both code and status; a lookup table of
 #                          { code, name } rows is not an error table and is left alone)
@@ -33,6 +35,8 @@
 #                          retryable equal the registry's; otherwise the row keeps its values)
 #   4. sdk-row-conflict    diagnostic only (no fix): a registered-code row whose status or retryable
 #                          differs from the registry, with the two choices
+#   5. inline-row-hoist    diagnostic only (no fix): an errorCodes row written inline with status or
+#                          description; hoist it into a table, then re-run
 id: errors-factory-throw-site
 language: typescript
 rule:
@@ -142,6 +146,17 @@ rule:
     - pattern:
         context: '{ errorCodes: [ $$$ENTRIES ] as const }'
         selector: pair
+  # A row that still carries its contract inline cannot become a reference;
+  # the list waits until the author hoists it (rule 5 names the row).
+  not:
+    has:
+      kind: object
+      has:
+        kind: pair
+        has:
+          field: key
+          regex: '^(status|description)$'
+      stopBy: end
 rewriters:
   - id: entry-to-factory
     rule:
@@ -649,6 +664,44 @@ rule:
 constraints:
   CODE:
     regex: "^[\"'](NOT_FOUND|not_found|NO_DATA|RATE_LIMITED|UPSTREAM_RATE_LIMIT|LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR|UPSTREAM_REJECTED|UPSTREAM_ERROR|BLOCKED|UPSTREAM_AUTH_ERROR|UPSTREAM_SCHEMA_ERROR|AUTH_REQUIRED|INVALID_REQUEST)[\"']$"
+transform:
+  CODE_NAME:
+    substring:
+      source: $CODE
+      startChar: 1
+      endChar: -1
+---
+# Residue, not a rewrite: an errorCodes row written inline with its contract.
+# A reference cannot carry status or description, so rule 2 leaves the whole
+# list alone until the row lives in a table.
+id: errors-factory-inline-row-hoist
+language: typescript
+severity: warning
+message: 'Inline errorCodes row $CODE carries status or description that an errors.$CODE_NAME reference cannot; it is left in place.'
+note: 'Hoist the row into a `const T = [ ... ] as const` table (or straight into a defineErrors map), spread the table in this list (`errorCodes: [...T]`), then re-run apifuse migrate: the table becomes the defineErrors map and the list becomes references.'
+rule:
+  kind: object
+  inside:
+    kind: array
+    inside:
+      kind: pair
+      has:
+        field: key
+        regex: '^errorCodes$'
+      stopBy: end
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+    - has:
+        kind: pair
+        has:
+          field: key
+          regex: '^(status|description)$'
+constraints:
+  CODE:
+    kind: string
 transform:
   CODE_NAME:
     substring:

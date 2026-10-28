@@ -139,7 +139,7 @@ describe("handle lint rules", () => {
 					message: expect.stringContaining('kind "loc" still declares issuedBy'),
 				}),
 			]);
-			expect(found[0]?.message).toContain("scripts/codemods/handles.yml");
+			expect(found[0]?.message).toContain("apifuse migrate --only handles");
 		});
 
 		it("is silent for kinds defined without the deprecated options and for a missing or empty list", () => {

@@ -1,0 +1,19 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+import { z } from "zod";
+
+import type { ProviderContext } from "../index";
+import { SEARCH_ERRORS } from "./search";
+
+const DetailInput = z.object({
+	itemId: z.string().describe("The item id from a search result."),
+});
+
+export const detailOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.detail.description",
+	input: DetailInput,
+	errorCodes: [
+		...SEARCH_ERRORS,
+		{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },
+	],
+	handler: async (input) => fetchItem(input.itemId),
+});
