@@ -206,10 +206,16 @@ export async function runMigrate(options: MigrateOptions): Promise<MigrateReport
 		throw new Error(AST_GREP_PREREQUISITE);
 	}
 
+	// errors-factory and errors-hoist are one unit: the first turns a table
+	// into a map, the second rewrites the list that spreads it; either alone
+	// leaves a provider that does not load.
+	const requested = new Set(options.only ?? []);
+	if (requested.has("errors-factory") || requested.has("errors-hoist")) {
+		requested.add("errors-factory");
+		requested.add("errors-hoist");
+	}
 	const selected =
-		options.only === undefined
-			? CODEMODS
-			: CODEMODS.filter((codemod) => options.only?.includes(codemod.id));
+		options.only === undefined ? CODEMODS : CODEMODS.filter((codemod) => requested.has(codemod.id));
 
 	const selectedIds = new Set(selected.map((codemod) => codemod.id));
 	const codemods: CodemodResult[] = [];

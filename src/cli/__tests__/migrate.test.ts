@@ -249,45 +249,20 @@ describe("apifuse migrate", () => {
 		expect(again.clean).toBe(false);
 	});
 
-	it("--only errors-factory leaves a list with an inline row whole and reports it", async () => {
+	it("--only errors-factory runs errors-hoist with it: a table and the list that spreads it move together", async () => {
 		const report = await runMigrate({ providerRoot, dryRun: false, only: ["errors-factory"] });
+		expect(report.codemods.map((result) => result.id)).toEqual(["errors-factory", "errors-hoist"]);
+		const search = readFileSync(join(providerRoot, "operations/search.ts"), "utf8");
+		expect(search).toContain("export const SEARCH_ERRORS = defineErrors({");
+		expect(search).toContain("\terrors: [\n\t\t...Object.values(SEARCH_ERRORS),\n\t],\n");
+		expect(search).not.toContain("errorCodes");
 		const detail = readFileSync(join(providerRoot, "operations/detail.ts"), "utf8");
-		expect(detail).toContain(
-			'errorCodes: [\n\t\t...SEARCH_ERRORS,\n\t\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n\t],',
-		);
-		expect(detail).not.toContain("errors.ITEM_GONE");
+		expect(detail).toContain("errors.ITEM_GONE");
 		expect(residueTable(report)).toEqual([
-			"errors-factory errors-factory-entry-not-a-row operations/detail.ts:15",
-			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
-			"errors-factory errors-factory-entry-not-a-row operations/named.ts:8",
-			"errors-factory errors-factory-entry-not-a-row operations/named.ts:8",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
-			"errors-factory errors-factory-entry-not-a-row operations/search.ts:14",
-			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
-			"errors-factory errors-factory-entry-not-a-row operations/statusless.ts:8",
-		]);
-		// A spread is never rewritten by the YAML alone: the table may not be a map.
-		expect(readFileSync(join(providerRoot, "operations/search.ts"), "utf8")).toContain(
-			"errorCodes: [...SEARCH_ERRORS],",
-		);
-		expect(readFileSync(join(providerRoot, "operations/named.ts"), "utf8")).toContain(
-			"errorCodes: [UPSTREAM_ROW, GONE_ROW],",
-		);
-		// Now the step that owns the row runs: the YAML diagnostic is dropped and
-		// the row leaves the list (the table conflict was reported on the first
-		// run and now sits in a map entry, outside the table rule's reach).
-		const hoist = await runMigrate({
-			providerRoot,
-			dryRun: false,
-			only: ["errors-factory", "errors-hoist"],
-		});
-		expect(residueTable(hoist)).toEqual([
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 		]);
-		expect(readFileSync(join(providerRoot, "operations/detail.ts"), "utf8")).toContain(
-			"errors.ITEM_GONE",
-		);
 	});
 
 	it("--only runs the named codemod and is clean once nothing is left", async () => {

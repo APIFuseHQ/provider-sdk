@@ -1807,7 +1807,7 @@ of being created implicitly. Regenerate intentional changes with
 ```bash
 apifuse migrate . --dry-run      # report what would change and what stays for you; writes nothing
 apifuse migrate .                # apply every codemod in dependency order
-apifuse migrate . --only handles # one codemod (errors-hoist expects errors-factory to have run)
+apifuse migrate . --only handles # one codemod (errors-factory and errors-hoist always run together)
 ```
 
 One command runs every shipped codemod (`scripts/codemods/*.yml`, ast-grep) against the
