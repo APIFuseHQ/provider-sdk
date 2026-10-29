@@ -16,6 +16,10 @@ export function parseItem(html: string): string {
 	return html;
 }
 
+export function rethrow(error: ProviderError): never {
+	throw new ProviderError(error.message, { ...error.options, code: "ITEM_GONE" });
+}
+
 export function upstreamError(message: string, retryable = true): ProviderError {
 	return new ProviderError(message, { code: "UPSTREAM_ERROR", retryable });
 }

@@ -89,7 +89,7 @@ function countsByCodemod(report: MigrateReport): Record<string, [string[], numbe
 
 const DRY_RUN_RESIDUES = [
 	"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:14",
-	"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:20",
+	"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:24",
 	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 	"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:31",
 	"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
@@ -121,7 +121,7 @@ describe("apifuse migrate", () => {
 
 		expect(sourceFiles()).toEqual(before);
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 8, 4],
+			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 9, 4],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
@@ -221,7 +221,7 @@ describe("apifuse migrate", () => {
 		expect(index).toContain("\tstate: true,\n\tcache: true,\n});");
 
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 8, 4],
+			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 9, 4],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
@@ -246,7 +246,7 @@ describe("apifuse migrate", () => {
 		// sits five lines higher than in the dry run.
 		expect(residueTable(report)).toEqual([
 			"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:14",
-			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:20",
+			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:24",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
@@ -269,6 +269,10 @@ describe("apifuse migrate", () => {
 		);
 		expect(mapper).toContain(
 			'throw new ProviderError("Keyed.", { code: "ITEM_GONE", messageKey: "errors.itemGone.message" });',
+		);
+		// A spread in the options rides along into the factory input.
+		expect(mapper).toContain(
+			"throw errors.ITEM_GONE({ message: error.message, ...error.options });",
 		);
 		// A shorthand retryable (a variable) cannot be checked: the site stays.
 		expect(mapper).toContain(
@@ -310,7 +314,7 @@ describe("apifuse migrate", () => {
 		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
 		expect(residueTable(again)).toEqual([
 			"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:15",
-			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:21",
+			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:25",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:29",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 			"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:8",
@@ -329,7 +333,7 @@ describe("apifuse migrate", () => {
 		expect(detail).toContain("errors.ITEM_GONE");
 		expect(residueTable(report)).toEqual([
 			"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:14",
-			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:20",
+			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:24",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
@@ -357,7 +361,7 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   3                   8         4");
+		expect(text).toContain("errors-factory                   3                   9         4");
 		expect(text).toContain("errors-hoist                     7                   8         2");
 		expect(text).toContain(
 			"operations/search.ts:31:10 [errors-factory-throw-site-registry-conflict]",

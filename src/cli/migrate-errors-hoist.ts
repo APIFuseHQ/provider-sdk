@@ -540,7 +540,8 @@ function factoryRewriteCode(ts: TypeScriptModule, node: TS.NewExpression): strin
 	}
 	if (!Object.hasOwn(SDK_ERROR_REGISTRY, code) && isSdkOwnedCode(code)) return undefined;
 	for (const property of options.properties) {
-		const name = propertyName(ts, property.name as TS.PropertyName);
+		if (ts.isSpreadAssignment(property)) continue;
+		const name = property.name === undefined ? undefined : propertyName(ts, property.name);
 		if (name !== "retryable" && name !== "category") continue;
 		if (ts.isShorthandPropertyAssignment(property)) return undefined;
 		if (ts.isPropertyAssignment(property)) {
