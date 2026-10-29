@@ -90,9 +90,12 @@ describe("errors-hoist", () => {
 				),
 			).toBe(true);
 			// Files are visited in path order, so detail.ts declares the shared code
-			// first and its description wins; the throw site in list.ts gives the category.
+			// first and its description wins. The category is the one every site
+			// served: the factory call in mappers/item.ts served the default
+			// (provider_error) and the list.ts site states upstream_http, so the
+			// declaration keeps the default and that site is a residue.
 			expect(map).toContain(
-				'\tITEM_NOT_FOUND: {\n\t\tstatus: 404,\n\t\tcategory: "upstream_http",\n\t\tretryable: false,\n\t\tdescription: "The detail page is gone.",\n\t},\n',
+				'\tITEM_NOT_FOUND: {\n\t\tstatus: 404,\n\t\tcategory: "provider_error",\n\t\tretryable: false,\n\t\tdescription: "The detail page is gone.",\n\t},\n',
 			);
 			expect(map).toContain("\tUPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,\n");
 			expect(map).toContain(
@@ -203,6 +206,7 @@ describe("errors-hoist", () => {
 				`${ERRORS_HOIST_RULES.spreadNotATable} operations/detail.ts:21`,
 				`${ERRORS_HOIST_RULES.sdkRowConflict} operations/list.ts:10`,
 				`${ERRORS_HOIST_RULES.codeConflict} operations/list.ts:18`,
+				`${ERRORS_HOIST_RULES.throwSiteConflict} operations/list.ts:29`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:16`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:22`,
 				`${ERRORS_HOIST_RULES.sdkOwnedCode} rows.ts:9`,
@@ -225,6 +229,15 @@ describe("errors-hoist", () => {
 			);
 			expect(twoWays?.message).toContain(
 				"operations/detail.ts:11 (status 404, retryable false); operations/list.ts:18 (status 400, retryable false)",
+			);
+			const site = result.residues.find(
+				(residue) => residue.ruleId === ERRORS_HOIST_RULES.throwSiteConflict,
+			);
+			expect(site?.message).toBe(
+				'Throw site of "ITEM_NOT_FOUND" serves category "upstream_http", and the declaration serves category "provider_error", retryable false; it is left as new ProviderError(...) and keeps serving its own value.',
+			);
+			expect(read("operations/list.ts")).toContain(
+				'throw new ProviderError("No item matches the id.", {\n\t\t\t\tcode: "ITEM_NOT_FOUND",\n\t\t\t\tcategory: "upstream_http",\n\t\t\t});',
 			);
 			expect(table(result.notes)).toEqual([
 				`${ERRORS_HOIST_RULES.descriptionDropped} operations/list.ts:8`,
@@ -257,7 +270,11 @@ describe("errors-hoist", () => {
 		);
 		const result = hoistInlineErrorRows({ providerRoot, dryRun: true });
 		expect(result.filesChanged).toContain("domain/errors.ts");
-		expect(result.rewrites).toBe(8);
+		// One more than the apply: the dry run counts the category it fills into
+		// LEGACY_TABLE's row once errors-factory (which always runs with this
+		// step under apifuse migrate) has made the table a map.
+		expect(result.filesChanged).toContain("shared.ts");
+		expect(result.rewrites).toBe(9);
 		expect(existsSync(join(providerRoot, "domain/errors.ts"))).toBe(false);
 		expect(
 			Object.fromEntries(walk(providerRoot).map((file) => [file, readFileSync(file, "utf8")])),
@@ -303,10 +320,20 @@ describe("errors-factory.yml owned-code guard", () => {
 			join(import.meta.dir, "../../../scripts/codemods/errors-factory.yml"),
 			"utf8",
 		);
-		const guards = [...yaml.matchAll(/regex: "\^\[\\"'\]\(([A-Za-z_|]+)\)\[\\"'\]\$"/g)]
-			.map((match) => match[1] as string)
-			.filter((list) => list.includes("MISSING_SECRET"));
+		const lists = [...yaml.matchAll(/regex: "\^\[\\"'\]\(([A-Za-z_|]+)\)\[\\"'\]\$"/g)].map(
+			(match) => match[1] as string,
+		);
+		const guards = lists.filter((list) => list.includes("MISSING_SECRET"));
 		expect(guards).toHaveLength(2);
+		// The provider-owned-site guard (rule 1, its bracket twin, rule 10) tells
+		// a registered code from a provider's by the registry's whole key list.
+		const registryLists = lists.filter(
+			(list) => list.includes("UPSTREAM_ERROR") && list.includes("AUTH_REQUIRED") && list.includes("|"),
+		);
+		expect(registryLists.length).toBeGreaterThanOrEqual(3);
+		for (const list of registryLists) {
+			expect(list.split("|").sort()).toEqual(Object.keys(SDK_ERROR_REGISTRY).sort());
+		}
 		const expected = [
 			...new Set([
 				...SDK_RUNTIME_OWNED_ERROR_CODES,

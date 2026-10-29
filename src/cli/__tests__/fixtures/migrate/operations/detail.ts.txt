@@ -14,6 +14,10 @@ export const detailOperation = defineOperation<ProviderContext>()({
 	errorCodes: [
 		...SEARCH_ERRORS,
 		{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },
+		{ code: "SHOP_DOWN", status: 502, description: "The shop is down.", retryable: false },
+		{ code: "SHOP_BUSY", status: 503, description: "The shop is busy.", retryable: false },
+		{ code: "SLOT_GONE", status: 410, description: "The slot is gone.", retryable: false },
+		{ code: "SLOT_HELD", status: 409, description: "The slot is held.", retryable: false },
 	],
 	handler: async (input) => fetchItem(input.itemId),
 });

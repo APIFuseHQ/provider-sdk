@@ -7,6 +7,7 @@ export const SEARCH_ERRORS = [
 	{ code: "UPSTREAM_ERROR", status: 502, description: "The shop answered 5xx.", retryable: false },
 	{ code: "SHOP_CLOSED", status: 409, description: "The shop is closed." },
 	{ code: "429", status: 429, description: "Too many searches.", retryable: true },
+	{ code: "SHOP_SLOW", status: 502, description: "The shop timed out." },
 ] as const;
 
 export const AREAS = [

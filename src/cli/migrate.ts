@@ -62,7 +62,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "ast-grep",
 		file: "errors-factory.yml",
 		manualStep:
-			"tsc names the category a provider row still lacks; a throw site left as new ProviderError names its registry conflict (errors-hoist adds the imports and resolves errors.X)",
+			"a throw site left as new ProviderError names its registry conflict, locale key or non-literal option (errors-hoist fills the category of a converted table's rows, checks a per-throw category/retryable against the declaration, adds the imports and resolves errors.X)",
 	},
 	{
 		id: "health-refs",
@@ -76,7 +76,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "source",
 		run: hoistInlineErrorRows,
 		manualStep:
-			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); the category of a hoisted provider code is the one its throw sites agreed on, else provider_error, so refine it where a narrower class fits",
+			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); a throw site left as new ProviderError names the category or retryable it serves that the declaration does not (declare a distinct code for it, or accept the declared value)",
 	},
 	{
 		id: "health-stale-window",
@@ -179,7 +179,11 @@ const SUPERSEDED_RULES: ReadonlyMap<
 		"errors-factory",
 		{
 			by: "errors-hoist",
-			ruleIds: ["errors-factory-inline-row-hoist", "errors-factory-entry-not-a-row"],
+			ruleIds: [
+				"errors-factory-inline-row-hoist",
+				"errors-factory-entry-not-a-row",
+				"errors-factory-throw-site-option",
+			],
 		},
 	],
 	["health-refs", { by: "health-stale-window", ruleIds: ["health-stale-window-per-call"] }],

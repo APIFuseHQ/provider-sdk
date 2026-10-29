@@ -9,6 +9,7 @@ import {
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 	type SdkErrorCode,
 } from "../error-resolution.js";
+import { isRetryableCategory, type ProviderErrorCategory } from "../observability.js";
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import { getTypeScript, type TypeScriptModule } from "../typescript-module.js";
 import {
@@ -52,11 +53,24 @@ import {
  * that is not a plain table name.
  *
  * The entry serves what the legacy path served: the row's status; the row's
- * retryable, else `false` (the legacy default); the category the provider's
- * `new ProviderError(..., { code, category })` sites agree on, else
- * `upstream_rejected` for a 409/410/422 row, else `provider_error` (what the
- * server reports for a legacy row that names none). The description is the
- * first one seen when rows differ; each dropped one is a note.
+ * retryable, else `false` (the legacy default); the category every throw site
+ * of the code served (a literal per-throw `category`, or for a site without
+ * one the serve default: `upstream_rejected` for a 409/410/422 row, else
+ * `provider_error`, `input_validation` for a 4xx `ValidationError`), when they
+ * all served one value; else the serve default, and each site that served
+ * something else is a residue. The description is the first one seen when
+ * rows differ; each dropped one is a note.
+ *
+ * The same rule fills `category` into the entries the errors-factory codemod
+ * made from a `const T = [...] as const` table (its rows never stated one), so
+ * the provider loads without a by-hand step and nothing it served changes.
+ *
+ * The throw sites errors-factory leaves to this step (a provider-owned code's
+ * site stating a literal `category` / `retryable`, or a site inside a
+ * function that binds its own `errors`) are rewritten to `errors.CODE({...})`
+ * only when the declaration serves the same category and retryable the site
+ * states; a site that states something else is a residue naming both values,
+ * left as it is so it keeps serving what it served.
  */
 
 const SDK_IMPORT = "@apifuse/provider-sdk/provider";
@@ -78,8 +92,13 @@ export const ERRORS_HOIST_RULES = {
 	nameTaken: "errors-hoist-name-taken",
 	declaredDifferently: "errors-hoist-declared-differently",
 	descriptionDropped: "errors-hoist-description-dropped",
-	categoryChosen: "errors-hoist-category-chosen",
+	categoryFromSites: "errors-hoist-category-from-sites",
 	referenceUndeclared: "errors-hoist-reference-undeclared",
+	throwSiteConflict: "errors-hoist-throw-site-conflict",
+	throwSiteRowConflict: "errors-hoist-throw-site-row-conflict",
+	throwSiteDerivedCategory: "errors-hoist-throw-site-derived-category",
+	throwSiteShadowed: "errors-hoist-throw-site-shadowed",
+	throwSiteUndeclared: "errors-hoist-throw-site-undeclared",
 } as const;
 
 export type ErrorsHoistOptions = {
@@ -135,11 +154,68 @@ type Declaration =
 			readonly comments: readonly string[];
 	  };
 
+/** One entry of a defineErrors map (or, in a dry run, one row of the table errors-factory converts). */
+type MapEntry = {
+	readonly status?: number;
+	readonly retryable?: boolean;
+	readonly category?: string;
+	/** The entry states a messageKey or fixKey. */
+	readonly localeKey?: boolean;
+	readonly sdk: boolean;
+	/** The entry's object literal, absent for `X: sdkErrors.X`. */
+	readonly node?: TS.ObjectLiteralExpression;
+};
+
 type ExistingMap = {
 	readonly file: ProviderSourceFile;
 	readonly object: TS.ObjectLiteralExpression;
-	readonly entries: ReadonlyMap<string, { status?: number; retryable?: boolean; sdk: boolean }>;
+	readonly entries: ReadonlyMap<string, MapEntry>;
 };
+
+/** What a declaration (the map's entry, or the one this step writes) serves for a code. */
+type DeclaredView = {
+	readonly status?: number;
+	readonly category: string;
+	readonly retryable: boolean;
+	/** True when this run chose the category (a hoisted row, a filled entry); false when the map already stated it. */
+	readonly resolved: boolean;
+};
+
+const ERROR_CONSTRUCTORS = new Set([
+	"ProviderError",
+	"AuthError",
+	"ValidationError",
+	"TransportError",
+	"SessionExpiredError",
+]);
+
+/**
+ * One `new ProviderError(...)` (or subclass) site naming a code literally,
+ * read before any step rewrites it; and, after errors-factory ran, each
+ * `errors.CODE({...})` it produced, which serves the declaration (`factory`).
+ */
+type ThrowSite = {
+	readonly file: ProviderSourceFile;
+	readonly node: TS.NewExpression | TS.CallExpression;
+	readonly constructor: string;
+	readonly code: string;
+	readonly options?: TS.ObjectLiteralExpression;
+	/** The literal per-throw category, when the site states one. */
+	readonly category?: string;
+	/** The literal per-throw retryable, when the site states one. */
+	readonly retryable?: boolean;
+	/** A category or retryable written as a shorthand or a non-literal value. */
+	readonly dynamic: boolean;
+	/** The site writes a category (literal or not), so the bare default does not apply. */
+	readonly categoryStated: boolean;
+	readonly localeKey: boolean;
+	/** Inside a function that binds its own `errors` somewhere (the errors-factory guard), so rule 1 left it. */
+	readonly bindsScope: boolean;
+	/** A local `errors` binding is in scope at the site, so `errors.CODE` there would not reach the map import. */
+	readonly shadowed: boolean;
+};
+
+type ThrowSites = ReadonlyMap<string, readonly ThrowSite[]>;
 
 const REJECTION_STATUSES = new Set([409, 410, 422]);
 
@@ -153,15 +229,25 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 
 	const lists = collectLists(ts, sources, residues);
 	const existing = findExistingMap(ts, sources);
-	const throwCategories = collectThrowCategories(ts, sources);
-	const declarations = declareCodes(ts, lists, existing, throwCategories, residues, notes);
+	const sites = collectThrowSites(ts, sources);
+	const declarations = declareCodes(ts, lists, existing, sites, residues, notes);
 	const maps = defineErrorsMaps(ts, sources);
-	const references = collectReferences(ts, sources, existing?.file.path ?? DEFAULT_MODULE);
 
 	const hoisted = new Set<string>();
 	const edits = new Map<string, FileEdits>();
 	const imports = new Map<string, FileEdits>();
 	let rewrites = 0;
+
+	// The entries errors-factory made from a table state no category (rule 3
+	// keeps the row's fields, and a legacy row never had one): each gets the
+	// category its throw sites served, so the provider loads and serves the same.
+	const views = new Map<string, DeclaredView | null>();
+	const filled = fillEntryCategories(maps, sites, views, notes, options.dryRun);
+	for (const pending of filled.edits.values()) {
+		editsFor(edits, pending.file).push(...pending.edits);
+	}
+	const pendingFiles = new Set<string>(filled.files);
+	rewrites += filled.rewrites;
 
 	for (const list of lists) {
 		if (list.wholeName !== undefined) {
@@ -259,6 +345,30 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 		}
 	}
 
+	// A hoisted row is declared by this step: its view is the declaration.
+	for (const [code, declaration] of declarations) {
+		if (declaration.kind === "provider" && hoisted.has(code)) {
+			views.set(code, {
+				status: declaration.status,
+				category: declaration.category,
+				retryable: declaration.retryable,
+				resolved: true,
+			});
+		}
+	}
+	const siteItems = resolveThrowSites(
+		sites,
+		views,
+		registryRowConflicts(declarations, maps),
+		residues,
+	);
+	const references = collectReferences(
+		ts,
+		sources,
+		existing?.file.path ?? DEFAULT_MODULE,
+		siteItems,
+	);
+
 	// A registered code a throw site names that no map in the file's scope
 	// declares (its row sat in a table rule 3 does not convert, or in another
 	// operation's table) is declared by value in the provider map.
@@ -324,7 +434,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 		if (!mergedImports.has(path)) editsFor(edits, pending.file).push(...pending.edits);
 	}
 
-	const filesChanged = new Set<string>();
+	const filesChanged = new Set<string>(pendingFiles);
 	for (const [path, { file, edits: fileEdits }] of edits) {
 		if (fileEdits.length === 0) continue;
 		filesChanged.add(path);
@@ -364,6 +474,8 @@ type Reference = {
 	readonly code: string;
 	/** The `errors` identifier to retarget; absent for a site the factory has not rewritten yet (a dry run). */
 	readonly target?: TS.Identifier;
+	/** A throw site this step rewrites itself once the map that declares the code is known. */
+	readonly site?: ThrowSite;
 };
 
 type FileReferences = {
@@ -383,18 +495,21 @@ function collectReferences(
 	ts: TypeScriptModule,
 	sources: readonly ProviderSourceFile[],
 	modulePath: string,
+	siteItems: ReadonlyMap<string, readonly Reference[]>,
 ): FileReferences[] {
 	const out: FileReferences[] = [];
 	for (const file of sources) {
 		const bound = topLevelBindings(ts, file);
 		if (bound.has(MAP_NAME) && importsModuleMap(ts, file, modulePath)) bound.delete(MAP_NAME);
 		if (bound.has(MAP_NAME) && file.path !== modulePath) continue;
-		const items: Reference[] = [];
+		const items: Reference[] = [...(siteItems.get(file.path) ?? [])];
 		const visit = (node: TS.Node): void => {
 			if (
 				(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
 				ts.isIdentifier(node.expression) &&
-				node.expression.text === MAP_NAME
+				node.expression.text === MAP_NAME &&
+				// `errors.length` on a local array is not a reference to the map.
+				!shadowedByLocalBinding(ts, node, MAP_NAME)
 			) {
 				const code = ts.isPropertyAccessExpression(node)
 					? node.name.text
@@ -403,7 +518,9 @@ function collectReferences(
 			} else if (
 				ts.isNewExpression(node) &&
 				ts.isIdentifier(node.expression) &&
-				node.expression.text === "ProviderError"
+				node.expression.text === "ProviderError" &&
+				!factoryLeavesSite(ts, node) &&
+				!insideFunctionBinding(ts, node, MAP_NAME)
 			) {
 				const code = factoryRewriteCode(ts, node);
 				if (code !== undefined) items.push({ node, code });
@@ -457,6 +574,10 @@ function resolveReferences(
 		let needsModule = false;
 		const pendingBefore = context.imports.get(file.path)?.edits.length ?? 0;
 		const retarget = (item: Reference, name: string): void => {
+			if (item.site !== undefined) {
+				fileEdits.push(throwSiteEdit(ts, item.site, name));
+				return;
+			}
 			if (item.target === undefined) return;
 			fileEdits.push({
 				start: item.target.getStart(file.source),
@@ -468,6 +589,7 @@ function resolveReferences(
 			const code = item.code;
 			if (context.moduleCodes.has(code)) {
 				if (file.path !== context.modulePath) needsModule = true;
+				if (item.site !== undefined) retarget(item, MAP_NAME);
 				continue;
 			}
 			const local = [...scope].find(([name, codes]) => name !== MAP_NAME && codes.has(code));
@@ -482,6 +604,19 @@ function resolveReferences(
 					retarget(item, only.name);
 					continue;
 				}
+			}
+			if (item.site !== undefined) {
+				// A site this step owns is never rewritten to a name no map declares.
+				context.residues.push(
+					finding(
+						file,
+						item.node.getStart(file.source),
+						ERRORS_HOIST_RULES.throwSiteUndeclared,
+						`Throw site of ${JSON.stringify(code)} cannot reach a defineErrors map that declares ${code} from this file${remote.length > 1 ? ` (${remote.length} maps declare it: ${remote.map((candidate) => `${candidate.name} in ${candidate.path}`).join(", ")})` : ""}; it is left as new ProviderError(...).`,
+						`Declare ${code} once in the provider's defineErrors map (status, the category and retryable this site states, description), then re-run apifuse migrate.`,
+					),
+				);
+				continue;
 			}
 			if (context.modulePath !== undefined && file.path !== context.modulePath) needsModule = true;
 			context.residues.push(
@@ -640,10 +775,10 @@ function sdkNamesWanted(
 	visit(file.source);
 	// A table the factory converts (a dry run) will name defineErrors, and
 	// sdkErrors for a registered code; a map already names what it uses.
-	for (const entry of (maps.get(file.path) ?? new Map()).values()) {
+	for (const entry of (maps.get(file.path) ?? new Map<string, MapInfo>()).values()) {
 		if (!entry.table) continue;
 		used.add("defineErrors");
-		if ([...entry.codes].some((code) => Object.hasOwn(SDK_ERROR_REGISTRY, code))) {
+		if ([...entry.codes.keys()].some((code) => Object.hasOwn(SDK_ERROR_REGISTRY, code))) {
 			used.add("sdkErrors");
 		}
 	}
@@ -920,7 +1055,7 @@ function declareCodes(
 	ts: TypeScriptModule,
 	lists: readonly ErrorList[],
 	existing: ExistingMap | undefined,
-	throwCategories: ReadonlyMap<string, readonly string[]>,
+	sites: ThrowSites,
 	residues: MigrateFinding[],
 	notes: MigrateFinding[],
 ): Map<string, DeclarationOrResidue> {
@@ -1094,26 +1229,15 @@ function declareCodes(
 		}
 
 		const stated = rows.map((row) => row.category).find((value) => value !== undefined);
-		const thrown = throwCategories.get(code) ?? [];
 		let category: string;
 		if (stated !== undefined) {
 			category = stated;
-		} else if (thrown.length > 0) {
-			category = majority(thrown);
-			if (new Set(thrown).size > 1) {
-				notes.push(
-					finding(
-						first.file,
-						first.node.getStart(first.file.source),
-						ERRORS_HOIST_RULES.categoryChosen,
-						`Code ${JSON.stringify(code)} is thrown with ${[...new Set(thrown)].map((value) => JSON.stringify(value)).join(" and ")}; the declaration takes ${JSON.stringify(category)} (the most frequent).`,
-					),
-				);
-			}
 		} else {
-			category = REJECTION_STATUSES.has(first.status as number)
-				? "upstream_rejected"
-				: "provider_error";
+			const served = categoryServedBySites(code, first.status as number, sites);
+			category = served.category;
+			if (served.fromSites) {
+				notes.push(categoryFromSitesNote(first.file, first.node, code, served));
+			}
 		}
 
 		declarations.set(code, {
@@ -1131,45 +1255,170 @@ function declareCodes(
 	return declarations;
 }
 
-function majority(values: readonly string[]): string {
-	const counts = new Map<string, number>();
-	for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-	let best: string = values[0] as string;
-	let bestCount = 0;
-	for (const value of values) {
-		const count = counts.get(value) ?? 0;
-		if (count > bestCount) {
-			best = value;
-			bestCount = count;
-		}
-	}
-	return best;
+/** The category the server reports for a declaration that states none. */
+function fallbackCategory(status: number | undefined): string {
+	return status !== undefined && REJECTION_STATUSES.has(status)
+		? "upstream_rejected"
+		: "provider_error";
 }
 
-function collectThrowCategories(
-	ts: TypeScriptModule,
-	sources: readonly ProviderSourceFile[],
-): Map<string, string[]> {
-	const out = new Map<string, string[]>();
+/**
+ * What a site that states no category served under a declaration without
+ * one (serve-implementation's per-constructor default); undefined for a
+ * `TransportError`, whose category the server derives from the transport
+ * failure, so no declared value can equal it.
+ */
+function categoryServedByBareSite(site: ThrowSite, status: number | undefined): string | undefined {
+	switch (site.constructor) {
+		case "TransportError":
+			return undefined;
+		case "ValidationError":
+			if (status !== undefined && REJECTION_STATUSES.has(status)) return "upstream_rejected";
+			return status !== undefined && status >= 500 ? "provider_error" : "input_validation";
+		case "SessionExpiredError":
+			return "credential_expired";
+		default:
+			return fallbackCategory(status);
+	}
+}
+
+/** What one site served for its category: its literal, else the bare default; undefined when it cannot be known. */
+function categoryServedBySite(site: ThrowSite, status: number | undefined): string | undefined {
+	if (site.category !== undefined) return site.category;
+	if (site.categoryStated) return undefined;
+	return categoryServedByBareSite(site, status);
+}
+
+type ServedCategory = {
+	readonly category: string;
+	/** True when every site served one value that differs from the status fallback. */
+	readonly fromSites: boolean;
+	readonly sites: number;
+};
+
+/**
+ * The category a declaration for `code` must state so that every throw site
+ * keeps serving what it served: the one value all sites served (a literal
+ * per-throw category, or the serve default for a site without one), else the
+ * serve default for the status, with each site that served something else
+ * reported by `resolveThrowSites`. A site whose category cannot be known (a
+ * variable, a transport-derived value) never decides it.
+ */
+function categoryServedBySites(code: string, status: number | undefined, sites: ThrowSites): ServedCategory {
+	const fallback = fallbackCategory(status);
+	const served = new Set<string>();
+	let counted = 0;
+	for (const site of sites.get(code) ?? []) {
+		const value = categoryServedBySite(site, status);
+		if (value === undefined) return { category: fallback, fromSites: false, sites: 0 };
+		served.add(value);
+		counted += 1;
+	}
+	if (served.size !== 1) return { category: fallback, fromSites: false, sites: 0 };
+	const [only] = served;
+	return { category: only as string, fromSites: only !== fallback, sites: counted };
+}
+
+function categoryFromSitesNote(
+	file: ProviderSourceFile,
+	node: TS.Node,
+	code: string,
+	served: ServedCategory,
+): MigrateFinding {
+	return finding(
+		file,
+		node.getStart(file.source),
+		ERRORS_HOIST_RULES.categoryFromSites,
+		`Code ${JSON.stringify(code)} is declared with category ${JSON.stringify(served.category)}, the value its ${served.sites} throw site${served.sites === 1 ? "" : "s"} served.`,
+	);
+}
+
+/**
+ * Every `new ProviderError(...)` (or subclass) site that names a code
+ * literally, as written before this run's rewrites, plus each
+ * `errors.CODE({...})` errors-factory already produced from a bare site
+ * (it serves the declaration, which a bare site always did). By code.
+ */
+function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourceFile[]): ThrowSites {
+	const out = new Map<string, ThrowSite[]>();
+	const add = (site: ThrowSite): void => {
+		const list = out.get(site.code) ?? [];
+		list.push(site);
+		out.set(site.code, list);
+	};
 	for (const file of sources) {
 		const visit = (node: TS.Node): void => {
 			if (
 				ts.isNewExpression(node) &&
 				ts.isIdentifier(node.expression) &&
-				node.expression.text === "ProviderError"
+				ERROR_CONSTRUCTORS.has(node.expression.text)
 			) {
 				const options = node.arguments?.[1];
 				if (options !== undefined && ts.isObjectLiteralExpression(options)) {
-					const code = propertyOf(ts, options, "code");
-					const category = propertyOf(ts, options, "category");
-					const codeValue = code === undefined ? undefined : literalString(ts, code.initializer);
-					const categoryValue =
-						category === undefined ? undefined : literalString(ts, category.initializer);
-					if (codeValue !== undefined && categoryValue !== undefined) {
-						const list = out.get(codeValue) ?? [];
-						list.push(categoryValue);
-						out.set(codeValue, list);
+					const codePair = propertyOf(ts, options, "code");
+					const code = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
+					if (code !== undefined) {
+						const category = propertyOf(ts, options, "category");
+						const retryable = propertyOf(ts, options, "retryable");
+						const categoryValue =
+							category === undefined ? undefined : literalString(ts, category.initializer);
+						const retryableValue =
+							retryable === undefined ? undefined : literalBoolean(ts, retryable.initializer);
+						const shorthand = options.properties.some(
+							(property) =>
+								ts.isShorthandPropertyAssignment(property) &&
+								(property.name.text === "category" || property.name.text === "retryable"),
+						);
+						const categoryStated =
+							category !== undefined ||
+							options.properties.some(
+								(property) =>
+									ts.isShorthandPropertyAssignment(property) && property.name.text === "category",
+							);
+						add({
+							file,
+							node,
+							constructor: node.expression.text,
+							code,
+							options,
+							...(categoryValue === undefined ? {} : { category: categoryValue }),
+							...(retryableValue === undefined ? {} : { retryable: retryableValue }),
+							dynamic:
+								shorthand ||
+								(category !== undefined && categoryValue === undefined) ||
+								(retryable !== undefined && retryableValue === undefined),
+							categoryStated,
+							localeKey:
+								propertyOf(ts, options, "messageKey") !== undefined ||
+								propertyOf(ts, options, "fixKey") !== undefined,
+							bindsScope: insideFunctionBinding(ts, node, MAP_NAME),
+							shadowed: shadowedByLocalBinding(ts, node, MAP_NAME),
+						});
 					}
+				}
+			} else if (
+				ts.isCallExpression(node) &&
+				(ts.isPropertyAccessExpression(node.expression) ||
+					ts.isElementAccessExpression(node.expression)) &&
+				ts.isIdentifier(node.expression.expression) &&
+				node.expression.expression.text === MAP_NAME &&
+				!shadowedByLocalBinding(ts, node, MAP_NAME)
+			) {
+				const code = ts.isPropertyAccessExpression(node.expression)
+					? node.expression.name.text
+					: literalString(ts, node.expression.argumentExpression);
+				if (code !== undefined) {
+					add({
+						file,
+						node,
+						constructor: "factory",
+						code,
+						dynamic: false,
+						categoryStated: false,
+						localeKey: false,
+						bindsScope: false,
+						shadowed: false,
+					});
 				}
 			}
 			ts.forEachChild(node, visit);
@@ -1179,17 +1428,442 @@ function collectThrowCategories(
 	return out;
 }
 
+/** True when errors-factory rule 1 leaves this `new ProviderError` site to this step: a registered code (the provider's row for it may differ from the registry), or a provider-owned code stating a literal category or retryable. */
+function factoryLeavesSite(ts: TypeScriptModule, node: TS.NewExpression): boolean {
+	const options = node.arguments?.[1];
+	if (options === undefined || !ts.isObjectLiteralExpression(options)) return false;
+	const codePair = propertyOf(ts, options, "code");
+	const code = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
+	if (code === undefined) return false;
+	if (Object.hasOwn(SDK_ERROR_REGISTRY, code)) return true;
+	for (const name of ["category", "retryable"]) {
+		const pair = propertyOf(ts, options, name);
+		if (pair === undefined) continue;
+		const value = unwrapExpression(ts, pair.initializer);
+		if (
+			value.kind === ts.SyntaxKind.TrueKeyword ||
+			value.kind === ts.SyntaxKind.FalseKeyword ||
+			ts.isStringLiteral(value)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function isFunctionLike(ts: TypeScriptModule, node: TS.Node): node is TS.SignatureDeclaration {
+	return (
+		ts.isFunctionDeclaration(node) ||
+		ts.isFunctionExpression(node) ||
+		ts.isArrowFunction(node) ||
+		ts.isMethodDeclaration(node) ||
+		ts.isConstructorDeclaration(node) ||
+		ts.isGetAccessorDeclaration(node) ||
+		ts.isSetAccessorDeclaration(node)
+	);
+}
+
+/** Every identifier a binding name (a plain name or a destructuring pattern) binds. */
+function boundNames(ts: TypeScriptModule, name: TS.BindingName, out: Set<string>): void {
+	if (ts.isIdentifier(name)) {
+		out.add(name.text);
+		return;
+	}
+	for (const element of name.elements) {
+		if (ts.isBindingElement(element)) boundNames(ts, element.name, out);
+	}
+}
+
+/** The names a scope node binds directly: its parameters, its own variable statements, its catch variable, its loop initializer. Nested functions are not entered. */
+function namesBoundBy(ts: TypeScriptModule, scope: TS.Node): Set<string> {
+	const out = new Set<string>();
+	if (isFunctionLike(ts, scope)) {
+		for (const parameter of scope.parameters) boundNames(ts, parameter.name, out);
+		return out;
+	}
+	if (ts.isCatchClause(scope)) {
+		if (scope.variableDeclaration !== undefined) boundNames(ts, scope.variableDeclaration.name, out);
+		return out;
+	}
+	const declarations = (list: TS.ForInitializer | undefined): void => {
+		if (list !== undefined && ts.isVariableDeclarationList(list)) {
+			for (const declaration of list.declarations) boundNames(ts, declaration.name, out);
+		}
+	};
+	if (ts.isForStatement(scope) || ts.isForOfStatement(scope) || ts.isForInStatement(scope)) {
+		declarations(scope.initializer);
+		return out;
+	}
+	if (ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) || ts.isCaseClause(scope) || ts.isDefaultClause(scope)) {
+		for (const statement of scope.statements) {
+			if (ts.isVariableStatement(statement)) {
+				for (const declaration of statement.declarationList.declarations) {
+					boundNames(ts, declaration.name, out);
+				}
+			} else if (
+				(ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+				statement.name !== undefined
+			) {
+				out.add(statement.name.text);
+			}
+		}
+	}
+	return out;
+}
+
+/** True when a binding named `name` below the top level is in scope at `node`, so `name` there is not the file's import. */
+function shadowedByLocalBinding(ts: TypeScriptModule, node: TS.Node, name: string): boolean {
+	for (let scope = node.parent; scope !== undefined && !ts.isSourceFile(scope); scope = scope.parent) {
+		if (namesBoundBy(ts, scope).has(name)) return true;
+	}
+	return false;
+}
+
+/**
+ * True when a function enclosing `node` binds `name` anywhere inside it (a
+ * parameter, a local, a destructured name, a catch variable, also in a nested
+ * function): the guard errors-factory rule 1 applies, so that site is this
+ * step's whether or not the binding really is in scope.
+ */
+function insideFunctionBinding(ts: TypeScriptModule, node: TS.Node, name: string): boolean {
+	for (let scope = node.parent; scope !== undefined && !ts.isSourceFile(scope); scope = scope.parent) {
+		if (!isFunctionLike(ts, scope)) continue;
+		let found = false;
+		const visit = (current: TS.Node): void => {
+			if (found) return;
+			if (
+				(ts.isVariableDeclaration(current) || ts.isParameter(current) || ts.isBindingElement(current)) &&
+				ts.isIdentifier(current.name) &&
+				current.name.text === name
+			) {
+				found = true;
+				return;
+			}
+			if (ts.isCatchClause(current) && current.variableDeclaration !== undefined) {
+				const names = new Set<string>();
+				boundNames(ts, current.variableDeclaration.name, names);
+				if (names.has(name)) {
+					found = true;
+					return;
+				}
+			}
+			ts.forEachChild(current, visit);
+		};
+		visit(scope);
+		if (found) return true;
+	}
+	return false;
+}
+
+/** The view a map entry serves: its category and retryable as defineErrors resolves them. */
+function viewOfEntry(code: string, entry: MapEntry): DeclaredView | null {
+	if (entry.sdk) {
+		const registry = Object.hasOwn(SDK_ERROR_REGISTRY, code)
+			? SDK_ERROR_REGISTRY[code as SdkErrorCode]
+			: undefined;
+		return registry === undefined
+			? null
+			: {
+					status: registry.status,
+					category: registry.category,
+					retryable: registry.retryable,
+					resolved: false,
+				};
+	}
+	if (entry.category === undefined) return null;
+	return {
+		...(entry.status === undefined ? {} : { status: entry.status }),
+		category: entry.category,
+		retryable: entry.retryable ?? isRetryableCategory(entry.category as ProviderErrorCategory),
+		resolved: false,
+	};
+}
+
+/**
+ * Each provider-owned entry of a defineErrors map that states no category
+ * (a table errors-factory converted) gets the category its throw sites
+ * served, and `retryable: false` where that category's default would flip
+ * the legacy default; in a dry run the table's row stands for the entry.
+ * Records the view every map entry serves, for the throw-site pass.
+ */
+function fillEntryCategories(
+	maps: MapsByFile,
+	sites: ThrowSites,
+	views: Map<string, DeclaredView | null>,
+	notes: MigrateFinding[],
+	dryRun: boolean,
+): { edits: Map<string, FileEdits>; files: string[]; rewrites: number } {
+	const edits = new Map<string, FileEdits>();
+	const files = new Set<string>();
+	let rewrites = 0;
+	const record = (code: string, view: DeclaredView | null): void => {
+		const known = views.get(code);
+		if (known === undefined) {
+			views.set(code, view);
+		} else if (
+			known === null ||
+			view === null ||
+			known.category !== view.category ||
+			known.retryable !== view.retryable
+		) {
+			// Two maps declaring one code differently: no single answer.
+			views.set(code, null);
+		}
+	};
+	for (const [, byName] of maps) {
+		for (const [, info] of byName) {
+			for (const [code, entry] of info.codes) {
+				if (entry.sdk || Object.hasOwn(SDK_ERROR_REGISTRY, code) || isSdkOwnedCode(code)) {
+					record(code, viewOfEntry(code, entry));
+					continue;
+				}
+				if (entry.category !== undefined || entry.status === undefined) {
+					record(code, viewOfEntry(code, entry));
+					continue;
+				}
+				// A table still an array after the apply is one errors-factory did not
+				// convert: nothing to fill. In a dry run the table stands for the map.
+				if (info.table && !dryRun) {
+					record(code, viewOfEntry(code, entry));
+					continue;
+				}
+				const served = categoryServedBySites(code, entry.status, sites);
+				const writeRetryable =
+					entry.retryable === undefined &&
+					isRetryableCategory(served.category as ProviderErrorCategory);
+				record(code, {
+					status: entry.status,
+					category: served.category,
+					retryable: entry.retryable ?? false,
+					resolved: true,
+				});
+				files.add(info.file.path);
+				rewrites += 1;
+				if (served.fromSites && entry.node !== undefined) {
+					notes.push(categoryFromSitesNote(info.file, entry.node, code, served));
+				}
+				if (info.table || entry.node === undefined) continue;
+				editsFor(edits, info.file).push(
+					...entryCategoryEdits(info.file, entry.node, served.category, writeRetryable),
+				);
+			}
+		}
+	}
+	return { edits, files: [...files], rewrites };
+}
+
+function entryCategoryEdits(
+	file: ProviderSourceFile,
+	node: TS.ObjectLiteralExpression,
+	category: string,
+	writeRetryable: boolean,
+): TextEdit[] {
+	const first = node.properties[0];
+	if (first === undefined) return [];
+	const text = file.text;
+	const at = first.getStart(file.source);
+	const fields = [
+		`category: ${JSON.stringify(category)}`,
+		...(writeRetryable ? ["retryable: false"] : []),
+	];
+	const multiline = text.slice(node.getStart(file.source) + 1, at).includes("\n");
+	const separator = multiline ? `,\n${lineIndentAt(text, at)}` : ", ";
+	return [{ start: at, end: at, text: `${fields.join(separator)}${separator}` }];
+}
+
+/**
+ * The throw sites errors-factory leaves to this step: a `new ProviderError`
+ * of a provider-owned code stating a literal category/retryable, or one
+ * inside a function that binds `errors`. A site whose values equal what the
+ * declaration serves becomes a reference (rewritten once the map is known);
+ * every other site is a residue naming both values and stays as written. A
+ * subclass site (`AuthError`, `ValidationError`, ...) is never rewritten; it
+ * is reported when the declaration serves something else than it did.
+ */
+function resolveThrowSites(
+	sites: ThrowSites,
+	views: ReadonlyMap<string, DeclaredView | null>,
+	rowConflicts: ReadonlySet<string>,
+	residues: MigrateFinding[],
+): Map<string, Reference[]> {
+	const items = new Map<string, Reference[]>();
+	const rewrite = (site: ThrowSite, code: string): void => {
+		const fileItems = items.get(site.file.path) ?? [];
+		fileItems.push({ node: site.node, code, site });
+		items.set(site.file.path, fileItems);
+	};
+	const shadowedResidue = (site: ThrowSite, code: string, at: number): MigrateFinding =>
+		finding(
+			site.file,
+			at,
+			ERRORS_HOIST_RULES.throwSiteShadowed,
+			`Throw site of ${JSON.stringify(code)} sits where a local \`${MAP_NAME}\` binding is in scope, so ${reference(code)}(...) here would not reach the map; it is left as new ProviderError(...).`,
+			`Rename the local \`${MAP_NAME}\`, then re-run apifuse migrate.`,
+		);
+	for (const [code, list] of sites) {
+		if (Object.hasOwn(SDK_ERROR_REGISTRY, code)) {
+			// A registered code: the site serves the registry unless a row of this
+			// provider departs from it, in which case it serves that row and stays.
+			const registry = SDK_ERROR_REGISTRY[code as SdkErrorCode];
+			for (const site of list) {
+				if (site.constructor !== "ProviderError" || site.localeKey || site.dynamic) continue;
+				if (
+					(site.category !== undefined && site.category !== registry.category) ||
+					(site.retryable !== undefined && site.retryable !== registry.retryable)
+				) {
+					continue; // errors-factory-throw-site-registry-conflict names it
+				}
+				const at = site.node.getStart(site.file.source);
+				if (rowConflicts.has(code)) {
+					residues.push(
+						finding(
+							site.file,
+							at,
+							ERRORS_HOIST_RULES.throwSiteRowConflict,
+							`Throw site of ${JSON.stringify(code)} serves this provider's own row for ${code}, which states a status, retryable or locale key that differs from the SDK registry (sdkErrors.${code}: ${registry.status}, retryable ${registry.retryable}); ${reference(code)}(...) would serve the registry, so the site is left as new ProviderError(...).`,
+							`Two choices: (a) accept the registry value: make every row of ${code} the registry's (sdkErrors.${code}, no own status, retryable or locale key) and re-run apifuse migrate; or (b) declare a distinct provider code for this condition (its own status, category and retryable) and throw it here.`,
+						),
+					);
+				} else if (site.shadowed) {
+					residues.push(shadowedResidue(site, code, at));
+				} else {
+					rewrite(site, code);
+				}
+			}
+			continue;
+		}
+		if (isSdkOwnedCode(code)) continue;
+		const view = views.get(code);
+		for (const site of list) {
+			if (site.constructor === "factory" || site.localeKey) continue;
+			const at = site.node.getStart(site.file.source);
+			const own =
+				site.constructor === "ProviderError" &&
+				!site.dynamic &&
+				(site.category !== undefined || site.retryable !== undefined || site.bindsScope);
+			if (view === undefined || view === null) {
+				if (own) {
+					residues.push(
+						finding(
+							site.file,
+							at,
+							ERRORS_HOIST_RULES.throwSiteUndeclared,
+							view === null
+								? `Throw site of ${JSON.stringify(code)}: the maps of this provider declare ${code} with different values, so what it serves cannot be checked; it is left as new ProviderError(...).`
+								: `Throw site of ${JSON.stringify(code)}: no defineErrors map in this provider declares ${code} to check what it serves against; it is left as new ProviderError(...).`,
+							`Declare ${code} once in the provider's defineErrors map (status, the category and retryable this site states, description), then re-run apifuse migrate.`,
+						),
+					);
+				}
+				continue;
+			}
+			const servedCategory = site.dynamic ? undefined : categoryServedBySite(site, view.status);
+			const categoryDiffers =
+				!site.dynamic && servedCategory !== undefined && servedCategory !== view.category;
+			const retryableDiffers = site.retryable !== undefined && site.retryable !== view.retryable;
+			if (own) {
+				if (site.shadowed) {
+					residues.push(shadowedResidue(site, code, at));
+				} else if (categoryDiffers || retryableDiffers) {
+					residues.push(throwSiteConflict(site, view, at, servedCategory));
+				} else {
+					rewrite(site, code);
+				}
+				continue;
+			}
+			if (site.constructor === "ProviderError") continue;
+			// A subclass site keeps its own per-throw value; a bare one serves the
+			// declaration, so it is reported on the run that gives the declaration
+			// a category it did not have (a map that already stated one served it
+			// to this site before).
+			if (!site.categoryStated && !view.resolved) {
+				if (retryableDiffers) residues.push(throwSiteConflict(site, view, at, servedCategory));
+				continue;
+			}
+			if (site.category === undefined && !site.dynamic && servedCategory === undefined) {
+				residues.push(
+					finding(
+						site.file,
+						at,
+						ERRORS_HOIST_RULES.throwSiteDerivedCategory,
+						`This ${site.constructor} site of ${JSON.stringify(code)} states no category, so the server derived one from the transport failure; the declaration now states ${JSON.stringify(view.category)}, which this site will serve instead.`,
+						`State the category this site means (category: "..." here, for one more release) or throw a distinct code declared with it, then re-run apifuse migrate.`,
+					),
+				);
+			} else if (categoryDiffers || retryableDiffers) {
+				residues.push(throwSiteConflict(site, view, at, servedCategory));
+			}
+		}
+	}
+	return items;
+}
+
+function throwSiteConflict(
+	site: ThrowSite,
+	view: DeclaredView,
+	at: number,
+	servedCategory: string | undefined,
+): MigrateFinding {
+	const stated = [
+		...(site.category !== undefined
+			? [`category ${JSON.stringify(site.category)}`]
+			: servedCategory !== undefined && servedCategory !== view.category
+				? [`category ${JSON.stringify(servedCategory)} (the ${site.constructor} default)`]
+				: []),
+		...(site.retryable !== undefined ? [`retryable ${site.retryable}`] : []),
+	].join(" and ");
+	const declared = `category ${JSON.stringify(view.category)}, retryable ${view.retryable}`;
+	const kept =
+		site.constructor === "ProviderError"
+			? "it is left as new ProviderError(...) and keeps serving its own value"
+			: `it is left as new ${site.constructor}(...) and keeps serving its own value for one more release`;
+	return finding(
+		site.file,
+		at,
+		ERRORS_HOIST_RULES.throwSiteConflict,
+		`Throw site of ${JSON.stringify(site.code)} serves ${stated}, and the declaration serves ${declared}; ${kept}.`,
+		"Two choices: (a) accept the declared value: delete the per-throw category/retryable here and re-run apifuse migrate; or (b) declare a distinct code for this condition in the defineErrors map (its own status, category and retryable) and throw that factory here.",
+	);
+}
+
+/** The `errors.CODE({ message, ...rest })` text errors-factory rule 1 writes, under the map name the file reaches the code by. */
+function throwSiteEdit(ts: TypeScriptModule, site: ThrowSite, mapName: string): TextEdit {
+	const node = site.node as TS.NewExpression;
+	const file = site.file;
+	const message = node.arguments?.[0];
+	const options = site.options as TS.ObjectLiteralExpression;
+	const messageText =
+		message === undefined ? '""' : file.text.slice(message.getStart(file.source), message.end);
+	const rest = options.properties
+		.filter((property) => {
+			if (!ts.isPropertyAssignment(property)) return true;
+			const name = propertyName(ts, property.name);
+			return name !== "code" && name !== "category" && name !== "retryable";
+		})
+		.map((property) => file.text.slice(property.getStart(file.source), property.end));
+	const accessor = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(site.code)
+		? `${mapName}.${site.code}`
+		: `${mapName}[${JSON.stringify(site.code)}]`;
+	return {
+		start: node.getStart(file.source),
+		end: node.end,
+		text: `${accessor}({ message: ${messageText}${rest.length === 0 ? "" : `, ${rest.join(", ")}`} })`,
+	};
+}
+
 /**
  * Every name that is a `defineErrors` map, or will be once `errors-factory`
  * runs (a `const NAME = [...]` whose rows carry `code` and `status`: rule 3's
  * own match), by file. The second form keeps a dry run, where the table is
  * still an array, reporting what the apply does.
  */
-/** Per file, each defineErrors map (or a table the factory converts) by name: its codes, and whether it is still a table. */
-type MapsByFile = Map<
-	string,
-	Map<string, { readonly codes: Set<string>; readonly table: boolean }>
->;
+/** Per file, each defineErrors map (or a table the factory converts) by name: its entries by code, and whether it is still a table. */
+type MapInfo = {
+	readonly file: ProviderSourceFile;
+	readonly codes: Map<string, MapEntry>;
+	readonly table: boolean;
+};
+type MapsByFile = Map<string, Map<string, MapInfo>>;
 
 function defineErrorsMaps(
 	ts: TypeScriptModule,
@@ -1197,7 +1871,7 @@ function defineErrorsMaps(
 ): MapsByFile {
 	const out: MapsByFile = new Map();
 	for (const file of sources) {
-		const names = new Map<string, { readonly codes: Set<string>; readonly table: boolean }>();
+		const names = new Map<string, MapInfo>();
 		for (const statement of file.source.statements) {
 			if (!ts.isVariableStatement(statement)) continue;
 			for (const declaration of statement.declarationList.declarations) {
@@ -1210,16 +1884,11 @@ function defineErrorsMaps(
 					ts.isCallExpression(initializer) &&
 					ts.isIdentifier(initializer.expression) &&
 					initializer.expression.text === "defineErrors";
-				const codes = new Set<string>();
+				let codes = new Map<string, MapEntry>();
 				if (isMap) {
 					const object = initializer.arguments[0];
 					if (object !== undefined && ts.isObjectLiteralExpression(object)) {
-						for (const property of object.properties) {
-							if (ts.isPropertyAssignment(property)) {
-								const name = propertyName(ts, property.name);
-								if (name !== undefined) codes.add(name);
-							}
-						}
+						codes = existingEntries(ts, object);
 					}
 				}
 				let isConvertibleTable = false;
@@ -1234,12 +1903,33 @@ function defineErrorsMaps(
 							isConvertibleTable = true;
 							const code = propertyOf(ts, row, "code");
 							const value = code === undefined ? undefined : literalString(ts, code.initializer);
-							if (value !== undefined) codes.add(value);
+							// A registered row becomes `sdkErrors.X` when its values equal the
+							// registry's; the view is the registry's either way it loads. A
+							// 409/410/422 row gets `upstream_rejected` from rule 3 (rejection-row).
+							if (value !== undefined) {
+								const fields = entryFields(ts, row);
+								codes.set(
+									value,
+									Object.hasOwn(SDK_ERROR_REGISTRY, value) &&
+										!rowDepartsFromRegistry(value as SdkErrorCode, fields)
+										? { sdk: true }
+										: {
+												...fields,
+												...(fields.category === undefined &&
+												fields.status !== undefined &&
+												REJECTION_STATUSES.has(fields.status)
+													? { category: "upstream_rejected" }
+													: {}),
+												sdk: false,
+												node: row,
+											},
+								);
+							}
 						}
 					}
 				}
 				if (isMap || isConvertibleTable) {
-					names.set(declaration.name.text, { codes, table: !isMap });
+					names.set(declaration.name.text, { file, codes, table: !isMap });
 				}
 			}
 		}
@@ -1265,7 +1955,7 @@ function mapsInScope(
 	file: ProviderSourceFile,
 ): Map<string, ReadonlySet<string>> {
 	const out = new Map<string, ReadonlySet<string>>();
-	for (const [name, entry] of maps.get(file.path) ?? []) out.set(name, entry.codes);
+	for (const [name, entry] of maps.get(file.path) ?? []) out.set(name, new Set(entry.codes.keys()));
 	for (const declaration of importsOf(ts, file.source)) {
 		const specifier = importSpecifierOf(ts, declaration);
 		if (specifier === undefined) continue;
@@ -1273,7 +1963,7 @@ function mapsInScope(
 		if (target === undefined) continue;
 		for (const [local, imported] of namedImportsOf(ts, declaration)) {
 			const entry = maps.get(target)?.get(imported);
-			if (entry !== undefined && !out.has(local)) out.set(local, entry.codes);
+			if (entry !== undefined && !out.has(local)) out.set(local, new Set(entry.codes.keys()));
 		}
 	}
 	return out;
@@ -1316,25 +2006,84 @@ function findExistingMap(
 function existingEntries(
 	ts: TypeScriptModule,
 	object: TS.ObjectLiteralExpression,
-): Map<string, { status?: number; retryable?: boolean; sdk: boolean }> {
-	const out = new Map<string, { status?: number; retryable?: boolean; sdk: boolean }>();
+): Map<string, MapEntry> {
+	const out = new Map<string, MapEntry>();
 	for (const property of object.properties) {
 		if (!ts.isPropertyAssignment(property)) continue;
 		const name = propertyName(ts, property.name);
 		if (name === undefined) continue;
 		const value = unwrapExpression(ts, property.initializer);
 		if (ts.isObjectLiteralExpression(value)) {
-			const status = propertyOf(ts, value, "status");
-			const retryable = propertyOf(ts, value, "retryable");
-			out.set(name, {
-				sdk: false,
-				...(status === undefined ? {} : { status: literalNumber(ts, status.initializer) }),
-				...(retryable === undefined
-					? {}
-					: { retryable: literalBoolean(ts, retryable.initializer) }),
-			});
+			out.set(name, { ...entryFields(ts, value), sdk: false, node: value });
 		} else {
 			out.set(name, { sdk: true });
+		}
+	}
+	return out;
+}
+
+/** The literal status, retryable and category an entry (or a table row) states; a non-literal value reads as absent. */
+function entryFields(
+	ts: TypeScriptModule,
+	value: TS.ObjectLiteralExpression,
+): { status?: number; retryable?: boolean; category?: string; localeKey?: boolean } {
+	const status = propertyOf(ts, value, "status");
+	const retryable = propertyOf(ts, value, "retryable");
+	const category = propertyOf(ts, value, "category");
+	const localeKey =
+		propertyOf(ts, value, "messageKey") !== undefined ||
+		propertyOf(ts, value, "fixKey") !== undefined;
+	const statusValue = status === undefined ? undefined : literalNumber(ts, status.initializer);
+	const retryableValue =
+		retryable === undefined ? undefined : literalBoolean(ts, retryable.initializer);
+	const categoryValue =
+		category === undefined ? undefined : literalString(ts, category.initializer);
+	return {
+		...(statusValue === undefined ? {} : { status: statusValue }),
+		...(retryableValue === undefined ? {} : { retryable: retryableValue }),
+		...(categoryValue === undefined ? {} : { category: categoryValue }),
+		...(localeKey ? { localeKey } : {}),
+	};
+}
+
+/** True when a row or entry under a registered key states a status, retryable or locale key the registry's row does not serve. */
+function rowDepartsFromRegistry(
+	code: SdkErrorCode,
+	fields: { status?: number; retryable?: boolean; localeKey?: boolean },
+): boolean {
+	const registry = SDK_ERROR_REGISTRY[code];
+	return (
+		(fields.status !== undefined && fields.status !== registry.status) ||
+		(fields.retryable !== undefined && fields.retryable !== registry.retryable) ||
+		fields.localeKey === true
+	);
+}
+
+/**
+ * The registered codes some row of this provider declares with its own
+ * values (an inline row this step refused, a table row or map entry under
+ * the registered key): a throw site of such a code serves that row, and
+ * `errors.CODE(...)` would serve the registry, so the site stays.
+ */
+function registryRowConflicts(
+	declarations: ReadonlyMap<string, DeclarationOrResidue>,
+	maps: MapsByFile,
+): Set<string> {
+	const out = new Set<string>();
+	for (const [code, declaration] of declarations) {
+		if (Object.hasOwn(SDK_ERROR_REGISTRY, code) && declaration.kind === "residue") out.add(code);
+	}
+	for (const byName of maps.values()) {
+		for (const info of byName.values()) {
+			for (const [code, entry] of info.codes) {
+				if (
+					!entry.sdk &&
+					Object.hasOwn(SDK_ERROR_REGISTRY, code) &&
+					rowDepartsFromRegistry(code as SdkErrorCode, entry)
+				) {
+					out.add(code);
+				}
+			}
 		}
 	}
 	return out;
