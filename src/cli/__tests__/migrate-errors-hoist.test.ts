@@ -312,17 +312,21 @@ describe("errors-hoist", () => {
 		// LEGACY_TABLE's row once errors-factory (which always runs with this
 		// step under apifuse migrate) has made the table a map.
 		expect(result.filesChanged).toContain("shared.ts");
-		expect(result.rewrites).toBe(9);
+		// Two more than the apply: the categories it fills into LEGACY_TABLE's and
+		// COMBINED_TABLE's rows once errors-factory has made the tables maps.
+		expect(result.rewrites).toBe(10);
 		// The dry run knows LEGACY_TABLE becomes a map and that the list spreading
 		// it stays whole (a call beside it): that spread would throw at import.
+		// COMBINED_TABLE spreads it too, but rule 3 converts that table as well,
+		// so the spread lands in an object and is not named.
 		const spread = result.residues.find((residue) => residue.ruleId === ERRORS_HOIST_RULES.mapSpreadInArray);
 		expect(`${spread?.file}:${spread?.line}`).toBe("operations/detail.ts:20");
 		expect(spread?.message).toBe(
 			"...LEGACY_TABLE spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
 		);
-		expect(table(result.residues).filter((line) => line.includes("detail.ts:20"))).toEqual([
-			`${ERRORS_HOIST_RULES.mapSpreadInArray} operations/detail.ts:20`,
-		]);
+		expect(
+			table(result.residues).filter((line) => line.startsWith(ERRORS_HOIST_RULES.mapSpreadInArray)),
+		).toEqual([`${ERRORS_HOIST_RULES.mapSpreadInArray} operations/detail.ts:20`]);
 		expect(existsSync(join(providerRoot, "domain/errors.ts"))).toBe(false);
 		expect(
 			Object.fromEntries(walk(providerRoot).map((file) => [file, readFileSync(file, "utf8")])),
@@ -384,6 +388,10 @@ describe("a site the factory cannot replace", () => {
 			'throw new ValidationError("The shop is down.", {\n\t\tcode: "SHOP_DOWN",\n\t\tcategory: "upstream_http",\n\t\tretryable: false,\n\t\tdetails: { detail },\n\t});',
 		);
 		expect(sites).toContain('throw new ValidationError("No item matches.", { code: "NOT_FOUND" });');
+		// A bare ProviderError site of a registered code, with every list of this
+		// provider readable and no row departing: the registry factory.
+		expect(sites).toContain('throw errors.NOT_FOUND({ message: "No item matches." });');
+		expect(read("domain/errors.ts")).toContain("\tNOT_FOUND: sdkErrors.NOT_FOUND,\n");
 		expect(sites).toContain(
 			'throw new ProviderError(`Secret ${name} missing.`, { code: "MISSING_SECRET" });',
 		);
@@ -423,11 +431,11 @@ describe("a site the factory cannot replace", () => {
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:8`,
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:17`,
 			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:21`,
-			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:33`,
-			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:41`,
+			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:37`,
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:45`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:49`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:61`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:49`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:53`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:65`,
 		]);
 		expect(result.residues[4]?.message).toBe(
 			'Throw site of "MIXED_INPUT" (ValidationError) served category "input_validation" (the ValidationError default under a row that states no category), and the declaration this run writes serves category "provider_error", retryable false; the declaration replaces that default, so this site serves category "provider_error" from this run on. The site stays a ValidationError and the change is named here.',
@@ -449,7 +457,7 @@ describe("a site the factory cannot replace", () => {
 		expect(again.rewrites).toBe(0);
 		expect(again.residues.map((residue) => residue.ruleId)).toEqual(
 			result.residues
-				.filter((residue) => residue.line !== 41 && residue.line !== 45)
+				.filter((residue) => residue.line !== 45 && residue.line !== 49)
 				.map((residue) => residue.ruleId),
 		);
 	});
@@ -461,11 +469,11 @@ describe("a site the factory cannot replace", () => {
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:8`,
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:17`,
 			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:21`,
-			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:33`,
-			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:41`,
+			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:37`,
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:45`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:49`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:61`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:49`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:53`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:65`,
 		]);
 	});
 });
@@ -488,13 +496,32 @@ describe("an errorCodes this step cannot read", () => {
 			expect(search).toContain(
 				'throw new ValidationError("The query was rejected.", {\n\t\tcode: "QUERY_REJECTED",\n\t\tcategory: "input_validation",\n\t\tretryable: false,\n\t\tdetails: { query },\n\t});',
 			);
-			const [list, site] = result.residues;
-			expect(table(result.residues)).toEqual([
-				`${fixture.endsWith("call") ? ERRORS_HOIST_RULES.listNotReadable : ERRORS_HOIST_RULES.spreadNotATable} operations/search.ts:19`,
-				`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/search.ts:27`,
-			]);
+			const call = fixture.endsWith("call");
+			const [list, ...rest] = result.residues;
+			const site = rest[rest.length - 1];
+			expect(table(result.residues)).toEqual(
+				call
+					? [
+							`${ERRORS_HOIST_RULES.listNotReadable} operations/search.ts:19`,
+							`${ERRORS_HOIST_RULES.throwSiteRowUnknown} operations/search.ts:27`,
+							`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/search.ts:31`,
+						]
+					: [
+							`${ERRORS_HOIST_RULES.spreadNotATable} operations/search.ts:19`,
+							`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/search.ts:27`,
+						],
+			);
+			if (call) {
+				// A registered code's ProviderError site is not rewritten to the
+				// registry factory while rows this run cannot read exist: the call
+				// may return a row of NOT_FOUND that departs from the registry.
+				expect(search).toContain('throw new ProviderError("No item matches.", { code: "NOT_FOUND" });');
+				expect(rest[0]?.message).toBe(
+					'Throw site of "NOT_FOUND": an errorCodes list of this provider holds rows this run cannot read (a list named above), and such a row of NOT_FOUND may state a status or retryable that differs from the SDK registry (sdkErrors.NOT_FOUND: 404, retryable false); errors.NOT_FOUND(...) would serve the registry, so the site is left as new ProviderError(...).',
+				);
+			}
 			expect(list?.message).toContain(
-				fixture.endsWith("call")
+				call
 					? "errorCodes is a call, whose rows this step cannot read"
 					: "errorCodes names STRICT_ERROR_CODES, which is not declared with defineErrors",
 			);
@@ -508,6 +535,87 @@ describe("an errorCodes this step cannot read", () => {
 			);
 		});
 	}
+});
+
+describe("a map another file must import", () => {
+	beforeEach(() => stage("migrate-errors-hoist-unexported"));
+
+	it("exports the declaration it imports, and never imports one it cannot export", () => {
+		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
+		expect(result.filesChanged).toEqual(["operations/search.ts", "upstream/client.ts"]);
+		const search = read("operations/search.ts");
+		expect(search).toContain("\nexport const SEARCH_ERRORS = defineErrors({\n");
+		// BLOCKED_ERRORS cannot be exported under its name (an export specifier
+		// takes it), so no import is written for it and the site is named.
+		expect(search).toContain("\nconst BLOCKED_ERRORS = defineErrors({\n");
+		const client = read("upstream/client.ts");
+		expect(client).toContain(
+			'import { ProviderError } from "@apifuse/provider-sdk/provider";\nimport { SEARCH_ERRORS } from "../operations/search";\n',
+		);
+		expect(client).toContain(
+			'throw SEARCH_ERRORS.QUERY_REJECTED({ message: "The query was rejected.", details: { query } });',
+		);
+		expect(client).not.toContain("BLOCKED_ERRORS } from");
+		expect(client).toContain(
+			'throw new ProviderError("The query was blocked.", { code: "QUERY_BLOCKED", category: "anti_bot_blocked", retryable: false });',
+		);
+		expect(table(result.residues)).toEqual([
+			`${ERRORS_HOIST_RULES.throwSiteUndeclared} upstream/client.ts:8`,
+		]);
+		expect(result.residues[0]?.message).toBe(
+			'Throw site of "QUERY_BLOCKED" cannot reach a defineErrors map that declares QUERY_BLOCKED from this file (BLOCKED_ERRORS in operations/search.ts declares it but is not exported, and this step cannot export it); it is left as new ProviderError(...).',
+		);
+		for (const file of ["operations/search.ts", "upstream/client.ts"]) expect(parses(file)).toBe(true);
+		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(again.rewrites).toBe(0);
+		expect(again.filesChanged).toEqual([]);
+	});
+
+	it("dry run decides the same export and import", () => {
+		const dry = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(dry.filesChanged).toEqual(["operations/search.ts", "upstream/client.ts"]);
+		expect(dry.rewrites).toBe(1);
+		expect(table(dry.residues)).toEqual([`${ERRORS_HOIST_RULES.throwSiteUndeclared} upstream/client.ts:8`]);
+	});
+});
+
+describe("a code two maps declare", () => {
+	it("resolves through the map this run imports for another site, so the first run is the fixed point", () => {
+		stage("migrate-errors-hoist-fixpoint");
+		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
+		expect(result.filesChanged).toEqual(["upstream/client.ts"]);
+		expect(result.residues).toEqual([]);
+		expect(read("upstream/client.ts")).toBe(
+			'import { ProviderError } from "@apifuse/provider-sdk/provider";\nimport { NOL_ERRORS } from "../errors";\n\nexport function unavailable(): never {\n\tthrow NOL_ERRORS.UPSTREAM_UNAVAILABLE({ message: "Unavailable." });\n}\n\nexport function authRejected(): never {\n\tthrow NOL_ERRORS.UPSTREAM_AUTH_REJECTED({ message: "Auth rejected." });\n}\n',
+		);
+		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(again.rewrites).toBe(0);
+		expect(again.residues).toEqual([]);
+	});
+});
+
+describe("a registered row behind a spread this step does not convert", () => {
+	it("keeps the site of a code whose literal row departs from the registry and rewrites the one whose row matches", () => {
+		stage("migrate-errors-hoist-satisfies");
+		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
+		const search = read("operations/search.ts");
+		// The `satisfies` table is an array rule 3 leaves; its rows are still read:
+		// UPSTREAM_SCHEMA_ERROR states 500 against the registry's 502 (the site
+		// would flip to 502 as errors.UPSTREAM_SCHEMA_ERROR), NOT_FOUND matches.
+		expect(search).toContain(
+			'throw new ProviderError("The page shape changed.", { code: "UPSTREAM_SCHEMA_ERROR" });',
+		);
+		expect(search).toContain('throw errors.NOT_FOUND({ message: "No item matches." });');
+		expect(table(result.residues)).toEqual([
+			`${ERRORS_HOIST_RULES.spreadNotATable} operations/search.ts:13`,
+			`${ERRORS_HOIST_RULES.throwSiteRowConflict} operations/search.ts:15`,
+		]);
+		expect(result.residues[1]?.message).toContain(
+			'serves this provider\'s own row for UPSTREAM_SCHEMA_ERROR, which states a status, retryable or locale key that differs from the SDK registry (sdkErrors.UPSTREAM_SCHEMA_ERROR: 502, retryable false)',
+		);
+		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(again.rewrites).toBe(0);
+	});
 });
 
 describe("errors-factory.yml registry lists", () => {

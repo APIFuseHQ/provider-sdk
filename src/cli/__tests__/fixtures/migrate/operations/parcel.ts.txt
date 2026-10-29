@@ -1,0 +1,13 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+
+const PARCEL_ERRORS = [
+	{ code: "PARCEL_LOST", status: 404, description: "The parcel was lost.", retryable: false },
+] as const;
+
+export const parcelOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.parcel.description",
+	errorCodes: [...PARCEL_ERRORS],
+	handler: async (input, ctx) => ctx.fetch(input.parcelId),
+});

@@ -1,4 +1,4 @@
-import { ValidationError, defineOperation } from "@apifuse/provider-sdk/provider";
+import { ProviderError, ValidationError, defineOperation } from "@apifuse/provider-sdk/provider";
 
 import type { ProviderContext } from "../index";
 import { strictErrorCodes } from "../upstream/codes";
@@ -22,6 +22,10 @@ export const strictOperation = defineOperation<ProviderContext>()({
 		return ctx.fetch(input.query);
 	},
 });
+
+function notFound(): never {
+	throw new ProviderError("No item matches.", { code: "NOT_FOUND" });
+}
 
 function rejected(query: string): never {
 	throw new ValidationError("The query was rejected.", {

@@ -8,3 +8,4 @@ export const COMMON_ERRORS = defineErrors({
 	BLOCKED: { status: 502, category: "anti_bot_blocked", retryable: true, description: "Blocked; a retry may pass." },
 });
 export const LEGACY_TABLE = [{ code: "TABLE_ROW", status: 400, description: "Still a table." }] as const;
+export const COMBINED_TABLE = [...LEGACY_TABLE, { code: "COMBINED_ROW", status: 404, description: "A table spreading a table." }] as const;

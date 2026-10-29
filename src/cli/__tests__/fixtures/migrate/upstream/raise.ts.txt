@@ -1,0 +1,21 @@
+import { ProviderError, ValidationError } from "@apifuse/provider-sdk/provider";
+
+export function raise(
+	message: string,
+	code: string,
+	options: { category?: "upstream_http" | "input_validation"; retryable?: boolean },
+): never {
+	throw new ProviderError(message, {
+		code,
+		...(options.category ? { category: options.category } : {}),
+		...(options.retryable === undefined ? {} : { retryable: options.retryable }),
+	});
+}
+
+export function raiseTyped(type: string, reason: string): never {
+	throw new ValidationError(reason, { code: type, category: "input_validation", retryable: false });
+}
+
+export function raiseGone(flag: boolean): never {
+	throw new ProviderError("The item was removed.", { code: "ITEM_GONE", ...(flag ? { category: "upstream_http" } : {}) });
+}

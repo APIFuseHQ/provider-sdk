@@ -25,6 +25,10 @@ export function badId(id: string): never {
 	throw new ValidationError("The id is malformed.", { code: "BAD_ID", category: "input_validation", retryable: false, details: { id } });
 }
 
+export function notFoundUpstream(): never {
+	throw new ProviderError("No item matches.", { code: "NOT_FOUND" });
+}
+
 export function notFoundInput(): never {
 	throw new ValidationError("No item matches.", { code: "NOT_FOUND", category: "upstream_http", retryable: false });
 }

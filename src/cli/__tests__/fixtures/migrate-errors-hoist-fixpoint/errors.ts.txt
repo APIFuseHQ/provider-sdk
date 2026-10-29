@@ -1,0 +1,6 @@
+import { defineErrors } from "@apifuse/provider-sdk/provider";
+
+export const NOL_ERRORS = defineErrors({
+	UPSTREAM_AUTH_REJECTED: { status: 401, category: "upstream_auth", retryable: false, description: "Auth rejected." },
+	UPSTREAM_UNAVAILABLE: { status: 503, category: "upstream_http", retryable: true, description: "Unavailable." },
+});

@@ -117,6 +117,8 @@ export const ERRORS_HOIST_RULES = {
 	throwSiteDynamicOption: "errors-hoist-throw-site-dynamic-option",
 	listNotReadable: "errors-hoist-list-not-readable",
 	mapSpreadInArray: "errors-hoist-map-spread-in-array",
+	throwSiteRowUnknown: "errors-hoist-throw-site-row-unknown",
+	throwSiteDynamicCode: "errors-hoist-throw-site-dynamic-code",
 } as const;
 
 export type ErrorsHoistOptions = {
@@ -222,8 +224,10 @@ type ThrowSite = {
 	readonly category?: string;
 	/** The literal per-throw retryable, when the site states one. */
 	readonly retryable?: boolean;
-	/** A category or retryable written as a shorthand or a non-literal value. */
+	/** A category or retryable written as a shorthand, a non-literal value, or inside a spread whose text names it. */
 	readonly dynamic: boolean;
+	/** The dynamic option sits in a `...spread` of the options object (errors-factory's own rule does not see it). */
+	readonly spreadOption: boolean;
 	/** The site writes a category (literal or not), so the bare default does not apply. */
 	readonly categoryStated: boolean;
 	readonly localeKey: boolean;
@@ -247,6 +251,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	const { lists, opaque } = collectLists(ts, sources, residues);
 	const existing = findExistingMap(ts, sources);
 	const sites = collectThrowSites(ts, sources);
+	residues.push(...collectDynamicCodeSites(ts, sources));
 	const declarations = declareCodes(ts, lists, existing, sites, residues, notes);
 
 	const hoisted = new Set<string>();
@@ -275,10 +280,35 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	// list may list any code, so every code then counts as still declared by a
 	// legacy row somewhere.
 	let opaqueRows = opaque;
+	// Rows this run cannot read at all: a list built by a call or a property
+	// access, a spread or a name bound to something that is not a literal in
+	// this provider's sources. A literal array or row behind a name the step
+	// does not convert is still read (for the registry conflicts below).
+	let rowsUnknown = opaque;
+	const readable = (file: ProviderSourceFile, name: string): boolean => {
+		const bound = namedRowConstant(ts, file, name, sources);
+		if (bound === undefined) return false;
+		const value = unwrapExpression(ts, bound.initializer);
+		return (
+			ts.isArrayLiteralExpression(value) ||
+			ts.isObjectLiteralExpression(value) ||
+			ts.isStringLiteral(value) ||
+			ts.isNumericLiteral(value)
+		);
+	};
 	const leaveRows = (list: ErrorList): void => {
 		for (const entry of list.entries) {
-			if (entry.kind === "row") leftover.add(entry.row.code);
-			else opaqueRows = true;
+			if (entry.kind === "row") {
+				leftover.add(entry.row.code);
+				continue;
+			}
+			opaqueRows = true;
+			if (entry.kind === "spread") {
+				if (entry.name === undefined || !readable(list.file, entry.name)) rowsUnknown = true;
+			} else {
+				const value = unwrapExpression(ts, entry.node);
+				if (!ts.isIdentifier(value) || !readable(list.file, value.text)) rowsUnknown = true;
+			}
 		}
 	};
 	// The `...MAP` spreads this step rewrites to `...Object.values(MAP)`; any
@@ -295,6 +325,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 				});
 			} else {
 				opaqueRows = true;
+				if (!readable(list.file, list.wholeName)) rowsUnknown = true;
 				residues.push(
 					finding(
 						list.file,
@@ -403,12 +434,15 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 			});
 		}
 	}
+	const literalRows = literalRegistryRows(ts, sources);
+	if (literalRows.unreadable) rowsUnknown = true;
 	const { items: siteItems, stripped } = resolveThrowSites(
 		sites,
 		views,
-		registryRowConflicts(declarations, maps),
+		new Set([...registryRowConflicts(declarations, maps), ...literalRows.departing]),
 		codeContractConflicts(lists, maps, sites),
 		(code) => opaqueRows || leftover.has(code),
+		rowsUnknown,
 		residues,
 	);
 	for (const site of stripped) {
@@ -611,14 +645,35 @@ function resolveReferences(
 	},
 ): number {
 	let rewrites = 0;
-	const declaringMaps = (code: string): Array<{ path: string; name: string }> => {
-		const out: Array<{ path: string; name: string }> = [];
+	const declaringMaps = (code: string): Array<{ path: string; name: string; info: MapInfo }> => {
+		const out: Array<{ path: string; name: string; info: MapInfo }> = [];
 		for (const [path, byName] of context.maps) {
 			for (const [name, entry] of byName) {
-				if (name !== MAP_NAME && entry.codes.has(code)) out.push({ path, name });
+				if (name !== MAP_NAME && entry.codes.has(code)) out.push({ path, name, info: entry });
 			}
 		}
 		return out;
+	};
+	// A map another file imports must be exported: this step adds `export` to
+	// the declaration when it can (a top-level `const` with no other modifier
+	// and no export specifier taking the name), once per map; else no import
+	// is written for it (ESM refuses the link and the provider does not load).
+	const exported = new Set<TS.VariableStatement>();
+	const exportable = (info: MapInfo, name: string): boolean => {
+		if (info.exported || exported.has(info.statement)) return true;
+		if ((info.statement.modifiers ?? []).length > 0) return false;
+		const taken = info.file.source.statements.some(
+			(statement) =>
+				ts.isExportDeclaration(statement) &&
+				statement.exportClause !== undefined &&
+				ts.isNamedExports(statement.exportClause) &&
+				statement.exportClause.elements.some((element) => element.name.text === name),
+		);
+		if (taken) return false;
+		exported.add(info.statement);
+		const at = info.statement.getStart(info.file.source);
+		editsFor(context.edits, info.file).push({ start: at, end: at, text: "export " });
+		return true;
 	};
 	for (const { file, bound, items, ownErrors } of references) {
 		const scope = mapsInScope(ts, context.maps, file);
@@ -664,6 +719,14 @@ function resolveReferences(
 				text: name,
 			});
 		};
+		const inScope = (code: string): string | undefined =>
+			[...scope].find(([name, codes]) => name !== MAP_NAME && codes.has(code))?.[0];
+		// First pass: the module map, a map already in scope, or the one remote map
+		// that declares the code (imported now, and from then on in this file's
+		// scope). Second pass: a code two maps declare resolves when the first
+		// pass imported one of them, so the run is its own fixed point.
+		const unresolved: Reference[] = [];
+		const unexported = new Map<Reference, string>();
 		for (const item of items) {
 			const code = item.code;
 			if (context.moduleCodes.has(code)) {
@@ -671,19 +734,37 @@ function resolveReferences(
 				if (item.site !== undefined) retarget(item, MAP_NAME);
 				continue;
 			}
-			const local = [...scope].find(([name, codes]) => name !== MAP_NAME && codes.has(code));
+			const local = inScope(code);
 			if (local !== undefined) {
-				retarget(item, local[0]);
+				retarget(item, local);
 				continue;
 			}
 			const remote = declaringMaps(code).filter((candidate) => candidate.path !== file.path);
 			const [only] = remote;
 			if (only !== undefined && remote.length === 1 && !bound.has(only.name)) {
-				if (ensureImport(ts, file, only.name, only.path, context.residues, context.imports)) {
+				if (!exportable(only.info, only.name)) {
+					unexported.set(item, `${only.name} in ${only.path} declares it but is not exported, and this step cannot export it`);
+				} else if (ensureImport(ts, file, only.name, only.path, context.residues, context.imports)) {
+					scope.set(only.name, new Set(only.info.codes.keys()));
 					retarget(item, only.name);
 					continue;
 				}
 			}
+			unresolved.push(item);
+		}
+		for (const item of unresolved) {
+			const code = item.code;
+			const local = inScope(code);
+			if (local !== undefined) {
+				retarget(item, local);
+				continue;
+			}
+			const remote = declaringMaps(code).filter((candidate) => candidate.path !== file.path);
+			const why =
+				unexported.get(item) ??
+				(remote.length > 1
+					? `${remote.length} maps declare it: ${remote.map((candidate) => `${candidate.name} in ${candidate.path}`).join(", ")}`
+					: undefined);
 			if (item.site !== undefined) {
 				// A site this step owns is never rewritten to a name no map declares.
 				context.residues.push(
@@ -691,7 +772,7 @@ function resolveReferences(
 						file,
 						item.node.getStart(file.source),
 						ERRORS_HOIST_RULES.throwSiteUndeclared,
-						`Throw site of ${JSON.stringify(code)} cannot reach a defineErrors map that declares ${code} from this file${remote.length > 1 ? ` (${remote.length} maps declare it: ${remote.map((candidate) => `${candidate.name} in ${candidate.path}`).join(", ")})` : ""}; it is left as new ProviderError(...).`,
+						`Throw site of ${JSON.stringify(code)} cannot reach a defineErrors map that declares ${code} from this file${why === undefined ? "" : ` (${why})`}; it is left as new ProviderError(...).`,
 						`Declare ${code} once in the provider's defineErrors map (status, the category and retryable this site states, description), then re-run apifuse migrate.`,
 					),
 				);
@@ -703,7 +784,7 @@ function resolveReferences(
 					file,
 					item.node.getStart(file.source),
 					ERRORS_HOIST_RULES.referenceUndeclared,
-					`${MAP_NAME}.${code} names a code no defineErrors map in this provider declares${remote.length > 1 ? ` (${remote.length} maps declare it: ${remote.map((candidate) => `${candidate.name} in ${candidate.path}`).join(", ")})` : context.modulePath === undefined ? " (and the provider has no errors map)" : ""}; tsc names it until it is declared.`,
+					`${MAP_NAME}.${code} names a code no defineErrors map in this provider declares${why !== undefined ? ` (${why})` : context.modulePath === undefined ? " (and the provider has no errors map)" : ""}; tsc names it until it is declared.`,
 					`Declare ${code} in the provider's defineErrors map (status, category, description) or throw a declared code here, then re-run apifuse migrate.`,
 				),
 			);
@@ -946,7 +1027,8 @@ function mapSpreadsInArrays(
 				ts.isSpreadElement(node) &&
 				ts.isArrayLiteralExpression(node.parent) &&
 				ts.isIdentifier(node.expression) &&
-				!rewritten.has(node)
+				!rewritten.has(node) &&
+				!isRule3TableArray(ts, node.parent)
 			) {
 				inScope ??= mapsInScope(ts, maps, file);
 				const name = node.expression.text;
@@ -1457,6 +1539,76 @@ function categoryFromSitesNote(
  * `errors.CODE({...})` errors-factory already produced from a bare site
  * (it serves the declaration, which a bare site always did). By code.
  */
+/** A top-level `...spread` of the options object whose text names `category` or `retryable` (the lint's own reading of such a spread). */
+function spreadNamesOption(ts: TypeScriptModule, file: ProviderSourceFile, options: TS.ObjectLiteralExpression): boolean {
+	return options.properties.some(
+		(property) =>
+			ts.isSpreadAssignment(property) &&
+			/(?<![A-Za-z0-9_$])(category|retryable)(?![A-Za-z0-9_$])/.test(
+				file.text.slice(property.getStart(file.source), property.end),
+			),
+	);
+}
+
+/**
+ * Every `new ProviderError(...)` (or `AuthError` / `ValidationError`) whose
+ * code is not a string literal (a parameter, a variable, absent) and that
+ * states a per-throw `category` or `retryable` in any form. No rule can read
+ * what it serves, the lint counts it as a legacy-error-options user, and the
+ * fleet's exit-0 criterion needs it named.
+ */
+function collectDynamicCodeSites(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+): MigrateFinding[] {
+	const out: MigrateFinding[] = [];
+	for (const file of sources) {
+		const visit = (node: TS.Node): void => {
+			if (
+				ts.isNewExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				(node.expression.text === "ProviderError" ||
+					node.expression.text === "AuthError" ||
+					node.expression.text === "ValidationError")
+			) {
+				const options = node.arguments?.[1];
+				if (options !== undefined && ts.isObjectLiteralExpression(options)) {
+					const codePair = propertyOf(ts, options, "code");
+					const literal = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
+					const codeShorthand = options.properties.some(
+						(property) => ts.isShorthandPropertyAssignment(property) && property.name.text === "code",
+					);
+					const stated = ["category", "retryable"].filter(
+						(name) =>
+							propertyOf(ts, options, name) !== undefined ||
+							options.properties.some(
+								(property) => ts.isShorthandPropertyAssignment(property) && property.name.text === name,
+							),
+					);
+					if (literal === undefined && (stated.length > 0 || spreadNamesOption(ts, file, options))) {
+						const how =
+							codePair === undefined && !codeShorthand
+								? "states no code"
+								: "takes its code from a variable";
+						out.push(
+							finding(
+								file,
+								node.getStart(file.source),
+								ERRORS_HOIST_RULES.throwSiteDynamicCode,
+								`new ${node.expression.text}(...) here ${how} and sets ${stated.length > 0 ? stated.join(" and ") : "category or retryable through a spread"} per throw; no step can tell which declaration it serves, so it is left as written and apifuse check keeps reporting it under legacy-error-options.`,
+								"Make each caller throw its declared factory (errors.CODE({ message, details })), which carries the category and retryable, and delete the per-throw option here; then re-run apifuse migrate.",
+							),
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file.source);
+	}
+	return out;
+}
+
 function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourceFile[]): ThrowSites {
 	const out = new Map<string, ThrowSite[]>();
 	const add = (site: ThrowSite): void => {
@@ -1476,6 +1628,7 @@ function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourc
 					const codePair = propertyOf(ts, options, "code");
 					const code = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
 					if (code !== undefined) {
+						const spreadOption = spreadNamesOption(ts, file, options);
 						const category = propertyOf(ts, options, "category");
 						const retryable = propertyOf(ts, options, "retryable");
 						const categoryValue =
@@ -1503,8 +1656,10 @@ function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourc
 							...(retryableValue === undefined ? {} : { retryable: retryableValue }),
 							dynamic:
 								shorthand ||
+								spreadOption ||
 								(category !== undefined && categoryValue === undefined) ||
 								(retryable !== undefined && retryableValue === undefined),
+							spreadOption,
 							categoryStated,
 							localeKey:
 								propertyOf(ts, options, "messageKey") !== undefined ||
@@ -1531,6 +1686,7 @@ function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourc
 						constructor: "factory",
 						code,
 						dynamic: false,
+						spreadOption: false,
 						categoryStated: false,
 						localeKey: false,
 						shadowed: false,
@@ -1810,6 +1966,8 @@ function resolveThrowSites(
 	rowConflicts: ReadonlySet<string>,
 	codeConflicts: ReadonlyMap<string, readonly string[]>,
 	legacyRowStays: (code: string) => boolean,
+	/** Some errorCodes of this provider could not be read (a spread, a call, a name that is not a map): any registered code may have a row there that departs from the registry. */
+	rowsUnknown: boolean,
 	residues: MigrateFinding[],
 ): { items: Map<string, Reference[]>; stripped: ThrowSite[] } {
 	const items = new Map<string, Reference[]>();
@@ -1873,7 +2031,13 @@ function resolveThrowSites(
 					}
 					continue;
 				}
-				if (site.localeKey || site.dynamic) continue;
+				if (site.localeKey) continue;
+				if (site.dynamic) {
+					if (site.spreadOption) {
+						residues.push(dynamicOptionResidue(site, site.node.getStart(site.file.source)));
+					}
+					continue; // else errors-factory-throw-site-dynamic-option names it
+				}
 				if (
 					(site.category !== undefined && site.category !== registry.category) ||
 					(site.retryable !== undefined && site.retryable !== registry.retryable)
@@ -1883,6 +2047,19 @@ function resolveThrowSites(
 				const at = site.node.getStart(site.file.source);
 				if (rowConflicts.has(code)) {
 					residues.push(rowConflictResidue(site, code, registry, at));
+				} else if (rowsUnknown) {
+					// A row of this code this run could not read may depart from the
+					// registry; the site would then serve that row, and errors.CODE(...)
+					// the registry. The site stays until the rows can be read.
+					residues.push(
+						finding(
+							site.file,
+							at,
+							ERRORS_HOIST_RULES.throwSiteRowUnknown,
+							`Throw site of ${JSON.stringify(code)}: an errorCodes list of this provider holds rows this run cannot read (a list named above), and such a row of ${code} may state a status or retryable that differs from the SDK registry (sdkErrors.${code}: ${registry.status}, retryable ${registry.retryable}); ${reference(code)}(...) would serve the registry, so the site is left as new ProviderError(...).`,
+							"Write every errorCodes row as a literal or a defineErrors map (fix what names the lists above), then re-run apifuse migrate; the site is then rewritten.",
+						),
+					);
 				} else if (site.shadowed) {
 					residues.push(shadowedResidue(site, code, at));
 				} else {
@@ -1898,7 +2075,7 @@ function resolveThrowSites(
 			for (const site of list) {
 				if (site.constructor === "factory" || declarationIgnoredFor(site.constructor)) continue;
 				if (!optioned(site)) continue;
-				if (site.dynamic && site.constructor === "ProviderError") continue; // errors-factory-throw-site-dynamic-option names it
+				if (site.dynamic && site.constructor === "ProviderError" && !site.spreadOption) continue; // errors-factory-throw-site-dynamic-option names it
 				stripOrName(
 					site,
 					servedWithoutOptions(site, code, undefined),
@@ -1966,7 +2143,10 @@ function resolveThrowSites(
 				}
 				continue;
 			}
-			if (site.constructor === "ProviderError") continue; // a dynamic option: errors-factory names it
+			if (site.constructor === "ProviderError") {
+				if (site.spreadOption) residues.push(dynamicOptionResidue(site, at));
+				continue; // else a dynamic option: errors-factory names it
+			}
 			// A subclass site that states no category served its constructor's
 			// default under a legacy row (a row states none); when this run writes
 			// the declaration's category and it differs, the site serves the new
@@ -2255,6 +2435,9 @@ type MapInfo = {
 	readonly file: ProviderSourceFile;
 	readonly codes: Map<string, MapEntry>;
 	readonly table: boolean;
+	/** The declaring statement, for the `export` this step adds when another file must import the map. */
+	readonly statement: TS.VariableStatement;
+	readonly exported: boolean;
 };
 type MapsByFile = Map<string, Map<string, MapInfo>>;
 
@@ -2324,13 +2507,41 @@ function defineErrorsMaps(
 					}
 				}
 				if (isMap || isConvertibleTable) {
-					names.set(declaration.name.text, { file, codes, table: !isMap });
+					names.set(declaration.name.text, {
+						file,
+						codes,
+						table: !isMap,
+						statement,
+						exported: (statement.modifiers ?? []).some(
+							(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+						),
+					});
 				}
 			}
 		}
 		out.set(file.path, names);
 	}
 	return out;
+}
+
+/** The array is the initializer of a declaration rule 3 converts: in the apply it is a map already, so a spread inside it lands in an object. */
+function isRule3TableArray(ts: TypeScriptModule, array: TS.ArrayLiteralExpression): boolean {
+	let node: TS.Node = array;
+	while (ts.isAsExpression(node.parent)) node = node.parent;
+	const declaration = node.parent;
+	if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== node) return false;
+	const statement = declaration.parent.parent;
+	return (
+		ts.isVariableStatement(statement) &&
+		tableRule3Matches(ts, statement, declaration) &&
+		ts.isArrayLiteralExpression(unwrapExpression(ts, declaration.initializer)) &&
+		(unwrapExpression(ts, declaration.initializer) as TS.ArrayLiteralExpression).elements.some(
+			(element) => {
+				const row = unwrapExpression(ts, element);
+				return ts.isObjectLiteralExpression(row) && hasProperty(ts, row, "code") && hasProperty(ts, row, "status");
+			},
+		)
+	);
 }
 
 /**
@@ -2493,6 +2704,52 @@ function rowDepartsFromRegistry(
  * the registered key): a throw site of such a code serves that row, and
  * `errors.CODE(...)` would serve the registry, so the site stays.
  */
+/**
+ * Every `{ code, status, ... }` row literal anywhere in the provider's
+ * sources (a table rule 3 does not convert, a row constant, a list built in
+ * a helper) whose registered code states a status, retryable or locale key
+ * that departs from the SDK registry: a throw site of that code serves the
+ * row wherever an operation lists it, and `errors.CODE(...)` would serve the
+ * registry. A registered row whose status or retryable is not a literal
+ * cannot be compared and makes every registered row unknown.
+ */
+function literalRegistryRows(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+): { departing: Set<string>; unreadable: boolean } {
+	const departing = new Set<string>();
+	let unreadable = false;
+	for (const file of sources) {
+		const visit = (node: TS.Node): void => {
+			if (
+				ts.isObjectLiteralExpression(node) &&
+				!ts.isNewExpression(node.parent) &&
+				hasProperty(ts, node, "code") &&
+				hasProperty(ts, node, "status")
+			) {
+				const codePair = propertyOf(ts, node, "code");
+				const code = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
+				if (code !== undefined && Object.hasOwn(SDK_ERROR_REGISTRY, code)) {
+					const fields = entryFields(ts, node);
+					const statusPair = propertyOf(ts, node, "status");
+					const retryablePair = propertyOf(ts, node, "retryable");
+					if (
+						(statusPair !== undefined && fields.status === undefined) ||
+						(retryablePair !== undefined && fields.retryable === undefined)
+					) {
+						unreadable = true;
+					} else if (rowDepartsFromRegistry(code as SdkErrorCode, fields)) {
+						departing.add(code);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file.source);
+	}
+	return { departing, unreadable };
+}
+
 function registryRowConflicts(
 	declarations: ReadonlyMap<string, DeclarationOrResidue>,
 	maps: MapsByFile,
