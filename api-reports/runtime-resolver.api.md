@@ -314,6 +314,7 @@ interface ProviderProxyPolicy {
     session?: {
         affinity?: ProviderProxySessionAffinity;
         lifetimeMinutes?: number;
+        poolSize?: number;
         drainLeadSeconds?: number;
     };
 }

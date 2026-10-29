@@ -29,6 +29,13 @@
 #    refused it. Move the exchange into `auth.flow.continue`. (reported)
 # 4. `reviewed: "staging"` is not an authored value. Declare `community` or
 #    `first-party`. (reported)
+# 5. `proxy.session.poolSize` sized a proxy pool that no longer exists: every
+#    attempt mints its own vendor session and a vendor serves three attempts
+#    before the chain moves on. The field is deleted; when it was the last
+#    member only the pair goes, otherwise the session object is written
+#    without it, one member per line (a comment that explained the pool is
+#    left for the author to delete). The next minor refuses the field at
+#    defineProvider. (rewritten)
 #
 # `defineCredentialsAuth(...)` returns the `credentials` arm directly, so
 # `defineProvider({ ...credentialsAuth })` and `auth: credentialsAuth.auth,
@@ -72,3 +79,74 @@ rule:
     - has:
         field: value
         regex: ^["']staging["']$
+---
+# `poolSize` is the last member of the session object (or its only one):
+# deleting the pair leaves a trailing comma, which is valid.
+id: provider-proxy-session-pool-size-last
+language: typescript
+severity: warning
+message: "proxy.session.poolSize is ignored (each attempt is its own vendor session); the field is deleted and the next minor refuses it."
+rule:
+  kind: pair
+  has:
+    field: key
+    regex: ^poolSize$
+  inside:
+    kind: object
+    inside:
+      kind: pair
+      has:
+        field: key
+        regex: ^session$
+  not:
+    precedes:
+      stopBy: end
+      any:
+        - kind: pair
+        - kind: spread_element
+        - kind: shorthand_property_identifier
+        - kind: method_definition
+fix: ''
+---
+# `poolSize` is followed by another member: the pair and its comma cannot be
+# deleted alone, so the session object is rewritten without the pair. The
+# members before it keep their text minus a trailing comma and any line
+# comment that sat between them and the pair (the comment explained the pool).
+id: provider-proxy-session-pool-size-middle
+language: typescript
+severity: warning
+message: "proxy.session.poolSize is ignored (each attempt is its own vendor session); the session object is rewritten without it and the next minor refuses the field."
+rule:
+  kind: object
+  inside:
+    kind: pair
+    has:
+      field: key
+      regex: ^session$
+  pattern:
+    context: 'const session = { $$$BEFORE, poolSize: $SIZE, $NEXT, $$$AFTER }'
+    selector: object
+transform:
+  KEPT:
+    replace:
+      source: $$$BEFORE
+      replace: '^(\S[\s\S]*?)(,?\s*(//[^\n]*\s*)*)$'
+      by: '$1,'
+fix: "{ $KEPT\n$NEXT, $$$AFTER }"
+---
+# `poolSize` is the first of exactly two members.
+id: provider-proxy-session-pool-size-first-of-two
+language: typescript
+severity: warning
+message: "proxy.session.poolSize is ignored (each attempt is its own vendor session); the session object is rewritten without it and the next minor refuses the field."
+rule:
+  kind: object
+  inside:
+    kind: pair
+    has:
+      field: key
+      regex: ^session$
+  pattern:
+    context: 'const session = { poolSize: $SIZE, $NEXT }'
+    selector: object
+fix: "{ $NEXT }"

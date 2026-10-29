@@ -22,6 +22,7 @@ import {
 } from "./health-scenario.js";
 import { UpstreamMaintenanceWindowsSchema } from "./upstream-maintenance.js";
 import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
+import { PROXY_ATTEMPTS_PER_VENDOR } from "./runtime/proxy-vendor-selector.js";
 import {
 	NODEMAVEN_ISP_SLUG_PATTERN,
 	NODEMAVEN_TTL_SECONDS_MAX,
@@ -1377,9 +1378,12 @@ function validateProviderProxy(config: {
 		}
 		rejectUnknownFields(
 			proxy.session,
-			new Set(["affinity", "lifetimeMinutes", "drainLeadSeconds"]),
+			new Set(["affinity", "lifetimeMinutes", "poolSize", "drainLeadSeconds"]),
 			"proxy.session",
 		);
+		if (proxy.session.poolSize !== undefined) {
+			warnRetiredProxyPoolSize(config.id, proxy.session.poolSize);
+		}
 		if (proxy.session.affinity !== undefined) {
 			assertLiteralField(
 				proxy.session.affinity,
@@ -1466,6 +1470,22 @@ function validateProviderProxy(config: {
 			`[provider-sdk] Provider "${config.id}" uses deprecated proxy vendor(s): ${deprecatedVendors.join(", ")}. Use "smartproxy"/"nodemaven".`,
 		);
 	}
+}
+
+const retiredPoolSizeWarned = new Set<string>();
+
+/**
+ * `proxy.session.poolSize` sized the smartproxy extraction pool that the
+ * per-attempt session id replaced. The runtime never reads it; the field is
+ * accepted one more release so a provider pin bump does not fail at load, and
+ * the provider is told once, at definition, how to delete it.
+ */
+function warnRetiredProxyPoolSize(providerId: string, poolSize: unknown): void {
+	if (retiredPoolSizeWarned.has(providerId)) return;
+	retiredPoolSizeWarned.add(providerId);
+	console.warn(
+		`[provider-sdk] Provider "${providerId}" declares proxy.session.poolSize (${String(poolSize)}), which is ignored: the proxy pool is gone, every attempt mints its own vendor session and a vendor serves ${PROXY_ATTEMPTS_PER_VENDOR} attempts before the chain moves on. Delete the field (apifuse migrate --only declaration, scripts/codemods/declaration.yml); the next minor refuses it at defineProvider.`,
+	);
 }
 
 function validateProviderStt(config: { id: string; stt?: ProviderSttConfig }): void {
