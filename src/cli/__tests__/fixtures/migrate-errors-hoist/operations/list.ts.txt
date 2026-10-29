@@ -1,4 +1,4 @@
-import { ProviderError, defineOperation } from "@apifuse/provider-sdk/provider";
+import { ProviderError, ValidationError, defineOperation } from "@apifuse/provider-sdk/provider";
 
 import type { ProviderContext } from "../index";
 
@@ -34,6 +34,8 @@ export const listOperation = defineOperation<ProviderContext>()({
 		}
 		if (input.id === "two") throw new ProviderError("Two ways.", { code: "TWO_WAYS" });
 		if (input.id === "cat") throw new ProviderError("Category ways.", { code: "CAT_WAYS" });
+		if (input.id === "cat-input") throw new ValidationError("Category ways.", { code: "CAT_WAYS", retryable: false });
+		if (input.id === "bot") throw new ValidationError("Blocked.", { code: "BLOCKED", retryable: false });
 		return ctx.fetch(input.id);
 	},
 });

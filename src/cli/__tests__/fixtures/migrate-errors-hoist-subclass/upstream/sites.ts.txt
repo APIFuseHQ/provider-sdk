@@ -29,6 +29,22 @@ export function notFoundInput(): never {
 	throw new ValidationError("No item matches.", { code: "NOT_FOUND", category: "upstream_http", retryable: false });
 }
 
+export function notFoundDynamic(retryable: boolean): never {
+	throw new ValidationError("No item matches.", { code: "NOT_FOUND", retryable });
+}
+
+export function mixedUpstream(): never {
+	throw new ProviderError("Thrown both ways.", { code: "MIXED_INPUT" });
+}
+
+export function mixedInput(): never {
+	throw new ValidationError("Thrown both ways.", { code: "MIXED_INPUT", retryable: false });
+}
+
+export function mixedInputBare(): never {
+	throw new ValidationError("Thrown both ways.", { code: "MIXED_INPUT" });
+}
+
 export function notFoundRetry(): never {
 	throw new ValidationError("No item matches.", { code: "NOT_FOUND", retryable: true });
 }

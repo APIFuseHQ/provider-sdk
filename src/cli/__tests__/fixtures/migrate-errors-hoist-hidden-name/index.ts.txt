@@ -1,0 +1,7 @@
+import { defineProvider } from "@apifuse/provider-sdk/provider";
+
+import { searchOperation, strictOperation } from "./operations/search";
+
+export default defineProvider({ id: "fixture", version: "1.0.0", runtime: "standard" })({
+	operations: { search: searchOperation, strict: strictOperation },
+});

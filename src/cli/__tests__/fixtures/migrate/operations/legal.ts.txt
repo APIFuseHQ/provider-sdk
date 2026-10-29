@@ -1,0 +1,39 @@
+import { ValidationError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { SEARCH_ERRORS } from "./search";
+
+const LEGAL_ROWS = [
+	{ code: "LEGAL_SOURCE_UNSUPPORTED", status: 400, description: "The legal source is not supported.", retryable: false },
+] as const;
+
+const LEGAL_SEARCH_ROWS = [...LEGAL_ROWS, ...SEARCH_ERRORS] as const;
+
+export const LEGAL_DOCS = {
+	search: { titleKey: "operations.legal.docs.title", errorCodes: [...LEGAL_SEARCH_ROWS] },
+};
+
+function legalRows() {
+	return [...LEGAL_SEARCH_ROWS];
+}
+
+export const legalOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.legal.description",
+	errorCodes: LEGAL_DOCS.search.errorCodes,
+	handler: async (input) => fetchLegal(input.source),
+});
+
+export const legalStrictOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.legalStrict.description",
+	errorCodes: legalRows(),
+	handler: async (input) => {
+		if (input.source === "") {
+			throw new ValidationError("The legal source is not supported.", {
+				code: "LEGAL_SOURCE_UNSUPPORTED",
+				category: "input_validation",
+				retryable: false,
+			});
+		}
+		return fetchLegal(input.source);
+	},
+});

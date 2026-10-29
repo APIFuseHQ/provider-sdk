@@ -115,6 +115,8 @@ export const ERRORS_HOIST_RULES = {
 	throwSiteUndeclared: "errors-hoist-throw-site-undeclared",
 	throwSiteSdkConflict: "errors-hoist-throw-site-sdk-conflict",
 	throwSiteDynamicOption: "errors-hoist-throw-site-dynamic-option",
+	listNotReadable: "errors-hoist-list-not-readable",
+	mapSpreadInArray: "errors-hoist-map-spread-in-array",
 } as const;
 
 export type ErrorsHoistOptions = {
@@ -241,11 +243,11 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	const residues: MigrateFinding[] = [];
 	const notes: MigrateFinding[] = [];
 
-	const lists = collectLists(ts, sources, residues);
+	const maps = defineErrorsMaps(ts, sources, options.dryRun);
+	const { lists, opaque } = collectLists(ts, sources, residues);
 	const existing = findExistingMap(ts, sources);
 	const sites = collectThrowSites(ts, sources);
 	const declarations = declareCodes(ts, lists, existing, sites, residues, notes);
-	const maps = defineErrorsMaps(ts, sources);
 
 	const hoisted = new Set<string>();
 	const edits = new Map<string, FileEdits>();
@@ -256,7 +258,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	// keeps the row's fields, and a legacy row never had one): each gets the
 	// category its throw sites served, so the provider loads and serves the same.
 	const views = new Map<string, DeclaredView | null>();
-	const filled = fillEntryCategories(maps, sites, views, notes, options.dryRun);
+	const filled = fillEntryCategories(maps, sites, views, notes);
 	for (const pending of filled.edits.values()) {
 		editsFor(edits, pending.file).push(...pending.edits);
 	}
@@ -268,15 +270,20 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	// category, for the operation that lists it.
 	const leftover = new Set<string>();
 	// A list left whole behind a spread or an entry this step cannot read (a
-	// call, a name that is not a table) may list any code: every code then
-	// counts as still declared by a legacy row somewhere.
-	let opaqueRows = false;
+	// call, a name that is not a table), an errorCodes whose rows it cannot
+	// read at all (a call, a property access, a name that is not a map): such a
+	// list may list any code, so every code then counts as still declared by a
+	// legacy row somewhere.
+	let opaqueRows = opaque;
 	const leaveRows = (list: ErrorList): void => {
 		for (const entry of list.entries) {
 			if (entry.kind === "row") leftover.add(entry.row.code);
 			else opaqueRows = true;
 		}
 	};
+	// The `...MAP` spreads this step rewrites to `...Object.values(MAP)`; any
+	// other spread of a map into an array literal breaks the provider's import.
+	const rewrittenSpreads = new Set<TS.Node>();
 	for (const list of lists) {
 		if (list.wholeName !== undefined) {
 			if (isDefineErrorsMap(ts, maps, list.file, list.wholeName)) {
@@ -287,6 +294,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 					text: `errors: Object.values(${list.wholeName})`,
 				});
 			} else {
+				opaqueRows = true;
 				residues.push(
 					finding(
 						list.file,
@@ -302,6 +310,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 		const moved: string[] = [];
 		const movedCodes: string[] = [];
 		const kept: TS.Expression[] = [];
+		const spreads: TS.Node[] = [];
 		let blocked = false;
 		for (const entry of list.entries) {
 			if (entry.kind === "row") {
@@ -327,6 +336,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 			} else if (entry.kind === "spread") {
 				if (entry.name !== undefined && isDefineErrorsMap(ts, maps, list.file, entry.name)) {
 					moved.push(`...Object.values(${entry.name})`);
+					spreads.push(entry.node);
 				} else {
 					// A spread whose rows the step cannot see may repeat a code the list
 					// also writes inline; `errors` and `errorCodes` naming one code twice
@@ -369,9 +379,11 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 			continue;
 		}
 		for (const code of movedCodes) hoisted.add(code);
+		for (const node of spreads) rewrittenSpreads.add(node);
 		rewrites += 1;
 		editsFor(edits, list.file).push(...listEdits(ts, list, moved, kept));
 	}
+	residues.push(...mapSpreadsInArrays(ts, sources, maps, rewrittenSpreads));
 	const mergedImports = new Set<string>();
 	for (const [path, pending] of imports) {
 		if (edits.has(path)) {
@@ -824,12 +836,20 @@ function mapKey(code: string): string {
 	return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(code) ? code : JSON.stringify(code);
 }
 
+/**
+ * Every `errorCodes:` property whose rows this step can read: an array
+ * literal, or a name (resolved to a map or a table). One it cannot read (a
+ * call, a property access, a conditional) is named and makes the run treat
+ * every code as possibly still declared by a legacy row (`opaque`): the
+ * server reads that operation's rows by code, whatever they are.
+ */
 function collectLists(
 	ts: TypeScriptModule,
 	sources: readonly ProviderSourceFile[],
 	residues: MigrateFinding[],
-): ErrorList[] {
+): { lists: ErrorList[]; opaque: boolean } {
 	const lists: ErrorList[] = [];
+	let opaque = false;
 	for (const file of sources) {
 		const visit = (node: TS.Node): void => {
 			if (
@@ -878,13 +898,75 @@ function collectLists(
 							);
 						}
 					}
+				} else {
+					opaque = true;
+					residues.push(
+						finding(
+							file,
+							node.getStart(file.source),
+							ERRORS_HOIST_RULES.listNotReadable,
+							`errorCodes is ${describeInitializer(ts, array)}, whose rows this step cannot read; the list is left in place, and every throw site whose per-throw options this list's rows may serve keeps them.`,
+							"Write the rows as an array literal here (or name a defineErrors map), then re-run apifuse migrate.",
+						),
+					);
 				}
 			}
 			ts.forEachChild(node, visit);
 		};
 		visit(file.source);
 	}
-	return lists;
+	return { lists, opaque };
+}
+
+function describeInitializer(ts: TypeScriptModule, node: TS.Expression): string {
+	if (ts.isCallExpression(node)) return "a call";
+	if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+		return "a property access";
+	}
+	return `a ${ts.SyntaxKind[node.kind]}`;
+}
+
+/**
+ * A `...NAME` of a defineErrors map (one errors-factory made from a table
+ * this run, or one that already was) inside an array literal this step did
+ * not rewrite: a map is an object, so the spread throws at import and the
+ * provider does not load. Each is named with the fix.
+ */
+function mapSpreadsInArrays(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+	maps: MapsByFile,
+	rewritten: ReadonlySet<TS.Node>,
+): MigrateFinding[] {
+	const out: MigrateFinding[] = [];
+	for (const file of sources) {
+		let inScope: Map<string, ReadonlySet<string>> | undefined;
+		const visit = (node: TS.Node): void => {
+			if (
+				ts.isSpreadElement(node) &&
+				ts.isArrayLiteralExpression(node.parent) &&
+				ts.isIdentifier(node.expression) &&
+				!rewritten.has(node)
+			) {
+				inScope ??= mapsInScope(ts, maps, file);
+				const name = node.expression.text;
+				if (inScope.has(name)) {
+					out.push(
+						finding(
+							file,
+							node.getStart(file.source),
+							ERRORS_HOIST_RULES.mapSpreadInArray,
+							`...${name} spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.`,
+							`Spread Object.values(${name}) here, or list the map in the operation's errors, then re-run apifuse migrate.`,
+						),
+					);
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file.source);
+	}
+	return out;
 }
 
 // Where the list's `errors` goes. Three shapes serve an operation's codes:
@@ -1566,7 +1648,6 @@ function fillEntryCategories(
 	sites: ThrowSites,
 	views: Map<string, DeclaredView | null>,
 	notes: MigrateFinding[],
-	dryRun: boolean,
 ): { edits: Map<string, FileEdits>; files: string[]; rewrites: number } {
 	const edits = new Map<string, FileEdits>();
 	const files = new Set<string>();
@@ -1593,12 +1674,6 @@ function fillEntryCategories(
 					continue;
 				}
 				if (entry.category !== undefined || entry.status === undefined) {
-					record(code, viewOfEntry(code, entry));
-					continue;
-				}
-				// A table still an array after the apply is one errors-factory did not
-				// convert: nothing to fill. In a dry run the table stands for the map.
-				if (info.table && !dryRun) {
 					record(code, viewOfEntry(code, entry));
 					continue;
 				}
@@ -1855,7 +1930,7 @@ function resolveThrowSites(
 						site.file,
 						at,
 						ERRORS_HOIST_RULES.throwSiteCodeConflict,
-						`Throw site of ${JSON.stringify(code)}: this provider declares ${code} with different contracts (${contracts.join("; ")}), and a factory would serve one of them to every operation that reaches this site; it is left as new ProviderError(...) and keeps serving each operation's own row.`,
+						`Throw site of ${JSON.stringify(code)}: this provider declares ${code} with different contracts (${contracts.join("; ")}), and a factory would serve one of them to every operation that reaches this site; it is left as new ${site.constructor}(...) and keeps serving each operation's own row.`,
 						"Give each distinct contract its own code (or unify the rows and the table entry), then re-run apifuse migrate.",
 					),
 				);
@@ -1892,16 +1967,21 @@ function resolveThrowSites(
 				continue;
 			}
 			if (site.constructor === "ProviderError") continue; // a dynamic option: errors-factory names it
+			// A subclass site that states no category served its constructor's
+			// default under a legacy row (a row states none); when this run writes
+			// the declaration's category and it differs, the site serves the new
+			// value from now on, so it is named (nothing at the site to keep). Under
+			// a map that already stated the category it served that and keeps it.
+			if (view.resolved && site.category === undefined && categoryDiffers) {
+				residues.push(replacedDefaultResidue(site, view, at, servedCategory as string));
+			}
 			if (!optioned(site)) continue;
-			// A subclass site serves the declaration once its per-throw options go
-			// (a bare one already does): the options go when they equal it, else the
-			// site keeps serving its own value for one more release and is named.
+			// A subclass site serves the declaration once its per-throw options go:
+			// the options go when they equal it, else the site keeps serving its own
+			// value for one more release and is named.
 			if (site.dynamic) {
 				residues.push(dynamicOptionResidue(site, at));
-			} else if (
-				(site.category !== undefined && site.category !== view.category) ||
-				retryableDiffers
-			) {
+			} else if ((site.category !== undefined && categoryDiffers) || retryableDiffers) {
 				residues.push(throwSiteConflict(site, view, at, site.category));
 			} else if (differsFrom(site, servedWithoutOptions(site, code, undefined))) {
 				residues.push(noDeclarationResidue(site, code, servedWithoutOptions(site, code, undefined), at));
@@ -2113,6 +2193,29 @@ function throwSiteConflict(
 	);
 }
 
+/**
+ * A subclass site that states no category served its constructor's default
+ * under a legacy row (a row states none). The declaration this run writes
+ * states one, and the server reads it before the default, so the site serves
+ * the declared category from this run on. The default was never the site's
+ * own value, so nothing at the site keeps it: the change is named here, and
+ * the site's per-throw options go or stay by the same rule as every other.
+ */
+function replacedDefaultResidue(
+	site: ThrowSite,
+	view: DeclaredView,
+	at: number,
+	served: string,
+): MigrateFinding {
+	return finding(
+		site.file,
+		at,
+		ERRORS_HOIST_RULES.throwSiteConflict,
+		`Throw site of ${JSON.stringify(site.code)} (${site.constructor}) served category ${JSON.stringify(served)} (the ${site.constructor} default under a row that states no category), and the declaration this run writes serves category ${JSON.stringify(view.category)}, retryable ${view.retryable}; the declaration replaces that default, so this site serves category ${JSON.stringify(view.category)} from this run on. The site stays a ${site.constructor} and the change is named here.`,
+		`Two choices: (a) accept the declared category for this site: nothing more to do here; or (b) declare a distinct code for this condition in the defineErrors map (its own status, category and retryable) and throw that factory here. Then re-run apifuse migrate.`,
+	);
+}
+
 /** The `errors.CODE({ message, ...rest })` text errors-factory rule 1 writes, under the map name the file reaches the code by. */
 function throwSiteEdit(ts: TypeScriptModule, site: ThrowSite, mapName: string): TextEdit {
 	const node = site.node as TS.NewExpression;
@@ -2140,9 +2243,12 @@ function throwSiteEdit(ts: TypeScriptModule, site: ThrowSite, mapName: string): 
 
 /**
  * Every name that is a `defineErrors` map, or will be once `errors-factory`
- * runs (a `const NAME = [...]` whose rows carry `code` and `status`: rule 3's
- * own match), by file. The second form keeps a dry run, where the table is
- * still an array, reporting what the apply does.
+ * runs (a `const NAME = [...]`, `[...] as const` or `const NAME: T = [...]`
+ * whose rows carry `code` and `status`: rule 3's own match, nothing wider,
+ * so a `[...] satisfies T[]` table stays an array and is never a map), by
+ * file. The second form keeps a dry run, where the table is still an array,
+ * reporting what the apply does; in the apply errors-factory has already run,
+ * so an array is never a map there whatever its shape.
  */
 /** Per file, each defineErrors map (or a table the factory converts) by name: its entries by code, and whether it is still a table. */
 type MapInfo = {
@@ -2155,6 +2261,7 @@ type MapsByFile = Map<string, Map<string, MapInfo>>;
 function defineErrorsMaps(
 	ts: TypeScriptModule,
 	sources: readonly ProviderSourceFile[],
+	dryRun: boolean,
 ): MapsByFile {
 	const out: MapsByFile = new Map();
 	for (const file of sources) {
@@ -2179,8 +2286,9 @@ function defineErrorsMaps(
 					}
 				}
 				let isConvertibleTable = false;
-				if (ts.isArrayLiteralExpression(initializer)) {
-					for (const element of initializer.elements) {
+				if (dryRun && tableRule3Matches(ts, statement, declaration)) {
+					const array = initializer as TS.ArrayLiteralExpression;
+					for (const element of array.elements) {
 						const row = unwrapExpression(ts, element);
 						if (
 							ts.isObjectLiteralExpression(row) &&
@@ -2223,6 +2331,30 @@ function defineErrorsMaps(
 		out.set(file.path, names);
 	}
 	return out;
+}
+
+/**
+ * The declaration shapes errors-factory rule 3 (`errors-factory-declaration-table`)
+ * rewrites to `defineErrors({...})`: `const NAME = [...]`, `const NAME = [...]
+ * as const`, `const NAME: T = [...]`. A `satisfies` clause, another `as`, a
+ * parenthesis or a `let` is outside its patterns and stays an array.
+ */
+function tableRule3Matches(
+	ts: TypeScriptModule,
+	statement: TS.VariableStatement,
+	declaration: TS.VariableDeclaration,
+): boolean {
+	if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return false;
+	const initializer = declaration.initializer;
+	if (initializer === undefined) return false;
+	if (ts.isArrayLiteralExpression(initializer)) return true;
+	return (
+		ts.isAsExpression(initializer) &&
+		ts.isArrayLiteralExpression(initializer.expression) &&
+		ts.isTypeReferenceNode(initializer.type) &&
+		ts.isIdentifier(initializer.type.typeName) &&
+		initializer.type.typeName.text === "const"
+	);
 }
 
 /** True when `name`, as seen from `file`, is a defineErrors map: declared there, or imported from a file that declares it. */

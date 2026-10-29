@@ -1,0 +1,21 @@
+import type { OperationErrorCode } from "@apifuse/provider-sdk";
+import { ProviderError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { UPSTREAM_ROW } from "../rows";
+
+export const checkoutErrorCodes = [
+	UPSTREAM_ROW,
+	{ code: "CART_ALREADY_SUBMITTED", status: 409, description: "The cart was already submitted.", retryable: false },
+] satisfies OperationErrorCode[];
+
+export const checkoutOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.checkout.description",
+	errorCodes: checkoutErrorCodes,
+	handler: async (input, ctx) => {
+		if (input.cartId === "") {
+			throw new ProviderError("The cart was already submitted.", { code: "CART_ALREADY_SUBMITTED", retryable: false });
+		}
+		return ctx.fetch(input.cartId);
+	},
+});

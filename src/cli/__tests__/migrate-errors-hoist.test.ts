@@ -203,12 +203,17 @@ describe("errors-hoist", () => {
 				`${ERRORS_HOIST_RULES.referenceUndeclared} mappers/item.ts:6`,
 				`${ERRORS_HOIST_RULES.codeConflict} operations/detail.ts:11`,
 				`${ERRORS_HOIST_RULES.rowNotLiteral} operations/detail.ts:12`,
+				// Run alone (no errors-factory before it) the apply sees LEGACY_TABLE
+				// still an array, and an array is never a map in the apply.
+				`${ERRORS_HOIST_RULES.spreadNotATable} operations/detail.ts:20`,
 				`${ERRORS_HOIST_RULES.spreadNotATable} operations/detail.ts:21`,
 				`${ERRORS_HOIST_RULES.sdkRowConflict} operations/list.ts:10`,
 				`${ERRORS_HOIST_RULES.codeConflict} operations/list.ts:18`,
 				`${ERRORS_HOIST_RULES.throwSiteConflict} operations/list.ts:30`,
 				`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/list.ts:35`,
 				`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/list.ts:36`,
+				`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/list.ts:37`,
+				`${ERRORS_HOIST_RULES.throwSiteRowConflict} operations/list.ts:38`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:16`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:22`,
 				`${ERRORS_HOIST_RULES.sdkOwnedCode} rows.ts:9`,
@@ -247,13 +252,27 @@ describe("errors-hoist", () => {
 			const twoWaySites = result.residues.filter(
 				(residue) => residue.ruleId === ERRORS_HOIST_RULES.throwSiteCodeConflict,
 			);
+			// A subclass site of such a code keeps its options too, even where a map
+			// declares the code (the conflict, not the map, decides).
 			expect(twoWaySites.map((residue) => residue.message)).toEqual([
 				'Throw site of "TWO_WAYS": this provider declares TWO_WAYS with different contracts (operations/detail.ts:11 status 404, category "provider_error", retryable false; operations/list.ts:18 status 400, category "provider_error", retryable false), and a factory would serve one of them to every operation that reaches this site; it is left as new ProviderError(...) and keeps serving each operation\'s own row.',
 				'Throw site of "CAT_WAYS": this provider declares CAT_WAYS with different contracts (operations/list.ts:19 status 400, category "provider_error", retryable false; shared.ts:7 status 400, category "input_validation", retryable false), and a factory would serve one of them to every operation that reaches this site; it is left as new ProviderError(...) and keeps serving each operation\'s own row.',
+				'Throw site of "CAT_WAYS": this provider declares CAT_WAYS with different contracts (operations/list.ts:19 status 400, category "provider_error", retryable false; shared.ts:7 status 400, category "input_validation", retryable false), and a factory would serve one of them to every operation that reaches this site; it is left as new ValidationError(...) and keeps serving each operation\'s own row.',
 			]);
 			expect(read("operations/list.ts")).toContain(
-				'if (input.id === "two") throw new ProviderError("Two ways.", { code: "TWO_WAYS" });\n\t\tif (input.id === "cat") throw new ProviderError("Category ways.", { code: "CAT_WAYS" });',
+				'if (input.id === "two") throw new ProviderError("Two ways.", { code: "TWO_WAYS" });\n\t\tif (input.id === "cat") throw new ProviderError("Category ways.", { code: "CAT_WAYS" });\n\t\tif (input.id === "cat-input") throw new ValidationError("Category ways.", { code: "CAT_WAYS", retryable: false });\n\t\tif (input.id === "bot") throw new ValidationError("Blocked.", { code: "BLOCKED", retryable: false });',
 			);
+			// A registered code a map entry declares with its own values (BLOCKED,
+			// retryable true against the registry's false): a subclass site serves
+			// that entry, and its per-throw retryable (equal to the registry, not to
+			// the entry) stays, named by the entry and not by a leftover row.
+			const rowConflict = result.residues.find(
+				(residue) => residue.ruleId === ERRORS_HOIST_RULES.throwSiteRowConflict,
+			);
+			expect(rowConflict?.message).toContain(
+				'Throw site of "BLOCKED" serves this provider\'s own row for BLOCKED, which states a status, retryable or locale key that differs from the SDK registry (sdkErrors.BLOCKED: 502, retryable false)',
+			);
+			expect(read("domain/errors.ts")).not.toContain("BLOCKED");
 			expect(table(result.notes)).toEqual([
 				`${ERRORS_HOIST_RULES.descriptionDropped} operations/list.ts:8`,
 				`${ERRORS_HOIST_RULES.descriptionRegistry} operations/list.ts:9`,
@@ -294,6 +313,16 @@ describe("errors-hoist", () => {
 		// step under apifuse migrate) has made the table a map.
 		expect(result.filesChanged).toContain("shared.ts");
 		expect(result.rewrites).toBe(9);
+		// The dry run knows LEGACY_TABLE becomes a map and that the list spreading
+		// it stays whole (a call beside it): that spread would throw at import.
+		const spread = result.residues.find((residue) => residue.ruleId === ERRORS_HOIST_RULES.mapSpreadInArray);
+		expect(`${spread?.file}:${spread?.line}`).toBe("operations/detail.ts:20");
+		expect(spread?.message).toBe(
+			"...LEGACY_TABLE spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
+		);
+		expect(table(result.residues).filter((line) => line.includes("detail.ts:20"))).toEqual([
+			`${ERRORS_HOIST_RULES.mapSpreadInArray} operations/detail.ts:20`,
+		]);
 		expect(existsSync(join(providerRoot, "domain/errors.ts"))).toBe(false);
 		expect(
 			Object.fromEntries(walk(providerRoot).map((file) => [file, readFileSync(file, "utf8")])),
@@ -339,6 +368,7 @@ describe("a site the factory cannot replace", () => {
 	it("deletes the per-throw options the server would serve anyway and names every other one", () => {
 		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
 		expect(result.filesChanged).toEqual(["domain/errors.ts", "operations/list.ts", "upstream/sites.ts"]);
+		expect(result.rewrites).toBe(7);
 		const sites = read("upstream/sites.ts");
 		// A ProviderError site goes to the factory; a ValidationError site keeps
 		// its constructor and loses the options equal to what the server serves
@@ -370,41 +400,114 @@ describe("a site the factory cannot replace", () => {
 		expect(sites).toContain(
 			'throw new ProviderError("Secret missing.", { code: "MISSING_SECRET", category: "provider_error" });',
 		);
+		// A variable option on a registered code is named, not stripped.
+		expect(sites).toContain(
+			'throw new ValidationError("No item matches.", { code: "NOT_FOUND", retryable });',
+		);
+		// One code thrown as ProviderError (serving the status fallback) and as
+		// ValidationError (serving input_validation) under a 400 row: the
+		// declaration gets the fallback, the ProviderError site becomes the
+		// factory, and each ValidationError site is named because the declared
+		// category replaces the default it served; an equal retryable still goes.
+		expect(read("domain/errors.ts")).toContain(
+			'\tMIXED_INPUT: {\n\t\tstatus: 400,\n\t\tcategory: "provider_error",\n\t\tretryable: false,',
+		);
+		expect(sites).toContain('throw errors.MIXED_INPUT({ message: "Thrown both ways." });');
+		expect(sites).toContain(
+			'export function mixedInput(): never {\n\tthrow new ValidationError("Thrown both ways.", { code: "MIXED_INPUT" });',
+		);
+		expect(sites).toContain(
+			'export function mixedInputBare(): never {\n\tthrow new ValidationError("Thrown both ways.", { code: "MIXED_INPUT" });',
+		);
 		expect(table(result.residues)).toEqual([
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:8`,
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:17`,
 			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:21`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:33`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:45`,
+			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:33`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:41`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:45`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:49`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:61`,
 		]);
+		expect(result.residues[4]?.message).toBe(
+			'Throw site of "MIXED_INPUT" (ValidationError) served category "input_validation" (the ValidationError default under a row that states no category), and the declaration this run writes serves category "provider_error", retryable false; the declaration replaces that default, so this site serves category "provider_error" from this run on. The site stays a ValidationError and the change is named here.',
+		);
+		expect(result.residues[5]?.message).toBe(result.residues[4]?.message);
 		expect(result.residues[0]?.message).toBe(
 			'Throw site of "SHOP_DOWN" (ValidationError) states category "upstream_http" and retryable false; reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category "input_validation", retryable false once the option is gone, so the site is left as written and keeps serving its own value for one more release.',
 		);
-		expect(result.residues[3]?.message).toBe(
+		expect(result.residues[6]?.message).toBe(
 			'Throw site of "NOT_FOUND" (ValidationError) sets retryable true per throw, and the SDK registry (sdkErrors.NOT_FOUND, which this provider\'s rows match) serves category "upstream_http", retryable false; the per-throw value is served for one more release, so the site is left as written.',
 		);
-		expect(result.residues[4]?.message).toBe(
+		expect(result.residues[7]?.message).toBe(
 			'Throw site of "MISSING_SECRET" (ProviderError) sets category "provider_error" per throw, and the SDK runtime (which owns this code and reads no declaration for it) serves category "credential_unavailable", retryable false; the per-throw value is served for one more release, so the site is left as written.',
 		);
 		expect(parses("upstream/sites.ts")).toBe(true);
+		// The second run sees the map stating MIXED_INPUT's category: the sites
+		// already serve it, so nothing is named there and nothing is rewritten.
 		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
 		expect(again.rewrites).toBe(0);
 		expect(again.residues.map((residue) => residue.ruleId)).toEqual(
-			result.residues.map((residue) => residue.ruleId),
+			result.residues
+				.filter((residue) => residue.line !== 41 && residue.line !== 45)
+				.map((residue) => residue.ruleId),
 		);
 	});
 
 	it("dry run decides the same sites", () => {
 		const dry = hoistInlineErrorRows({ providerRoot, dryRun: true });
-		expect(dry.rewrites).toBe(6);
+		expect(dry.rewrites).toBe(7);
 		expect(table(dry.residues)).toEqual([
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:8`,
 			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:17`,
 			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:21`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:33`,
-			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:45`,
+			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:33`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:41`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:45`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:49`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:61`,
 		]);
 	});
+});
+
+describe("an errorCodes this step cannot read", () => {
+	// One operation lists the code inline (400); a second lists it through an
+	// initializer the step cannot read (a call, or a name bound to one) that
+	// serves it as 422. The site's options equal the 400 row and the
+	// ValidationError default, so only the unreadable list stops the strip: the
+	// 422 row would serve `upstream_rejected` once the option is gone.
+	for (const [fixture, shape] of [
+		["migrate-errors-hoist-hidden-call", "a call"],
+		["migrate-errors-hoist-hidden-name", "a name that is not a map"],
+	] as const) {
+		it(`names the list that is ${shape} and keeps the site's options`, () => {
+			stage(fixture);
+			const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
+			const search = read("operations/search.ts");
+			expect(search).toContain("\terrors: [\n\t\terrors.QUERY_REJECTED,\n\t],\n");
+			expect(search).toContain(
+				'throw new ValidationError("The query was rejected.", {\n\t\tcode: "QUERY_REJECTED",\n\t\tcategory: "input_validation",\n\t\tretryable: false,\n\t\tdetails: { query },\n\t});',
+			);
+			const [list, site] = result.residues;
+			expect(table(result.residues)).toEqual([
+				`${fixture.endsWith("call") ? ERRORS_HOIST_RULES.listNotReadable : ERRORS_HOIST_RULES.spreadNotATable} operations/search.ts:19`,
+				`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/search.ts:27`,
+			]);
+			expect(list?.message).toContain(
+				fixture.endsWith("call")
+					? "errorCodes is a call, whose rows this step cannot read"
+					: "errorCodes names STRICT_ERROR_CODES, which is not declared with defineErrors",
+			);
+			expect(site?.message).toContain(
+				"a legacy errorCodes row of QUERY_REJECTED may stay in an operation this run cannot move",
+			);
+			const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+			expect(again.rewrites).toBe(0);
+			expect(again.residues.map((residue) => residue.ruleId)).toEqual(
+				result.residues.map((residue) => residue.ruleId),
+			);
+		});
+	}
 });
 
 describe("errors-factory.yml registry lists", () => {

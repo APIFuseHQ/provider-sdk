@@ -1,0 +1,5 @@
+export function strictErrorCodes() {
+	return [{ code: "QUERY_REJECTED", status: 422, description: "The query was rejected upstream.", retryable: false }];
+}
+
+export const STRICT_ERROR_CODES = strictErrorCodes();

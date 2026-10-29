@@ -1,0 +1,33 @@
+import { ValidationError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { STRICT_ERROR_CODES } from "../upstream/codes";
+
+export const searchOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.search.description",
+	errorCodes: [
+		{ code: "QUERY_REJECTED", status: 400, description: "The query was rejected.", retryable: false },
+	],
+	handler: async (input, ctx) => {
+		if (input.query === "") rejected(input.query);
+		return ctx.fetch(input.query);
+	},
+});
+
+export const strictOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.strict.description",
+	errorCodes: STRICT_ERROR_CODES,
+	handler: async (input, ctx) => {
+		if (input.query === "") rejected(input.query);
+		return ctx.fetch(input.query);
+	},
+});
+
+function rejected(query: string): never {
+	throw new ValidationError("The query was rejected.", {
+		code: "QUERY_REJECTED",
+		category: "input_validation",
+		retryable: false,
+		details: { query },
+	});
+}
