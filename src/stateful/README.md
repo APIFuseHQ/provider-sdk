@@ -22,6 +22,12 @@ the following compatibility-sensitive behavior:
 - `subscribe` must return a disposer. The manager runs it before checkpointing and closing a
   session. `health()` and `reconcileWrite()` use the same per-session concurrency scheduler and
   optional ownership validation semantics as invocation.
+- The scheduler's wait follows the operation's signal. An operation whose signal aborts while it
+  waits for its turn (a `serialize` queue or a `parallel` `maxInFlight` slot) is rejected with the
+  signal's reason at once and never reaches the adapter; once the adapter is called, the signal is
+  the adapter's to honor. An ownership re-check of a pooled session that fails with the
+  operation's own abort reason (thrown as it is or kept as a `cause`) leaves the session and the
+  owner lease in place; any other re-check failure closes the session.
 - `HttpProviderEventEmitter.flush(timeoutMs)` resolves to
   `{ delivered: number, failed: number, pending: number }`. Counts are cumulative for the emitter's
   lifetime; `pending` is the buffer remaining when the flush returns.
