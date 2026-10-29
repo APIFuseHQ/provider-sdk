@@ -38,9 +38,7 @@ describe("migrateOperationShape", () => {
 		expect(result.rewrites).toBe(1);
 		expect(result.importAdded).toBe(true);
 		expect(result.code).toContain("defineOperation<ProviderContext>()({");
-		expect(result.code).toContain(
-			'import type { ProviderContext } from "../index";',
-		);
+		expect(result.code).toContain('import type { ProviderContext } from "../index";');
 	});
 
 	it("curries every call site in a multi-operation file", () => {
@@ -54,8 +52,7 @@ export const detailOperation = defineOperation({
 		expect(result.status).toBe("migrated");
 		if (result.status !== "migrated") return;
 		expect(result.rewrites).toBe(2);
-		const occurrences =
-			result.code.match(/defineOperation<ProviderContext>\(\)\(/g) ?? [];
+		const occurrences = result.code.match(/defineOperation<ProviderContext>\(\)\(/g) ?? [];
 		expect(occurrences.length).toBe(2);
 	});
 
@@ -92,7 +89,7 @@ export default buildProvider({ operations: { search: searchOperation } });
 		if (result.status !== "migrated") return;
 		expect(result.importAdded).toBe(false);
 		expect(result.code).toContain("defineOperation<ProviderContext>()({");
-		expect(result.code).not.toContain('import type { ProviderContext } from');
+		expect(result.code).not.toContain("import type { ProviderContext } from");
 	});
 
 	it("returns curried input unchanged", () => {
@@ -117,11 +114,7 @@ export default buildProvider({ operations: { search: searchOperation } });
 		expect(first.status).toBe("migrated");
 		if (first.status !== "migrated") return;
 
-		const second = migrateOperationShape(
-			first.code,
-			"operations/search.ts",
-			"../index",
-		);
+		const second = migrateOperationShape(first.code, "operations/search.ts", "../index");
 		expect(second.status).toBe("unchanged");
 	});
 

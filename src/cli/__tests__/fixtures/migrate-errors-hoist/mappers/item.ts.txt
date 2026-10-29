@@ -1,0 +1,8 @@
+import { COMMON_ERRORS } from "../shared";
+
+export function parseItem(html: string): string {
+	if (html === "") throw errors.ITEM_NOT_FOUND({ message: "No item matches the id." });
+	if (html === "drift") throw errors.UPSTREAM_SCHEMA_ERROR({ message: "Shape drift." });
+	if (html === "?") throw errors.NEVER_DECLARED({ message: "Unknown." });
+	return html;
+}

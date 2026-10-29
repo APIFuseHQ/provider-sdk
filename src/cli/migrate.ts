@@ -45,11 +45,12 @@ export type CodemodManifest = {
 
 /**
  * Dependency order. `errors-factory` first: it turns every `errorCodes`
- * table into a `defineErrors` map and leaves a list with inline rows whole.
- * `errors-hoist` next: it moves those inline rows into the provider's one
- * map and spreads a table only once it is a map, so it has to see the tables
- * converted. Both leave the `errors.<CODE>` names `health-refs` references,
- * so a health scenario rewritten after them points at a name that exists.
+ * table into a `defineErrors` map, rewrites throw sites to `errors.CODE`,
+ * and leaves a list with inline rows whole. `health-refs` next: it rewrites
+ * scenarios to `errors.CODE` references. `errors-hoist` after both: it
+ * moves the inline rows into the provider's one map, spreads a table only
+ * once it is a map, and resolves every `errors.CODE` the two left (the
+ * import, or the file's own map), so it has to see their rewrites.
  * `health-stale-window` after `health-refs`: it moves the per-call window
  * `health-refs` only reports. The others touch disjoint syntax (handle
  * options, allow comments, schema descriptions) and run after so their
@@ -61,14 +62,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "ast-grep",
 		file: "errors-factory.yml",
 		manualStep:
-			'import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider" where a table became a map; import the map where errors.X is thrown or listed; tsc names the category a provider row still lacks',
-	},
-	{
-		id: "errors-hoist",
-		kind: "source",
-		run: hoistInlineErrorRows,
-		manualStep:
-			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); the category of a hoisted provider code is the one its throw sites agreed on, else provider_error, so refine it where a narrower class fits",
+			"tsc names the category a provider row still lacks; a throw site left as new ProviderError names its registry conflict (errors-hoist adds the imports and resolves errors.X)",
 	},
 	{
 		id: "health-refs",
@@ -76,6 +70,13 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		file: "health-refs.yml",
 		manualStep:
 			"declare `errors` once in the scenario module (errorRefs(<operation>ErrorCodes) or the defineErrors map)",
+	},
+	{
+		id: "errors-hoist",
+		kind: "source",
+		run: hoistInlineErrorRows,
+		manualStep:
+			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); the category of a hoisted provider code is the one its throw sites agreed on, else provider_error, so refine it where a narrower class fits",
 	},
 	{
 		id: "health-stale-window",

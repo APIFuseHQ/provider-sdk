@@ -90,15 +90,17 @@ function countsByCodemod(report: MigrateReport): Record<string, [string[], numbe
 const DRY_RUN_RESIDUES = [
 	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 	"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:31",
+	"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:8",
 	"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
+	"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:7",
 ];
 
 describe("apifuse migrate", () => {
 	it("runs the codemods in dependency order: the error-table steps before the codemods that reference their map", () => {
 		expect(CODEMODS.map((codemod) => codemod.id)).toEqual([
 			"errors-factory",
-			"errors-hoist",
 			"health-refs",
+			"errors-hoist",
 			"health-stale-window",
 			"handles",
 			"runtime-boundary-allow-comments",
@@ -118,17 +120,19 @@ describe("apifuse migrate", () => {
 
 		expect(sourceFiles()).toEqual(before);
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["operations/search.ts"], 3, 2],
+			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 7, 2],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
+					"mappers/item.ts",
 					"operations/detail.ts",
 					"operations/named.ts",
 					"operations/search.ts",
 					"operations/whole.ts",
+					"upstream/client.ts",
 				],
-				5,
-				1,
+				8,
+				3,
 			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
@@ -161,12 +165,11 @@ describe("apifuse migrate", () => {
 			'"429": { status: 429, description: "Too many searches.", retryable: true }',
 		);
 		expect(search).toContain("\terrors: [\n\t\t...Object.values(SEARCH_ERRORS),\n\t],\n");
-		expect(search).toContain('errors.NOT_FOUND({ message: "No item matches.", details: {\n');
-		expect(search).toContain('throw errors["429"]({ message: "Too many searches." });');
+		expect(search).toContain('SEARCH_ERRORS.NOT_FOUND({ message: "No item matches.", details: {\n');
+		expect(search).toContain('throw SEARCH_ERRORS["429"]({ message: "Too many searches." });');
 		expect(search).toContain('export const AREAS = [\n\t{ code: "010", name: "Sapporo" },');
 		expect(search).not.toContain("retryable: false,\n\t\t\t\tdetails");
 		expect(search).not.toContain("@apifuse-allow");
-		expect(search).toContain('expectedErrors: [{ error: errors.NOT_FOUND, attribute: "query" }]');
 		// health-stale-window moved the per-call window onto the operation and
 		// the provider declaration gained the cache capability it needs.
 		expect(search).toContain(
@@ -217,17 +220,19 @@ describe("apifuse migrate", () => {
 		expect(index).toContain("\tstate: true,\n\tcache: true,\n});");
 
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["operations/search.ts"], 3, 2],
+			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 7, 2],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
+					"mappers/item.ts",
 					"operations/detail.ts",
 					"operations/named.ts",
 					"operations/search.ts",
 					"operations/whole.ts",
+					"upstream/client.ts",
 				],
-				5,
-				1,
+				8,
+				3,
 			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
@@ -241,8 +246,32 @@ describe("apifuse migrate", () => {
 		expect(residueTable(report)).toEqual([
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
+			"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:8",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
+			"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:7",
 		]);
+		// Every errors.CODE the factory and health-refs wrote resolves: the
+		// module map by import, the file's own map by retargeting; the undeclared
+		// one is the residue above (and still gets the import so tsc names only it).
+		const mapper = after["mappers/item.ts"] ?? "";
+		expect(mapper).toContain(
+			'import { ProviderError } from "@apifuse/provider-sdk/provider";\nimport { errors } from "../domain/errors";\n',
+		);
+		expect(mapper).toContain('throw errors.ITEM_GONE({ message: "The item was removed." });');
+		const client = after["upstream/client.ts"] ?? "";
+		expect(client).toContain(
+			'import { SEARCH_ERRORS } from "../operations/search";\nimport { errors } from "../domain/errors";\n',
+		);
+		expect(client).toContain('throw SEARCH_ERRORS.NOT_FOUND({ message: "No item matches." });');
+		expect(client).toContain('throw errors.NEVER_DECLARED({ message: "Unknown." });');
+		expect(search).toContain(
+			'import { ProviderError, defineOperation, defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";',
+		);
+		expect(search).toContain('throw SEARCH_ERRORS["429"]({ message: "Too many searches." });');
+		expect(search).toContain(
+			'expectedErrors: [{ error: SEARCH_ERRORS.NOT_FOUND, attribute: "query" }]',
+		);
+		expect(search).not.toContain("domain/errors");
 		expect(report.codemods.find((result) => result.id === "schema")?.notes).toEqual([
 			{
 				codemod: "schema",
@@ -260,7 +289,9 @@ describe("apifuse migrate", () => {
 		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
 		expect(residueTable(again)).toEqual([
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:29",
+			"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:9",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
+			"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:8",
 		]);
 		expect(again.clean).toBe(false);
 	});
@@ -277,8 +308,13 @@ describe("apifuse migrate", () => {
 		expect(residueTable(report)).toEqual([
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
+			"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:8",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
+			"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:7",
 		]);
+		expect(readFileSync(join(providerRoot, "mappers/item.ts"), "utf8")).toContain(
+			'import { errors } from "../domain/errors";',
+		);
 	});
 
 	it("--only runs the named codemod and is clean once nothing is left", async () => {
@@ -298,8 +334,8 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   1                   3         2");
-		expect(text).toContain("errors-hoist                     5                   5         1");
+		expect(text).toContain("errors-factory                   3                   7         2");
+		expect(text).toContain("errors-hoist                     7                   8         3");
 		expect(text).toContain(
 			"operations/search.ts:31:10 [errors-factory-throw-site-registry-conflict]",
 		);
@@ -307,7 +343,7 @@ describe("apifuse migrate", () => {
 		expect(text).toContain("operations/search.ts:7:2 [errors-factory-sdk-row-conflict]");
 		expect(text).not.toContain("[errors-factory-inline-row-hoist]");
 		expect(text).not.toContain("[health-stale-window-per-call]");
-		expect(text).toContain("by hand: import { defineErrors, sdkErrors }");
+		expect(text).toContain("by hand: tsc names the category a provider row still lacks");
 		expect(text).toContain("by hand: a row left in errorCodes names its reason");
 		expect(text).toContain(
 			'operations/detail.ts:8:10 Raw .describe() prose on property itemId; replaced by describeKey("schema.itemId").',

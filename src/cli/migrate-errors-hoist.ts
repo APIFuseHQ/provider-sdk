@@ -78,6 +78,7 @@ export const ERRORS_HOIST_RULES = {
 	declaredDifferently: "errors-hoist-declared-differently",
 	descriptionDropped: "errors-hoist-description-dropped",
 	categoryChosen: "errors-hoist-category-chosen",
+	referenceUndeclared: "errors-hoist-reference-undeclared",
 } as const;
 
 export type ErrorsHoistOptions = {
@@ -252,8 +253,12 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 		rewrites += 1;
 		editsFor(edits, list.file).push(...listEdits(ts, list, moved, kept));
 	}
+	const mergedImports = new Set<string>();
 	for (const [path, pending] of imports) {
-		if (edits.has(path)) editsFor(edits, pending.file).push(...pending.edits);
+		if (edits.has(path)) {
+			editsFor(edits, pending.file).push(...pending.edits);
+			mergedImports.add(path);
+		}
 	}
 
 	const newCodes = [...declarations.entries()].filter(
@@ -272,6 +277,25 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 		if (moduleResult.edits.length > 0) {
 			editsFor(edits, moduleResult.file).push(...moduleResult.edits);
 		}
+	}
+
+	const moduleCodes = new Set<string>([
+		...(existing?.entries.keys() ?? []),
+		...newCodes.map(([code]) => code),
+	]);
+	const modulePath =
+		existing?.file.path ?? (moduleResult === undefined ? undefined : DEFAULT_MODULE);
+	rewrites += resolveReferences(ts, sources, {
+		existing,
+		modulePath,
+		moduleCodes,
+		maps,
+		edits,
+		imports,
+		residues,
+	});
+	for (const [path, pending] of imports) {
+		if (!mergedImports.has(path)) editsFor(edits, pending.file).push(...pending.edits);
 	}
 
 	const filesChanged = new Set<string>();
@@ -307,6 +331,219 @@ function dedupe(findings: readonly MigrateFinding[]): MigrateFinding[] {
 		seen.add(key);
 		return true;
 	});
+}
+
+/**
+ * errors-factory rewrites a throw site to `errors.CODE(...)` (and a health
+ * scenario to `errors.CODE`) without the binding. Per file: a reference to a
+ * code the provider map declares gets `import { errors }` from the module; a
+ * reference to a code only a map in the file's scope declares (its own table
+ * that became a map, or one it imports) is retargeted to that map; a code no
+ * map declares is a residue. A file that converted a table, or names
+ * `sdkErrors`, gets the SDK import. A dry run counts the throw sites the
+ * factory will rewrite so it reports what the apply does.
+ */
+function resolveReferences(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+	context: {
+		readonly existing: ExistingMap | undefined;
+		readonly modulePath: string | undefined;
+		readonly moduleCodes: ReadonlySet<string>;
+		readonly maps: MapsByFile;
+		readonly edits: Map<string, FileEdits>;
+		readonly imports: Map<string, FileEdits>;
+		readonly residues: MigrateFinding[];
+	},
+): number {
+	let rewrites = 0;
+	for (const file of sources) {
+		const scope = mapsInScope(ts, context.maps, file);
+		const bound = topLevelBindings(ts, file);
+		// `errors` already imported from the module (a second run) still has its
+		// references checked; `errors` bound to anything else is left alone.
+		if (bound.has(MAP_NAME) && importsModuleMap(ts, file, context.modulePath))
+			bound.delete(MAP_NAME);
+		const fileEdits: TextEdit[] = [];
+		let needsModule = false;
+		const reference = (node: TS.Node, code: string, retarget: (name: string) => void): void => {
+			if (context.moduleCodes.has(code)) {
+				if (file.path !== context.modulePath) needsModule = true;
+				return;
+			}
+			for (const [name, codes] of scope) {
+				if (name !== MAP_NAME && codes.has(code)) {
+					retarget(name);
+					return;
+				}
+			}
+			if (context.modulePath !== undefined && file.path !== context.modulePath) needsModule = true;
+			context.residues.push(
+				finding(
+					file,
+					node.getStart(file.source),
+					ERRORS_HOIST_RULES.referenceUndeclared,
+					`${MAP_NAME}.${code} names a code no defineErrors map in this provider declares${context.modulePath === undefined ? " (and the provider has no errors map)" : ""}; tsc names it until it is declared.`,
+					`Declare ${code} in the provider's defineErrors map (status, category, description) or throw a declared code here, then re-run apifuse migrate.`,
+				),
+			);
+		};
+		const visit = (node: TS.Node): void => {
+			if (
+				(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === MAP_NAME &&
+				!bound.has(MAP_NAME)
+			) {
+				const code = ts.isPropertyAccessExpression(node)
+					? node.name.text
+					: literalString(ts, node.argumentExpression);
+				if (code !== undefined) {
+					const target = node.expression;
+					reference(node, code, (name) => {
+						fileEdits.push({ start: target.getStart(file.source), end: target.end, text: name });
+					});
+				}
+			} else if (
+				ts.isNewExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === "ProviderError"
+			) {
+				// Not yet rewritten (a dry run): count what rule 1 will leave behind.
+				const code = factoryRewriteCode(ts, node);
+				if (code !== undefined && !bound.has(MAP_NAME)) reference(node, code, () => {});
+			} else if (ts.isObjectLiteralExpression(node) && !bound.has(MAP_NAME)) {
+				// Not yet rewritten (a dry run): an expectedErrors entry health-refs
+				// turns into { error: errors.CODE, attribute }.
+				const code = healthRefsRewriteCode(ts, node);
+				if (code !== undefined) reference(node, code, () => {});
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file.source);
+
+		const sdkWanted = sdkNamesWanted(ts, file, context.maps);
+		if (sdkWanted.length > 0 && file.path !== context.modulePath) {
+			fileEdits.push(...sdkImportEdits(ts, file, sdkWanted));
+		}
+		if (needsModule && !bound.has(MAP_NAME)) {
+			if (!ensureMapImport(ts, file, context.existing, context.residues, context.imports)) {
+				continue;
+			}
+		}
+		if (fileEdits.length > 0) editsFor(context.edits, file).push(...fileEdits);
+		if (fileEdits.length > 0 || (needsModule && context.imports.has(file.path))) rewrites += 1;
+	}
+	return rewrites;
+}
+
+function importsModuleMap(
+	ts: TypeScriptModule,
+	file: ProviderSourceFile,
+	modulePath: string | undefined,
+): boolean {
+	if (modulePath === undefined) return false;
+	for (const declaration of importsOf(ts, file.source)) {
+		if (namedImportsOf(ts, declaration).get(MAP_NAME) !== MAP_NAME) continue;
+		const specifier = (importSpecifierOf(ts, declaration) ?? "").replace(/\.[cm]?js$/, "");
+		return specifier === relativeSpecifier(file.path, modulePath);
+	}
+	return false;
+}
+
+/** The code rule 1 rewrites this throw site to, or undefined when it leaves the site (no literal code, or a per-throw value that contradicts the registry). */
+function factoryRewriteCode(ts: TypeScriptModule, node: TS.NewExpression): string | undefined {
+	const options = node.arguments?.[1];
+	if (options === undefined || !ts.isObjectLiteralExpression(options)) return undefined;
+	const codePair = propertyOf(ts, options, "code");
+	const code = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
+	if (code === undefined) return undefined;
+	if (Object.hasOwn(SDK_ERROR_REGISTRY, code)) {
+		const registry = SDK_ERROR_REGISTRY[code as SdkErrorCode];
+		const retryable = propertyOf(ts, options, "retryable");
+		const category = propertyOf(ts, options, "category");
+		const stated = retryable === undefined ? undefined : literalBoolean(ts, retryable.initializer);
+		const statedCategory =
+			category === undefined ? undefined : literalString(ts, category.initializer);
+		if (
+			(retryable !== undefined && stated !== registry.retryable) ||
+			(category !== undefined && statedCategory !== registry.category)
+		) {
+			return undefined;
+		}
+	}
+	return code;
+}
+
+/** The code health-refs rewrites this `expectedErrors` entry to, or undefined when it is not one. */
+function healthRefsRewriteCode(
+	ts: TypeScriptModule,
+	node: TS.ObjectLiteralExpression,
+): string | undefined {
+	const array = node.parent;
+	if (!ts.isArrayLiteralExpression(array)) return undefined;
+	const pair = array.parent;
+	if (!ts.isPropertyAssignment(pair) || propertyName(ts, pair.name) !== "expectedErrors") {
+		return undefined;
+	}
+	const code = propertyOf(ts, node, "code");
+	if (
+		code === undefined ||
+		!hasProperty(ts, node, "status") ||
+		!hasProperty(ts, node, "attribute")
+	) {
+		return undefined;
+	}
+	return literalString(ts, code.initializer);
+}
+
+/** Top-level names a file binds (declarations and imports), which a reference to `errors` resolves to before any import this step adds. */
+function topLevelBindings(ts: TypeScriptModule, file: ProviderSourceFile): Set<string> {
+	const names = new Set<string>();
+	for (const statement of file.source.statements) {
+		if (ts.isVariableStatement(statement)) {
+			for (const declaration of statement.declarationList.declarations) {
+				if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text);
+			}
+		} else if (
+			(ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+			statement.name !== undefined
+		) {
+			names.add(statement.name.text);
+		} else if (ts.isImportDeclaration(statement)) {
+			for (const local of namedImportsOf(ts, statement).keys()) names.add(local);
+			const name = statement.importClause?.name;
+			if (name !== undefined) names.add(name.text);
+		}
+	}
+	return names;
+}
+
+/** `defineErrors` / `sdkErrors` a file uses (or will, once its table is a map) without importing them. */
+function sdkNamesWanted(
+	ts: TypeScriptModule,
+	file: ProviderSourceFile,
+	maps: MapsByFile,
+): string[] {
+	const bound = topLevelBindings(ts, file);
+	const used = new Set<string>();
+	const visit = (node: TS.Node): void => {
+		if (ts.isIdentifier(node) && (node.text === "defineErrors" || node.text === "sdkErrors")) {
+			used.add(node.text);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(file.source);
+	// A table the factory converts (a dry run) will name defineErrors, and
+	// sdkErrors for a registered code; a map already names what it uses.
+	for (const entry of (maps.get(file.path) ?? new Map()).values()) {
+		if (!entry.table) continue;
+		used.add("defineErrors");
+		if ([...entry.codes].some((code) => Object.hasOwn(SDK_ERROR_REGISTRY, code))) {
+			used.add("sdkErrors");
+		}
+	}
+	return ["defineErrors", "sdkErrors"].filter((name) => used.has(name) && !bound.has(name));
 }
 
 function editsFor(edits: Map<string, FileEdits>, file: ProviderSourceFile): TextEdit[] {
@@ -844,13 +1081,19 @@ function collectThrowCategories(
  * own match), by file. The second form keeps a dry run, where the table is
  * still an array, reporting what the apply does.
  */
+/** Per file, each defineErrors map (or a table the factory converts) by name: its codes, and whether it is still a table. */
+type MapsByFile = Map<
+	string,
+	Map<string, { readonly codes: Set<string>; readonly table: boolean }>
+>;
+
 function defineErrorsMaps(
 	ts: TypeScriptModule,
 	sources: readonly ProviderSourceFile[],
-): Map<string, Set<string>> {
-	const out = new Map<string, Set<string>>();
+): MapsByFile {
+	const out: MapsByFile = new Map();
 	for (const file of sources) {
-		const names = new Set<string>();
+		const names = new Map<string, { readonly codes: Set<string>; readonly table: boolean }>();
 		for (const statement of file.source.statements) {
 			if (!ts.isVariableStatement(statement)) continue;
 			for (const declaration of statement.declarationList.declarations) {
@@ -863,17 +1106,37 @@ function defineErrorsMaps(
 					ts.isCallExpression(initializer) &&
 					ts.isIdentifier(initializer.expression) &&
 					initializer.expression.text === "defineErrors";
-				const isConvertibleTable =
-					ts.isArrayLiteralExpression(initializer) &&
-					initializer.elements.some((element) => {
+				const codes = new Set<string>();
+				if (isMap) {
+					const object = initializer.arguments[0];
+					if (object !== undefined && ts.isObjectLiteralExpression(object)) {
+						for (const property of object.properties) {
+							if (ts.isPropertyAssignment(property)) {
+								const name = propertyName(ts, property.name);
+								if (name !== undefined) codes.add(name);
+							}
+						}
+					}
+				}
+				let isConvertibleTable = false;
+				if (ts.isArrayLiteralExpression(initializer)) {
+					for (const element of initializer.elements) {
 						const row = unwrapExpression(ts, element);
-						return (
+						if (
 							ts.isObjectLiteralExpression(row) &&
 							hasProperty(ts, row, "code") &&
 							hasProperty(ts, row, "status")
-						);
-					});
-				if (isMap || isConvertibleTable) names.add(declaration.name.text);
+						) {
+							isConvertibleTable = true;
+							const code = propertyOf(ts, row, "code");
+							const value = code === undefined ? undefined : literalString(ts, code.initializer);
+							if (value !== undefined) codes.add(value);
+						}
+					}
+				}
+				if (isMap || isConvertibleTable) {
+					names.set(declaration.name.text, { codes, table: !isMap });
+				}
 			}
 		}
 		out.set(file.path, names);
@@ -884,20 +1147,32 @@ function defineErrorsMaps(
 /** True when `name`, as seen from `file`, is a defineErrors map: declared there, or imported from a file that declares it. */
 function isDefineErrorsMap(
 	ts: TypeScriptModule,
-	maps: ReadonlyMap<string, ReadonlySet<string>>,
+	maps: MapsByFile,
 	file: ProviderSourceFile,
 	name: string,
 ): boolean {
-	if (maps.get(file.path)?.has(name)) return true;
+	return mapsInScope(ts, maps, file).has(name);
+}
+
+/** The defineErrors maps a file can name: its own, and the ones it imports from a file that declares them; local name -> codes. */
+function mapsInScope(
+	ts: TypeScriptModule,
+	maps: MapsByFile,
+	file: ProviderSourceFile,
+): Map<string, ReadonlySet<string>> {
+	const out = new Map<string, ReadonlySet<string>>();
+	for (const [name, entry] of maps.get(file.path) ?? []) out.set(name, entry.codes);
 	for (const declaration of importsOf(ts, file.source)) {
-		const imported = namedImportsOf(ts, declaration).get(name);
-		if (imported === undefined) continue;
 		const specifier = importSpecifierOf(ts, declaration);
-		if (specifier === undefined) return false;
+		if (specifier === undefined) continue;
 		const target = resolveRelativeImport(file.path, specifier, (candidate) => maps.has(candidate));
-		return target !== undefined && (maps.get(target)?.has(imported) ?? false);
+		if (target === undefined) continue;
+		for (const [local, imported] of namedImportsOf(ts, declaration)) {
+			const entry = maps.get(target)?.get(imported);
+			if (entry !== undefined && !out.has(local)) out.set(local, entry.codes);
+		}
 	}
-	return false;
+	return out;
 }
 
 function findExistingMap(
@@ -1183,7 +1458,9 @@ function writeMap(
 				text: comma === -1 && at === insertAt ? `,\n${body}` : body,
 			});
 		}
-		edits.push(...sdkImportEdits(ts, existing.file, needsSdk));
+		edits.push(
+			...sdkImportEdits(ts, existing.file, ["defineErrors", ...(needsSdk ? ["sdkErrors"] : [])]),
+		);
 		return { file: existing.file, edits };
 	}
 
@@ -1205,7 +1482,7 @@ function writeMap(
 		return { file, edits: [], created };
 	}
 	const edits: TextEdit[] = [
-		...sdkImportEdits(ts, current, needsSdk),
+		...sdkImportEdits(ts, current, ["defineErrors", ...(needsSdk ? ["sdkErrors"] : [])]),
 		{
 			start: current.text.length,
 			end: current.text.length,
@@ -1218,9 +1495,8 @@ function writeMap(
 function sdkImportEdits(
 	ts: TypeScriptModule,
 	file: ProviderSourceFile,
-	needsSdk: boolean,
+	wanted: readonly string[],
 ): TextEdit[] {
-	const wanted = ["defineErrors", ...(needsSdk ? ["sdkErrors"] : [])];
 	for (const declaration of importsOf(ts, file.source)) {
 		if (importSpecifierOf(ts, declaration) !== SDK_IMPORT) continue;
 		if (declaration.importClause?.isTypeOnly) continue;

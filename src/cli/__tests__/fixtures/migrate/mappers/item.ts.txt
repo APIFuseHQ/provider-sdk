@@ -1,0 +1,11 @@
+import { ProviderError } from "@apifuse/provider-sdk/provider";
+
+export function parseItem(html: string): string {
+	if (html === "") {
+		throw new ProviderError("The item was removed.", { code: "ITEM_GONE" });
+	}
+	if (html === "drift") {
+		throw new ProviderError("Shape drift.", { code: "UPSTREAM_SCHEMA_ERROR" });
+	}
+	return html;
+}

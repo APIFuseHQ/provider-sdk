@@ -1,10 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import ts from "typescript";
 
-import {
-	migrateProviderShape,
-	type ProviderShapeMigration,
-} from "../migrate-provider-shape.js";
+import { migrateProviderShape, type ProviderShapeMigration } from "../migrate-provider-shape.js";
 
 /**
  * Fixtures mirror the four shape classes measured across the 84 polyrepo
@@ -110,9 +107,8 @@ function parses(code: string): boolean {
 		true,
 		ts.ScriptKind.TS,
 	);
-	const diagnostics = (
-		source as ts.SourceFile & { parseDiagnostics?: ts.DiagnosticWithLocation[] }
-	).parseDiagnostics;
+	const diagnostics = (source as ts.SourceFile & { parseDiagnostics?: ts.DiagnosticWithLocation[] })
+		.parseDiagnostics;
 	return diagnostics === undefined || diagnostics.length === 0;
 }
 

@@ -69,13 +69,14 @@ describe("errors-hoist", () => {
 		it("creates domain/errors.ts with one entry per hoisted code, registry rows as sdkErrors refs", () => {
 			expect(result.filesChanged).toEqual([
 				"domain/errors.ts",
+				"mappers/item.ts",
 				"operations/detail.ts",
 				"operations/legacy.ts",
 				"operations/list.ts",
 				"operations/meta.ts",
 				"operations/named.ts",
 			]);
-			expect(result.rewrites).toBe(6);
+			expect(result.rewrites).toBe(8);
 			const map = read("domain/errors.ts");
 			expect(
 				map.startsWith(
@@ -159,9 +160,25 @@ describe("errors-hoist", () => {
 				expect(parses(file)).toBe(true);
 		});
 
+		it("resolves every errors.CODE a rewritten throw site names: the module by import, a map in scope by name", () => {
+			const mapper = read("mappers/item.ts");
+			expect(mapper).toContain(
+				'import { COMMON_ERRORS } from "../shared";\nimport { errors } from "../domain/errors";\n',
+			);
+			expect(mapper).toContain(
+				'throw errors.ITEM_NOT_FOUND({ message: "No item matches the id." });',
+			);
+			expect(mapper).toContain(
+				'throw COMMON_ERRORS.UPSTREAM_SCHEMA_ERROR({ message: "Shape drift." });',
+			);
+			expect(mapper).toContain('throw errors.NEVER_DECLARED({ message: "Unknown." });');
+			expect(parses("mappers/item.ts")).toBe(true);
+		});
+
 		it("names every refused row with its reason and notes the dropped description", () => {
 			expect(table(result.residues)).toEqual([
 				`${ERRORS_HOIST_RULES.outsideOperation} docs/notes.ts:1`,
+				`${ERRORS_HOIST_RULES.referenceUndeclared} mappers/item.ts:6`,
 				`${ERRORS_HOIST_RULES.codeConflict} operations/detail.ts:11`,
 				`${ERRORS_HOIST_RULES.rowNotLiteral} operations/detail.ts:12`,
 				`${ERRORS_HOIST_RULES.spreadNotATable} operations/detail.ts:21`,
@@ -221,7 +238,7 @@ describe("errors-hoist", () => {
 		);
 		const result = hoistInlineErrorRows({ providerRoot, dryRun: true });
 		expect(result.filesChanged).toContain("domain/errors.ts");
-		expect(result.rewrites).toBe(6);
+		expect(result.rewrites).toBe(8);
 		expect(existsSync(join(providerRoot, "domain/errors.ts"))).toBe(false);
 		expect(
 			Object.fromEntries(walk(providerRoot).map((file) => [file, readFileSync(file, "utf8")])),

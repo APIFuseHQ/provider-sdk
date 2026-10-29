@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
 
@@ -9,8 +9,8 @@ import {
 	deploymentIntentsEquivalent,
 	normalizeLegacyDeployment,
 	parseDeploymentIntent,
-	redundantDeploymentDefaults,
 	type ResolvedDeploymentIntent,
+	redundantDeploymentDefaults,
 	resolveDeploymentIntent,
 	subtractDeploymentDefaults,
 } from "../deployment-intent.js";
