@@ -23,7 +23,8 @@
  * provider-contract/__tests__, packages/provider-registry/src/__tests__).
  * There are no directory-shaped fixture providers in apifuse; those inline
  * literals are the fixtures the beta.81 bump broke, so they are run as tests
- * in a staged copy of the monorepo with the SDK swapped. The last two groups
+ * in a staged copy of the whole monorepo (minus node_modules, .git and
+ * generated trees) with the SDK swapped in every workspace node_modules. The last two groups
  * were outside every earlier ad-hoc fleet scan, which is how beta.81 refused
  * the six providers-staging workspaces and the monorepo fixtures at load time.
  *
@@ -44,7 +45,9 @@
  * lint diagnostics by rule id, and the runtime warnings printed while
  * loading. The diff table marks a target BREAK when it loaded or compiled on
  * base and fails on head, or when its contract digest changes; a lint
- * error-level rule or a runtime warning that is new on head is marked WARN.
+ * error-level rule or a runtime warning that is new on head is marked WARN;
+ * a target that fails on both sides is NOT COVERED (`covered: false` in the
+ * JSON), because the diff says nothing about it.
  *
  * The second section counts the one-release window rules across the targets
  * (legacy per-throw error options, defineCursor/defineDraft fieldName or
@@ -69,6 +72,8 @@ import {
 import { cpus, tmpdir } from "node:os";
 import path from "node:path";
 
+import ts from "typescript";
+
 const SDK_REPO = path.resolve(import.meta.dirname, "..");
 const SDK_PACKAGE = "@apifuse/provider-sdk";
 
@@ -83,12 +88,16 @@ const FIXTURE_TEST_DIRS = [
 	"scripts/lib/provider-contract/__tests__",
 	"packages/provider-registry/src/__tests__",
 ];
-const APIFUSE_STAGE_DIRECTORIES = [
-	"scripts",
-	"packages",
-	"openspec",
-	"providers",
-	"provider-artifacts",
+const APIFUSE_STAGE_EXCLUDES = [
+	"node_modules",
+	".git",
+	".worktree",
+	".provider-workspace",
+	"__generated__",
+	".tmp",
+	".next",
+	".turbo",
+	"coverage",
 ];
 
 export type Side = "base" | "head";
@@ -110,10 +119,16 @@ export interface ProviderProbe {
 export interface SideResult {
 	probe?: ProviderProbe;
 	tsc?: { errors: number; sample: string[] };
-	tests?: { pass: number; fail: number; files: Record<string, { pass: number; fail: number }> };
+	tests?: { pass: number; fail: number; files: Record<string, FixtureFileResult> };
 }
 
-export type Verdict = "SAME" | "BREAK" | "WARN" | "SKIP";
+export interface FixtureFileResult {
+	pass: number;
+	fail: number;
+	firstFailure?: string;
+}
+
+export type Verdict = "SAME" | "BREAK" | "WARN" | "NOT COVERED" | "SKIP";
 
 export interface TargetReport {
 	name: string;
@@ -122,6 +137,8 @@ export interface TargetReport {
 	base: SideResult;
 	head: SideResult;
 	verdict: Verdict;
+	/** False when the target fails on both sides, so the diff says nothing about it. */
+	covered: boolean;
 	reasons: string[];
 }
 
@@ -135,6 +152,7 @@ export interface WindowRuleUsage {
 export interface ScanReport {
 	base: { spec: string; dir: string; version: string };
 	head: { spec: string; dir: string; version: string };
+	targetPatterns: string[];
 	targets: TargetReport[];
 	windowRules: WindowRuleUsage[];
 	summary: Record<Verdict, number>;
@@ -153,7 +171,8 @@ interface Options {
 	base: string;
 	head: string;
 	targets: string[];
-	apifuse: string | undefined;
+	apifuse: string;
+	fixtureTests: boolean;
 	jobs: number;
 	scratch: string;
 	keep: boolean;
@@ -174,6 +193,7 @@ export function parseArgs(argv: string[]): Options {
 		head: "",
 		targets: DEFAULT_TARGETS,
 		apifuse: DEFAULT_APIFUSE,
+		fixtureTests: true,
 		jobs: Math.max(2, Math.min(16, Math.floor(cpus().length / 4))),
 		scratch: defaultScratchRoot(),
 		keep: false,
@@ -203,7 +223,7 @@ export function parseArgs(argv: string[]): Options {
 				options.apifuse = value();
 				break;
 			case "--no-fixture-tests":
-				options.apifuse = undefined;
+				options.fixtureTests = false;
 				break;
 			case "--jobs":
 				options.jobs = Number.parseInt(value(), 10);
@@ -418,10 +438,14 @@ function providerIdOf(dir: string): string | undefined {
 	}
 }
 
-export function discoverTargets(patterns: string[], apifuse: string | undefined): Target[] {
+export function discoverTargets(
+	patterns: string[],
+	apifuse: string,
+	fixtureTests: boolean,
+): Target[] {
 	const targets: Target[] = [];
 	const seen = new Set<string>();
-	const workspaceProviders = apifuse ? path.join(apifuse, ".provider-workspace", "providers") : "";
+	const workspaceProviders = path.join(DEFAULT_APIFUSE, ".provider-workspace", "providers");
 	for (const pattern of patterns) {
 		for (const dir of expandPattern(pattern)) {
 			if (!isProviderCheckout(dir)) continue;
@@ -433,10 +457,8 @@ export function discoverTargets(patterns: string[], apifuse: string | undefined)
 				name = `${path.basename(path.dirname(real))}/${name}`;
 			const nodeModulesSources = [path.join(real, "node_modules")];
 			const id = providerIdOf(real) ?? path.basename(real);
-			if (workspaceProviders) {
-				const twin = path.join(workspaceProviders, id, "node_modules");
-				if (twin !== nodeModulesSources[0] && existsSync(twin)) nodeModulesSources.push(twin);
-			}
+			const twin = path.join(workspaceProviders, id, "node_modules");
+			if (twin !== nodeModulesSources[0] && existsSync(twin)) nodeModulesSources.push(twin);
 			targets.push({
 				name,
 				kind: "provider",
@@ -446,7 +468,7 @@ export function discoverTargets(patterns: string[], apifuse: string | undefined)
 			});
 		}
 	}
-	if (apifuse && existsSync(apifuse)) {
+	if (fixtureTests && existsSync(apifuse)) {
 		const testFiles: string[] = [];
 		for (const relativeDir of FIXTURE_TEST_DIRS) {
 			const dir = path.join(apifuse, relativeDir);
@@ -588,40 +610,28 @@ async function stageApifuse(
 	scratch: string,
 ): Promise<string> {
 	const staged = path.join(scratch, side, "apifuse");
-	mkdirSync(staged, { recursive: true });
-	for (const entry of readdirSync(target.path, { withFileTypes: true })) {
-		if (entry.isFile())
-			writeFileSync(
-				path.join(staged, entry.name),
-				readFileSync(path.join(target.path, entry.name)),
-			);
-	}
-	for (const entry of APIFUSE_STAGE_DIRECTORIES) {
-		const from = path.join(target.path, entry);
-		if (!existsSync(from)) continue;
-		await copyTree(from, path.join(staged, entry), ["node_modules", ".git", "__generated__"]);
-	}
+	await copyTree(target.path, staged, APIFUSE_STAGE_EXCLUDES);
 	const remap = { repoRoot: target.path, stagedRoot: staged };
-	shadowNodeModules(
-		path.join(staged, "node_modules"),
-		[path.join(target.path, "node_modules")],
-		sdk.dir,
-		remap,
-	);
-	const packagesDir = path.join(target.path, "packages");
-	if (existsSync(packagesDir)) {
-		for (const name of readdirSync(packagesDir)) {
-			const original = path.join(packagesDir, name, "node_modules");
-			if (!existsSync(original) || !existsSync(path.join(staged, "packages", name))) continue;
-			shadowNodeModules(
-				path.join(staged, "packages", name, "node_modules"),
-				[original],
-				sdk.dir,
-				remap,
-			);
-		}
+	for (const original of workspaceNodeModules(target.path)) {
+		const relative = path.relative(target.path, original);
+		if (!existsSync(path.dirname(path.join(staged, relative)))) continue;
+		shadowNodeModules(path.join(staged, relative), [original], sdk.dir, remap);
 	}
 	return staged;
+}
+
+/** The root node_modules plus every `<group>/<member>/node_modules` of the workspace (apps, packages, providers-staging). */
+function workspaceNodeModules(repoRoot: string): string[] {
+	const found = [path.join(repoRoot, "node_modules")];
+	for (const group of readdirSync(repoRoot, { withFileTypes: true })) {
+		if (!group.isDirectory() || APIFUSE_STAGE_EXCLUDES.includes(group.name)) continue;
+		for (const member of readdirSync(path.join(repoRoot, group.name), { withFileTypes: true })) {
+			if (!member.isDirectory()) continue;
+			const candidate = path.join(repoRoot, group.name, member.name, "node_modules");
+			if (existsSync(candidate)) found.push(candidate);
+		}
+	}
+	return found.filter((candidate) => existsSync(candidate));
 }
 
 const PROBE_MARKER = "__BUMP_SAFETY_SCAN_PROBE__";
@@ -786,9 +796,22 @@ async function runFixtureTests(
 		let fail = Number(/^\s*(\d+) fail/m.exec(text)?.[1] ?? 0);
 		if (result.timedOut || (result.code !== 0 && pass === 0 && fail === 0))
 			fail = Math.max(fail, 1);
-		return [file, { pass, fail }] as const;
+		const firstFailure = result.timedOut
+			? "timed out after 600s"
+			: text
+					.split("\n")
+					.map((line) => line.trim())
+					.find((line) => /^(error:|\(fail\)|[A-Za-z]*Error:|ENOENT)/.test(line));
+		return [
+			file,
+			{
+				pass,
+				fail,
+				...(fail > 0 && firstFailure ? { firstFailure: firstFailure.slice(0, 160) } : {}),
+			},
+		] as const;
 	});
-	const files_: Record<string, { pass: number; fail: number }> = {};
+	const files_: Record<string, FixtureFileResult> = {};
 	let pass = 0;
 	let fail = 0;
 	for (const [file, counts] of perFile) {
@@ -799,31 +822,59 @@ async function runFixtureTests(
 	return { pass, fail, files: files_ };
 }
 
-export function judge(target: Pick<TargetReport, "kind" | "base" | "head">): {
+export interface Judgement {
 	verdict: Verdict;
+	covered: boolean;
 	reasons: string[];
-} {
+}
+
+/**
+ * BREAK and WARN come from a base-to-head change; NOT COVERED means the target
+ * (or, for fixture tests, at least one of its files) fails on both sides, so
+ * the diff says nothing about it. A fixture-tests target with one both-sides
+ * failing file and one regressing file is BREAK and not covered at once.
+ */
+export function judge(target: Pick<TargetReport, "kind" | "base" | "head">): Judgement {
 	const reasons: string[] = [];
 	let verdict: Verdict = "SAME";
+	let covered = true;
 	const escalate = (level: Verdict, reason: string) => {
 		reasons.push(reason);
 		if (level === "BREAK" || (level === "WARN" && verdict === "SAME")) verdict = level;
 	};
+	const uncover = (reason: string) => {
+		covered = false;
+		reasons.push(reason);
+		if (verdict === "SAME") verdict = "NOT COVERED";
+	};
 	if (target.kind === "fixture-tests") {
 		const base = target.base.tests;
 		const head = target.head.tests;
-		if (!base || !head) return { verdict: "SKIP", reasons: ["tests did not run"] };
+		if (!base || !head) return { verdict: "SKIP", covered: false, reasons: ["tests did not run"] };
 		for (const [file, counts] of Object.entries(head.files)) {
 			const before = base.files[file];
-			if (before && before.fail === 0 && counts.fail > 0) {
-				escalate("BREAK", `${file}: ${before.pass} pass on base, ${counts.fail} fail on head`);
+			if (!before) continue;
+			if (before.fail === 0 && counts.fail > 0) {
+				escalate(
+					"BREAK",
+					`${file}: ${before.pass} pass on base, ${counts.fail} fail on head: ${counts.firstFailure ?? ""}`,
+				);
+			} else if (before.fail > 0 && counts.fail > 0) {
+				uncover(
+					`${file}: ${before.fail} fail on both sides: ${before.firstFailure ?? counts.firstFailure ?? ""}`,
+				);
 			}
 		}
-		return { verdict, reasons };
+		return { verdict, covered, reasons };
 	}
 	const base = target.base.probe;
 	const head = target.head.probe;
-	if (!base || !head) return { verdict: "SKIP", reasons: ["probe did not run"] };
+	if (!base || !head) return { verdict: "SKIP", covered: false, reasons: ["probe did not run"] };
+	if (base.load.status === "error" && head.load.status === "error") {
+		uncover(
+			`fails to load on both sides: ${head.load.errorCode ?? head.load.errorClass}: ${(head.load.message ?? "").slice(0, 110)}`,
+		);
+	}
 	if (base.load.status === "ok" && head.load.status === "error") {
 		escalate(
 			"BREAK",
@@ -854,7 +905,7 @@ export function judge(target: Pick<TargetReport, "kind" | "base" | "head">): {
 	if (newWarnings.length > 0) {
 		escalate("WARN", `new runtime warning: ${newWarnings[0]!.slice(0, 120)}`);
 	}
-	return { verdict, reasons };
+	return { verdict, covered, reasons };
 }
 
 const WINDOW_RULES: Array<{
@@ -901,8 +952,30 @@ const WINDOW_RULES: Array<{
 	},
 ];
 
-function stripComments(source: string): string {
-	return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\"'`])\/\/[^\n]*/g, "$1");
+/**
+ * Blanks every comment the TypeScript parser sees, so a `*\/*` inside a string
+ * (an `Accept` header) or a `//` inside a string or template never opens one.
+ */
+export function stripComments(source: string): string {
+	const sourceFile = ts.createSourceFile("source.ts", source, ts.ScriptTarget.Latest, true);
+	const ranges = new Map<number, number>();
+	const collect = (comments: readonly ts.CommentRange[] | undefined) => {
+		for (const comment of comments ?? []) ranges.set(comment.pos, comment.end);
+	};
+	const visit = (node: ts.Node) => {
+		collect(ts.getLeadingCommentRanges(source, node.getFullStart()));
+		collect(ts.getTrailingCommentRanges(source, node.getEnd()));
+		for (const child of node.getChildren(sourceFile)) visit(child);
+	};
+	visit(sourceFile);
+	let stripped = "";
+	let cursor = 0;
+	for (const [start, end] of [...ranges.entries()].sort(([left], [right]) => left - right)) {
+		if (start < cursor) continue;
+		stripped += source.slice(cursor, start);
+		cursor = end;
+	}
+	return stripped + source.slice(cursor);
 }
 
 function matches(source: string, pattern: RegExp): number {
@@ -1006,7 +1079,7 @@ export function renderReport(report: ScanReport): string {
 	out.push(
 		`bump-safety-scan: base ${report.base.spec} v${report.base.version} -> head ${report.head.spec} v${report.head.version}`,
 	);
-	out.push(`targets: ${report.targets.length}`);
+	out.push(`targets: ${report.targets.length} from ${report.targetPatterns.join(", ")}`);
 	out.push("");
 	const rows: string[][] = [
 		["target", "load b/h", "tsc b/h", "digest", "lint b/h", "warns b/h", "verdict", "reason"],
@@ -1032,7 +1105,7 @@ export function renderReport(report: ScanReport): string {
 	out.push(table(rows));
 	out.push("");
 	out.push(
-		`summary: ${report.summary.BREAK} BREAK, ${report.summary.WARN} WARN, ${report.summary.SAME} SAME, ${report.summary.SKIP} SKIP`,
+		`summary: ${report.summary.BREAK} BREAK, ${report.summary.WARN} WARN, ${report.summary.SAME} SAME, ${report.summary["NOT COVERED"]} NOT COVERED, ${report.summary.SKIP} SKIP`,
 	);
 	for (const target of report.targets) {
 		if (target.verdict === "BREAK" || target.verdict === "WARN") {
@@ -1040,24 +1113,23 @@ export function renderReport(report: ScanReport): string {
 				out.push(`  ${target.verdict} ${target.name}: ${reason}`);
 		}
 	}
-	const unloadable = report.targets.filter(
-		(target) =>
-			target.base.probe?.load.status === "error" && target.head.probe?.load.status === "error",
-	);
-	if (unloadable.length > 0) {
+	const uncovered = report.targets.filter((target) => !target.covered);
+	if (uncovered.length > 0) {
 		out.push("");
 		out.push(
-			`not covered: ${unloadable.length} target(s) fail to load on both sides (the diff says nothing about them)`,
+			`not covered: ${uncovered.length} target(s) fail on both sides (the diff says nothing about them)`,
 		);
-		for (const target of unloadable) {
-			const load = target.head.probe!.load;
-			out.push(
-				`  ${target.name}: ${load.errorCode ?? load.errorClass}: ${(load.message ?? "").slice(0, 110)}`,
-			);
+		for (const target of uncovered) {
+			for (const reason of target.reasons) {
+				if (!/^fails to load on both sides: |fail on both sides: /.test(reason)) continue;
+				out.push(`  ${target.name}: ${reason.replace(/^fails to load on both sides: /, "")}`);
+			}
 		}
 	}
 	out.push("");
-	out.push("window rules (deletion gate: a rule and its one-release path can go only at 0 users)");
+	out.push(
+		`window rules over the ${report.targets.length} target(s) above (deletion gate: a rule and its one-release path can go only at 0 users on the default target set)`,
+	);
 	const usageRows: string[][] = [["rule", "providers", "sites", "gate", "users"]];
 	for (const usage of report.windowRules) {
 		usageRows.push([
@@ -1080,7 +1152,7 @@ export async function scan(options: Options): Promise<ScanReport> {
 	try {
 		const base = await resolveSdk(options.base, options.scratch);
 		const head = await resolveSdk(options.head, options.scratch);
-		const targets = discoverTargets(options.targets, options.apifuse);
+		const targets = discoverTargets(options.targets, options.apifuse, options.fixtureTests);
 		if (targets.length === 0)
 			throw new Error(
 				"no targets matched; a target is a directory whose index.ts calls defineProvider",
@@ -1101,6 +1173,7 @@ export async function scan(options: Options): Promise<ScanReport> {
 				base: {},
 				head: {},
 				verdict: "SKIP",
+				covered: false,
 				reasons: [],
 			});
 		}
@@ -1150,16 +1223,27 @@ export async function scan(options: Options): Promise<ScanReport> {
 				progress(`${side} ${target.name}`);
 			}
 		}
-		const summary: Record<Verdict, number> = { SAME: 0, BREAK: 0, WARN: 0, SKIP: 0 };
+		const summary: Record<Verdict, number> = {
+			SAME: 0,
+			BREAK: 0,
+			WARN: 0,
+			"NOT COVERED": 0,
+			SKIP: 0,
+		};
 		for (const report of reports.values()) {
 			const judged = judge(report);
 			report.verdict = judged.verdict;
+			report.covered = judged.covered;
 			report.reasons = judged.reasons;
 			summary[report.verdict] += 1;
 		}
 		return {
 			base,
 			head,
+			targetPatterns: [
+				...options.targets,
+				...(options.fixtureTests ? [`${options.apifuse} (fixture-tests)`] : []),
+			],
 			targets: [...reports.values()],
 			windowRules: countWindowRules(targets),
 			summary,

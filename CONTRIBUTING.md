@@ -33,11 +33,11 @@ Each target gets a shadow copy whose `node_modules/@apifuse/provider-sdk` and `z
 
 - `BREAK`: the provider loaded or compiled on base and fails on head, or its contract digest changed. The command exits 1. Either the change gets a one-release deprecation path (DX rule 4) or the PR body lists every affected provider with `file:line` and the migration.
 - `WARN`: a new error-level lint rule or a new runtime warning on head. List them in the PR body.
-- `not covered`: targets that fail to load on both sides. The diff says nothing about them; say so in the PR body when one of them is deployed.
+- `NOT COVERED`: the target fails on both sides (a provider that does not load, or a fixture test file that fails on base as well), so the diff says nothing about it. The row carries the failure class, the JSON carries `covered: false`, and the `not covered` section lists them; say so in the PR body when one of them is deployed.
 
 The second table counts the one-release window rules across the targets (legacy per-throw error options, `defineCursor`/`defineDraft` with `fieldName` or `issuedBy`, `proxy.session.poolSize`, `approval:`, `contextKeys`, raw `.describe(`). A rule and the path it guards can be deleted only when that table shows 0 users; a PR that deletes one quotes the row.
 
-Paste the summary line, the BREAK/WARN rows and the window-rule table into the PR body. Scratch copies go under `/mnt/scratch/tmp/bump-safety-scan` (or `$TMPDIR`) and are removed unless `--keep` is passed.
+Paste the summary line, the BREAK/WARN rows and the window-rule table into the PR body. The window-rule table is computed over the targets of that run, so read the deletion gate only from a default-target run. Scratch copies go under `/mnt/scratch/tmp/bump-safety-scan` (or `$TMPDIR`); the staged copies are removed unless `--keep` is passed, the SDK builds under `<scratch>/sdk/<sha>` stay as a cache.
 
 ## API reports and changesets
 

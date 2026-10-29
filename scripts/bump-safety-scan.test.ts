@@ -12,7 +12,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { countWindowRules, judge, type ScanReport } from "./bump-safety-scan.js";
+import {
+	countWindowRules,
+	judge,
+	renderReport,
+	type ScanReport,
+	stripComments,
+	type TargetReport,
+} from "./bump-safety-scan.js";
 
 const SDK = path.resolve(import.meta.dirname, "..");
 const SCRIPT = path.join(SDK, "scripts", "bump-safety-scan.ts");
@@ -44,6 +51,28 @@ function breakingHeadBuild(root: string): string {
 	return dir;
 }
 
+function runScan(targets: string, scratchName: string, json: boolean) {
+	return spawnSync(
+		"bun",
+		[
+			SCRIPT,
+			"--base",
+			SDK,
+			"--head",
+			head,
+			"--targets",
+			targets,
+			"--no-fixture-tests",
+			"--scratch",
+			path.join(scratch, scratchName),
+			"--jobs",
+			"2",
+			...(json ? ["--json"] : []),
+		],
+		{ cwd: SDK, encoding: "utf8", timeout: 240_000 },
+	);
+}
+
 beforeAll(() => {
 	if (!existsSync(path.join(SDK, "dist", "index.js"))) {
 		const build = spawnSync("bun", ["run", "build"], { cwd: SDK, stdio: "inherit" });
@@ -58,32 +87,15 @@ afterAll(() => {
 });
 
 describe("bump-safety-scan", () => {
-	it("marks the provider the head build refuses BREAK and the untouched one SAME", () => {
-		const result = spawnSync(
-			"bun",
-			[
-				SCRIPT,
-				"--base",
-				SDK,
-				"--head",
-				head,
-				"--targets",
-				path.join(FIXTURES, "*"),
-				"--no-fixture-tests",
-				"--scratch",
-				path.join(scratch, "scan"),
-				"--jobs",
-				"2",
-				"--json",
-			],
-			{ cwd: SDK, encoding: "utf8", timeout: 240_000 },
-		);
+	it("marks the refused provider BREAK, the untouched one SAME and the unloadable one NOT COVERED", () => {
+		const result = runScan(path.join(FIXTURES, "*"), "scan", true);
 		expect(result.status).toBe(1);
 		const report = JSON.parse(result.stdout) as ScanReport;
 		const rows = Object.fromEntries(report.targets.map((target) => [target.name, target]));
 
-		expect(Object.keys(rows).sort()).toEqual(["breaks", "clean"]);
+		expect(Object.keys(rows).sort()).toEqual(["breaks", "clean", "unloadable"]);
 		expect(rows.clean?.verdict).toBe("SAME");
+		expect(rows.clean?.covered).toBe(true);
 		expect(rows.clean?.base.probe?.load.status).toBe("ok");
 		expect(rows.clean?.head.probe?.load.status).toBe("ok");
 		expect(rows.clean?.base.probe?.digest).toBeString();
@@ -92,10 +104,18 @@ describe("bump-safety-scan", () => {
 		expect(rows.clean?.head.tsc?.errors).toBe(0);
 
 		expect(rows.breaks?.verdict).toBe("BREAK");
+		expect(rows.breaks?.covered).toBe(true);
 		expect(rows.breaks?.base.probe?.load.status).toBe("ok");
 		expect(rows.breaks?.head.probe?.load.status).toBe("error");
 		expect(rows.breaks?.reasons[0]).toContain("loads on base, fails on head");
-		expect(report.summary).toEqual({ SAME: 1, BREAK: 1, WARN: 0, SKIP: 0 });
+
+		expect(rows.unloadable?.verdict).toBe("NOT COVERED");
+		expect(rows.unloadable?.covered).toBe(false);
+		expect(rows.unloadable?.reasons[0]).toContain("fails to load on both sides");
+		expect(rows.unloadable?.reasons[0]).toContain("fixture: cannot load on any SDK");
+
+		expect(report.summary).toEqual({ SAME: 1, BREAK: 1, WARN: 0, "NOT COVERED": 1, SKIP: 0 });
+		expect(report.targetPatterns).toEqual([path.join(FIXTURES, "*")]);
 		expect(report.windowRules.map((usage) => usage.rule)).toEqual([
 			"legacy-error-options",
 			"legacy-handle-declaration",
@@ -107,28 +127,18 @@ describe("bump-safety-scan", () => {
 		expect(report.windowRules.every((usage) => usage.providers.length === 0)).toBe(true);
 	}, 120_000);
 
-	it("renders the verdict table with a BREAK row and exits 1", () => {
-		const result = spawnSync(
-			"bun",
-			[
-				SCRIPT,
-				"--base",
-				SDK,
-				"--head",
-				head,
-				"--targets",
-				path.join(FIXTURES, "breaks"),
-				"--no-fixture-tests",
-				"--scratch",
-				path.join(scratch, "scan-table"),
-				"--jobs",
-				"2",
-			],
-			{ cwd: SDK, encoding: "utf8", timeout: 240_000 },
+	it("renders the verdict table, the not-covered section and exits 1", () => {
+		const result = runScan(
+			`${path.join(FIXTURES, "breaks")},${path.join(FIXTURES, "unloadable")}`,
+			"scan-table",
+			false,
 		);
 		expect(result.status).toBe(1);
-		expect(result.stdout).toContain("summary: 1 BREAK, 0 WARN, 0 SAME, 0 SKIP");
+		expect(result.stdout).toContain("summary: 1 BREAK, 0 WARN, 0 SAME, 1 NOT COVERED, 0 SKIP");
 		expect(result.stdout).toMatch(/^breaks\s+ok \/ ERR Error\s+0 \/ 0\s+-\s+.*BREAK/m);
+		expect(result.stdout).toMatch(/^unloadable\s+ERR Error \/ ERR Error\s+.*NOT COVERED/m);
+		expect(result.stdout).toContain("not covered: 1 target(s) fail on both sides");
+		expect(result.stdout).toMatch(/^ {2}unloadable: Error: fixture: cannot load on any SDK/m);
 		expect(result.stdout).toContain("DELETABLE");
 	}, 120_000);
 });
@@ -138,10 +148,18 @@ describe("judge", () => {
 		probe: { load: { status: "ok" as const }, digest, lint: {}, warnings: [] },
 		tsc: { errors: 0, sample: [] },
 	});
+	const failing = {
+		probe: {
+			load: { status: "error" as const, errorClass: "ValidationError", message: "x" },
+			lint: {},
+			warnings: [],
+		},
+	};
 
-	it("is SAME when both sides load, compile and digest alike", () => {
+	it("is SAME and covered when both sides load, compile and digest alike", () => {
 		expect(judge({ kind: "provider", base: ok("a"), head: ok("a") })).toEqual({
 			verdict: "SAME",
+			covered: true,
 			reasons: [],
 		});
 	});
@@ -157,15 +175,11 @@ describe("judge", () => {
 		expect(judged.reasons[0]).toContain("tsc 0 -> 3");
 	});
 
-	it("is SAME when a provider fails identically on both sides", () => {
-		const failing = {
-			probe: {
-				load: { status: "error" as const, errorClass: "ValidationError", message: "x" },
-				lint: {},
-				warnings: [],
-			},
-		};
-		expect(judge({ kind: "provider", base: failing, head: failing }).verdict).toBe("SAME");
+	it("is NOT COVERED when a provider fails identically on both sides", () => {
+		const judged = judge({ kind: "provider", base: failing, head: failing });
+		expect(judged.verdict).toBe("NOT COVERED");
+		expect(judged.covered).toBe(false);
+		expect(judged.reasons[0]).toBe("fails to load on both sides: ValidationError: x");
 	});
 
 	it("is WARN for a new lint error or a new runtime warning", () => {
@@ -186,21 +200,110 @@ describe("judge", () => {
 			tests: { pass: 3, fail, files: { "a.test.ts": { pass: 3, fail } } },
 		});
 		expect(judge({ kind: "fixture-tests", base: tests(0), head: tests(1) }).verdict).toBe("BREAK");
-		expect(judge({ kind: "fixture-tests", base: tests(1), head: tests(1) }).verdict).toBe("SAME");
+	});
+
+	it("is NOT COVERED for a fixture test file that fails on both sides, even next to a green file", () => {
+		const side = {
+			tests: {
+				pass: 5,
+				fail: 2,
+				files: {
+					"green.test.ts": { pass: 5, fail: 0 },
+					"red.test.ts": { pass: 0, fail: 2, firstFailure: "ENOENT: infra/env/registry.yaml" },
+				},
+			},
+		};
+		const judged = judge({ kind: "fixture-tests", base: side, head: side });
+		expect(judged.verdict).toBe("NOT COVERED");
+		expect(judged.covered).toBe(false);
+		expect(judged.reasons).toEqual([
+			"red.test.ts: 2 fail on both sides: ENOENT: infra/env/registry.yaml",
+		]);
+	});
+});
+
+describe("renderReport", () => {
+	it("lists a both-sides failing fixture file under not covered with its first failure", () => {
+		const side = {
+			tests: {
+				pass: 0,
+				fail: 86,
+				files: {
+					"scripts/__tests__/gpm.test.ts": {
+						pass: 43,
+						fail: 86,
+						firstFailure: "ENOENT: infra/env/registry.yaml",
+					},
+				},
+			},
+		};
+		const target: TargetReport = {
+			name: "apifuse fixture-tests",
+			kind: "fixture-tests",
+			path: "/apifuse",
+			base: side,
+			head: side,
+			verdict: "SKIP",
+			covered: true,
+			reasons: [],
+		};
+		Object.assign(target, judge(target));
+		const rendered = renderReport({
+			base: { spec: "a", dir: "/a", version: "1" },
+			head: { spec: "b", dir: "/b", version: "1" },
+			targetPatterns: ["/apifuse (fixture-tests)"],
+			targets: [target],
+			windowRules: [],
+			summary: { SAME: 0, BREAK: 0, WARN: 0, "NOT COVERED": 1, SKIP: 0 },
+		});
+		expect(rendered).toContain("summary: 0 BREAK, 0 WARN, 0 SAME, 1 NOT COVERED, 0 SKIP");
+		expect(rendered).toContain("not covered: 1 target(s) fail on both sides");
+		expect(rendered).toContain(
+			"  apifuse fixture-tests: scripts/__tests__/gpm.test.ts: 86 fail on both sides: ENOENT: infra/env/registry.yaml",
+		);
+		expect(rendered).toMatch(/^apifuse fixture-tests\s+86 fail \/ 86 fail\s+.*NOT COVERED/m);
+	});
+});
+
+describe("stripComments", () => {
+	it("removes comments but keeps comment-looking text inside strings and templates", () => {
+		const source = [
+			'const accept = "application/json, text/plain, */*";',
+			"// a line comment with new ProviderError(",
+			'const url = "https://example.com/path"; // trailing',
+			`const tpl = \`https://$\{host}/x\`; /* block */ const after = 1;`,
+			"/* multi",
+			"   line */",
+			'const slash = "contains // slash";',
+			"const last = 2;",
+		].join("\n");
+		const stripped = stripComments(source);
+		expect(stripped).toContain('"application/json, text/plain, */*"');
+		expect(stripped).toContain('"https://example.com/path"');
+		expect(stripped).toContain(`\`https://$\{host}/x\``);
+		expect(stripped).toContain('"contains // slash"');
+		expect(stripped).toContain("const after = 1;");
+		expect(stripped).toContain("const last = 2;");
+		expect(stripped).not.toContain("a line comment");
+		expect(stripped).not.toContain("trailing");
+		expect(stripped).not.toContain("block");
+		expect(stripped).not.toContain("multi");
 	});
 });
 
 describe("countWindowRules", () => {
-	it("counts each window rule per target and skips comments", () => {
+	it("counts each window rule per target, skips comments and survives */* in strings", () => {
 		const dir = mkdtempSync(path.join(process.env.TMPDIR ?? tmpdir(), "window-rules-"));
 		try {
 			const file = path.join(dir, "ops.ts");
 			writeFileSync(
 				file,
 				[
+					'const headers = { Accept: "application/json, text/plain, */*" };',
 					'throw new ProviderError("x", { code: "X", retryable: false });',
 					'throw new ProviderError("y", { code: "Y" });',
 					"// throw new ProviderError('z', { category: 'upstream_http' });",
+					'const note = "contains // slash"; throw new ProviderError("w", { code: "W", category: "upstream_http" });',
 					'const cursor = defineCursor({ name: "page", fieldName: "page_token" });',
 					"const session = { poolSize: 3 };",
 					'const op = { approval: "always", contextKeys: ["a"] };',
@@ -215,7 +318,7 @@ describe("countWindowRules", () => {
 				]),
 			);
 			expect(usage).toEqual({
-				"legacy-error-options": 1,
+				"legacy-error-options": 2,
 				"legacy-handle-declaration": 1,
 				"proxy-session-pool-size": 1,
 				"redundant-approval": 1,
