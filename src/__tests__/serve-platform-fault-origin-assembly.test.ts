@@ -231,6 +231,28 @@ function thrownUnderPlatformWordDeclaration(): ProviderError {
 	return error;
 }
 
+// The factory that copy's defineErrors returned for the same declaration,
+// shaped and branded the way that copy shaped and branded it.
+function factoryUnderPlatformWordDeclaration(): () => ProviderError {
+	const declaration = {
+		code: DECLARED_PLATFORM_WORD_CODE,
+		status: 502,
+		category: "internal_error",
+		retryable: false,
+		description: "A provider failure declared under a platform word.",
+	};
+	const factory = () => thrownUnderPlatformWordDeclaration();
+	Object.defineProperty(factory, "code", { value: DECLARED_PLATFORM_WORD_CODE, enumerable: true });
+	Object.defineProperty(factory, "declaration", { value: declaration, enumerable: true });
+	Object.defineProperty(factory, Symbol.for("@apifuse/provider-sdk/error-declaration@1"), {
+		value: declaration,
+		enumerable: false,
+		writable: false,
+		configurable: false,
+	});
+	return factory;
+}
+
 // The serve request whose ctx.http call aborts the inbound request first.
 let inboundToAbort: AbortController | undefined;
 
@@ -510,6 +532,24 @@ describe("a declaration's category outside the provider-failure words", () => {
 				},
 			}),
 		).toThrow(/declares the platform-fault category internal_error/);
+	});
+
+	it("rejects another SDK copy's factory declared under a platform word when spread into this SDK's defineErrors", () => {
+		const otherCopyErrors = {
+			[DECLARED_PLATFORM_WORD_CODE]:
+				factoryUnderPlatformWordDeclaration() as never /* test-invalid: that copy's types took every category; the runtime check is under test */,
+		};
+		let thrown: unknown;
+		try {
+			defineErrors({ ...otherCopyErrors });
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ValidationError);
+		expect((thrown as ValidationError).code).toBe("ERROR_DECLARATION_INVALID");
+		expect((thrown as ValidationError).message).toMatch(
+			/"DECLARED_PLATFORM_WORD" declares the platform-fault category internal_error, which only the SDK reports/,
+		);
 	});
 
 	it("reads a platform word another SDK copy declared as no value and signals it", async () => {

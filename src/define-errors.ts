@@ -211,6 +211,16 @@ function declarationError(code: string, problem: string, fix: string): Validatio
 	});
 }
 
+function categoryError(code: string, category: unknown): ValidationError {
+	return declarationError(
+		code,
+		typeof category === "string" && isPlatformFaultCategory(category)
+			? `declares the platform-fault category ${category}, which only the SDK reports.`
+			: `has invalid category ${String(category)}.`,
+		`Set category to the provider-failure category for how the upstream call failed: one of ${PROVIDER_FAILURE_CATEGORIES.join(", ")}.`,
+	);
+}
+
 function localeKeyOf(
 	code: string,
 	field: "messageKey" | "fixKey",
@@ -235,6 +245,10 @@ function resolveDeclaration(code: string, entry: unknown): ProviderErrorDeclarat
 				`is assigned the factory for "${entry.code}".`,
 				`Key the factory by its own code: ${entry.code}: errors.${entry.code}.`,
 			);
+		}
+		// Another SDK copy's defineErrors may have taken any category.
+		if (!isDeclarableCategory(entry.declaration.category)) {
+			throw categoryError(code, entry.declaration.category);
 		}
 		return entry.declaration;
 	}
@@ -280,13 +294,7 @@ function resolveDeclaration(code: string, entry: unknown): ProviderErrorDeclarat
 		);
 	}
 	if (!isDeclarableCategory(entry.category)) {
-		throw declarationError(
-			code,
-			typeof entry.category === "string" && isPlatformFaultCategory(entry.category)
-				? `declares the platform-fault category ${entry.category}, which only the SDK reports.`
-				: `has invalid category ${String(entry.category)}.`,
-			`Set category to the provider-failure category for how the upstream call failed: one of ${PROVIDER_FAILURE_CATEGORIES.join(", ")}.`,
-		);
+		throw categoryError(code, entry.category);
 	}
 	if (entry.retryable !== undefined && typeof entry.retryable !== "boolean") {
 		throw declarationError(
