@@ -111,7 +111,7 @@ describe("errors-hoist", () => {
 			expect(map).not.toContain("BESIDE_UNRESOLVED");
 			const named = read("operations/named.ts");
 			expect(named).toContain(
-				"\terrors: [\n\t\terrors.UPSTREAM_ERROR,\n\t\terrors.LOCAL_ROW,\n\t\terrors.NAMED_GONE,\n\t],\n\thandler:",
+				"\terrors: [\n\t\terrors.UPSTREAM_ERROR,\n\t\terrors.LOCAL_ROW,\n\t\terrors.NAMED_GONE,\n\t],\n\terrorCodes: [\n\t\tSESSION_EXPIRED_ROW,\n\t],\n\thandler:",
 			);
 			expect(named).toContain('errorCodes: [NOT_A_ROW, { code: "BESIDE_UNRESOLVED"');
 			expect(named).not.toContain("errors: []");
@@ -168,7 +168,17 @@ describe("errors-hoist", () => {
 				`${ERRORS_HOIST_RULES.sdkRowConflict} operations/list.ts:10`,
 				`${ERRORS_HOIST_RULES.codeConflict} operations/list.ts:18`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:16`,
+				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:22`,
+				`${ERRORS_HOIST_RULES.sdkOwnedCode} rows.ts:9`,
 			]);
+			// One row constant named from two lists is one row: one finding, at the constant.
+			expect(
+				result.residues.filter((residue) => residue.ruleId === ERRORS_HOIST_RULES.sdkOwnedCode),
+			).toHaveLength(1);
+			// Two lists naming one constant that is not a row: one finding each list, at the list.
+			expect(
+				result.residues.filter((residue) => residue.ruleId === ERRORS_HOIST_RULES.entryNotARow),
+			).toHaveLength(2);
 			const conflict = result.residues.find(
 				(residue) => residue.ruleId === ERRORS_HOIST_RULES.sdkRowConflict,
 			);

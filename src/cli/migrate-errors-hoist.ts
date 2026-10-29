@@ -293,9 +293,20 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	return {
 		filesChanged: [...filesChanged].sort(),
 		rewrites,
-		notes: notes.sort(byPosition),
-		residues: residues.sort(byPosition),
+		notes: dedupe(notes).sort(byPosition),
+		residues: dedupe(residues).sort(byPosition),
 	};
+}
+
+// A row constant several operations reference by name is one row: one finding.
+function dedupe(findings: readonly MigrateFinding[]): MigrateFinding[] {
+	const seen = new Set<string>();
+	return findings.filter((item) => {
+		const key = `${item.ruleId}\0${item.file}\0${item.line}\0${item.column}\0${item.message}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
 }
 
 function editsFor(edits: Map<string, FileEdits>, file: ProviderSourceFile): TextEdit[] {
