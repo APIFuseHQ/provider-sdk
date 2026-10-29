@@ -139,7 +139,7 @@ describe("errors-hoist", () => {
 				'import type { ProviderContext } from "../index";\nimport { errors } from "../domain/errors";\n',
 			);
 			expect(list).toContain(
-				'\terrors: [\n\t\terrors.ITEM_NOT_FOUND,\n\t\terrors.UPSTREAM_ERROR,\n\t\terrors.SHOP_CLOSED,\n\t\terrors["429"],\n\t\terrors.LOCALIZED,\n\t],\n\terrorCodes: [\n\t\t{ code: "NOT_FOUND", status: 404, description: "Registry row with the wrong retryable.", retryable: true },\n\t\t{ code: "TWO_WAYS", status: 400, description: "Declared 400 here.", retryable: false },\n\t],\n\thandler:',
+				'\terrors: [\n\t\terrors.ITEM_NOT_FOUND,\n\t\terrors.UPSTREAM_ERROR,\n\t\terrors.SHOP_CLOSED,\n\t\terrors["429"],\n\t\terrors.CAT_WAYS,\n\t\terrors.LOCALIZED,\n\t],\n\terrorCodes: [\n\t\t{ code: "NOT_FOUND", status: 404, description: "Registry row with the wrong retryable.", retryable: true },\n\t\t{ code: "TWO_WAYS", status: 400, description: "Declared 400 here.", retryable: false },\n\t],\n\thandler:',
 			);
 			const detail = read("operations/detail.ts");
 			expect(detail).toContain(
@@ -206,7 +206,9 @@ describe("errors-hoist", () => {
 				`${ERRORS_HOIST_RULES.spreadNotATable} operations/detail.ts:21`,
 				`${ERRORS_HOIST_RULES.sdkRowConflict} operations/list.ts:10`,
 				`${ERRORS_HOIST_RULES.codeConflict} operations/list.ts:18`,
-				`${ERRORS_HOIST_RULES.throwSiteConflict} operations/list.ts:29`,
+				`${ERRORS_HOIST_RULES.throwSiteConflict} operations/list.ts:30`,
+				`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/list.ts:35`,
+				`${ERRORS_HOIST_RULES.throwSiteCodeConflict} operations/list.ts:36`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:16`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:22`,
 				`${ERRORS_HOIST_RULES.sdkOwnedCode} rows.ts:9`,
@@ -238,6 +240,19 @@ describe("errors-hoist", () => {
 			);
 			expect(read("operations/list.ts")).toContain(
 				'throw new ProviderError("No item matches the id.", {\n\t\t\t\tcode: "ITEM_NOT_FOUND",\n\t\t\t\tcategory: "upstream_http",\n\t\t\t});',
+			);
+			// A code declared two ways stays at every site, whichever field differs:
+			// TWO_WAYS by status alone (404 against 400), CAT_WAYS by category alone
+			// (a row without one against a map entry with one, same status and retryable).
+			const twoWaySites = result.residues.filter(
+				(residue) => residue.ruleId === ERRORS_HOIST_RULES.throwSiteCodeConflict,
+			);
+			expect(twoWaySites.map((residue) => residue.message)).toEqual([
+				'Throw site of "TWO_WAYS": this provider declares TWO_WAYS with different contracts (operations/detail.ts:11 status 404, category "provider_error", retryable false; operations/list.ts:18 status 400, category "provider_error", retryable false), and a factory would serve one of them to every operation that reaches this site; it is left as new ProviderError(...) and keeps serving each operation\'s own row.',
+				'Throw site of "CAT_WAYS": this provider declares CAT_WAYS with different contracts (operations/list.ts:19 status 400, category "provider_error", retryable false; shared.ts:7 status 400, category "input_validation", retryable false), and a factory would serve one of them to every operation that reaches this site; it is left as new ProviderError(...) and keeps serving each operation\'s own row.',
+			]);
+			expect(read("operations/list.ts")).toContain(
+				'if (input.id === "two") throw new ProviderError("Two ways.", { code: "TWO_WAYS" });\n\t\tif (input.id === "cat") throw new ProviderError("Category ways.", { code: "CAT_WAYS" });',
 			);
 			expect(table(result.notes)).toEqual([
 				`${ERRORS_HOIST_RULES.descriptionDropped} operations/list.ts:8`,
@@ -315,6 +330,80 @@ describe("errors-hoist", () => {
 			for (const file of ["domain/errors.ts", "operations/list.ts"])
 				expect(parses(file)).toBe(true);
 		});
+	});
+});
+
+describe("a site the factory cannot replace", () => {
+	beforeEach(() => stage("migrate-errors-hoist-subclass"));
+
+	it("deletes the per-throw options the server would serve anyway and names every other one", () => {
+		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
+		expect(result.filesChanged).toEqual(["domain/errors.ts", "operations/list.ts", "upstream/sites.ts"]);
+		const sites = read("upstream/sites.ts");
+		// A ProviderError site goes to the factory; a ValidationError site keeps
+		// its constructor and loses the options equal to what the server serves
+		// without them (the declaration and the no-declaration default for BAD_ID,
+		// the registry for NOT_FOUND, the SDK's own value for MISSING_SECRET).
+		expect(sites).toContain('throw errors.SHOP_DOWN({ message: "The shop is down." });');
+		expect(sites).toContain(
+			'throw new ValidationError("The id is malformed.", { code: "BAD_ID", details: { id } });',
+		);
+		// A value the declaration serves but the constructor's no-declaration
+		// default does not (a site reached from an auth flow reads none) stays.
+		expect(sites).toContain(
+			'throw new ValidationError("The shop is down.", {\n\t\tcode: "SHOP_DOWN",\n\t\tcategory: "upstream_http",\n\t\tretryable: false,\n\t\tdetails: { detail },\n\t});',
+		);
+		expect(sites).toContain('throw new ValidationError("No item matches.", { code: "NOT_FOUND" });');
+		expect(sites).toContain(
+			'throw new ProviderError(`Secret ${name} missing.`, { code: "MISSING_SECRET" });',
+		);
+		// A value the server would not serve, or one it cannot check, stays.
+		expect(sites).toContain(
+			'throw new ValidationError("The shop is down.", { code: "SHOP_DOWN", category: "upstream_http", retryable: true });',
+		);
+		expect(sites).toContain(
+			'throw new ValidationError("The shop is down.", { code: "SHOP_DOWN", category });',
+		);
+		expect(sites).toContain(
+			'throw new ValidationError("No item matches.", { code: "NOT_FOUND", retryable: true });',
+		);
+		expect(sites).toContain(
+			'throw new ProviderError("Secret missing.", { code: "MISSING_SECRET", category: "provider_error" });',
+		);
+		expect(table(result.residues)).toEqual([
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:8`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:17`,
+			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:21`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:33`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:45`,
+		]);
+		expect(result.residues[0]?.message).toBe(
+			'Throw site of "SHOP_DOWN" (ValidationError) states category "upstream_http" and retryable false; reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category "input_validation", retryable false once the option is gone, so the site is left as written and keeps serving its own value for one more release.',
+		);
+		expect(result.residues[3]?.message).toBe(
+			'Throw site of "NOT_FOUND" (ValidationError) sets retryable true per throw, and the SDK registry (sdkErrors.NOT_FOUND, which this provider\'s rows match) serves category "upstream_http", retryable false; the per-throw value is served for one more release, so the site is left as written.',
+		);
+		expect(result.residues[4]?.message).toBe(
+			'Throw site of "MISSING_SECRET" (ProviderError) sets category "provider_error" per throw, and the SDK runtime (which owns this code and reads no declaration for it) serves category "credential_unavailable", retryable false; the per-throw value is served for one more release, so the site is left as written.',
+		);
+		expect(parses("upstream/sites.ts")).toBe(true);
+		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(again.rewrites).toBe(0);
+		expect(again.residues.map((residue) => residue.ruleId)).toEqual(
+			result.residues.map((residue) => residue.ruleId),
+		);
+	});
+
+	it("dry run decides the same sites", () => {
+		const dry = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(dry.rewrites).toBe(6);
+		expect(table(dry.residues)).toEqual([
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:8`,
+			`${ERRORS_HOIST_RULES.throwSiteConflict} upstream/sites.ts:17`,
+			`${ERRORS_HOIST_RULES.throwSiteDynamicOption} upstream/sites.ts:21`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:33`,
+			`${ERRORS_HOIST_RULES.throwSiteSdkConflict} upstream/sites.ts:45`,
+		]);
 	});
 });
 

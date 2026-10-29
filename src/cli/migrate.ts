@@ -76,7 +76,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "source",
 		run: hoistInlineErrorRows,
 		manualStep:
-			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); a throw site left as new ProviderError names what it serves that one declaration does not (a per-throw value, a code declared with two contracts, a row that departs from the registry, a code no map declares): declare a distinct code for it, or make the declarations agree",
+			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); a throw site left as new ProviderError names what it serves that one declaration does not (a per-throw value, a code declared with two contracts, a row that departs from the registry, a code no map declares): declare a distinct code for it, or make the declarations agree; a ValidationError or SDK-owned-code site that keeps a per-throw category/retryable names the value the SDK would serve instead: delete the option or declare a distinct code",
 	},
 	{
 		id: "health-stale-window",

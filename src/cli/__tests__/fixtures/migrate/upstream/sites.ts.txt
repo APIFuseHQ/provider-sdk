@@ -1,4 +1,4 @@
-import { ProviderError, TransportError } from "@apifuse/provider-sdk/provider";
+import { ProviderError, TransportError, ValidationError } from "@apifuse/provider-sdk/provider";
 
 export function shopDown(detail: string): never {
 	throw new ProviderError("The shop is down.", {
@@ -57,4 +57,33 @@ export function collect(): string[] {
 	const errors: string[] = [];
 	if (errors.length > 0) throw new ProviderError("The item was removed.", { code: "ITEM_GONE" });
 	return errors;
+}
+
+export function shopDownInput(detail: string): never {
+	throw new ValidationError("The shop is down.", {
+		code: "SHOP_DOWN",
+		category: "upstream_http",
+		retryable: false,
+		details: { detail },
+	});
+}
+
+export function shopDownRetry(): never {
+	throw new ValidationError("The shop is down.", { code: "SHOP_DOWN", category: "upstream_http", retryable: true });
+}
+
+export function secretMissing(name: string): never {
+	throw new ProviderError(`Secret ${name} missing.`, {
+		code: "MISSING_SECRET",
+		category: "credential_unavailable",
+		retryable: false,
+	});
+}
+
+export function secretMissingOdd(): never {
+	throw new ProviderError("Secret missing.", { code: "MISSING_SECRET", category: "provider_error" });
+}
+
+export function notFoundInputRow(): never {
+	throw new ValidationError("No item matches.", { code: "NOT_FOUND", category: "upstream_http", retryable: false });
 }

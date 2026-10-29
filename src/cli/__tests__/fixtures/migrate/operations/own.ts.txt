@@ -1,0 +1,30 @@
+import { ProviderError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+
+const errors = [
+	{ code: "OWN_TOKEN", status: 400, description: "The own token is stale.", retryable: false },
+] as const;
+
+function staleToken(): never {
+	throw new ProviderError("The own token is stale.", {
+		code: "OWN_TOKEN",
+		category: "input_validation",
+		retryable: false,
+		fix: "Start the search again.",
+	});
+}
+
+function itemGone(): never {
+	throw new ProviderError("The item was removed.", { code: "ITEM_GONE" });
+}
+
+export const ownOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.own.description",
+	errorCodes: [...errors],
+	handler: async (input) => {
+		if (input.token === "") staleToken();
+		if (input.token === "gone") itemGone();
+		return { token: input.token };
+	},
+});

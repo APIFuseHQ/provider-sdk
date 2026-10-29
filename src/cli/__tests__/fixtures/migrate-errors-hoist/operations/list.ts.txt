@@ -16,6 +16,7 @@ export const listOperation = defineOperation<ProviderContext>()({
 		},
 		{ code: "429", status: 429, description: "Too many lists.", retryable: true },
 		{ code: "TWO_WAYS", status: 400, description: "Declared 400 here.", retryable: false },
+		{ code: "CAT_WAYS", status: 400, description: "Declared here without a category.", retryable: false },
 		{
 			code: "LOCALIZED",
 			status: 409,
@@ -31,6 +32,8 @@ export const listOperation = defineOperation<ProviderContext>()({
 				category: "upstream_http",
 			});
 		}
+		if (input.id === "two") throw new ProviderError("Two ways.", { code: "TWO_WAYS" });
+		if (input.id === "cat") throw new ProviderError("Category ways.", { code: "CAT_WAYS" });
 		return ctx.fetch(input.id);
 	},
 });
