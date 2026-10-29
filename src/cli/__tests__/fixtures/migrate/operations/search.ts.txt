@@ -8,6 +8,7 @@ export const SEARCH_ERRORS = [
 	{ code: "SHOP_CLOSED", status: 409, description: "The shop is closed." },
 	{ code: "429", status: 429, description: "Too many searches.", retryable: true },
 	{ code: "SHOP_SLOW", status: 502, description: "The shop timed out." },
+	{ code: "PAGE_CHANGED", status: 502, description: "The page changed.", retryable: false },
 ] as const;
 
 export const AREAS = [

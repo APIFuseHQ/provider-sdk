@@ -18,6 +18,7 @@ export const detailOperation = defineOperation<ProviderContext>()({
 		{ code: "SHOP_BUSY", status: 503, description: "The shop is busy.", retryable: false },
 		{ code: "SLOT_GONE", status: 410, description: "The slot is gone.", retryable: false },
 		{ code: "SLOT_HELD", status: 409, description: "The slot is held.", retryable: false },
+		{ code: "PAGE_CHANGED", status: 502, description: "The page changed.", retryable: true },
 	],
 	handler: async (input) => fetchItem(input.itemId),
 });

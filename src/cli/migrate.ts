@@ -62,7 +62,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "ast-grep",
 		file: "errors-factory.yml",
 		manualStep:
-			"a throw site left as new ProviderError names its registry conflict, locale key or non-literal option (errors-hoist fills the category of a converted table's rows, checks a per-throw category/retryable against the declaration, adds the imports and resolves errors.X)",
+			"a throw site named here keeps a registry conflict, a locale key or a non-literal option (errors-hoist rewrites every other throw site once it has checked the code's rows and declarations, fills the category of a converted table's rows, adds the imports and resolves errors.X)",
 	},
 	{
 		id: "health-refs",
@@ -76,7 +76,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "source",
 		run: hoistInlineErrorRows,
 		manualStep:
-			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); a throw site left as new ProviderError names the category or retryable it serves that the declaration does not (declare a distinct code for it, or accept the declared value)",
+			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); a throw site left as new ProviderError names what it serves that one declaration does not (a per-throw value, a code declared with two contracts, a row that departs from the registry, a code no map declares): declare a distinct code for it, or make the declarations agree",
 	},
 	{
 		id: "health-stale-window",

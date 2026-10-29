@@ -45,6 +45,10 @@ export function slotHeldBare(): never {
 	throw new ProviderError("The slot is held by someone.", { code: "SLOT_HELD" });
 }
 
+export function pageChanged(): never {
+	throw new ProviderError("The page changed.", { code: "PAGE_CHANGED" });
+}
+
 export function upstreamDown(): never {
 	throw new ProviderError("The shop answered 5xx.", { code: "UPSTREAM_ERROR" });
 }

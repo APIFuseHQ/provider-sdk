@@ -17,7 +17,7 @@ import {
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 } from "../../error-resolution.js";
-import { ERRORS_HOIST_RULES, hoistInlineErrorRows } from "../migrate-errors-hoist.js";
+import { ERRORS_HOIST_RULES, hoistInlineErrorRows, isSdkOwnedCode } from "../migrate-errors-hoist.js";
 import type { MigrateFinding, SourceStepResult } from "../migrate-source.js";
 
 const FIXTURES = join(import.meta.dir, "fixtures");
@@ -241,7 +241,11 @@ describe("errors-hoist", () => {
 			);
 			expect(table(result.notes)).toEqual([
 				`${ERRORS_HOIST_RULES.descriptionDropped} operations/list.ts:8`,
+				`${ERRORS_HOIST_RULES.descriptionRegistry} operations/list.ts:9`,
 			]);
+			expect(result.notes[1]?.message).toContain(
+				'the contract publishes the registry\'s description "The upstream returned an HTTP failure." instead of this row\'s "The shop answered 5xx."',
+			);
 			expect(result.notes[0]?.message).toContain(
 				'description from operations/detail.ts:10; this operation\'s own wording "No item matches the id." is dropped',
 			);
@@ -314,8 +318,8 @@ describe("errors-hoist", () => {
 	});
 });
 
-describe("errors-factory.yml owned-code guard", () => {
-	it("lists exactly the codes defineErrors refuses, so rule 1 never writes a factory that cannot exist", () => {
+describe("errors-factory.yml registry lists", () => {
+	it("names every registered code wherever a rule tells a registered code from a provider's, and no throw-site rewrite rule remains", () => {
 		const yaml = readFileSync(
 			join(import.meta.dir, "../../../scripts/codemods/errors-factory.yml"),
 			"utf8",
@@ -323,25 +327,22 @@ describe("errors-factory.yml owned-code guard", () => {
 		const lists = [...yaml.matchAll(/regex: "\^\[\\"'\]\(([A-Za-z_|]+)\)\[\\"'\]\$"/g)].map(
 			(match) => match[1] as string,
 		);
-		const guards = lists.filter((list) => list.includes("MISSING_SECRET"));
-		expect(guards).toHaveLength(2);
-		// The provider-owned-site guard (rule 1, its bracket twin, rule 10) tells
-		// a registered code from a provider's by the registry's whole key list.
 		const registryLists = lists.filter(
 			(list) => list.includes("UPSTREAM_ERROR") && list.includes("AUTH_REQUIRED") && list.includes("|"),
 		);
-		expect(registryLists.length).toBeGreaterThanOrEqual(3);
+		expect(registryLists.length).toBeGreaterThanOrEqual(1);
 		for (const list of registryLists) {
 			expect(list.split("|").sort()).toEqual(Object.keys(SDK_ERROR_REGISTRY).sort());
 		}
-		const expected = [
-			...new Set([
-				...SDK_RUNTIME_OWNED_ERROR_CODES,
-				...SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.keys(),
-			]),
-		]
-			.filter((code) => !Object.hasOwn(SDK_ERROR_REGISTRY, code))
-			.sort();
-		for (const guard of guards) expect(guard.split("|").sort()).toEqual(expected);
+		// A throw site is errors-hoist's alone: the YAML names sites, never
+		// rewrites one (a factory for a code the runtime owns cannot exist, and a
+		// site must be checked against every declaration of its code first).
+		const ids = [...yaml.matchAll(/^id: (.*)$/gm)].map((match) => match[1]);
+		expect(ids).not.toContain("errors-factory-throw-site");
+		expect(ids).not.toContain("errors-factory-throw-site-bracket");
+		expect(isSdkOwnedCode("MISSING_SECRET")).toBe(true);
+		for (const code of [...SDK_RUNTIME_OWNED_ERROR_CODES, ...SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.keys()]) {
+			if (!Object.hasOwn(SDK_ERROR_REGISTRY, code)) expect(isSdkOwnedCode(code)).toBe(true);
+		}
 	});
 });
