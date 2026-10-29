@@ -18,6 +18,7 @@ const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
 const {
 	buildSessionKey,
 	RecordingStatefulProviderMetricEmitter,
+	StatefulControlPlaneError,
 	StatefulProviderSessionManager,
 	StatefulSessionInvalidatedError,
 } = await builtStateful;
@@ -452,3 +453,393 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 		await manager.closeAll("test");
 	});
 });
+
+type Gate = { readonly promise: Promise<void>; readonly open: () => void };
+
+function gate(): Gate {
+	let open!: () => void;
+	const promise = new Promise<void>((resolve) => {
+		open = resolve;
+	});
+	return { promise, open };
+}
+
+type Outcome = { readonly settled: "resolved" | "rejected"; readonly value: unknown } | "pending";
+
+// How `promise` stands once the work queued so far has had its turn. A queue
+// wait that ignores the signal stays "pending" here.
+async function outcomeSoon(promise: Promise<unknown>): Promise<Outcome> {
+	const pending = Bun.sleep(1_000).then((): Outcome => "pending");
+	return Promise.race([
+		promise.then(
+			(value): Outcome => ({ settled: "resolved", value }),
+			(value): Outcome => ({ settled: "rejected", value }),
+		),
+		pending,
+	]);
+}
+
+// test-invalid: a JavaScript caller outside the declared type calls without a signal.
+const missingSignal: AbortSignal = undefined as never;
+
+const ESTABLISHMENT_FAILURE = Symbol.for(
+	"@apifuse/provider-sdk/stateful/session-establishment-failure@1",
+);
+
+function hasEstablishmentFailureMark(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		Object.getOwnPropertyDescriptor(error, ESTABLISHMENT_FAILURE)?.value === true
+	);
+}
+
+describe("StatefulProviderSessionManager queue wait and the request's signal", () => {
+	it("lets a parallel waiter whose signal aborts leave without losing the next wake-up", async () => {
+		const sessionKey = testSessionKey();
+		const holds = new Map<string, Gate>();
+		const started: string[] = [];
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				policy: { concurrency: { mode: "parallel", maxInFlight: 1 }, reconnect: "resume" },
+				invoke: async (_ctx, _session, operation) => {
+					started.push(operation.requestId);
+					await holds.get(operation.requestId)?.promise;
+					return { output: operation.requestId };
+				},
+			}),
+			poolPolicy,
+		});
+		holds.set("r1", gate());
+		const r1 = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey, "r1"),
+			new AbortController().signal,
+		);
+		await Bun.sleep(1);
+		const r2Controller = new AbortController();
+		const r2 = manager.invoke(owner(sessionKey), request(sessionKey, "r2"), r2Controller.signal);
+		const r3 = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey, "r3"),
+			new AbortController().signal,
+		);
+		const reason = new Error("r2's caller went away");
+		r2Controller.abort(reason);
+
+		expect(await outcomeSoon(r2)).toEqual({ settled: "rejected", value: reason });
+		expect(started).toEqual(["r1"]);
+		holds.get("r1")?.open();
+		expect(await r1).toEqual({ output: "r1" });
+		// The slot r1 gives up reaches r3; r2's wake-up is not waiting in line.
+		expect(await outcomeSoon(r3)).toEqual({ settled: "resolved", value: { output: "r3" } });
+		expect(started).toEqual(["r1", "r3"]);
+		expect(manager.parallelLimiterCountForTesting).toBe(0);
+		await manager.closeAll("test");
+	});
+
+	it("keeps maxInFlight for an arrival after a woken parallel waiter has started", async () => {
+		const sessionKey = testSessionKey();
+		const holds = new Map<string, Gate>();
+		const starts = new Map<string, Gate>();
+		let active = 0;
+		let maxActive = 0;
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				policy: { concurrency: { mode: "parallel", maxInFlight: 1 }, reconnect: "resume" },
+				invoke: async (_ctx, _session, operation) => {
+					active += 1;
+					maxActive = Math.max(maxActive, active);
+					starts.get(operation.requestId)?.open();
+					await holds.get(operation.requestId)?.promise;
+					active -= 1;
+					return { output: operation.requestId };
+				},
+			}),
+			poolPolicy,
+		});
+		for (const id of ["r1", "r2", "r3"]) {
+			holds.set(id, gate());
+			starts.set(id, gate());
+		}
+		const r1 = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey, "r1"),
+			new AbortController().signal,
+		);
+		await starts.get("r1")?.promise;
+		const r2 = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey, "r2"),
+			new AbortController().signal,
+		);
+		holds.get("r1")?.open();
+		await r1;
+		await starts.get("r2")?.promise;
+		// r3 arrives while the woken r2 runs: it must wait for r2's slot.
+		const r3 = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey, "r3"),
+			new AbortController().signal,
+		);
+		await Bun.sleep(5);
+		expect(active).toBe(1);
+		holds.get("r2")?.open();
+		holds.get("r3")?.open();
+		await Promise.all([r2, r3]);
+		expect(maxActive).toBe(1);
+		expect(manager.parallelLimiterCountForTesting).toBe(0);
+		await manager.closeAll("test");
+	});
+
+	it("keeps the pooled session and leaves no establishment mark when the request's abort ends the owner re-check", async () => {
+		const world = revalidationWorld((signal) => {
+			signal.throwIfAborted();
+		});
+		const { error, reason } = await world.recheckThatFails({ abort: true });
+		// The registry's own failure for an aborted call: the reason itself.
+		expect(error).toBe(reason);
+		expect(hasEstablishmentFailureMark(error)).toBe(false);
+		expect(world.closes).toEqual([]);
+		await world.invokeAgain();
+		expect(world.connects()).toBe(1);
+		await world.manager.closeAll("test");
+	});
+
+	it("keeps the pooled session when the re-check's control-plane error carries the request's abort as its cause", async () => {
+		let thrown: unknown;
+		// HttpSessionOwnerRegistry keeps a fetch the caller's signal aborted as the cause.
+		const world = revalidationWorld((signal) => {
+			thrown = new StatefulControlPlaneError({
+				code: "STATEFUL_CONTROL_PLANE_REQUEST_FAILED",
+				message: "Stateful control-plane resolve request failed.",
+				operation: "resolve",
+				cause: signal.reason,
+			});
+			throw thrown;
+		});
+		const { error } = await world.recheckThatFails({ abort: true });
+		expect(error).toBe(thrown);
+		expect(hasEstablishmentFailureMark(error)).toBe(false);
+		expect(world.closes).toEqual([]);
+		await world.invokeAgain();
+		expect(world.connects()).toBe(1);
+		await world.manager.closeAll("test");
+	});
+
+	it("still closes the pooled session for a re-check failure that is not the request's abort, even with the signal aborted", async () => {
+		const unrelated = new Error("control plane unavailable");
+		const world = revalidationWorld(() => {
+			throw unrelated;
+		});
+		const { error } = await world.recheckThatFails({ abort: true });
+		expect(error).toBe(unrelated);
+		expect(hasEstablishmentFailureMark(error)).toBe(true);
+		expect(world.closes).toEqual(["ownership-validation-failed"]);
+		await world.invokeAgain();
+		expect(world.connects()).toBe(2);
+		await world.manager.closeAll("test");
+	});
+
+	it("still closes the pooled session for a control-plane error on a live signal", async () => {
+		let thrown: unknown;
+		const world = revalidationWorld(() => {
+			thrown = new StatefulControlPlaneError({
+				code: "STATEFUL_CONTROL_PLANE_HTTP_ERROR",
+				message: "Stateful control-plane resolve returned status 503.",
+				operation: "resolve",
+				status: 503,
+			});
+			throw thrown;
+		});
+		const { error } = await world.recheckThatFails({ abort: false });
+		expect(error).toBe(thrown);
+		expect(hasEstablishmentFailureMark(error)).toBe(true);
+		expect(world.closes).toEqual(["ownership-validation-failed"]);
+		await world.manager.closeAll("test");
+	});
+
+	it("keeps the pooled session when a null abort reason is itself what the re-check threw", async () => {
+		const world = revalidationWorld((signal) => {
+			signal.throwIfAborted();
+		});
+		const { error } = await world.recheckThatFails({ abort: true, reason: null });
+		expect(error).toBeNull();
+		expect(world.closes).toEqual([]);
+		await world.invokeAgain();
+		expect(world.connects()).toBe(1);
+		await world.manager.closeAll("test");
+	});
+
+	it("still closes the pooled session for an unrelated error whose own cause is null when the abort reason is null", async () => {
+		const unrelated = new Error("registry unavailable", { cause: null });
+		const world = revalidationWorld(() => {
+			throw unrelated;
+		});
+		const { error } = await world.recheckThatFails({ abort: true, reason: null });
+		expect(error).toBe(unrelated);
+		expect(hasEstablishmentFailureMark(error)).toBe(true);
+		expect(world.closes).toEqual(["ownership-validation-failed"]);
+		await world.manager.closeAll("test");
+	});
+
+	it("closes the pooled session with the original error for a caller that passes no signal", async () => {
+		const sessionKey = testSessionKey();
+		const closes: string[] = [];
+		const unrelated = new Error("control plane unavailable");
+		let failValidation = false;
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				close: async (_ctx, _session, reason) => {
+					closes.push(reason);
+				},
+			}),
+			poolPolicy,
+		});
+		const validateOwnership = async (expected: SessionOwnerRecord) => {
+			if (failValidation) throw unrelated;
+			return expected;
+		};
+		await manager.invoke(owner(sessionKey), request(sessionKey), missingSignal, validateOwnership);
+		failValidation = true;
+		const error = await manager
+			.invoke(owner(sessionKey), request(sessionKey, "r2"), missingSignal, validateOwnership)
+			.then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+		expect(error).toBe(unrelated);
+		expect(hasEstablishmentFailureMark(error)).toBe(true);
+		expect(closes).toEqual(["ownership-validation-failed"]);
+		await manager.closeAll("test");
+	});
+
+	it("queues a parallel operation without a signal behind maxInFlight as before", async () => {
+		const sessionKey = testSessionKey();
+		const hold = gate();
+		const started = gate();
+		const order: string[] = [];
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				policy: { concurrency: { mode: "parallel", maxInFlight: 1 }, reconnect: "resume" },
+				invoke: async (_ctx, _session, operation) => {
+					order.push(`start-${operation.requestId}`);
+					if (operation.requestId === "r1") {
+						started.open();
+						await hold.promise;
+					}
+					order.push(`end-${operation.requestId}`);
+					return { output: operation.requestId };
+				},
+			}),
+			poolPolicy,
+		});
+		const r1 = manager.invoke(owner(sessionKey), request(sessionKey, "r1"), missingSignal);
+		await started.promise;
+		const r2 = manager.invoke(owner(sessionKey), request(sessionKey, "r2"), missingSignal);
+		await Bun.sleep(5);
+		expect(order).toEqual(["start-r1"]);
+		hold.open();
+		expect(await r1).toEqual({ output: "r1" });
+		expect(await r2).toEqual({ output: "r2" });
+		expect(order).toEqual(["start-r1", "end-r1", "start-r2", "end-r2"]);
+		await manager.closeAll("test");
+	});
+
+	it("lets a queued health check whose signal aborts leave without running the health hook", async () => {
+		const sessionKey = testSessionKey();
+		const hold = gate();
+		const started = gate();
+		let healthCalls = 0;
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				invoke: async () => {
+					started.open();
+					await hold.promise;
+					return { output: "ok" };
+				},
+				health: async () => {
+					healthCalls += 1;
+					return { status: "ready" };
+				},
+			}),
+			poolPolicy,
+		});
+		const invoking = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey),
+			new AbortController().signal,
+		);
+		await started.promise;
+		const controller = new AbortController();
+		const checking = manager.health(owner(sessionKey), request(sessionKey), controller.signal);
+		const reason = new Error("health caller went away");
+		controller.abort(reason);
+		expect(await outcomeSoon(checking)).toEqual({ settled: "rejected", value: reason });
+		hold.open();
+		await invoking;
+		expect(healthCalls).toBe(0);
+		await manager.closeAll("test");
+	});
+});
+
+// A session manager whose first invoke pools a session, and whose next
+// invoke's ownership re-check waits until the test decides whether the
+// request's signal aborts, then fails with `failure`.
+function revalidationWorld(failure: (signal: AbortSignal) => void) {
+	const sessionKey = testSessionKey();
+	let connects = 0;
+	const closes: string[] = [];
+	let failNext = false;
+	const recheckEntered = gate();
+	const failNow = gate();
+	const manager = new StatefulProviderSessionManager({
+		adapter: adapter({
+			connect: async () => {
+				connects += 1;
+				return { connected: true };
+			},
+			close: async (_ctx, _session, reason) => {
+				closes.push(reason);
+			},
+		}),
+		poolPolicy,
+	});
+	const validateOwnership = async (expected: SessionOwnerRecord, signal: AbortSignal) => {
+		if (!failNext) return expected;
+		failNext = false;
+		recheckEntered.open();
+		await failNow.promise;
+		failure(signal);
+		return expected;
+	};
+	const invokeWith = (requestId: string, signal: AbortSignal) =>
+		manager.invoke(owner(sessionKey), request(sessionKey, requestId), signal, validateOwnership);
+	return {
+		manager,
+		closes,
+		connects: () => connects,
+		async recheckThatFails(options: { readonly abort: boolean; readonly reason?: unknown }) {
+			await invokeWith("pools-the-session", new AbortController().signal);
+			failNext = true;
+			const controller = new AbortController();
+			const reason =
+				"reason" in options
+					? options.reason
+					: new DOMException(
+							"Stateful operation request recheck deadline has expired.",
+							"AbortError",
+						);
+			const recheck = invokeWith("recheck", controller.signal);
+			await recheckEntered.promise;
+			if (options.abort) controller.abort(reason);
+			failNow.open();
+			const error = await recheck.then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+			return { error, reason };
+		},
+		invokeAgain: () => invokeWith("after-recheck", new AbortController().signal),
+	};
+}

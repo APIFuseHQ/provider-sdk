@@ -286,19 +286,49 @@ export class PodLocalSessionPool<T> {
 		await this.closeOne(sessionKey, reason);
 	}
 
-	async runExclusive<R>(sessionKey: string, task: () => R | Promise<R>): Promise<R> {
+	/**
+	 * Runs `task` after every task queued before it for `sessionKey` has
+	 * settled. With a `signal`, the wait is the caller's: an aborted signal is
+	 * rejected with its reason without queueing, an abort while waiting rejects
+	 * at once with the reason, and a task whose signal is aborted by the time
+	 * its turn comes never starts. A task that has started runs to its end;
+	 * the signal is the task's own from then on. The tasks queued after an
+	 * aborted one keep their order and still start only after the tasks before
+	 * it have settled.
+	 */
+	async runExclusive<R>(
+		sessionKey: string,
+		task: () => R | Promise<R>,
+		signal?: AbortSignal,
+	): Promise<R> {
+		signal?.throwIfAborted();
 		const previous = this.#queues.get(sessionKey) ?? Promise.resolve();
-		const next = previous.then(task, task);
+		let leaveQueue: ((reason: unknown) => void) | undefined;
+		const left = signal
+			? new Promise<never>((_resolve, reject) => {
+					leaveQueue = reject;
+				})
+			: undefined;
+		const onAbort = () => leaveQueue?.(signal?.reason);
+		signal?.addEventListener("abort", onAbort, { once: true });
+		const run = () => {
+			// The turn has come: from here on the signal is the task's.
+			signal?.removeEventListener("abort", onAbort);
+			signal?.throwIfAborted();
+			return task();
+		};
+		const next = previous.then(run, run);
 		const settled = next.then(
 			() => undefined,
 			() => undefined,
 		);
 		this.#queues.set(sessionKey, settled);
-		await settled.finally(() => {
+		const released = settled.finally(() => {
 			if (this.#queues.get(sessionKey) === settled) {
 				this.#queues.delete(sessionKey);
 			}
 		});
+		await (left ? Promise.race([released, left]) : released);
 		return next;
 	}
 

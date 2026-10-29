@@ -300,8 +300,7 @@ export class PodLocalSessionPool<T> {
     getOrCreate(sessionKey: string, generation: number, factory: SessionFactory<T>, now?: Date, identity?: ManagedSessionIdentity): Promise<ManagedSession<T>>;
     // (undocumented)
     invalidate(sessionKey: string, reason: string): Promise<void>;
-    // (undocumented)
-    runExclusive<R>(sessionKey: string, task: () => R | Promise<R>): Promise<R>;
+    runExclusive<R>(sessionKey: string, task: () => R | Promise<R>, signal?: AbortSignal): Promise<R>;
 }
 
 // @public (undocumented)
@@ -1127,6 +1126,8 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
     health(owner: SessionOwnerRecord, request: StatefulOperationRequest, signal: AbortSignal, validateOwnership?: StatefulOwnershipValidator): Promise<StatefulSessionHealth>;
     // (undocumented)
     invoke(owner: SessionOwnerRecord, request: StatefulOperationRequest, signal: AbortSignal, validateOwnership?: StatefulOwnershipValidator): Promise<StatefulOperationResult>;
+    // @internal
+    get parallelLimiterCountForTesting(): number;
     // (undocumented)
     reconcileWrite(owner: SessionOwnerRecord, request: StatefulOperationRequest, ledgerEntry: unknown, signal: AbortSignal, validateOwnership?: StatefulOwnershipValidator): Promise<StatefulWriteReconciliationResult<TSharedState>>;
 }

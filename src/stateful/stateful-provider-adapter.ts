@@ -1,3 +1,4 @@
+import { errorCauseChainIncludes } from "./deadline-expiry.js";
 import type {
 	ProviderEventOwnerFence,
 	ProviderEventPublishOptions,
@@ -244,7 +245,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			}
 		};
 
-		return this.schedule(owner.sessionKey, run);
+		return this.schedule(owner.sessionKey, run, signal);
 	}
 
 	executeLocal(
@@ -267,7 +268,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 				`Stateful provider adapter "${this.#adapter.providerId}" has no health hook.`,
 			);
 		}
-		return this.schedule(owner.sessionKey, async () => {
+		const check = async () => {
 			const session = await this.getOrCreate(owner, request, signal, validateOwnership);
 			const validatedOwner = await this.validatePooledOwnership(
 				owner,
@@ -284,7 +285,8 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 				),
 				session.value,
 			) as Promise<StatefulSessionHealth>;
-		});
+		};
+		return this.schedule(owner.sessionKey, check, signal);
 	}
 
 	async reconcileWrite(
@@ -299,7 +301,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 				`Stateful provider adapter "${this.#adapter.providerId}" does not support write reconciliation.`,
 			);
 		}
-		return this.schedule(owner.sessionKey, async () => {
+		const reconcile = async () => {
 			const restoreCtx = makeStatefulProviderSessionContext(
 				this.#adapter.providerId,
 				owner,
@@ -319,7 +321,8 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			return this.#adapter.reconcileWrite?.(ctx, ledgerEntry, sharedState) as Promise<
 				StatefulWriteReconciliationResult<TSharedState>
 			>;
-		});
+		};
+		return this.schedule(owner.sessionKey, reconcile, signal);
 	}
 
 	closeAll(reason: string): Promise<void> {
@@ -409,6 +412,13 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			this.refreshEventOwnerFence(validatedOwner, sessionKey);
 			return validatedOwner;
 		} catch (error) {
+			// The request's own abort ended the re-check before it learned
+			// anything about the owner. That is no evidence the pod lost the
+			// session, so the pooled session and the owner lease stay; only a
+			// failure that is not this signal's reason closes them. A caller
+			// outside the declared type may pass no signal at all; its failure
+			// closes them as before.
+			if (signal?.aborted && errorCauseChainIncludes(error, signal.reason)) throw error;
 			await this.#pool
 				.invalidate(owner.sessionKey, "ownership-validation-failed")
 				.catch(() => undefined);
@@ -474,34 +484,96 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		});
 	}
 
+	/**
+	 * Runs `run` once fewer than `maxInFlight` operations for `sessionKey` are
+	 * in flight. A finishing operation hands its slot straight to the next
+	 * waiter, so an arrival in between cannot take it. A waiter whose signal
+	 * aborts leaves the line at once with the signal's reason; one that was
+	 * handed a slot in the same turn its signal aborted passes the slot on and
+	 * does not run. Without a signal the wait is unconditional, as before.
+	 */
 	private async runLimited<R>(
 		sessionKey: string,
 		maxInFlight: number,
 		run: () => Promise<R>,
+		signal: AbortSignal | undefined,
 	): Promise<R> {
-		const limiter = this.#parallelLimiters.get(sessionKey) ?? { active: 0, waiting: [] };
-		this.#parallelLimiters.set(sessionKey, limiter);
-		if (limiter.active >= maxInFlight) {
-			await new Promise<void>((resolve) => limiter.waiting.push(resolve));
+		signal?.throwIfAborted();
+		let limiter = this.#parallelLimiters.get(sessionKey);
+		if (!limiter) {
+			limiter = { active: 0, waiting: [] };
+			this.#parallelLimiters.set(sessionKey, limiter);
 		}
-		limiter.active += 1;
+		if (limiter.active < maxInFlight) {
+			limiter.active += 1;
+		} else {
+			await waitForLimiterSlot(limiter, signal);
+			if (signal?.aborted) {
+				this.releaseLimiterSlot(sessionKey, limiter);
+				throw signal.reason;
+			}
+		}
 		try {
 			return await run();
 		} finally {
-			limiter.active -= 1;
-			limiter.waiting.shift()?.();
-			if (limiter.active === 0 && limiter.waiting.length === 0) {
-				this.#parallelLimiters.delete(sessionKey);
-			}
+			this.releaseLimiterSlot(sessionKey, limiter);
 		}
 	}
 
-	private schedule<R>(sessionKey: string, run: () => Promise<R>): Promise<R> {
-		const concurrency = this.#adapter.policy.concurrency;
-		if (concurrency.mode === "serialize") return this.#pool.runExclusive(sessionKey, run);
-		if (concurrency.maxInFlight === undefined) return run();
-		return this.runLimited(sessionKey, concurrency.maxInFlight, run);
+	private releaseLimiterSlot(sessionKey: string, limiter: ParallelLimiter): void {
+		const next = limiter.waiting.shift();
+		if (next) {
+			next();
+			return;
+		}
+		limiter.active -= 1;
+		if (limiter.active === 0 && this.#parallelLimiters.get(sessionKey) === limiter) {
+			this.#parallelLimiters.delete(sessionKey);
+		}
 	}
+
+	// `signal` is declared on every public entry, but a JavaScript caller can
+	// leave it out; the wait then behaves as it did before signals reached it.
+	private schedule<R>(
+		sessionKey: string,
+		run: () => Promise<R>,
+		signal: AbortSignal | undefined,
+	): Promise<R> {
+		const concurrency = this.#adapter.policy.concurrency;
+		if (concurrency.mode === "serialize") return this.#pool.runExclusive(sessionKey, run, signal);
+		if (concurrency.maxInFlight === undefined) return run();
+		return this.runLimited(sessionKey, concurrency.maxInFlight, run, signal);
+	}
+
+	/** @internal Test-only visibility into parallel limiter cleanup. */
+	get parallelLimiterCountForTesting(): number {
+		return this.#parallelLimiters.size;
+	}
+}
+
+/**
+ * Waits until a finishing operation hands this waiter its slot, or rejects
+ * with the signal's reason when the signal aborts first. A waiter that leaves
+ * takes its wake-up out of the line, so the next hand-off reaches a waiter
+ * that is still there.
+ */
+function waitForLimiterSlot(
+	limiter: ParallelLimiter,
+	signal: AbortSignal | undefined,
+): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const onAbort = () => {
+			const index = limiter.waiting.indexOf(wake);
+			if (index !== -1) limiter.waiting.splice(index, 1);
+			reject(signal?.reason);
+		};
+		const wake = () => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		};
+		limiter.waiting.push(wake);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 function validateAdapterConfiguration<TSession, TSharedState, TEvent>(
