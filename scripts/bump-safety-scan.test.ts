@@ -15,6 +15,7 @@ import path from "node:path";
 import {
 	countWindowRules,
 	judge,
+	parseFixtureTestOutput,
 	renderReport,
 	type ScanReport,
 	stripComments,
@@ -44,6 +45,19 @@ function breakingHeadBuild(root: string): string {
 			'\t\tthrow new Error("Provider " + JSON.stringify(declaration.id) + " must declare reviewed as first-party or community");',
 			"\t}",
 			"\treturn upstream(declaration);",
+			"}",
+			"",
+		].join("\n"),
+	);
+	renameSync(path.join(dir, "dist", "contract.js"), path.join(dir, "dist", "contract.original.js"));
+	writeFileSync(
+		path.join(dir, "dist", "contract.js"),
+		[
+			'export * from "./contract.original.js";',
+			'import { extractProviderContract as upstream } from "./contract.original.js";',
+			"export function extractProviderContract(provider) {",
+			'\tif (provider?.id === "bump-scan-digest") throw new Error("contract extraction refused for " + provider.id);',
+			"\treturn upstream(provider);",
 			"}",
 			"",
 		].join("\n"),
@@ -87,13 +101,13 @@ afterAll(() => {
 });
 
 describe("bump-safety-scan", () => {
-	it("marks the refused provider BREAK, the untouched one SAME and the unloadable one NOT COVERED", () => {
+	it("marks the refused provider BREAK, the untouched one SAME, the unloadable one NOT COVERED and the digest-refused one BREAK", () => {
 		const result = runScan(path.join(FIXTURES, "*"), "scan", true);
 		expect(result.status).toBe(1);
 		const report = JSON.parse(result.stdout) as ScanReport;
 		const rows = Object.fromEntries(report.targets.map((target) => [target.name, target]));
 
-		expect(Object.keys(rows).sort()).toEqual(["breaks", "clean", "unloadable"]);
+		expect(Object.keys(rows).sort()).toEqual(["breaks", "clean", "digest", "unloadable"]);
 		expect(rows.clean?.verdict).toBe("SAME");
 		expect(rows.clean?.covered).toBe(true);
 		expect(rows.clean?.base.probe?.load.status).toBe("ok");
@@ -114,7 +128,14 @@ describe("bump-safety-scan", () => {
 		expect(rows.unloadable?.reasons[0]).toContain("fails to load on both sides");
 		expect(rows.unloadable?.reasons[0]).toContain("fixture: cannot load on any SDK");
 
-		expect(report.summary).toEqual({ SAME: 1, BREAK: 1, WARN: 0, "NOT COVERED": 1, SKIP: 0 });
+		expect(rows.digest?.verdict).toBe("BREAK");
+		expect(rows.digest?.head.probe?.load.status).toBe("ok");
+		expect(rows.digest?.base.probe?.digest).toBeString();
+		expect(rows.digest?.head.probe?.digest).toBeUndefined();
+		expect(rows.digest?.head.probe?.digestError).toContain("contract extraction refused");
+		expect(rows.digest?.reasons[0]).toContain("contract extraction failed on head");
+
+		expect(report.summary).toEqual({ SAME: 1, BREAK: 2, WARN: 0, "NOT COVERED": 1, SKIP: 0 });
 		expect(report.targetPatterns).toEqual([path.join(FIXTURES, "*")]);
 		expect(report.windowRules.map((usage) => usage.rule)).toEqual([
 			"legacy-error-options",
@@ -173,6 +194,25 @@ describe("judge", () => {
 		const judged = judge({ kind: "provider", base: ok("a"), head });
 		expect(judged.verdict).toBe("BREAK");
 		expect(judged.reasons[0]).toContain("tsc 0 -> 3");
+	});
+
+	it("is BREAK when the head SDK cannot extract a contract it extracted on base, NOT COVERED when neither side can", () => {
+		const extractionFailed = {
+			...ok("a"),
+			probe: {
+				load: { status: "ok" as const },
+				digestError: "walker threw",
+				lint: {},
+				warnings: [],
+			},
+		};
+		const judged = judge({ kind: "provider", base: ok("a"), head: extractionFailed });
+		expect(judged.verdict).toBe("BREAK");
+		expect(judged.reasons[0]).toBe("contract extraction failed on head: walker threw");
+		const both = judge({ kind: "provider", base: extractionFailed, head: extractionFailed });
+		expect(both.verdict).toBe("NOT COVERED");
+		expect(both.covered).toBe(false);
+		expect(both.reasons[0]).toBe("contract extraction fails on both sides: walker threw");
 	});
 
 	it("is NOT COVERED when a provider fails identically on both sides", () => {
@@ -262,6 +302,25 @@ describe("renderReport", () => {
 			"  apifuse fixture-tests: scripts/__tests__/gpm.test.ts: 86 fail on both sides: ENOENT: infra/env/registry.yaml",
 		);
 		expect(rendered).toMatch(/^apifuse fixture-tests\s+86 fail \/ 86 fail\s+.*NOT COVERED/m);
+	});
+});
+
+describe("parseFixtureTestOutput", () => {
+	it("counts a nonzero exit with zero failed tests as a failure, whatever the pass count", () => {
+		const text =
+			"bun test v1.3.14\n(pass) suite > one\nerror: afterAll threw\n\n 1 pass\n 0 fail\n 1 error\nRan 1 test across 1 file.";
+		expect(parseFixtureTestOutput(text, 1, false)).toEqual({
+			pass: 1,
+			fail: 1,
+			firstFailure: "error: afterAll threw",
+		});
+		expect(parseFixtureTestOutput("\n 3 pass\n 0 fail\n", 0, false)).toEqual({ pass: 3, fail: 0 });
+		expect(parseFixtureTestOutput("\n 3 pass\n 2 fail\n", 1, false)).toEqual({ pass: 3, fail: 2 });
+		expect(parseFixtureTestOutput("", null, true)).toEqual({
+			pass: 0,
+			fail: 1,
+			firstFailure: "timed out after 600s",
+		});
 	});
 });
 

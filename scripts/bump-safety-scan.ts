@@ -112,6 +112,8 @@ export interface LoadResult {
 export interface ProviderProbe {
 	load: LoadResult;
 	digest?: string;
+	/** The provider loaded but the SDK threw while extracting or hashing its contract. */
+	digestError?: string;
 	lint: Record<string, { level: "error" | "warn"; count: number }>;
 	warnings: string[];
 }
@@ -741,11 +743,11 @@ async function probeProvider(staged: string, sdk: SdkBuild, probe: string): Prom
 		const trimmed = line.trim();
 		if (trimmed && !/^\s*at /.test(trimmed)) warnings.add(trimmed);
 	}
-	if (parsed.digestError) warnings.add(`digest: ${parsed.digestError}`);
 	if (parsed.lintError) warnings.add(`lint: ${parsed.lintError}`);
 	return {
 		load: parsed.load,
-		digest: parsed.digest,
+		...(parsed.digest === undefined ? {} : { digest: parsed.digest }),
+		...(parsed.digestError === undefined ? {} : { digestError: parsed.digestError }),
 		lint: parsed.lint,
 		warnings: [...warnings].sort(),
 	};
@@ -791,24 +793,9 @@ async function runFixtureTests(
 			timeoutMs: 600_000,
 			env: { CI: "1" },
 		});
-		const text = `${result.stdout}\n${result.stderr}`;
-		const pass = Number(/^\s*(\d+) pass/m.exec(text)?.[1] ?? 0);
-		let fail = Number(/^\s*(\d+) fail/m.exec(text)?.[1] ?? 0);
-		if (result.timedOut || (result.code !== 0 && pass === 0 && fail === 0))
-			fail = Math.max(fail, 1);
-		const firstFailure = result.timedOut
-			? "timed out after 600s"
-			: text
-					.split("\n")
-					.map((line) => line.trim())
-					.find((line) => /^(error:|\(fail\)|[A-Za-z]*Error:|ENOENT)/.test(line));
 		return [
 			file,
-			{
-				pass,
-				fail,
-				...(fail > 0 && firstFailure ? { firstFailure: firstFailure.slice(0, 160) } : {}),
-			},
+			parseFixtureTestOutput(`${result.stdout}\n${result.stderr}`, result.code, result.timedOut),
 		] as const;
 	});
 	const files_: Record<string, FixtureFileResult> = {};
@@ -820,6 +807,34 @@ async function runFixtureTests(
 		fail += counts.fail;
 	}
 	return { pass, fail, files: files_ };
+}
+
+/**
+ * A nonzero exit with no parsed failure is still a failure: bun reports an
+ * unhandled error outside a test (a throwing afterAll, an error between
+ * tests) as `N pass, 0 fail, 1 error` and exits 1.
+ */
+export function parseFixtureTestOutput(
+	text: string,
+	code: number | null,
+	timedOut: boolean,
+): FixtureFileResult {
+	const pass = Number(/^\s*(\d+) pass/m.exec(text)?.[1] ?? 0);
+	const parsedFail = Number(/^\s*(\d+) fail/m.exec(text)?.[1] ?? 0);
+	const exitedWithoutFailedTest = code !== 0 && parsedFail === 0;
+	const fail = timedOut || exitedWithoutFailedTest ? Math.max(parsedFail, 1) : parsedFail;
+	const firstFailure = timedOut
+		? "timed out after 600s"
+		: (text
+				.split("\n")
+				.map((line) => line.trim())
+				.find((line) => /^(error:|\(fail\)|[A-Za-z]*Error:|ENOENT)/.test(line)) ??
+			(exitedWithoutFailedTest ? `process exited ${code} with no failed test` : undefined));
+	return {
+		pass,
+		fail,
+		...(fail > 0 && firstFailure ? { firstFailure: firstFailure.slice(0, 160) } : {}),
+	};
 }
 
 export interface Judgement {
@@ -882,7 +897,11 @@ export function judge(target: Pick<TargetReport, "kind" | "base" | "head">): Jud
 		);
 	}
 	if (base.load.status === "ok" && head.load.status === "ok") {
-		if (base.digest && head.digest && base.digest !== head.digest) {
+		if (base.digestError !== undefined && head.digestError !== undefined) {
+			uncover(`contract extraction fails on both sides: ${head.digestError.slice(0, 110)}`);
+		} else if (base.digest && head.digestError !== undefined) {
+			escalate("BREAK", `contract extraction failed on head: ${head.digestError.slice(0, 110)}`);
+		} else if (base.digest && head.digest && base.digest !== head.digest) {
 			escalate(
 				"BREAK",
 				`contract digest ${base.digest.slice(0, 12)} -> ${head.digest.slice(0, 12)}`,
@@ -1086,11 +1105,13 @@ export function renderReport(report: ScanReport): string {
 	];
 	for (const target of report.targets) {
 		const digest =
-			target.base.probe?.digest && target.head.probe?.digest
-				? target.base.probe.digest === target.head.probe.digest
-					? "same"
-					: "CHANGED"
-				: "-";
+			target.base.probe?.digestError !== undefined || target.head.probe?.digestError !== undefined
+				? `${target.base.probe?.digestError === undefined ? "ok" : "ERR"} / ${target.head.probe?.digestError === undefined ? "ok" : "ERR"}`
+				: target.base.probe?.digest && target.head.probe?.digest
+					? target.base.probe.digest === target.head.probe.digest
+						? "same"
+						: "CHANGED"
+					: "-";
 		rows.push([
 			target.name,
 			`${loadCell(target.base)} / ${loadCell(target.head)}`,
@@ -1114,6 +1135,8 @@ export function renderReport(report: ScanReport): string {
 		}
 	}
 	const uncovered = report.targets.filter((target) => !target.covered);
+	const uncoveredReason =
+		/^(fails to load on both sides: |contract extraction fails on both sides: )|fail on both sides: /;
 	if (uncovered.length > 0) {
 		out.push("");
 		out.push(
@@ -1121,7 +1144,7 @@ export function renderReport(report: ScanReport): string {
 		);
 		for (const target of uncovered) {
 			for (const reason of target.reasons) {
-				if (!/^fails to load on both sides: |fail on both sides: /.test(reason)) continue;
+				if (!uncoveredReason.test(reason)) continue;
 				out.push(`  ${target.name}: ${reason.replace(/^fails to load on both sides: /, "")}`);
 			}
 		}
