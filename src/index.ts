@@ -156,6 +156,7 @@ export type {
 	CredentialRefDeclaration,
 	EstablishedConnectionReference,
 	AbsenceErrorRef,
+	DefinedErrorsMap,
 	ErrorRefs,
 	ExpectedAbsenceAttribution,
 	ExpectedAbsenceStatus,

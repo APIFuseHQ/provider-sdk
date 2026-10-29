@@ -125,6 +125,7 @@ export type {
 	EstablishedConnectionReference,
 	ExtractResult,
 	AbsenceErrorRef,
+	DefinedErrorsMap,
 	ErrorRefs,
 	ExpectedAbsenceAttribution,
 	ExpectedAbsenceStatus,

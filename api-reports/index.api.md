@@ -1773,6 +1773,11 @@ interface DeclarativeStealthResponse {
 }
 
 // @public
+type DeclaredErrorStatus<TEntry> = TEntry extends ProviderErrorFactory<string, infer TStatus> ? TStatus : TEntry extends {
+    readonly status: infer TStatus extends ProviderErrorStatus;
+} ? TStatus : ProviderErrorStatus;
+
+// @public
 export type DeclaredHandleKind<TConfig> = TConfig extends {
     handle: readonly (infer K)[];
 } ? [K] extends [never] ? HandleKind : K extends HandleKind ? K : HandleKind : HandleKind;
@@ -1886,9 +1891,16 @@ export interface DefinedCredentialsAuth {
     };
 }
 
+// Warning: (ae-forgotten-export) The symbol "DeclaredErrorStatus" needs to be exported by the entry point index.d.ts
+//
 // @public
 export type DefinedErrors<T extends DefineErrorsInput> = {
-    readonly [K in keyof T & string]: ProviderErrorFactory<K>;
+    readonly [K in keyof T & string]: ProviderErrorFactory<K, DeclaredErrorStatus<T[K]>>;
+};
+
+// @public
+export type DefinedErrorsMap = {
+    readonly [code: string]: ProviderErrorFactory;
 };
 
 // @public
@@ -2071,13 +2083,21 @@ export function error(code: string, message: string, options?: Omit<SseErrorData
 // @public
 export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
 
+// Warning: (ae-forgotten-export) The symbol "ErrorRefsSource" needs to be exported by the entry point index.d.ts
+//
 // @public
-export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[]> = {
-    readonly [TRef in AbsenceErrorRef<T[number]> as TRef["code"]]: TRef;
+export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[] | DefinedErrorsMap> = {
+    readonly [TRef in AbsenceErrorRef<ErrorRefsSource<T>> as TRef["code"]]: TRef;
 };
 
 // @public
 export function errorRefs<const T extends readonly OperationErrorCodeDeclaration[]>(errorCodes: T): ErrorRefs<T>;
+
+// @public
+export function errorRefs<const T extends DefinedErrorsMap>(errors: T): ErrorRefs<T>;
+
+// @public
+type ErrorRefsSource<T> = T extends readonly OperationErrorCodeDeclaration[] ? T[number] : T extends DefinedErrorsMap ? T[keyof T]["declaration"] : never;
 
 // @public (undocumented)
 export type EstablishedConnectionReference = CredentialReference & {
@@ -5830,9 +5850,9 @@ export type ProviderErrorCauseFrame = {
 };
 
 // @public
-export type ProviderErrorDeclaration<TCode extends string = string> = {
+export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus> = {
     readonly code: TCode;
-    readonly status: ProviderErrorStatus;
+    readonly status: TStatus;
     readonly category: ProviderErrorCategory;
     readonly retryable: boolean;
     readonly description: string;
@@ -5851,10 +5871,10 @@ export type ProviderErrorDeclarationInput = {
 };
 
 // @public
-export type ProviderErrorFactory<TCode extends string = string> = {
+export type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
-    readonly declaration: ProviderErrorDeclaration<TCode>;
+    readonly declaration: ProviderErrorDeclaration<TCode, TStatus>;
 };
 
 // @public

@@ -51,10 +51,18 @@ export type ProviderErrorDeclarationInput = {
 	readonly fixKey?: ProviderLocaleKeyInput;
 };
 
-/** The resolved declaration a factory carries and the server reads. */
-export type ProviderErrorDeclaration<TCode extends string = string> = {
+/**
+ * The resolved declaration a factory carries and the server reads. `TStatus`
+ * is the literal status the map declared (or the registry's, for an
+ * `sdkErrors` reference), so a health scenario's `errorRefs(errors)` can
+ * refuse a non-absence code at compile time.
+ */
+export type ProviderErrorDeclaration<
+	TCode extends string = string,
+	TStatus extends ProviderErrorStatus = ProviderErrorStatus,
+> = {
 	readonly code: TCode;
-	readonly status: ProviderErrorStatus;
+	readonly status: TStatus;
 	readonly category: ProviderErrorCategory;
 	readonly retryable: boolean;
 	readonly description: string;
@@ -101,10 +109,13 @@ export type ProviderErrorInput = {
 };
 
 /** `errors.CODE` from `defineErrors`: throws the declared error, and carries the declaration for the contract. */
-export type ProviderErrorFactory<TCode extends string = string> = {
+export type ProviderErrorFactory<
+	TCode extends string = string,
+	TStatus extends ProviderErrorStatus = ProviderErrorStatus,
+> = {
 	(input?: ProviderErrorInput): ProviderError<TCode>;
 	readonly code: TCode;
-	readonly declaration: ProviderErrorDeclaration<TCode>;
+	readonly declaration: ProviderErrorDeclaration<TCode, TStatus>;
 };
 
 /**
@@ -127,9 +138,16 @@ type CheckedDefineErrorsInput<T extends DefineErrorsInput> = {
 			: never;
 };
 
-/** The factories `defineErrors` returns, one per declared code. */
+/** The literal status one `defineErrors` entry declares; the full status union when it is not a literal. */
+type DeclaredErrorStatus<TEntry> = TEntry extends ProviderErrorFactory<string, infer TStatus>
+	? TStatus
+	: TEntry extends { readonly status: infer TStatus extends ProviderErrorStatus }
+		? TStatus
+		: ProviderErrorStatus;
+
+/** The factories `defineErrors` returns, one per declared code, each carrying its declared status. */
 export type DefinedErrors<T extends DefineErrorsInput> = {
-	readonly [K in keyof T & string]: ProviderErrorFactory<K>;
+	readonly [K in keyof T & string]: ProviderErrorFactory<K, DeclaredErrorStatus<T[K]>>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

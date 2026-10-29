@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 import {
+	defineErrors,
 	defineHealthJourney,
 	defineHealthScenario,
 	errorRefs,
@@ -19,6 +20,7 @@ import {
 	type OperationResult,
 	type ProviderDefinition,
 	SDK_OWNED_HEALTH_REASON_COPY,
+	sdkErrors,
 	withFreshnessGuards,
 } from "./index.js";
 import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
@@ -996,6 +998,76 @@ describe("declarative health scenarios", () => {
 				}),
 			).toThrow();
 		}
+	});
+
+	it("references a defineErrors map by value: declared status per code, registry status for sdkErrors, absences only", () => {
+		const declared = defineErrors({
+			NO_DATA: sdkErrors.NO_DATA,
+			UPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,
+			RATE_LIMITED: sdkErrors.RATE_LIMITED,
+			BAD_DISTRICT: { status: 400, category: "upstream_rejected", description: "Unknown district." },
+			ITEM_GONE: { status: 404, category: "upstream_http", description: "The item is gone." },
+			SHOP_CLOSED: { status: 409, category: "upstream_rejected", description: "Closed today." },
+			UPSTREAM_DOWN: { status: 500, category: "upstream_http", description: "Upstream fault." },
+		});
+		const errors = errorRefs(declared);
+		expect(errors).toEqual({
+			NO_DATA: { code: "NO_DATA", status: 404 },
+			BAD_DISTRICT: { code: "BAD_DISTRICT", status: 400 },
+			ITEM_GONE: { code: "ITEM_GONE", status: 404 },
+		});
+		const noData: { readonly code: "NO_DATA"; readonly status: 404 } = errors.NO_DATA;
+		const badDistrict: { readonly code: "BAD_DISTRICT"; readonly status: 400 } = errors.BAD_DISTRICT;
+		expect([noData.status, badDistrict.status]).toEqual([404, 400]);
+		// @ts-expect-error test-invalid: a 500 provider code is a fault, not an absence
+		errors.UPSTREAM_DOWN;
+		// @ts-expect-error test-invalid: a 409 is an upstream refusal, not an absence
+		errors.SHOP_CLOSED;
+		// @ts-expect-error test-invalid: an SDK code registered at 502 is never an absence
+		errors.UPSTREAM_ERROR;
+		// @ts-expect-error test-invalid: a rate-limit code is never an absence
+		errors.RATE_LIMITED;
+		// @ts-expect-error test-invalid: an undeclared code does not exist
+		errors.TYPO;
+
+		// A map spread into another keeps each factory's literal status.
+		const spread = errorRefs(
+			defineErrors({ ...declared, NO_ROUTE: { status: 404, category: "upstream_http", description: "No route." } }),
+		);
+		const itemGone: { readonly code: "ITEM_GONE"; readonly status: 404 } = spread.ITEM_GONE;
+		expect([itemGone, spread.NO_ROUTE]).toEqual([
+			{ code: "ITEM_GONE", status: 404 },
+			{ code: "NO_ROUTE", status: 404 },
+		]);
+		// @ts-expect-error test-invalid: the spread 500 code stays refused
+		spread.UPSTREAM_DOWN;
+
+		// The reference serializes to the same wire entry as the table form.
+		const base = validScenario();
+		const [operation, ...rest] = base.steps;
+		if (operation.kind !== "operation") throw new Error("expected operation step");
+		const attribute = [
+			{
+				operationId: "ping",
+				status: "degraded",
+				reasonCode: "expected_absence",
+				reasonKey: "health.ping.calm",
+			},
+		] as const;
+		const parsed = defineHealthScenario({
+			...base,
+			steps: [{ ...operation, expectedErrors: [{ error: errors.NO_DATA, attribute }] }, ...rest],
+		});
+		const parsedOperation = parsed.steps[0];
+		expect(
+			parsedOperation.kind === "operation" ? parsedOperation.expectedErrors : undefined,
+		).toEqual([{ status: 404, code: "NO_DATA", attribute: [...attribute] }]);
+
+		// The map's input (declarations, not factories) is refused with the fix named.
+		expect(() =>
+			// @ts-expect-error test-invalid: the defineErrors input holds declarations, not factories
+			errorRefs({ NO_DATA: sdkErrors.NO_DATA }),
+		).toThrow(/not a defineErrors factory/);
 	});
 
 	it("tags a by-code entry for the old path's lint without changing the wire shape", () => {
