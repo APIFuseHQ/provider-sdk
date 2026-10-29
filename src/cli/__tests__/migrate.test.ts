@@ -90,7 +90,6 @@ function countsByCodemod(report: MigrateReport): Record<string, [string[], numbe
 const DRY_RUN_RESIDUES = [
 	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 	"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:31",
-	"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:8",
 	"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 	"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:7",
 ];
@@ -132,7 +131,7 @@ describe("apifuse migrate", () => {
 					"upstream/client.ts",
 				],
 				8,
-				3,
+				2,
 			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
@@ -195,7 +194,7 @@ describe("apifuse migrate", () => {
 		expect(detail).not.toContain("errorCodes");
 		expect(detail).toContain('itemId: z.string().describeKey("schema.itemId")');
 		expect(after["domain/errors.ts"]).toBe(
-			'import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";\n\nexport const errors = defineErrors({\n\tITEM_GONE: {\n\t\tstatus: 410,\n\t\tcategory: "upstream_rejected",\n\t\tretryable: false,\n\t\tdescription: "The item was removed.",\n\t},\n\tUPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,\n});\n',
+			'import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";\n\nexport const errors = defineErrors({\n\tITEM_GONE: {\n\t\tstatus: 410,\n\t\tcategory: "upstream_rejected",\n\t\tretryable: false,\n\t\tdescription: "The item was removed.",\n\t},\n\tUPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,\n\tUPSTREAM_SCHEMA_ERROR: sdkErrors.UPSTREAM_SCHEMA_ERROR,\n});\n',
 		);
 		// A list of rows referenced by name (another file) becomes references,
 		// never an empty list.
@@ -232,7 +231,7 @@ describe("apifuse migrate", () => {
 					"upstream/client.ts",
 				],
 				8,
-				3,
+				2,
 			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
@@ -246,8 +245,7 @@ describe("apifuse migrate", () => {
 		expect(residueTable(report)).toEqual([
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
-			"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:8",
-			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
+					"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 			"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:7",
 		]);
 		// Every errors.CODE the factory and health-refs wrote resolves: the
@@ -258,6 +256,8 @@ describe("apifuse migrate", () => {
 			'import { ProviderError } from "@apifuse/provider-sdk/provider";\nimport { errors } from "../domain/errors";\n',
 		);
 		expect(mapper).toContain('throw errors.ITEM_GONE({ message: "The item was removed." });');
+		// A registered code no map declared is declared by value in the module.
+		expect(mapper).toContain('throw errors.UPSTREAM_SCHEMA_ERROR({ message: "Shape drift." });');
 		const client = after["upstream/client.ts"] ?? "";
 		expect(client).toContain(
 			'import { SEARCH_ERRORS } from "../operations/search";\nimport { errors } from "../domain/errors";\n',
@@ -289,7 +289,6 @@ describe("apifuse migrate", () => {
 		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
 		expect(residueTable(again)).toEqual([
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:29",
-			"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:9",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 			"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:8",
 		]);
@@ -308,8 +307,7 @@ describe("apifuse migrate", () => {
 		expect(residueTable(report)).toEqual([
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
-			"errors-hoist errors-hoist-reference-undeclared mappers/item.ts:8",
-			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
+					"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 			"errors-hoist errors-hoist-reference-undeclared upstream/client.ts:7",
 		]);
 		expect(readFileSync(join(providerRoot, "mappers/item.ts"), "utf8")).toContain(
@@ -335,7 +333,7 @@ describe("apifuse migrate", () => {
 			"codemod                          files would change  rewrites  residues",
 		);
 		expect(text).toContain("errors-factory                   3                   7         2");
-		expect(text).toContain("errors-hoist                     7                   8         3");
+		expect(text).toContain("errors-hoist                     7                   8         2");
 		expect(text).toContain(
 			"operations/search.ts:31:10 [errors-factory-throw-site-registry-conflict]",
 		);

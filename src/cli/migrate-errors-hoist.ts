@@ -151,14 +151,32 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	const notes: MigrateFinding[] = [];
 
 	const lists = collectLists(ts, sources, residues);
-	if (lists.length === 0) {
-		return { filesChanged: [], rewrites: 0, notes, residues: residues.sort(byPosition) };
-	}
-
 	const existing = findExistingMap(ts, sources);
 	const throwCategories = collectThrowCategories(ts, sources);
 	const declarations = declareCodes(ts, lists, existing, throwCategories, residues, notes);
 	const maps = defineErrorsMaps(ts, sources);
+	const references = collectReferences(ts, sources, existing?.file.path ?? DEFAULT_MODULE);
+	// A registered code a throw site names that no map declares (its row sat
+	// in a table rule 3 does not convert) is declared by value in the map.
+	const declaredSomewhere = new Set<string>();
+	for (const byName of maps.values())
+		for (const entry of byName.values())
+			for (const code of entry.codes) declaredSomewhere.add(code);
+	const referencedSdk = new Set<string>();
+	for (const fileReferences of references) {
+		for (const item of fileReferences.items) {
+			const code = item.code;
+			if (
+				Object.hasOwn(SDK_ERROR_REGISTRY, code) &&
+				!declarations.has(code) &&
+				!existing?.entries.has(code) &&
+				!declaredSomewhere.has(code)
+			) {
+				declarations.set(code, { kind: "sdk", code: code as SdkErrorCode });
+				referencedSdk.add(code);
+			}
+		}
+	}
 
 	const hoisted = new Set<string>();
 	const edits = new Map<string, FileEdits>();
@@ -263,7 +281,9 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 
 	const newCodes = [...declarations.entries()].filter(
 		([code, declaration]) =>
-			declaration.kind !== "residue" && hoisted.has(code) && !existing?.entries.has(code),
+			declaration.kind !== "residue" &&
+			(hoisted.has(code) || referencedSdk.has(code)) &&
+			!existing?.entries.has(code),
 	);
 	const moduleResult = writeMap(
 		ts,
@@ -285,7 +305,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	]);
 	const modulePath =
 		existing?.file.path ?? (moduleResult === undefined ? undefined : DEFAULT_MODULE);
-	rewrites += resolveReferences(ts, sources, {
+	rewrites += resolveReferences(ts, references, {
 		existing,
 		modulePath,
 		moduleCodes,
@@ -333,19 +353,78 @@ function dedupe(findings: readonly MigrateFinding[]): MigrateFinding[] {
 	});
 }
 
+type Reference = {
+	readonly node: TS.Node;
+	readonly code: string;
+	/** The `errors` identifier to retarget; absent for a site the factory has not rewritten yet (a dry run). */
+	readonly target?: TS.Identifier;
+};
+
+type FileReferences = {
+	readonly file: ProviderSourceFile;
+	/** Top-level names the file binds, with `errors` dropped when it is the module's own import. */
+	readonly bound: Set<string>;
+	readonly items: readonly Reference[];
+};
+
 /**
- * errors-factory rewrites a throw site to `errors.CODE(...)` (and a health
- * scenario to `errors.CODE`) without the binding. Per file: a reference to a
- * code the provider map declares gets `import { errors }` from the module; a
- * reference to a code only a map in the file's scope declares (its own table
- * that became a map, or one it imports) is retargeted to that map; a code no
- * map declares is a residue. A file that converted a table, or names
- * `sdkErrors`, gets the SDK import. A dry run counts the throw sites the
- * factory will rewrite so it reports what the apply does.
+ * Every `errors.CODE` a file names (a throw site errors-factory rewrote, a
+ * health scenario health-refs rewrote), plus, so a dry run reports what the
+ * apply does, the sites the two will rewrite. A file that binds `errors` to
+ * anything but the module's import is left alone.
+ */
+function collectReferences(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+	modulePath: string,
+): FileReferences[] {
+	const out: FileReferences[] = [];
+	for (const file of sources) {
+		const bound = topLevelBindings(ts, file);
+		if (bound.has(MAP_NAME) && importsModuleMap(ts, file, modulePath)) bound.delete(MAP_NAME);
+		if (bound.has(MAP_NAME) && file.path !== modulePath) continue;
+		const items: Reference[] = [];
+		const visit = (node: TS.Node): void => {
+			if (
+				(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === MAP_NAME
+			) {
+				const code = ts.isPropertyAccessExpression(node)
+					? node.name.text
+					: literalString(ts, node.argumentExpression);
+				if (code !== undefined) items.push({ node, code, target: node.expression });
+			} else if (
+				ts.isNewExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === "ProviderError"
+			) {
+				const code = factoryRewriteCode(ts, node);
+				if (code !== undefined) items.push({ node, code });
+			} else if (ts.isObjectLiteralExpression(node)) {
+				const code = healthRefsRewriteCode(ts, node);
+				if (code !== undefined) items.push({ node, code });
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file.source);
+		out.push({ file, bound, items });
+	}
+	return out;
+}
+
+/**
+ * Per file: a reference to a code the provider map declares gets
+ * `import { errors }` from the module; a reference to a code a map in the
+ * file's scope declares (its own table that became a map, or one it imports)
+ * is retargeted to that map; a code exactly one map elsewhere declares gets
+ * that map imported and the reference retargeted; a code no map declares is
+ * a residue. A file that converted a table, or names `sdkErrors`, gets the
+ * SDK import.
  */
 function resolveReferences(
 	ts: TypeScriptModule,
-	sources: readonly ProviderSourceFile[],
+	references: readonly FileReferences[],
 	context: {
 		readonly existing: ExistingMap | undefined;
 		readonly modulePath: string | undefined;
@@ -357,70 +436,58 @@ function resolveReferences(
 	},
 ): number {
 	let rewrites = 0;
-	for (const file of sources) {
+	const declaringMaps = (code: string): Array<{ path: string; name: string }> => {
+		const out: Array<{ path: string; name: string }> = [];
+		for (const [path, byName] of context.maps) {
+			for (const [name, entry] of byName) {
+				if (name !== MAP_NAME && entry.codes.has(code)) out.push({ path, name });
+			}
+		}
+		return out;
+	};
+	for (const { file, bound, items } of references) {
 		const scope = mapsInScope(ts, context.maps, file);
-		const bound = topLevelBindings(ts, file);
-		// `errors` already imported from the module (a second run) still has its
-		// references checked; `errors` bound to anything else is left alone.
-		if (bound.has(MAP_NAME) && importsModuleMap(ts, file, context.modulePath))
-			bound.delete(MAP_NAME);
 		const fileEdits: TextEdit[] = [];
 		let needsModule = false;
-		const reference = (node: TS.Node, code: string, retarget: (name: string) => void): void => {
+		const pendingBefore = context.imports.get(file.path)?.edits.length ?? 0;
+		const retarget = (item: Reference, name: string): void => {
+			if (item.target === undefined) return;
+			fileEdits.push({
+				start: item.target.getStart(file.source),
+				end: item.target.end,
+				text: name,
+			});
+		};
+		for (const item of items) {
+			const code = item.code;
 			if (context.moduleCodes.has(code)) {
 				if (file.path !== context.modulePath) needsModule = true;
-				return;
+				continue;
 			}
-			for (const [name, codes] of scope) {
-				if (name !== MAP_NAME && codes.has(code)) {
-					retarget(name);
-					return;
+			const local = [...scope].find(([name, codes]) => name !== MAP_NAME && codes.has(code));
+			if (local !== undefined) {
+				retarget(item, local[0]);
+				continue;
+			}
+			const remote = declaringMaps(code).filter((candidate) => candidate.path !== file.path);
+			const [only] = remote;
+			if (only !== undefined && remote.length === 1 && !bound.has(only.name)) {
+				if (ensureImport(ts, file, only.name, only.path, context.residues, context.imports)) {
+					retarget(item, only.name);
+					continue;
 				}
 			}
 			if (context.modulePath !== undefined && file.path !== context.modulePath) needsModule = true;
 			context.residues.push(
 				finding(
 					file,
-					node.getStart(file.source),
+					item.node.getStart(file.source),
 					ERRORS_HOIST_RULES.referenceUndeclared,
-					`${MAP_NAME}.${code} names a code no defineErrors map in this provider declares${context.modulePath === undefined ? " (and the provider has no errors map)" : ""}; tsc names it until it is declared.`,
+					`${MAP_NAME}.${code} names a code no defineErrors map in this provider declares${remote.length > 1 ? ` (${remote.length} maps declare it: ${remote.map((candidate) => `${candidate.name} in ${candidate.path}`).join(", ")})` : context.modulePath === undefined ? " (and the provider has no errors map)" : ""}; tsc names it until it is declared.`,
 					`Declare ${code} in the provider's defineErrors map (status, category, description) or throw a declared code here, then re-run apifuse migrate.`,
 				),
 			);
-		};
-		const visit = (node: TS.Node): void => {
-			if (
-				(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
-				ts.isIdentifier(node.expression) &&
-				node.expression.text === MAP_NAME &&
-				!bound.has(MAP_NAME)
-			) {
-				const code = ts.isPropertyAccessExpression(node)
-					? node.name.text
-					: literalString(ts, node.argumentExpression);
-				if (code !== undefined) {
-					const target = node.expression;
-					reference(node, code, (name) => {
-						fileEdits.push({ start: target.getStart(file.source), end: target.end, text: name });
-					});
-				}
-			} else if (
-				ts.isNewExpression(node) &&
-				ts.isIdentifier(node.expression) &&
-				node.expression.text === "ProviderError"
-			) {
-				// Not yet rewritten (a dry run): count what rule 1 will leave behind.
-				const code = factoryRewriteCode(ts, node);
-				if (code !== undefined && !bound.has(MAP_NAME)) reference(node, code, () => {});
-			} else if (ts.isObjectLiteralExpression(node) && !bound.has(MAP_NAME)) {
-				// Not yet rewritten (a dry run): an expectedErrors entry health-refs
-				// turns into { error: errors.CODE, attribute }.
-				const code = healthRefsRewriteCode(ts, node);
-				if (code !== undefined) reference(node, code, () => {});
-			}
-			ts.forEachChild(node, visit);
-		};
-		visit(file.source);
+		}
 
 		const sdkWanted = sdkNamesWanted(ts, file, context.maps);
 		if (sdkWanted.length > 0 && file.path !== context.modulePath) {
@@ -431,8 +498,9 @@ function resolveReferences(
 				continue;
 			}
 		}
+		const importedAny = (context.imports.get(file.path)?.edits.length ?? 0) > pendingBefore;
 		if (fileEdits.length > 0) editsFor(context.edits, file).push(...fileEdits);
-		if (fileEdits.length > 0 || (needsModule && context.imports.has(file.path))) rewrites += 1;
+		if (fileEdits.length > 0 || importedAny) rewrites += 1;
 	}
 	return rewrites;
 }
@@ -1322,71 +1390,63 @@ function ensureMapImport(
 	residues: MigrateFinding[],
 	imports: Map<string, FileEdits>,
 ): boolean {
-	const modulePath = existing?.file.path ?? DEFAULT_MODULE;
-	if (file.path === modulePath) return true;
+	return ensureImport(ts, file, MAP_NAME, existing?.file.path ?? DEFAULT_MODULE, residues, imports);
+}
+
+/** Ensures `file` imports `name` from the provider file `fromPath`; false (with a residue) when the name is bound to something else. */
+function ensureImport(
+	ts: TypeScriptModule,
+	file: ProviderSourceFile,
+	name: string,
+	fromPath: string,
+	residues: MigrateFinding[],
+	imports: Map<string, FileEdits>,
+): boolean {
+	if (file.path === fromPath) return true;
+	const specifier = relativeSpecifier(file.path, fromPath);
 	for (const declaration of importsOf(ts, file.source)) {
 		const named = namedImportsOf(ts, declaration);
-		if (named.get(MAP_NAME) === MAP_NAME) {
-			const specifier = importSpecifierOf(ts, declaration) ?? "";
-			const target = specifier.replace(/\.[cm]?js$/, "");
-			if (target === relativeSpecifier(file.path, modulePath)) return true;
-			residues.push(
-				finding(
-					file,
-					declaration.getStart(file.source),
-					ERRORS_HOIST_RULES.nameTaken,
-					`This file imports a different \`${MAP_NAME}\` (from ${JSON.stringify(specifier)}), so its errorCodes rows cannot be listed as ${MAP_NAME}.CODE; they are left in place.`,
-					`Rename that import, then re-run apifuse migrate.`,
-				),
-			);
-			return false;
-		}
-		if (named.has(MAP_NAME)) {
-			residues.push(
-				finding(
-					file,
-					declaration.getStart(file.source),
-					ERRORS_HOIST_RULES.nameTaken,
-					`This file binds \`${MAP_NAME}\` to an import of something else, so its errorCodes rows cannot be listed as ${MAP_NAME}.CODE; they are left in place.`,
-					`Rename that binding, then re-run apifuse migrate.`,
-				),
-			);
-			return false;
-		}
+		if (!named.has(name)) continue;
+		const from = (importSpecifierOf(ts, declaration) ?? "").replace(/\.[cm]?js$/, "");
+		if (named.get(name) === name && from === specifier) return true;
+		residues.push(
+			finding(
+				file,
+				declaration.getStart(file.source),
+				ERRORS_HOIST_RULES.nameTaken,
+				`This file binds \`${name}\` to an import from ${JSON.stringify(importSpecifierOf(ts, declaration) ?? "")}, so its error references cannot use ${name} from ${fromPath}; they are left in place.`,
+				"Rename that import, then re-run apifuse migrate.",
+			),
+		);
+		return false;
 	}
 	for (const statement of file.source.statements) {
-		if (ts.isVariableStatement(statement)) {
-			for (const declaration of statement.declarationList.declarations) {
-				if (ts.isIdentifier(declaration.name) && declaration.name.text === MAP_NAME) {
-					residues.push(
-						finding(
-							file,
-							declaration.getStart(file.source),
-							ERRORS_HOIST_RULES.nameTaken,
-							`This file declares its own \`${MAP_NAME}\`, so its errorCodes rows cannot be listed as ${MAP_NAME}.CODE; they are left in place.`,
-							`Rename that declaration, then re-run apifuse migrate.`,
-						),
-					);
-					return false;
-				}
+		if (!ts.isVariableStatement(statement)) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (ts.isIdentifier(declaration.name) && declaration.name.text === name) {
+				residues.push(
+					finding(
+						file,
+						declaration.getStart(file.source),
+						ERRORS_HOIST_RULES.nameTaken,
+						`This file declares its own \`${name}\`, so its error references cannot use ${name} from ${fromPath}; they are left in place.`,
+						"Rename that declaration, then re-run apifuse migrate.",
+					),
+				);
+				return false;
 			}
 		}
 	}
-	if (!imports.has(file.path)) {
+	const pending = imports.get(file.path) ?? { file, edits: [] };
+	const line = (() => {
 		const style = importStyleOf(ts, file);
-		const specifier = `${relativeSpecifier(file.path, modulePath)}${style.extension}`;
+		return `import { ${name} } from ${style.quote}${specifier}${style.extension}${style.quote}${style.semi}\n`;
+	})();
+	if (!pending.edits.some((edit) => edit.text === line)) {
 		const at = importInsertionPoint(ts, file);
-		imports.set(file.path, {
-			file,
-			edits: [
-				{
-					start: at,
-					end: at,
-					text: `import { ${MAP_NAME} } from ${style.quote}${specifier}${style.quote}${style.semi}\n`,
-				},
-			],
-		});
+		pending.edits.push({ start: at, end: at, text: line });
 	}
+	imports.set(file.path, pending);
 	return true;
 }
 

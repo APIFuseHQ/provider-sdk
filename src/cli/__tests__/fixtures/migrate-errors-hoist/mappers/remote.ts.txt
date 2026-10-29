@@ -1,0 +1,5 @@
+export function parseRemote(html: string): string {
+	if (html === "drift") throw errors.UPSTREAM_SCHEMA_ERROR({ message: "Shape drift, no import here." });
+	if (html === "slow") throw errors.RATE_LIMITED({ message: "Registered, declared nowhere." });
+	return html;
+}

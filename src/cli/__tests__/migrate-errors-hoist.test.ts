@@ -70,6 +70,7 @@ describe("errors-hoist", () => {
 			expect(result.filesChanged).toEqual([
 				"domain/errors.ts",
 				"mappers/item.ts",
+				"mappers/remote.ts",
 				"operations/detail.ts",
 				"operations/legacy.ts",
 				"operations/list.ts",
@@ -173,6 +174,18 @@ describe("errors-hoist", () => {
 			);
 			expect(mapper).toContain('throw errors.NEVER_DECLARED({ message: "Unknown." });');
 			expect(parses("mappers/item.ts")).toBe(true);
+			// No map in scope: the one map elsewhere that declares the code is
+			// imported; a registered code no map declares is declared by value.
+			const remote = read("mappers/remote.ts");
+			expect(
+				remote.startsWith(
+					'import { COMMON_ERRORS } from "../shared";\nimport { errors } from "../domain/errors";\n',
+				),
+			).toBe(true);
+			expect(remote).toContain("throw COMMON_ERRORS.UPSTREAM_SCHEMA_ERROR({");
+			expect(remote).toContain("throw errors.RATE_LIMITED({");
+			expect(read("domain/errors.ts")).toContain("\tRATE_LIMITED: sdkErrors.RATE_LIMITED,\n");
+			expect(parses("mappers/remote.ts")).toBe(true);
 		});
 
 		it("names every refused row with its reason and notes the dropped description", () => {
