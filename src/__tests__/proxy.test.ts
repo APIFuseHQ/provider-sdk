@@ -8,6 +8,7 @@ import {
 	type ProxyAttemptRecord,
 	type ProxyAttemptRequest,
 	type ProxyVendorSelector,
+	resolvePolicyProxyAttemptSpan,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 	setProxyVendorSelector,
@@ -919,6 +920,87 @@ describe("proxy integration", () => {
 					session: { affinity: "connection" },
 				},
 			},
+		});
+
+		const response = await http.get("/health");
+
+		expect(response.status).toBe(200);
+		const proxies = nativeProxyCalls();
+		expect(proxies).toHaveLength(PROXY_ATTEMPTS_PER_VENDOR + 1);
+		expectDistinctSmartproxySessions(proxies.slice(0, PROXY_ATTEMPTS_PER_VENDOR), 3);
+		expect(proxies[PROXY_ATTEMPTS_PER_VENDOR]).toMatch(NODEMAVEN_URL_PATTERN);
+	});
+
+	it("ignores a declared session.poolSize: same sticky session id and the same per-vendor budget", async () => {
+		// The retired pool size is accepted for one release so a pin bump loads;
+		// nothing downstream reads it. Before the pool was retired, poolSize 6 put
+		// NodeMaven at attempt offset 6; the chain still moves on after
+		// PROXY_ATTEMPTS_PER_VENDOR smartproxy sessions, and the sticky id for an
+		// attempt is the same digest with or without the field.
+		useSmartproxyCredentials();
+		useNodemavenCredentials();
+		const session = { affinity: "connection", lifetimeMinutes: 120 } as const;
+		const withoutPool: ProviderProxyPolicy = {
+			mode: "required",
+			providers: ["smartproxy", "nodemaven"],
+			geo: { country: "KR" },
+			session,
+		};
+		const withPool: ProviderProxyPolicy = {
+			...withoutPool,
+			session: { ...session, poolSize: 6 },
+		};
+
+		expect(resolvePolicyProxyAttemptSpan(withPool)).toBe(
+			resolvePolicyProxyAttemptSpan(withoutPool),
+		);
+		expect(resolvePolicyProxyAttemptSpan(withPool)).toBe(2 * PROXY_ATTEMPTS_PER_VENDOR);
+
+		const now = Date.UTC(2026, 9, 29, 1, 0, 0);
+		const resolve = (policy: ProviderProxyPolicy, proxyAttempt: number) =>
+			resolveProxyConfigAsync({
+				affinityKey: "af_con_pool_size",
+				now,
+				proxyAttempt,
+				upstream: { proxy: policy },
+			});
+		for (const attempt of [0, 1, 2]) {
+			const [plain, pooled] = await Promise.all([
+				resolve(withoutPool, attempt),
+				resolve(withPool, attempt),
+			]);
+			expect(pooled.sessionId).toBe(plain.sessionId);
+			expect(pooled.url).toBe(plain.url);
+			expect(pooled.sessionId).toBe(
+				deriveProxySessionId({
+					sticky: true,
+					affinityKey: "af_con_pool_size",
+					windowEpoch: proxySessionWindow(120, now).windowEpoch,
+					attempt,
+				}),
+			);
+		}
+
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				nativeFetchCalls.push({
+					url: String(input),
+					init: init as RequestInit & { proxy?: string },
+				});
+				const proxy = (init as { proxy?: string } | undefined)?.proxy;
+				if (typeof proxy === "string" && NODEMAVEN_URL_PATTERN.test(proxy)) {
+					return new Response(JSON.stringify({ ok: true }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				throw new Error("socket hang up");
+			}),
+		);
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_pool_size",
+			upstream: { proxy: withPool },
 		});
 
 		const response = await http.get("/health");

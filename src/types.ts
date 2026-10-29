@@ -1182,6 +1182,15 @@ export interface ProviderProxyPolicy {
 		 */
 		lifetimeMinutes?: number;
 		/**
+		 * @deprecated The proxy pool is gone: every attempt mints its own vendor
+		 * session and a vendor serves `PROXY_ATTEMPTS_PER_VENDOR` (3) attempts
+		 * before the chain moves on, so no pool size is declared. The field is
+		 * accepted and ignored for one more release (`defineProvider` warns once
+		 * per provider) and is refused in the next minor (2.3.0). Delete it:
+		 * `apifuse migrate --only declaration` (scripts/codemods/declaration.yml).
+		 */
+		poolSize?: number;
+		/**
 		 * Seconds before hard sticky expiry at which native connections receive
 		 * the `expiring` event so the provider can drain and reconnect cleanly.
 		 * Declared by the provider; the SDK does not assume a default cut point.

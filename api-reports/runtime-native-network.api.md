@@ -538,6 +538,7 @@ interface ProviderProxyPolicy {
     session?: {
         affinity?: ProviderProxySessionAffinity;
         lifetimeMinutes?: number;
+        poolSize?: number;
         drainLeadSeconds?: number;
     };
 }
@@ -670,8 +671,8 @@ export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => Vendor
 // dist/runtime/native-telemetry.d.ts:48:5 - (ae-forgotten-export) The symbol "NativeTelemetryLifecycleKind" needs to be exported by the entry point native-network.d.ts
 // dist/types.d.ts:1036:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point native-network.d.ts
 // dist/types.d.ts:1049:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1949:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1950:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1958:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1959:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point native-network.d.ts
 
 // (No @packageDocumentation comment for this package)
 

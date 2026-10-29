@@ -1228,6 +1228,83 @@ describe("defineProvider", () => {
 		});
 	});
 
+	describe("proxy.session.poolSize", () => {
+		// The pool is gone, but a provider that still declares its size must load
+		// for one more release: the field is kept on the definition (the served
+		// contract does not change on bump), the provider is warned once at
+		// definition, and the runtime never reads it.
+		const withPoolSize = (id: string) =>
+			defineProvider({
+				...validConfig,
+				id,
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					session: { affinity: "connection", lifetimeMinutes: 120, poolSize: 6 },
+				},
+			});
+
+		const poolSizeWarnings = (warn: { mock: { calls: unknown[][] } }, id: string) =>
+			warn.mock.calls.filter(
+				(call) =>
+					typeof call[0] === "string" &&
+					call[0].includes(`Provider "${id}" declares proxy.session.poolSize (6)`),
+			);
+
+		it("accepts the retired field and warns once per provider with the deletion step", () => {
+			const warn = spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				const first = withPoolSize("pool-size-once");
+				const second = withPoolSize("pool-size-once");
+
+				for (const provider of [first, second]) {
+					const proxy = provider.proxy;
+					if (!proxy || typeof proxy === "boolean") throw new Error("expected a proxy policy");
+					expect(proxy.session).toEqual({
+						affinity: "connection",
+						lifetimeMinutes: 120,
+						poolSize: 6,
+					});
+				}
+				const warnings = poolSizeWarnings(warn, "pool-size-once");
+				expect(warnings).toHaveLength(1);
+				expect(warnings[0]?.[0]).toBe(
+					'[provider-sdk] Provider "pool-size-once" declares proxy.session.poolSize (6), which is ignored: the proxy pool is gone, every attempt mints its own vendor session and a vendor serves 3 attempts before the chain moves on. Delete the field (apifuse migrate --only declaration, scripts/codemods/declaration.yml); the next minor refuses it at defineProvider.',
+				);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it("warns each provider separately and stays silent without the field", () => {
+			const warn = spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				withPoolSize("pool-size-other");
+				defineProvider({
+					...validConfig,
+					id: "pool-size-absent",
+					proxy: {
+						mode: "required",
+						providers: ["smartproxy", "nodemaven"],
+						session: { affinity: "connection", lifetimeMinutes: 120 },
+					},
+				});
+
+				expect(poolSizeWarnings(warn, "pool-size-other")).toHaveLength(1);
+				expect(
+					warn.mock.calls.filter(
+						(call) =>
+							typeof call[0] === "string" &&
+							call[0].includes('"pool-size-absent"') &&
+							call[0].includes("poolSize"),
+					),
+				).toHaveLength(0);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+	});
+
 	describe("proxy.session.drainLeadSeconds", () => {
 		// Regression guard: the type surface and the runtime validator drifted
 		// apart once (drainLeadSeconds was typed but rejected by the allowlist),
