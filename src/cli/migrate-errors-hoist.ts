@@ -89,6 +89,8 @@ export type ErrorsHoistOptions = {
 type Row = {
 	readonly file: ProviderSourceFile;
 	readonly node: TS.ObjectLiteralExpression;
+	/** The list element that names this row when it is a constant referenced by name. */
+	readonly listed?: TS.Expression;
 	readonly code: string;
 	readonly status?: number;
 	readonly descriptionText?: string;
@@ -183,7 +185,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 						),
 					);
 				} else {
-					kept.push(entry.row.node);
+					kept.push(entry.row.listed ?? entry.row.node);
 				}
 			} else if (entry.kind === "spread") {
 				if (entry.name !== undefined && isDefineErrorsMap(ts, maps, list.file, entry.name)) {
@@ -302,7 +304,9 @@ function collectLists(
 			) {
 				const array = unwrapExpression(ts, node.initializer);
 				if (ts.isArrayLiteralExpression(array)) {
-					const entries = array.elements.map((element) => classifyEntry(ts, file, element));
+					const entries = array.elements.map((element) =>
+						classifyEntry(ts, file, element, sources),
+					);
 					const contractRows = entries.filter((entry) => entry.kind === "row" && !entry.bare);
 					if (contractRows.length > 0) {
 						const placement = listPlacement(ts, node);
@@ -384,6 +388,7 @@ function classifyEntry(
 	ts: TypeScriptModule,
 	file: ProviderSourceFile,
 	element: TS.Expression,
+	sources: readonly ProviderSourceFile[],
 ): Entry {
 	if (ts.isSpreadElement(element)) {
 		const spread = unwrapExpression(ts, element.expression);
@@ -391,7 +396,18 @@ function classifyEntry(
 			? { kind: "spread", node: element, name: spread.text }
 			: { kind: "spread", node: element };
 	}
-	const object = unwrapExpression(ts, element);
+	const value = unwrapExpression(ts, element);
+	if (ts.isIdentifier(value)) {
+		// A row referenced by name: the constant it names, in this file or the
+		// one it is imported from, is the row (its own position reports it).
+		const named = namedRowConstant(ts, file, value.text, sources);
+		if (named === undefined) return { kind: "other", node: element };
+		const entry = classifyEntry(ts, named.file, named.initializer, sources);
+		return entry.kind === "row"
+			? { ...entry, row: { ...entry.row, listed: element } }
+			: { kind: "other", node: element };
+	}
+	const object = value;
 	if (!ts.isObjectLiteralExpression(object)) return { kind: "other", node: element };
 	const fields = new Map<string, TS.Expression>();
 	for (const property of object.properties) {
@@ -434,6 +450,39 @@ function classifyEntry(
 	};
 	const bare = statusNode === undefined && descriptionNode === undefined;
 	return { kind: "row", row, bare };
+}
+
+function namedRowConstant(
+	ts: TypeScriptModule,
+	file: ProviderSourceFile,
+	name: string,
+	sources: readonly ProviderSourceFile[],
+): { readonly file: ProviderSourceFile; readonly initializer: TS.Expression } | undefined {
+	for (const statement of file.source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (
+				ts.isIdentifier(declaration.name) &&
+				declaration.name.text === name &&
+				declaration.initializer !== undefined
+			) {
+				return { file, initializer: declaration.initializer };
+			}
+		}
+	}
+	for (const declaration of importsOf(ts, file.source)) {
+		const imported = namedImportsOf(ts, declaration).get(name);
+		if (imported === undefined) continue;
+		const specifier = importSpecifierOf(ts, declaration);
+		if (specifier === undefined) return undefined;
+		const target = resolveRelativeImport(file.path, specifier, (candidate) =>
+			sources.some((source) => source.path === candidate),
+		);
+		const declaredIn = sources.find((source) => source.path === target);
+		if (declaredIn === undefined) return undefined;
+		return namedRowConstant(ts, declaredIn, imported, sources);
+	}
+	return undefined;
 }
 
 function nonLiteralField(row: Row, fields: Map<string, TS.Expression>): string | undefined {

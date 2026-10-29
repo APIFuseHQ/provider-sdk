@@ -73,8 +73,9 @@ describe("errors-hoist", () => {
 				"operations/legacy.ts",
 				"operations/list.ts",
 				"operations/meta.ts",
+				"operations/named.ts",
 			]);
-			expect(result.rewrites).toBe(5);
+			expect(result.rewrites).toBe(6);
 			const map = read("domain/errors.ts");
 			expect(
 				map.startsWith(
@@ -101,6 +102,20 @@ describe("errors-hoist", () => {
 				'\tMETA_REFUSED: {\n\t\tstatus: 422,\n\t\tcategory: "upstream_rejected",',
 			);
 			expect(map).not.toContain("\tNOT_FOUND:");
+			// Rows referenced by name resolve to their constant, in this file or
+			// another; a name that is not a row blocks its list (never an empty one).
+			expect(map).toContain('\tLOCAL_ROW: {\n\t\tstatus: 400,\n\t\tcategory: "provider_error",');
+			expect(map).toContain(
+				'\tNAMED_GONE: {\n\t\tstatus: 410,\n\t\tcategory: "upstream_rejected",\n\t\tretryable: false,\n\t\tdescription: "Referenced by name from another file.",',
+			);
+			expect(map).not.toContain("BESIDE_UNRESOLVED");
+			const named = read("operations/named.ts");
+			expect(named).toContain(
+				"\terrors: [\n\t\terrors.UPSTREAM_ERROR,\n\t\terrors.LOCAL_ROW,\n\t\terrors.NAMED_GONE,\n\t],\n\thandler:",
+			);
+			expect(named).toContain('errorCodes: [NOT_A_ROW, { code: "BESIDE_UNRESOLVED"');
+			expect(named).not.toContain("errors: []");
+			expect(parses("operations/named.ts")).toBe(true);
 			expect(map).not.toContain("TWO_WAYS");
 			expect(map).not.toContain("DYNAMIC");
 			expect(map).not.toContain("NOT_AN_OPERATION");
@@ -152,6 +167,7 @@ describe("errors-hoist", () => {
 				`${ERRORS_HOIST_RULES.spreadNotATable} operations/detail.ts:21`,
 				`${ERRORS_HOIST_RULES.sdkRowConflict} operations/list.ts:10`,
 				`${ERRORS_HOIST_RULES.codeConflict} operations/list.ts:18`,
+				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:16`,
 			]);
 			const conflict = result.residues.find(
 				(residue) => residue.ruleId === ERRORS_HOIST_RULES.sdkRowConflict,
@@ -195,7 +211,7 @@ describe("errors-hoist", () => {
 		);
 		const result = hoistInlineErrorRows({ providerRoot, dryRun: true });
 		expect(result.filesChanged).toContain("domain/errors.ts");
-		expect(result.rewrites).toBe(5);
+		expect(result.rewrites).toBe(6);
 		expect(existsSync(join(providerRoot, "domain/errors.ts"))).toBe(false);
 		expect(
 			Object.fromEntries(walk(providerRoot).map((file) => [file, readFileSync(file, "utf8")])),

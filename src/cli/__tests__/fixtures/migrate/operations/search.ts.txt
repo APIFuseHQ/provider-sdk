@@ -27,6 +27,13 @@ export const searchOperation = defineOperation<ProviderContext>()({
 		if (page === "rate-limited") {
 			throw new ProviderError("Too many searches.", { code: "429" });
 		}
+		if (page === "drift") {
+			throw new ProviderError("The shop changed its auth page.", {
+				code: "UPSTREAM_ERROR",
+				category: "upstream_schema_drift",
+				retryable: false,
+			});
+		}
 		if (page === undefined) {
 			throw new ProviderError("No item matches.", {
 				code: "NOT_FOUND",

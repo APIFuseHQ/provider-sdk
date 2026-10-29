@@ -1,0 +1,7 @@
+import { ProviderError } from "@apifuse/provider-sdk/provider";
+
+export const TEST_TABLE = [
+	{ code: "NOT_FOUND", status: 404, description: "Pinned by the test.", retryable: false },
+] as const;
+
+export const thrown = new ProviderError("pinned", { code: "NOT_FOUND" });

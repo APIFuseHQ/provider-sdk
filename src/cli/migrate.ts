@@ -172,10 +172,16 @@ export const AST_GREP_PREREQUISITE =
 // it a second time with a generic note, so it is dropped when both run.
 const SUPERSEDED_RULES: ReadonlyMap<
 	CodemodId,
-	{ readonly by: CodemodId; readonly ruleId: string }
+	{ readonly by: CodemodId; readonly ruleIds: readonly string[] }
 > = new Map([
-	["errors-factory", { by: "errors-hoist", ruleId: "errors-factory-inline-row-hoist" }],
-	["health-refs", { by: "health-stale-window", ruleId: "health-stale-window-per-call" }],
+	[
+		"errors-factory",
+		{
+			by: "errors-hoist",
+			ruleIds: ["errors-factory-inline-row-hoist", "errors-factory-entry-not-a-row"],
+		},
+	],
+	["health-refs", { by: "health-stale-window", ruleIds: ["health-stale-window-per-call"] }],
 ]);
 
 /**
@@ -247,7 +253,7 @@ export async function runMigrate(options: MigrateOptions): Promise<MigrateReport
 
 		const superseded = SUPERSEDED_RULES.get(codemod.id);
 		if (superseded !== undefined && selectedIds.has(superseded.by)) {
-			residues = residues.filter((residue) => residue.ruleId !== superseded.ruleId);
+			residues = residues.filter((residue) => !superseded.ruleIds.includes(residue.ruleId));
 		}
 		codemods.push({
 			id: codemod.id,
@@ -335,7 +341,23 @@ type AstGrepFinding = {
 	readonly replacement?: string;
 };
 
-const SCAN_GLOBS = ["--globs", "!node_modules/**", "--globs", "!dist/**", "--globs", "!.git/**"];
+// Tests pin behaviour and build their own fixtures (a case array whose rows
+// nest { code, status } is not an error table); the author updates them
+// against the migrated source.
+const SCAN_GLOBS = [
+	"--globs",
+	"!node_modules/**",
+	"--globs",
+	"!dist/**",
+	"--globs",
+	"!.git/**",
+	"--globs",
+	"!**/__tests__/**",
+	"--globs",
+	"!**/*.test.ts",
+	"--globs",
+	"!**/*.spec.ts",
+];
 
 async function scan(
 	astGrep: string,
