@@ -75,6 +75,43 @@ function readStringProperty(value: object, key: "name" | "message"): string | un
 }
 
 /**
+ * Whether `matches` holds for `error` or for one of its first `cause` links.
+ * Only an own `cause` data property is followed, the walk stops after five
+ * links or at a cycle, and a link whose `cause` cannot be read ends the chain.
+ */
+function causeChainSome(error: unknown, matches: (link: unknown) => boolean): boolean {
+	const seen = new Set<object>();
+	let current = error;
+	for (let depth = 0; depth < 5; depth++) {
+		if (matches(current)) return true;
+		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
+			return false;
+		}
+		if (seen.has(current)) return false;
+		seen.add(current);
+		let cause: PropertyDescriptor | undefined;
+		try {
+			cause = Object.getOwnPropertyDescriptor(current, "cause");
+		} catch {
+			return false;
+		}
+		if (!cause || !Object.hasOwn(cause, "value")) return false;
+		current = cause.value;
+	}
+	return false;
+}
+
+/**
+ * Whether `error` or one of its first `cause` links is `target` itself. An
+ * aborted signal's registry call fails with the signal's own reason, either
+ * thrown as it is or kept as the cause of the registry's error, so this tells
+ * a failure the caller's own abort produced from any other failure.
+ */
+export function errorCauseChainIncludes(error: unknown, target: unknown): boolean {
+	return causeChainSome(error, (link) => link === target);
+}
+
+/**
  * Whether `error` or one of its first `cause` links is this request's
  * deadline abort reason. The reason object itself matches by identity. A
  * redacted copy of it matches too: ctx.http and ctx.stealth redact a failure
@@ -94,32 +131,16 @@ export function errorCauseChainCarriesDeadline(
 	const reasonMessage = readStringProperty(reason, "message");
 	const recognizable =
 		reasonName !== undefined && reasonMessage === statefulDeadlineAbortMessage(requestId);
-	const seen = new Set<object>();
-	let current = error;
-	for (let depth = 0; depth < 5; depth++) {
-		if (current === reason) return true;
-		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
-			return false;
-		}
-		if (
-			recognizable &&
-			readStringProperty(current, "name") === reasonName &&
-			readStringProperty(current, "message") === reasonMessage
-		) {
-			return true;
-		}
-		if (seen.has(current)) return false;
-		seen.add(current);
-		let cause: PropertyDescriptor | undefined;
-		try {
-			cause = Object.getOwnPropertyDescriptor(current, "cause");
-		} catch {
-			return false;
-		}
-		if (!cause || !Object.hasOwn(cause, "value")) return false;
-		current = cause.value;
-	}
-	return false;
+	return causeChainSome(
+		error,
+		(link) =>
+			link === reason ||
+			(recognizable &&
+				link !== null &&
+				(typeof link === "object" || typeof link === "function") &&
+				readStringProperty(link, "name") === reasonName &&
+				readStringProperty(link, "message") === reasonMessage),
+	);
 }
 
 /**

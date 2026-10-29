@@ -1,3 +1,4 @@
+import { errorCauseChainIncludes } from "./deadline-expiry.js";
 import type {
 	ProviderEventOwnerFence,
 	ProviderEventPublishOptions,
@@ -409,6 +410,11 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			this.refreshEventOwnerFence(validatedOwner, sessionKey);
 			return validatedOwner;
 		} catch (error) {
+			// The request's own abort ended the re-check before it learned
+			// anything about the owner. That is no evidence the pod lost the
+			// session, so the pooled session and the owner lease stay; only a
+			// failure that is not this signal's reason closes them.
+			if (signal.aborted && errorCauseChainIncludes(error, signal.reason)) throw error;
 			await this.#pool
 				.invalidate(owner.sessionKey, "ownership-validation-failed")
 				.catch(() => undefined);
