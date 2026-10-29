@@ -90,6 +90,7 @@ function countsByCodemod(report: MigrateReport): Record<string, [string[], numbe
 const DRY_RUN_RESIDUES = [
 	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 	"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:31",
+	"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 ];
 
 describe("apifuse migrate", () => {
@@ -117,8 +118,12 @@ describe("apifuse migrate", () => {
 
 		expect(sourceFiles()).toEqual(before);
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["operations/search.ts"], 4, 2],
-			"errors-hoist": [["domain/errors.ts", "operations/detail.ts", "operations/named.ts"], 3, 0],
+			"errors-factory": [["operations/search.ts"], 3, 2],
+			"errors-hoist": [
+				["domain/errors.ts", "operations/detail.ts", "operations/named.ts", "operations/search.ts"],
+				4,
+				1,
+			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
 			handles: [["index.ts"], 2, 0],
@@ -149,7 +154,7 @@ describe("apifuse migrate", () => {
 		expect(search).toContain(
 			'"429": { status: 429, description: "Too many searches.", retryable: true }',
 		);
-		expect(search).toContain("errors: [...Object.values(SEARCH_ERRORS)]");
+		expect(search).toContain("\terrors: [\n\t\t...Object.values(SEARCH_ERRORS),\n\t],\n");
 		expect(search).toContain('errors.NOT_FOUND({ message: "No item matches.", details: {\n');
 		expect(search).toContain('throw errors["429"]({ message: "Too many searches." });');
 		expect(search).toContain('export const AREAS = [\n\t{ code: "010", name: "Sapporo" },');
@@ -159,8 +164,11 @@ describe("apifuse migrate", () => {
 		// health-stale-window moved the per-call window onto the operation and
 		// the provider declaration gained the cache capability it needs.
 		expect(search).toContain(
-			'descriptionKey: "operations.search.description",\n\terrors: [...Object.values(SEARCH_ERRORS)],\n\tcache: { staleIfErrorMs: 300_000 },\n\thandler:',
+			'descriptionKey: "operations.search.description",\n\terrors: [\n\t\t...Object.values(SEARCH_ERRORS),\n\t],\n\tcache: { staleIfErrorMs: 300_000 },\n\thandler:',
 		);
+		// A spread of a table whose rows state no status (rule 3 never converts
+		// it) is left in errorCodes with a residue, never spread from an array.
+		expect(after["operations/statusless.ts"]).toBe(before["operations/statusless.ts"]);
 		expect(search).toContain("{ ttlMs: 60_000 },");
 		expect(search).not.toContain("staleIfErrorMs: 300_000,");
 
@@ -199,8 +207,12 @@ describe("apifuse migrate", () => {
 		expect(index).toContain("\tstate: true,\n\tcache: true,\n});");
 
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["operations/search.ts"], 4, 2],
-			"errors-hoist": [["domain/errors.ts", "operations/detail.ts", "operations/named.ts"], 3, 0],
+			"errors-factory": [["operations/search.ts"], 3, 2],
+			"errors-hoist": [
+				["domain/errors.ts", "operations/detail.ts", "operations/named.ts", "operations/search.ts"],
+				4,
+				1,
+			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
 			handles: [["index.ts"], 2, 0],
@@ -213,6 +225,7 @@ describe("apifuse migrate", () => {
 		expect(residueTable(report)).toEqual([
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
+			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 		]);
 		expect(report.codemods.find((result) => result.id === "schema")?.notes).toEqual([
 			{
@@ -230,7 +243,8 @@ describe("apifuse migrate", () => {
 		const again = await runMigrate({ providerRoot, dryRun: true });
 		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
 		expect(residueTable(again)).toEqual([
-			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:27",
+			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:30",
+			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 		]);
 		expect(again.clean).toBe(false);
 	});
@@ -243,12 +257,19 @@ describe("apifuse migrate", () => {
 		);
 		expect(detail).not.toContain("errors.ITEM_GONE");
 		expect(residueTable(report)).toEqual([
+			"errors-factory errors-factory-entry-not-a-row operations/detail.ts:15",
 			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
 			"errors-factory errors-factory-entry-not-a-row operations/named.ts:8",
 			"errors-factory errors-factory-entry-not-a-row operations/named.ts:8",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
+			"errors-factory errors-factory-entry-not-a-row operations/search.ts:14",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
+			"errors-factory errors-factory-entry-not-a-row operations/statusless.ts:8",
 		]);
+		// A spread is never rewritten by the YAML alone: the table may not be a map.
+		expect(readFileSync(join(providerRoot, "operations/search.ts"), "utf8")).toContain(
+			"errorCodes: [...SEARCH_ERRORS],",
+		);
 		expect(readFileSync(join(providerRoot, "operations/named.ts"), "utf8")).toContain(
 			"errorCodes: [UPSTREAM_ROW, GONE_ROW],",
 		);
@@ -262,6 +283,7 @@ describe("apifuse migrate", () => {
 		});
 		expect(residueTable(hoist)).toEqual([
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
+			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 		]);
 		expect(readFileSync(join(providerRoot, "operations/detail.ts"), "utf8")).toContain(
 			"errors.ITEM_GONE",
@@ -285,8 +307,8 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   1                   4         2");
-		expect(text).toContain("errors-hoist                     3                   3         0");
+		expect(text).toContain("errors-factory                   1                   3         2");
+		expect(text).toContain("errors-hoist                     4                   4         1");
 		expect(text).toContain(
 			"operations/search.ts:31:10 [errors-factory-throw-site-registry-conflict]",
 		);

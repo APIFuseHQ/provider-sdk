@@ -29,9 +29,11 @@
 #                          a code that is not an identifier, e.g. "429", is reached as errors["429"];
 #                          a registered code whose per-throw value contradicts the registry is NOT
 #                          rewritten: rule 6 reports it)
-#   2. operation-list      errorCodes: [ { code: "X" }, ...TABLE ]          -> errors: [ errors.X, ...Object.values(TABLE) ]
+#   2. operation-list      errorCodes: [ { code: "X" } ]                     -> errors: [ errors.X ]
 #                          (skipped while any row of the list carries status or description: rule 5,
-#                          or any element is neither a row literal nor a spread: rule 7)
+#                          or any element is not a row literal, a spread included: rule 7; `apifuse
+#                          migrate` (errors-hoist) turns `...TABLE` into `...Object.values(TABLE)`
+#                          once TABLE is, or rule 3 makes it, a defineErrors map)
 #   3. declaration-table   const T = [ { code: "X", status, description, retryable }, ... ] as const
 #                          (only a table whose own rows carry both code and status as their own keys;
 #                          a lookup table of { code, name } rows, or a test-case array whose rows nest
@@ -49,7 +51,7 @@
 #   6. throw-site-registry-conflict  diagnostic only (no fix): a throw site of a registered code whose
 #                          per-throw retryable or category contradicts the registry; rule 1 skips it
 #   7. entry-not-a-row     diagnostic only (no fix): an errorCodes element that is not a row literal
-#                          or a spread (a row constant referenced by name); rule 2 skips the list and
+#                          (a spread, a row constant referenced by name); rule 2 skips the list and
 #                          `apifuse migrate` (errors-hoist) resolves the name across files
 id: errors-factory-throw-site
 language: typescript
@@ -512,15 +514,19 @@ rule:
             has:
               field: key
               regex: '^errors$'
-    # An element that is neither a row literal nor a spread (a row referenced
-    # by name, a call) has no rewriter; dropping it would empty the list.
-    # errors-hoist resolves a named row across files; rule 7 reports the rest.
+    # An element that is not a row literal (a spread, a row referenced by
+    # name, a call) is left to errors-hoist, which resolves the name across
+    # files and spreads a table only once it is a defineErrors map; this rule
+    # cannot see the other file, and `...Object.values(T)` over a table rule 3
+    # does not convert (rows without status) breaks the provider's load.
+    # Rule 7 reports such an element in a standalone run.
     - not:
         has:
           kind: array
           stopBy: end
           has:
             any:
+              - kind: spread_element
               - kind: identifier
               - kind: member_expression
               - kind: subscript_expression
@@ -559,17 +565,11 @@ rewriters:
         kind: string
         regex: "^[\"'](.*[^A-Za-z0-9_$].*|[0-9].*)[\"']$"
     fix: errors[$CODE]
-  - id: spread-to-factories
-    rule:
-      pattern:
-        context: '[...$TABLE]'
-        selector: spread_element
-    fix: '...Object.values($TABLE)'
 transform:
   FACTORIES:
     rewrite:
-      source: $$$ENTRIES
-      rewriters: [entry-to-factory, entry-to-factory-bracket, spread-to-factories]
+      source: $$ENTRIES
+      rewriters: [entry-to-factory, entry-to-factory-bracket]
       joinBy: ', '
 fix: 'errors: [$FACTORIES]'
 ---
@@ -1298,10 +1298,11 @@ transform:
 id: errors-factory-entry-not-a-row
 language: typescript
 severity: warning
-message: 'errorCodes element is not a row literal or a spread; the list is left whole so the declared code is not dropped.'
-note: 'Run `apifuse migrate` (errors-hoist resolves a row constant by name, also from another file), or write the row inline, or list errors.CODE from the defineErrors map.'
+message: 'errorCodes element is not a row literal; the list is left whole so the declared codes are not dropped or spread from an array.'
+note: 'Run `apifuse migrate` (errors-hoist resolves a row constant by name, also from another file, and spreads a table once it is a defineErrors map), or write the rows inline, or list errors.CODE from the defineErrors map.'
 rule:
   any:
+    - kind: spread_element
     - kind: identifier
     - kind: member_expression
     - kind: subscript_expression

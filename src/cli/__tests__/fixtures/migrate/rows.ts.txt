@@ -1,2 +1,5 @@
 export const GONE_ROW = { code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false } as const;
 export const UPSTREAM_ROW = { code: "UPSTREAM_ERROR", status: 502, description: "The shop answered 5xx.", retryable: true } as const;
+export const REGISTRY_ROWS = [
+	{ code: "NOT_FOUND", description: "No item matches; the SDK serves the status.", retryable: false },
+] as const;

@@ -201,7 +201,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 							entry.node.getStart(list.file.source),
 							ERRORS_HOIST_RULES.spreadNotATable,
 							`This errorCodes spread is not the name of a defineErrors map${entry.name === undefined ? "" : ` (${entry.name} is not declared with defineErrors)`}, so the list cannot become references; it is left whole.`,
-							"Give the spread rows a defineErrors map (a `const T = [...] as const` table becomes one through the errors-factory codemod) and spread that name, then re-run apifuse migrate.",
+							"Give the spread rows a defineErrors map and spread that name, then re-run apifuse migrate. A `const T = [...] as const` table becomes one through the errors-factory codemod when its rows carry code and status; a row of a registered code that states no status needs `CODE: sdkErrors.CODE` written by hand.",
 						),
 					);
 				}
@@ -307,8 +307,15 @@ function collectLists(
 					const entries = array.elements.map((element) =>
 						classifyEntry(ts, file, element, sources),
 					);
-					const contractRows = entries.filter((entry) => entry.kind === "row" && !entry.bare);
-					if (contractRows.length > 0) {
+					// A list is this step's when it holds something only this step can
+					// place: a row with its contract, a row referenced by name, a spread
+					// (resolved across files). A list of bare { code } rows is rule 2's.
+					const owned = entries.filter(
+						(entry) =>
+							entry.kind === "spread" ||
+							(entry.kind === "row" && (!entry.bare || entry.row.listed !== undefined)),
+					);
+					if (owned.length > 0) {
 						const placement = listPlacement(ts, node);
 						if (placement !== undefined) {
 							lists.push({ file, pair: node, array, ...placement, entries });

@@ -1,0 +1,10 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { REGISTRY_ROWS } from "../rows";
+
+export const statuslessOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.statusless.description",
+	errorCodes: [...REGISTRY_ROWS],
+	handler: async (input) => fetchItem(input.itemId),
+});
