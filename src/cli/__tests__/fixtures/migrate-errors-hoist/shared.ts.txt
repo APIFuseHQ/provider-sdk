@@ -1,0 +1,7 @@
+import { defineErrors } from "@apifuse/provider-sdk/provider";
+
+export const STATUS = 400;
+export const COMMON_ERRORS = defineErrors({
+	UPSTREAM_SCHEMA_ERROR: { status: 502, category: "upstream_schema_drift", description: "Shape drift." },
+});
+export const LEGACY_TABLE = [{ code: "TABLE_ROW", status: 400, description: "Still a table." }] as const;

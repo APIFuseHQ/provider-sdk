@@ -1,0 +1,10 @@
+import { defineProvider } from "@apifuse/provider-sdk/provider";
+
+import { listOperation } from "./operations/list";
+import { detailOperation } from "./operations/detail";
+import { legacyOperations } from "./operations/legacy";
+import { metaOperation } from "./operations/meta";
+
+export default defineProvider({ id: "fixture", version: "1.0.0", runtime: "standard" })({
+	operations: { list: listOperation, detail: detailOperation, ...legacyOperations, meta: metaOperation },
+});

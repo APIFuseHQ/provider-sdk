@@ -16,9 +16,11 @@
 #     that condition (`UPSTREAM_REJECTED: sdkErrors.UPSTREAM_REJECTED` for a deterministic 4xx
 #     refusal, or a provider code with its own status/retryable) and throw it at those sites;
 #   - rows written inline in an operation's `errorCodes` that carry `status` or `description`
-#     are NOT rewritten (an `errors.X` reference could not carry them): rule 5 reports each row;
-#     hoist them into a `const T = [...] as const` table and spread it in the list, then re-run,
-#     so rule 3 turns the table into the defineErrors map and rule 2 the list into references;
+#     are NOT rewritten here (an `errors.X` reference could not carry them): `apifuse migrate`
+#     runs the `errors-hoist` step before this file, which moves them into the provider's one
+#     defineErrors map (domain/errors.ts, or the existing `export const errors`) and lists the
+#     references, so this file meets only tables and reference lists. Run standalone, rule 5
+#     reports each such row and rule 2 leaves the list whole;
 #   - a throw site whose `code` is not a string literal (`code: flag ? "A" : "B"`) is left as is.
 #
 # Rules, in order:
@@ -33,10 +35,12 @@
 #                          -> const T = defineErrors({ X: sdkErrors.X | { status, description, retryable, category? } })
 #                          (a registered code becomes `sdkErrors.X` only when the row's status and
 #                          retryable equal the registry's; otherwise the row keeps its values)
-#   4. sdk-row-conflict    diagnostic only (no fix): a registered-code row whose status or retryable
-#                          differs from the registry, with the two choices
+#   4. sdk-row-conflict    diagnostic only (no fix): a registered-code row of a table whose status or
+#                          retryable differs from the registry, with the two choices (an inline
+#                          errorCodes row is the errors-hoist step's, which reports it itself)
 #   5. inline-row-hoist    diagnostic only (no fix): an errorCodes row written inline with status or
-#                          description; hoist it into a table, then re-run
+#                          description; `apifuse migrate` moves it (errors-hoist) and drops this
+#                          diagnostic when both run
 id: errors-factory-throw-site
 language: typescript
 rule:
@@ -146,17 +150,28 @@ rule:
     - pattern:
         context: '{ errorCodes: [ $$$ENTRIES ] as const }'
         selector: pair
-  # A row that still carries its contract inline cannot become a reference;
-  # the list waits until the author hoists it (rule 5 names the row).
-  not:
-    has:
-      kind: object
-      has:
-        kind: pair
+  all:
+    # A row that still carries its contract inline cannot become a reference;
+    # the list waits until errors-hoist moves it (rule 5 names the row).
+    - not:
         has:
-          field: key
-          regex: '^(status|description)$'
-      stopBy: end
+          kind: object
+          has:
+            kind: pair
+            has:
+              field: key
+              regex: '^(status|description)$'
+          stopBy: end
+    # An operation that already lists `errors` (errors-hoist left a residue
+    # row or a non-table spread in errorCodes) must not get a second key.
+    - not:
+        inside:
+          kind: object
+          has:
+            kind: pair
+            has:
+              field: key
+              regex: '^errors$'
 rewriters:
   - id: entry-to-factory
     rule:
@@ -526,7 +541,8 @@ fix: 'const $NAME = defineErrors({ $ROWS })'
 # status or retryable differs from the registry. The row keeps its own values
 # (rule 3 leaves it a provider-row under the registered key, which defineErrors
 # refuses at the type and at runtime), so the provider's contract is not
-# flipped by the migration; the author chooses.
+# flipped by the migration; the author chooses. An inline errorCodes row is
+# not a table row: the errors-hoist step owns it and reports the same choice.
 id: errors-factory-sdk-row-conflict
 language: typescript
 severity: warning
@@ -536,6 +552,13 @@ rule:
   kind: object
   inside:
     kind: array
+    not:
+      inside:
+        kind: pair
+        has:
+          field: key
+          regex: '^errorCodes$'
+        stopBy: end
   all:
     - has:
         pattern:
@@ -673,12 +696,14 @@ transform:
 ---
 # Residue, not a rewrite: an errorCodes row written inline with its contract.
 # A reference cannot carry status or description, so rule 2 leaves the whole
-# list alone until the row lives in a table.
+# list alone until the row lives in a map. `apifuse migrate` runs the
+# errors-hoist step first, which moves the row and reports the ones it cannot;
+# this diagnostic is for a standalone run of this file.
 id: errors-factory-inline-row-hoist
 language: typescript
 severity: warning
 message: 'Inline errorCodes row $CODE carries status or description that an errors.$CODE_NAME reference cannot; it is left in place.'
-note: 'Hoist the row into a `const T = [ ... ] as const` table (or straight into a defineErrors map), spread the table in this list (`errorCodes: [...T]`), then re-run apifuse migrate: the table becomes the defineErrors map and the list becomes references.'
+note: 'Run `apifuse migrate` (its errors-hoist step moves the row into the defineErrors map and lists errors.$CODE_NAME here), or hoist the row into a `const T = [ ... ] as const` table spread in this list and re-run this file.'
 rule:
   kind: object
   inside:

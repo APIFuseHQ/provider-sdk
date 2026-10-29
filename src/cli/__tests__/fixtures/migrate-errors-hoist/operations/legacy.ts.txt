@@ -1,0 +1,14 @@
+import type { ProviderContext } from "../index";
+
+export const legacyOperations = {
+	legacy: {
+		descriptionKey: "operations.legacy.description",
+		docs: {
+			titleKey: "operations.legacy.docs.title",
+			errorCodes: [
+				{ code: "LEGACY_GONE", status: 404, description: "The legacy record is gone.", retryable: false },
+			],
+		},
+		handler: async (ctx: ProviderContext) => ctx.fetch("legacy"),
+	},
+};

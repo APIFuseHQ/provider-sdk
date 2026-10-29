@@ -87,17 +87,15 @@ function countsByCodemod(report: MigrateReport): Record<string, [string[], numbe
 	);
 }
 
-const DRY_RUN_RESIDUES = [
-	"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
-	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
-	"health-refs health-stale-window-per-call operations/search.ts:25",
-];
+const DRY_RUN_RESIDUES = ["errors-factory errors-factory-sdk-row-conflict operations/search.ts:7"];
 
 describe("apifuse migrate", () => {
-	it("runs the codemods in dependency order: errors-factory before the codemods that reference its map", () => {
+	it("runs the codemods in dependency order: the error-table steps before the codemods that reference their map", () => {
 		expect(CODEMODS.map((codemod) => codemod.id)).toEqual([
 			"errors-factory",
+			"errors-hoist",
 			"health-refs",
+			"health-stale-window",
 			"handles",
 			"runtime-boundary-allow-comments",
 			"schema",
@@ -116,8 +114,10 @@ describe("apifuse migrate", () => {
 
 		expect(sourceFiles()).toEqual(before);
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["operations/search.ts"], 4, 2],
-			"health-refs": [["operations/search.ts"], 1, 1],
+			"errors-factory": [["operations/search.ts"], 4, 1],
+			"errors-hoist": [["domain/errors.ts", "operations/detail.ts"], 2, 0],
+			"health-refs": [["operations/search.ts"], 1, 0],
+			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
 			handles: [["index.ts"], 2, 0],
 			"runtime-boundary-allow-comments": [["operations/search.ts"], 1, 0],
 			schema: [["operations/detail.ts"], 1, 0],
@@ -152,43 +152,50 @@ describe("apifuse migrate", () => {
 		expect(search).not.toContain("retryable: false,\n\t\t\t\tdetails");
 		expect(search).not.toContain("@apifuse-allow");
 		expect(search).toContain('expectedErrors: [{ error: errors.NOT_FOUND, attribute: "query" }]');
-		expect(search).toContain("staleIfErrorMs: 300_000");
+		// health-stale-window moved the per-call window onto the operation and
+		// the provider declaration gained the cache capability it needs.
+		expect(search).toContain(
+			'descriptionKey: "operations.search.description",\n\terrors: [...Object.values(SEARCH_ERRORS)],\n\tcache: { staleIfErrorMs: 300_000 },\n\thandler:',
+		);
+		expect(search).toContain("{ ttlMs: 60_000 },");
+		expect(search).not.toContain("staleIfErrorMs: 300_000,");
 
-		// An errorCodes list with an inline row carrying its contract is left
-		// whole: nothing is deleted, the row is a residue until it is hoisted.
+		// errors-hoist moved the inline row into domain/errors.ts and listed the
+		// reference beside the table spread that errors-factory turned into a map.
 		const detail = after["operations/detail.ts"] ?? "";
 		expect(detail).toContain(
-			'errorCodes: [\n\t\t...SEARCH_ERRORS,\n\t\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n\t],',
+			"\terrors: [\n\t\t...Object.values(SEARCH_ERRORS),\n\t\terrors.ITEM_GONE,\n\t],\n\thandler:",
 		);
-		expect(detail).not.toContain("errors.ITEM_GONE");
+		expect(detail).toContain('import { errors } from "../domain/errors";');
+		expect(detail).not.toContain("errorCodes");
 		expect(detail).toContain('itemId: z.string().describeKey("schema.itemId")');
+		expect(after["domain/errors.ts"]).toBe(
+			'import { defineErrors } from "@apifuse/provider-sdk/provider";\n\nexport const errors = defineErrors({\n\tITEM_GONE: {\n\t\tstatus: 410,\n\t\tcategory: "upstream_rejected",\n\t\tretryable: false,\n\t\tdescription: "The item was removed.",\n\t},\n});\n',
+		);
 
 		const index = after["index.ts"] ?? "";
 		expect(index).not.toContain("fieldName");
 		expect(index).not.toContain("issuedBy");
 		expect(index).toContain('name: "page",\n\tschema: CursorSchema,');
+		expect(index).toContain("\tstate: true,\n\tcache: true,\n});");
 
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["operations/search.ts"], 4, 2],
-			"health-refs": [["operations/search.ts"], 1, 1],
+			"errors-factory": [["operations/search.ts"], 4, 1],
+			"errors-hoist": [["domain/errors.ts", "operations/detail.ts"], 2, 0],
+			"health-refs": [["operations/search.ts"], 1, 0],
+			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
 			handles: [["index.ts"], 2, 0],
 			"runtime-boundary-allow-comments": [["operations/search.ts"], 1, 0],
 			schema: [["operations/detail.ts"], 1, 0],
 			declaration: [[], 0, 0],
 		});
-		// health-refs ran after errors-factory: its residue sits at the line the
-		// collapsed error table left it on, not at the pre-migration line.
-		expect(residueTable(report)).toEqual([
-			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
-			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
-			"health-refs health-stale-window-per-call operations/search.ts:20",
-		]);
+		expect(residueTable(report)).toEqual(DRY_RUN_RESIDUES);
 		expect(report.codemods.find((result) => result.id === "schema")?.notes).toEqual([
 			{
 				codemod: "schema",
 				ruleId: "schema-describe-prose-on-property",
 				file: "operations/detail.ts",
-				line: 8,
+				line: 9,
 				column: 10,
 				message:
 					'Raw .describe() prose on property itemId; replaced by describeKey("schema.itemId"). Add "schema.itemId": "The item id from a search result." to locales/en.json (and the other catalogs).',
@@ -197,40 +204,34 @@ describe("apifuse migrate", () => {
 		expect(migrateExitCode(report)).toBe(1);
 
 		const again = await runMigrate({ providerRoot, dryRun: true });
-		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0]);
-		expect(residueTable(again)).toEqual([
-			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
-			"health-refs health-stale-window-per-call operations/search.ts:20",
-		]);
+		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+		expect(residueTable(again)).toEqual([]);
+		expect(again.clean).toBe(true);
 	});
 
-	it("rewrites the list once the inline row is hoisted into a table", async () => {
-		const detailPath = join(providerRoot, "operations/detail.ts");
-		const hoisted = readFileSync(detailPath, "utf8").replace(
-			'\terrorCodes: [\n\t\t...SEARCH_ERRORS,\n\t\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n\t],',
-			"\terrorCodes: [...SEARCH_ERRORS, ...DETAIL_ERRORS],",
-		);
-		await Bun.write(
-			detailPath,
-			hoisted.replace(
-				"export const detailOperation",
-				'export const DETAIL_ERRORS = [\n\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n] as const;\n\nexport const detailOperation',
-			),
-		);
-
+	it("--only errors-factory leaves a list with an inline row whole and reports it", async () => {
 		const report = await runMigrate({ providerRoot, dryRun: false, only: ["errors-factory"] });
-		const detail = readFileSync(detailPath, "utf8");
-
+		const detail = readFileSync(join(providerRoot, "operations/detail.ts"), "utf8");
 		expect(detail).toContain(
-			'export const DETAIL_ERRORS = defineErrors({ "ITEM_GONE": { category: "upstream_rejected", status: 410, description: "The item was removed.", retryable: false } })',
+			'errorCodes: [\n\t\t...SEARCH_ERRORS,\n\t\t{ code: "ITEM_GONE", status: 410, description: "The item was removed.", retryable: false },\n\t],',
 		);
-		expect(detail).toContain(
-			"errors: [...Object.values(SEARCH_ERRORS), ...Object.values(DETAIL_ERRORS)]",
-		);
-		expect(parseErrors("operations/detail.ts", detail)).toEqual([]);
+		expect(detail).not.toContain("errors.ITEM_GONE");
 		expect(residueTable(report)).toEqual([
+			"errors-factory errors-factory-inline-row-hoist operations/detail.ts:16",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 		]);
+		// Now the step that owns the row runs: the YAML diagnostic is dropped and
+		// the row leaves the list (the table conflict was reported on the first
+		// run and now sits in a map entry, outside the table rule's reach).
+		const hoist = await runMigrate({
+			providerRoot,
+			dryRun: false,
+			only: ["errors-factory", "errors-hoist"],
+		});
+		expect(residueTable(hoist)).toEqual([]);
+		expect(readFileSync(join(providerRoot, "operations/detail.ts"), "utf8")).toContain(
+			"errors.ITEM_GONE",
+		);
 	});
 
 	it("--only runs the named codemod and is clean once nothing is left", async () => {
@@ -250,11 +251,14 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   1                   4         2");
-		expect(text).toContain("operations/detail.ts:16:3 [errors-factory-inline-row-hoist]");
+		expect(text).toContain("errors-factory                   1                   4         1");
+		expect(text).toContain("errors-hoist                     2                   2         0");
+		expect(text).toContain("health-stale-window              2                   3         0");
 		expect(text).toContain("operations/search.ts:7:2 [errors-factory-sdk-row-conflict]");
-		expect(text).toContain("operations/search.ts:25:21 [health-stale-window-per-call]");
+		expect(text).not.toContain("[errors-factory-inline-row-hoist]");
+		expect(text).not.toContain("[health-stale-window-per-call]");
 		expect(text).toContain("by hand: import { defineErrors, sdkErrors }");
+		expect(text).toContain("by hand: a row left in errorCodes names its reason");
 		expect(text).toContain(
 			'operations/detail.ts:8:10 Raw .describe() prose on property itemId; replaced by describeKey("schema.itemId").',
 		);

@@ -1,0 +1,15 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import { errors } from "../domain/errors";
+import type { ProviderContext } from "../index";
+
+export const listOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.list.description",
+	errors: [errors.ITEM_NOT_FOUND],
+	errorCodes: [
+		{ code: "ITEM_NOT_FOUND", status: 410, description: "Disagrees with the map.", retryable: false },
+		{ code: "UPSTREAM_ERROR", status: 502, description: "The shop answered 5xx.", retryable: true },
+		{ code: "SHOP_CLOSED", status: 409, description: "The shop is closed.", retryable: false },
+	],
+	handler: async (input, ctx) => ctx.fetch(input.id),
+});

@@ -1,0 +1,9 @@
+import { defineErrors } from "@apifuse/provider-sdk/provider";
+
+export const errors = defineErrors({
+	ITEM_NOT_FOUND: {
+		status: 404,
+		category: "upstream_http",
+		description: "No item matches the id.",
+	},
+});

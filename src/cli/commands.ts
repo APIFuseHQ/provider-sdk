@@ -63,7 +63,7 @@ export const COMMAND_MANIFEST: Record<
 	migrate: {
 		name: "migrate",
 		summary:
-			"Run the SDK's migration codemods (errors-factory, health-refs, handles, runtime-boundary-allow-comments, schema) against a provider in dependency order and report files changed and the residues left to you.",
+			"Run the SDK's migration codemods (errors-factory, errors-hoist, health-refs, health-stale-window, handles, runtime-boundary-allow-comments, schema, declaration) against a provider in dependency order and report files changed and the residues left to you.",
 		usage: "apifuse migrate [path] [--dry-run] [--only <codemod>] [--json]",
 		examples: ["apifuse migrate . --dry-run", "apifuse migrate . --only errors-factory"],
 		modulePath: "./apifuse-migrate",

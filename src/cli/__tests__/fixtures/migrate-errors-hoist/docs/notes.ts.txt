@@ -1,0 +1,1 @@
+export const notes = { errorCodes: [{ code: "NOT_AN_OPERATION", status: 400, description: "Outside." }] };
