@@ -1,0 +1,7 @@
+import { defineProvider } from "@apifuse/provider-sdk/provider";
+
+import { listOperation, tableOperation } from "./operations/list";
+
+export default defineProvider({ id: "fixture", version: "1.0.0", runtime: "standard" })({
+	operations: { list: listOperation, table: tableOperation },
+});

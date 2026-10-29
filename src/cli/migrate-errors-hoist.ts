@@ -285,6 +285,9 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	// this provider's sources. A literal array or row behind a name the step
 	// does not convert is still read (for the registry conflicts below).
 	let rowsUnknown = opaque;
+	// A defineErrors(...) map counts as readable: its rows are its entries
+	// (already read into `maps`), in the dry run where it is still a table and
+	// in the apply where errors-factory has made it a map alike.
 	const readable = (file: ProviderSourceFile, name: string): boolean => {
 		const bound = namedRowConstant(ts, file, name, sources);
 		if (bound === undefined) return false;
@@ -293,7 +296,10 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 			ts.isArrayLiteralExpression(value) ||
 			ts.isObjectLiteralExpression(value) ||
 			ts.isStringLiteral(value) ||
-			ts.isNumericLiteral(value)
+			ts.isNumericLiteral(value) ||
+			(ts.isCallExpression(value) &&
+				ts.isIdentifier(value.expression) &&
+				value.expression.text === "defineErrors")
 		);
 	};
 	const leaveRows = (list: ErrorList): void => {
@@ -671,8 +677,16 @@ function resolveReferences(
 		);
 		if (taken) return false;
 		exported.add(info.statement);
-		const at = info.statement.getStart(info.file.source);
-		editsFor(context.edits, info.file).push({ start: at, end: at, text: "export " });
+		// The edit replaces the declaration keyword rather than inserting before
+		// it: an import this run adds to the same file lands at the line after
+		// the last import, which is this offset when the map follows the imports
+		// directly, and applyEdits applies a zero-width insert before a
+		// replacement at the same start, so the import always precedes `export`.
+		const keyword = info.statement.declarationList.getFirstToken(info.file.source);
+		const at = keyword?.getStart(info.file.source) ?? info.statement.getStart(info.file.source);
+		const end = keyword?.end ?? at;
+		const text = info.file.text.slice(at, end);
+		editsFor(context.edits, info.file).push({ start: at, end, text: `export ${text}` });
 		return true;
 	};
 	for (const { file, bound, items, ownErrors } of references) {

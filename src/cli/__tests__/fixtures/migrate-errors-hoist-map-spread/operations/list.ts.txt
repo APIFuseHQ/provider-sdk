@@ -1,0 +1,19 @@
+import { ProviderError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { COMMON, LEGACY_TABLE, NOT_A_ROW } from "../shared";
+
+export const listOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.list.description",
+	errorCodes: [...COMMON, NOT_A_ROW, { code: "LOCAL_ONLY", status: 404, description: "Local.", retryable: false }],
+	handler: async (input, ctx) => {
+		if (input.id === "") throw new ProviderError("Upstream failed.", { code: "UPSTREAM_ERROR" });
+		return ctx.fetch(input.id);
+	},
+});
+
+export const tableOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.table.description",
+	errorCodes: [...LEGACY_TABLE, NOT_A_ROW, { code: "TABLE_ONLY", status: 404, description: "Table.", retryable: false }],
+	handler: async (input, ctx) => ctx.fetch(input.id),
+});

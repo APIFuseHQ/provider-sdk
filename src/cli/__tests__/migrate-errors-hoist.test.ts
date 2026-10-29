@@ -544,7 +544,14 @@ describe("a map another file must import", () => {
 		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
 		expect(result.filesChanged).toEqual(["operations/search.ts", "upstream/client.ts"]);
 		const search = read("operations/search.ts");
-		expect(search).toContain("\nexport const SEARCH_ERRORS = defineErrors({\n");
+		// search.ts both gains an import (for its OTHER_THING site) at the line
+		// after its last import and exports the map that starts on that line:
+		// the import lands first, `export` prefixes the declaration keyword.
+		expect(search).toContain(
+			'import type { ProviderContext } from "../index";\nimport { OTHER_ERRORS } from "../upstream/other";\nexport const SEARCH_ERRORS = defineErrors({\n',
+		);
+		expect(search).not.toContain("export import");
+		expect(search).toContain('throw OTHER_ERRORS.OTHER_THING({ message: "Other." });');
 		// BLOCKED_ERRORS cannot be exported under its name (an export specifier
 		// takes it), so no import is written for it and the site is named.
 		expect(search).toContain("\nconst BLOCKED_ERRORS = defineErrors({\n");
@@ -559,6 +566,7 @@ describe("a map another file must import", () => {
 		expect(client).toContain(
 			'throw new ProviderError("The query was blocked.", { code: "QUERY_BLOCKED", category: "anti_bot_blocked", retryable: false });',
 		);
+		expect(result.rewrites).toBe(2);
 		expect(table(result.residues)).toEqual([
 			`${ERRORS_HOIST_RULES.throwSiteUndeclared} upstream/client.ts:8`,
 		]);
@@ -566,15 +574,17 @@ describe("a map another file must import", () => {
 			'Throw site of "QUERY_BLOCKED" cannot reach a defineErrors map that declares QUERY_BLOCKED from this file (BLOCKED_ERRORS in operations/search.ts declares it but is not exported, and this step cannot export it); it is left as new ProviderError(...).',
 		);
 		for (const file of ["operations/search.ts", "upstream/client.ts"]) expect(parses(file)).toBe(true);
-		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		const before = Object.fromEntries(walk(providerRoot).map((file) => [file, readFileSync(file, "utf8")]));
+		const again = hoistInlineErrorRows({ providerRoot, dryRun: false });
 		expect(again.rewrites).toBe(0);
 		expect(again.filesChanged).toEqual([]);
+		expect(Object.fromEntries(walk(providerRoot).map((file) => [file, readFileSync(file, "utf8")]))).toEqual(before);
 	});
 
 	it("dry run decides the same export and import", () => {
 		const dry = hoistInlineErrorRows({ providerRoot, dryRun: true });
 		expect(dry.filesChanged).toEqual(["operations/search.ts", "upstream/client.ts"]);
-		expect(dry.rewrites).toBe(1);
+		expect(dry.rewrites).toBe(2);
 		expect(table(dry.residues)).toEqual([`${ERRORS_HOIST_RULES.throwSiteUndeclared} upstream/client.ts:8`]);
 	});
 });
@@ -615,6 +625,44 @@ describe("a registered row behind a spread this step does not convert", () => {
 		);
 		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
 		expect(again.rewrites).toBe(0);
+	});
+});
+
+describe("a map or a table spread into a list left whole", () => {
+	// A list left whole (an entry that is not a row beside the spread) keeps a
+	// spread of COMMON (a defineErrors map: the apply's state of a converted
+	// table) and of LEGACY_TABLE (a rule-3 table: the dry run's state). Both
+	// are readable, so no row is unknown and a registered code's site goes to
+	// the registry factory, in the dry run and the apply alike.
+	beforeEach(() => stage("migrate-errors-hoist-map-spread"));
+
+	it("reads the rows behind both and rewrites the registered site", () => {
+		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
+		expect(result.filesChanged).toEqual(["domain/errors.ts", "operations/list.ts"]);
+		expect(read("operations/list.ts")).toContain(
+			'throw errors.UPSTREAM_ERROR({ message: "Upstream failed." });',
+		);
+		expect(read("domain/errors.ts")).toContain("\tUPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,\n");
+		expect(result.residues.map((residue) => residue.ruleId)).toEqual([
+			ERRORS_HOIST_RULES.mapSpreadInArray,
+			ERRORS_HOIST_RULES.entryNotARow,
+			ERRORS_HOIST_RULES.spreadNotATable,
+			ERRORS_HOIST_RULES.entryNotARow,
+		]);
+		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(again.filesChanged).not.toContain("operations/list.ts");
+	});
+
+	it("dry run decides the same site", () => {
+		const dry = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(dry.filesChanged).toContain("operations/list.ts");
+		expect(dry.residues.map((residue) => residue.ruleId)).not.toContain(ERRORS_HOIST_RULES.throwSiteRowUnknown);
+		expect(dry.residues.filter((residue) => residue.file === "operations/list.ts").map((residue) => residue.ruleId)).toEqual([
+			ERRORS_HOIST_RULES.mapSpreadInArray,
+			ERRORS_HOIST_RULES.entryNotARow,
+			ERRORS_HOIST_RULES.mapSpreadInArray,
+			ERRORS_HOIST_RULES.entryNotARow,
+		]);
 	});
 });
 
