@@ -1776,8 +1776,8 @@ interface DeclarativeStealthResponse {
 
 // @public
 type DeclaredErrorCategory<TEntry> = TEntry extends ProviderErrorFactory<string, ProviderErrorStatus, infer TCategory> ? TCategory : TEntry extends {
-    readonly category: infer TCategory extends ProviderErrorCategory;
-} ? TCategory : ProviderErrorCategory;
+    readonly category: infer TCategory extends ProviderFailureCategory;
+} ? TCategory : ProviderFailureCategory;
 
 // @public
 type DeclaredErrorStatus<TEntry> = TEntry extends ProviderErrorFactory<string, infer TStatus> ? TStatus : TEntry extends {
@@ -3628,7 +3628,7 @@ export function lintProvider(provider: {
             declaration: {
                 code: string;
                 status?: number;
-                category?: ProviderErrorCategory;
+                category?: ProviderFailureCategory;
             };
         }>;
     }>;
@@ -5937,7 +5937,7 @@ export type ProviderErrorCauseFrame = {
 };
 
 // @public
-export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     readonly code: TCode;
     readonly status: TStatus;
     readonly category: TCategory;
@@ -5950,7 +5950,7 @@ export type ProviderErrorDeclaration<TCode extends string = string, TStatus exte
 // @public
 export type ProviderErrorDeclarationInput = {
     readonly status: ProviderErrorStatus;
-    readonly category: ProviderErrorCategory;
+    readonly category: ProviderFailureCategory;
     readonly retryable?: boolean;
     readonly description: string;
     readonly messageKey?: ProviderLocaleKeyInput;
@@ -5958,7 +5958,7 @@ export type ProviderErrorDeclarationInput = {
 };
 
 // @public
-export type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+export type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
     readonly declaration: ProviderErrorDeclaration<TCode, TStatus, TCategory>;

@@ -6,9 +6,9 @@ import {
 import { legacyHandleOptionsOf } from "./handle/contract.js";
 import { isExpectedErrorByCode } from "./health-scenario.js";
 import {
-	PROVIDER_ERROR_CATEGORIES,
-	type ProviderErrorCategory,
+	isProviderFailureCategory,
 	type ProviderErrorSource,
+	type ProviderFailureCategory,
 	sourceForCategory,
 } from "./observability.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
@@ -1736,12 +1736,6 @@ const EXPECTED_ERROR_FORBIDDEN_CODES: ReadonlySet<string> = new Set([
 /** Statuses the `expectedErrors` schema excludes; a code that serves one is not an absence. */
 const EXPECTED_ERROR_FORBIDDEN_STATUSES: ReadonlySet<number> = new Set([401, 403, 429]);
 
-const PROVIDER_ERROR_CATEGORY_SET: ReadonlySet<string> = new Set(PROVIDER_ERROR_CATEGORIES);
-
-function isProviderErrorCategory(value: string): value is ProviderErrorCategory {
-	return PROVIDER_ERROR_CATEGORY_SET.has(value);
-}
-
 type ExpectedErrorEntry = { status: number; code: string };
 
 /**
@@ -1783,8 +1777,21 @@ function lastErrorCodeDeclaration<T extends { code: string }>(
 /** What an operation declares for a code, from either declaration shape. */
 type ExpectedErrorDeclaration = {
 	readonly status?: number;
-	readonly category?: ProviderErrorCategory;
+	readonly category?: ProviderFailureCategory;
 };
+
+/**
+ * A declaration's category as serve reads it: a provider-failure category, or
+ * none. `defineErrors` only makes declarations with one; a declaration from an
+ * SDK copy that took every category may carry a platform word, which serve
+ * reads as unset, and so does this rule.
+ */
+function declaredFailureCategory(
+	declared: ExpectedErrorDeclaration | undefined,
+): ProviderFailureCategory | undefined {
+	const category: unknown = declared?.category;
+	return typeof category === "string" && isProviderFailureCategory(category) ? category : undefined;
+}
 
 /**
  * The declaration the runtime reads for a code on an operation: a listed
@@ -1820,8 +1827,9 @@ function expectedErrorDeclaration(
 function derivedExpectedErrorCategory(
 	code: string,
 	declared: ExpectedErrorDeclaration | undefined,
-): ProviderErrorCategory | undefined {
-	if (declared?.category !== undefined) return declared.category;
+): ProviderFailureCategory | undefined {
+	const declaredCategory = declaredFailureCategory(declared);
+	if (declaredCategory !== undefined) return declaredCategory;
 	const declaredStatus = declared?.status;
 	if (declaredStatus === 409 || declaredStatus === 410 || declaredStatus === 422)
 		return "upstream_rejected";
@@ -1832,7 +1840,8 @@ function derivedExpectedErrorCategory(
  * Every `source` the serve layer can put on the envelope of a thrown code, as
  * far as the linter can see: `publicErrorSource` pins MISSING_SECRET,
  * UPSTREAM_ERROR and BLOCKED, and otherwise follows the category — the throw
- * site's literal `category` when it sets one, else the derived category, else
+ * site's literal `category` when it sets a provider-failure one (serve reads
+ * any other word as unset), else the derived category, else
  * the class default (`provider_error` for ProviderError, `input_validation`
  * for ValidationError).
  *
@@ -1859,13 +1868,14 @@ function expectedErrorEnvelopeSources(
 	const derived = derivedExpectedErrorCategory(code, declared);
 	const candidates = sites.filter((site) => site.code === code || site.code === undefined);
 	if (candidates.length === 0) return new Set([sourceForCategory(derived ?? "provider_error")]);
+	const declaredCategory = declaredFailureCategory(declared);
 	const declaredSource: ProviderErrorSource[] =
-		declared?.category === undefined ? [] : [sourceForCategory(declared.category)];
+		declaredCategory === undefined ? [] : [sourceForCategory(declaredCategory)];
 	return new Set([
 		...declaredSource,
 		...candidates.flatMap((site): ProviderErrorSource[] => {
 			const literal =
-				site.category !== undefined && isProviderErrorCategory(site.category)
+				site.category !== undefined && isProviderFailureCategory(site.category)
 					? site.category
 					: undefined;
 			const fallback =
@@ -1915,7 +1925,7 @@ function lintHealthCheckExpectedErrors(provider: {
 			healthCheck?: unknown;
 			errorCodes?: ReadonlyArray<{ code: string; status?: number }>;
 			errors?: ReadonlyArray<{
-				declaration: { code: string; status?: number; category?: ProviderErrorCategory };
+				declaration: { code: string; status?: number; category?: ProviderFailureCategory };
 			}>;
 		}
 	>;
@@ -2147,7 +2157,7 @@ export function lintProvider(
 				}>;
 				/** `defineErrors` factories the operation lists; read by the health-check expectedErrors rule. */
 				errors?: ReadonlyArray<{
-					declaration: { code: string; status?: number; category?: ProviderErrorCategory };
+					declaration: { code: string; status?: number; category?: ProviderFailureCategory };
 				}>;
 			}
 		>;

@@ -37,7 +37,7 @@ import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 } from "../error-resolution.js";
-import { defineErrors, providerErrorDeclaration } from "../define-errors.js";
+import { providerErrorDeclaration } from "../define-errors.js";
 import {
 	AuthError,
 	isProviderError,
@@ -2175,10 +2175,7 @@ function providerFailureContract(
 			...(legacyCategory === undefined ? {} : { category: legacyCategory }),
 		},
 	});
-	return {
-		category: providerFailureCategoryIn(contract.category),
-		retryable: contract.retryable,
-	};
+	return { category: contract.category, retryable: contract.retryable };
 }
 
 // categoryForStatus for a failure. Every error status (400 and above) maps to a
@@ -2435,7 +2432,7 @@ function sdkOwnsErrorResolution(error: unknown): boolean {
 
 // What an operation declares for a code: a `defineErrors` declaration (listed
 // in `errors`) carries a category; a legacy `errorCodes` row does not.
-type DeclaredErrorCode = DeclaredErrorCodeRow & { readonly category?: ProviderErrorCategory };
+type DeclaredErrorCode = DeclaredErrorCodeRow & { readonly category?: ProviderFailureCategory };
 
 type OperationErrorCodeLookup = ReadonlyMap<string, ReadonlyMap<string, DeclaredErrorCode>>;
 
@@ -2502,7 +2499,10 @@ type LegacyErrorOptionConflict = {
 // deprecated per-throw options are still honored. A per-throw value that
 // differs from the declaration is named with both values: the per-throw one
 // is what is served (resolveProviderErrorContract), and the fix is a distinct
-// code for that condition rather than a per-throw override.
+// code for that condition rather than a per-throw override. A category outside
+// the provider-failure categories, thrown or declared, is no value
+// (providerFailureCategoryIn) and never a conflict: serve does not serve it,
+// and the failure log's unknown_provider_error_category signal names it.
 function warnLegacyErrorOptionsOnce(
 	emit: ProviderServerLogger,
 	provider: ProviderDefinition,
@@ -2516,15 +2516,17 @@ function warnLegacyErrorOptionsOnce(
 	if (options.length === 0) return;
 	const code = providerErrorCode(error) ?? "";
 	const conflicts: LegacyErrorOptionConflict[] = [];
+	const thrownCategory = providerFailureCategoryIn(legacy.category);
+	const declaredCategory = providerFailureCategoryIn(declaredErrorCode?.category);
 	if (
-		legacy.category !== undefined &&
-		declaredErrorCode?.category !== undefined &&
-		legacy.category !== declaredErrorCode.category
+		thrownCategory !== undefined &&
+		declaredCategory !== undefined &&
+		thrownCategory !== declaredCategory
 	) {
 		conflicts.push({
 			option: "category",
-			thrown: legacy.category,
-			declared: declaredErrorCode.category,
+			thrown: thrownCategory,
+			declared: declaredCategory,
 		});
 	}
 	if (
@@ -2827,25 +2829,26 @@ type RequestScope = RequestScopeContext & {
 
 const STREAM_CLEANUP_TIMEOUT_MS = 100;
 
-// The server's own terminal error for a stream the caller stopped reading.
-// Declared like a provider error so it carries its contract: nothing on it is
-// a deprecated per-throw option, and the deprecation warning never names it.
-const serverErrors = defineErrors({
-	client_cancelled: {
-		status: CLIENT_CANCELLED_STATUS,
-		category: "client_cancelled",
-		retryable: false,
-		description: "Request stream was cancelled by the client.",
-	},
-});
+// The server's own terminal error for a stream the caller stopped reading: the
+// platform fault client_cancelled, which serve observed itself. The SDK issues
+// it with its fault record, and serve reads the category, status and
+// retryability from that record alone. It is not a defineErrors declaration,
+// whose category is a provider-failure category, and it sets no deprecated
+// per-throw option, so the deprecation warning never names it.
+const CLIENT_CANCELLED_FAULT: PlatformFault = {
+	category: "client_cancelled",
+	code: "client_cancelled",
+	status: CLIENT_CANCELLED_STATUS,
+	retryable: false,
+};
 
 function clientCancelledError(): ProviderError {
-	return issueSdkError(serverErrors.client_cancelled(), {
-		category: "client_cancelled",
-		code: "client_cancelled",
-		status: CLIENT_CANCELLED_STATUS,
-		retryable: false,
-	});
+	return issueSdkError(
+		new ProviderError("Request stream was cancelled by the client.", {
+			code: CLIENT_CANCELLED_FAULT.code,
+		}),
+		CLIENT_CANCELLED_FAULT,
+	);
 }
 
 async function runBestEffortWithTimeout(cleanup: () => void | Promise<void>): Promise<void> {

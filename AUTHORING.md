@@ -1000,10 +1000,11 @@ handler: async () => {
 A key that names an SDK-registered code must hold that `sdkErrors` reference;
 writing a status or retryability for it is a type error, so one code never has
 two answers across the fleet. A provider code states `status`, `category` and
-`description`; `retryable` defaults to the category's answer (`timeout`,
-`network`, `upstream_rate_limited`, `upstream_http` and `proxy_pool` retry,
-nothing else does). `errors.X()` returns a `ProviderError<"X">`, so a helper
-that throws several codes is typed by the union of their names. One map can
+`description`; `category` is a `ProviderFailureCategory` (see below), and
+`retryable` defaults to the category's answer (`timeout`, `network`,
+`upstream_rate_limited` and `upstream_http` retry, nothing else does).
+`errors.X()` returns a `ProviderError<"X">`, so a helper that throws several
+codes is typed by the union of their names. One map can
 spread another (`defineErrors({ ...commonErrors, ... })`), and
 `Object.values(commonErrors)` lists a whole map on an operation.
 
@@ -1104,8 +1105,12 @@ error the platform fault it imitates. A category outside
 `ProviderFailureCategory` that reaches the server at runtime (plain JavaScript
 or a cast) is read as no category, so the rules above classify the error, and
 the `provider_request_failed` log carries the `unknown_provider_error_category`
-signal. A `defineErrors` declaration's `category` is read the same way: a
-platform-fault word declared there is read as no category, with the same signal.
+signal. A `defineErrors` declaration's `category` has the same type, and
+`defineErrors` rejects a platform-fault word at definition, so plain JavaScript
+or a cast cannot declare one either. A declaration that still carries one,
+made by an SDK copy whose `defineErrors` took every category (a provider
+bundled with an earlier release), is read at serve the same way: as no
+category, with the same signal.
 
 An unregistered non-validation `ProviderError` code returns HTTP 500 and emits
 the greppable `unregistered_provider_error_code` signal with the code in the

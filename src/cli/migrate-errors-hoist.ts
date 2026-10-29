@@ -12,7 +12,11 @@ import {
 	type SdkErrorCode,
 } from "../error-resolution.js";
 import { MISSING_SECRET_CODE } from "../runtime/secrets.js";
-import { isRetryableCategory, type ProviderErrorCategory } from "../observability.js";
+import {
+	isRetryableCategory,
+	type ProviderErrorCategory,
+	type ProviderFailureCategory,
+} from "../observability.js";
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import { getTypeScript, type TypeScriptModule } from "../typescript-module.js";
 import {
@@ -2323,7 +2327,7 @@ function servedWithoutOptions(
 						...(read.status === undefined
 							? {}
 							: { status: read.status as ProviderErrorDeclarationLike["status"] }),
-						category: read.category as ProviderErrorCategory,
+						category: read.category as ProviderFailureCategory,
 						retryable: read.retryable,
 					},
 		legacyOptions: {},

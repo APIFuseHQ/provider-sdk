@@ -2026,14 +2026,6 @@ interface OtpReceiptBase {
 }
 
 // @public (undocumented)
-const PLATFORM_FAULT_CATEGORIES: readonly ["ok", "stateful_forwarding_deadline", "proxy_pool", "credential_unavailable", "output_validation", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
-
-// Warning: (ae-forgotten-export) The symbol "PLATFORM_FAULT_CATEGORIES" needs to be exported by the entry point contract.d.ts
-//
-// @public (undocumented)
-type PlatformFaultCategory = (typeof PLATFORM_FAULT_CATEGORIES)[number];
-
-// @public (undocumented)
 const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
     kind: z.ZodLiteral<"predicate">;
     operator: z.ZodEnum<{
@@ -2766,16 +2758,10 @@ class ProviderError<TCode extends string = string> extends Error {
     readonly options?: ProviderErrorOptions | undefined;
 }
 
-// Warning: (ae-forgotten-export) The symbol "PlatformFaultCategory" needs to be exported by the entry point contract.d.ts
 // Warning: (ae-forgotten-export) The symbol "ProviderFailureCategory" needs to be exported by the entry point contract.d.ts
 //
-// @public (undocumented)
-type ProviderErrorCategory = PlatformFaultCategory | ProviderFailureCategory;
-
-// Warning: (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point contract.d.ts
-//
 // @public
-type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     readonly code: TCode;
     readonly status: TStatus;
     readonly category: TCategory;
@@ -2786,7 +2772,7 @@ type ProviderErrorDeclaration<TCode extends string = string, TStatus extends Pro
 };
 
 // @public
-type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
     readonly declaration: ProviderErrorDeclaration<TCode, TStatus, TCategory>;
@@ -4370,11 +4356,11 @@ interface VerificationCodeExtractionResult {
 
 // Warnings were encountered during analysis:
 //
-// dist/define-errors.d.ts:85:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point contract.d.ts
-// dist/define-errors.d.ts:86:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point contract.d.ts
-// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point contract.d.ts
-// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point contract.d.ts
-// dist/define-errors.d.ts:92:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point contract.d.ts
+// dist/define-errors.d.ts:92:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point contract.d.ts
+// dist/define-errors.d.ts:93:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point contract.d.ts
+// dist/define-errors.d.ts:97:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point contract.d.ts
+// dist/define-errors.d.ts:97:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point contract.d.ts
+// dist/define-errors.d.ts:99:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point contract.d.ts
 // dist/health-scenario.d.ts:1505:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point contract.d.ts
 // dist/health-scenario.d.ts:1514:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point contract.d.ts
 // dist/health-scenario.d.ts:1544:5 - (ae-forgotten-export) The symbol "StepReference" needs to be exported by the entry point contract.d.ts

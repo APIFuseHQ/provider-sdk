@@ -52,6 +52,7 @@ import {
 	GATEWAY_ACCEPTED_ORIGIN_HEADERS,
 	GATEWAY_REJECTED_ORIGIN_HEADERS,
 } from "./fixtures/gateway-error-observability-origin.js";
+import { event } from "../stream.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
 // A platform fault (an error outcome APIFuse reports as its own, origin
@@ -204,17 +205,31 @@ function operation(
 	};
 }
 
-// A code the provider declares with defineErrors under a platform word. The
-// declaration type takes every category; serve reads a platform word there as
-// no value, like the category option.
-const declaredPlatformWordErrors = defineErrors({
-	DECLARED_PLATFORM_WORD: {
-		status: 502,
-		category: "internal_error",
-		retryable: false,
-		description: "A provider failure declared under a platform word.",
-	},
-});
+// A code declared under a platform word. This SDK's types and defineErrors
+// reject one, but an SDK copy whose defineErrors still took every category
+// (the release before this one) made such declarations, and serve recognizes
+// a factory-made error from another copy by the cross-copy declaration brand.
+// The error is built the way that copy built it; serve reads the platform
+// word as no value, like the category option.
+const DECLARED_PLATFORM_WORD_CODE = "DECLARED_PLATFORM_WORD";
+
+function thrownUnderPlatformWordDeclaration(): ProviderError {
+	const description = "A provider failure declared under a platform word.";
+	const error = new ProviderError(description, { code: DECLARED_PLATFORM_WORD_CODE });
+	Object.defineProperty(error, Symbol.for("@apifuse/provider-sdk/error-declaration@1"), {
+		value: {
+			code: DECLARED_PLATFORM_WORD_CODE,
+			status: 502,
+			category: "internal_error",
+			retryable: false,
+			description,
+		},
+		enumerable: false,
+		writable: false,
+		configurable: false,
+	});
+	return error;
+}
 
 // The serve request whose ctx.http call aborts the inbound request first.
 let inboundToAbort: AbortController | undefined;
@@ -252,12 +267,9 @@ const provider: ProviderDefinition = createProviderDefinitionDouble({
 				],
 			},
 		),
-		"declared-platform-category": operation(
-			async () => {
-				throw declaredPlatformWordErrors.DECLARED_PLATFORM_WORD();
-			},
-			{ errors: [declaredPlatformWordErrors.DECLARED_PLATFORM_WORD] },
-		),
+		"declared-platform-category": operation(async () => {
+			throw thrownUnderPlatformWordDeclaration();
+		}),
 		// Public classes and SDK codes, constructed by the provider.
 		"provider-handle-error": operation(async () => {
 			throw new HandleError("HANDLE_STORAGE_UNAVAILABLE", "Handle storage is down.");
@@ -274,6 +286,9 @@ const provider: ProviderDefinition = createProviderDefinitionDouble({
 		}),
 		"provider-deadline-code": operation(async () => {
 			throw new ProviderError("The provider gave up.", { code: DEADLINE_CODE });
+		}),
+		"provider-client-cancelled-code": operation(async () => {
+			throw new ProviderError("The provider stopped.", { code: "client_cancelled" });
 		}),
 		"provider-proxy-pool-exhausted": operation(async () => {
 			throw new TransportError(PROXY_POOL_EXHAUSTED_MESSAGE, { code: PROXY_POOL_EXHAUSTED_CODE });
@@ -312,6 +327,18 @@ const provider: ProviderDefinition = createProviderDefinitionDouble({
 			await ctx.http.get("/hold", { retry: false });
 			return { ok: true };
 		}),
+		// A stream the caller stops reading after its first event; the SDK
+		// terminalizes it as its own client_cancelled.
+		"caller-stops-reading": {
+			riskClass: "read",
+			input: z.object({}).passthrough(),
+			output,
+			transport: { kind: "sse", events: { delta: z.object({ value: z.string() }) } },
+			async *handler() {
+				yield event("delta", { value: "first" });
+				await new Promise<void>(() => undefined);
+			},
+		},
 		"native-proxy-invalid": operation(async () => {
 			// A native client whose gateway synthesizer allocates an endpoint
 			// URL the client cannot tunnel through.
@@ -391,7 +418,9 @@ async function call(
 }
 
 const SMARTPROXY_ENV_NAMES = [SMARTPROXY_USERNAME_ENV, SMARTPROXY_PASSWORD_ENV] as const;
-const originalSmartproxyEnv = SMARTPROXY_ENV_NAMES.map((name) => [name, process.env[name]] as const);
+const originalSmartproxyEnv = SMARTPROXY_ENV_NAMES.map(
+	(name) => [name, process.env[name]] as const,
+);
 const originalSecret = process.env[SECRET_ENV];
 
 afterEach(() => {
@@ -469,8 +498,21 @@ describe("a provider's category option outside the provider-failure words", () =
 	});
 });
 
-describe("a defineErrors declaration's category outside the provider-failure words", () => {
-	it("reads the declared platform word as no value and signals it", async () => {
+describe("a declaration's category outside the provider-failure words", () => {
+	it("rejects a platform word in this SDK's defineErrors at definition", () => {
+		expect(() =>
+			defineErrors({
+				DECLARED_PLATFORM_WORD: {
+					status: 502,
+					category:
+						"internal_error" as never /* test-invalid: the type rejects a platform word; the runtime check is under test */,
+					description: "A provider failure declared under a platform word.",
+				},
+			}),
+		).toThrow(/declares the platform-fault category internal_error/);
+	});
+
+	it("reads a platform word another SDK copy declared as no value and signals it", async () => {
 		const requestId = "category-declared-platform-word";
 		const served = await call("declared-platform-category", requestId);
 
@@ -481,12 +523,12 @@ describe("a defineErrors declaration's category outside the provider-failure wor
 			origin: "provider",
 			category: "provider_error",
 			retryable: false,
-			code: "DECLARED_PLATFORM_WORD",
+			code: DECLARED_PLATFORM_WORD_CODE,
 			source: "apifuse",
 		});
 		expect(failureLog(events, requestId)).toMatchObject({
 			status: 502,
-			code: "DECLARED_PLATFORM_WORD",
+			code: DECLARED_PLATFORM_WORD_CODE,
 			errorCategory: "provider_error",
 			errorOrigin: "provider",
 			signal: "unknown_provider_error_category",
@@ -540,6 +582,22 @@ describe("public classes and SDK codes a provider constructs itself", () => {
 			retryable: false,
 			code: DEADLINE_CODE,
 			source: "apifuse",
+		});
+	});
+
+	it("serves a ProviderError the provider built with the code client_cancelled as its own failure", async () => {
+		const served = await call("provider-client-cancelled-code", "provider-client-cancelled-code");
+		expect(outcome(served)).toEqual({
+			status: 500,
+			origin: "provider",
+			category: "provider_error",
+			retryable: false,
+			code: "client_cancelled",
+			source: "apifuse",
+		});
+		expect(failureLog(events, "provider-client-cancelled-code")).toMatchObject({
+			errorOrigin: "provider",
+			signal: "unregistered_provider_error_code",
 		});
 	});
 
@@ -617,6 +675,37 @@ describe("platform faults the SDK observed itself", () => {
 			code: "transport_cancelled",
 			source: "client",
 		});
+	});
+
+	it("terminalizes a stream the caller stops reading as the platform's client_cancelled", async () => {
+		const requestId = "caller-stops-reading";
+		const response = await app.request("/v1/caller-stops-reading", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId, input: {} }),
+		});
+		const reader = response.body?.getReader();
+		expect((await reader?.read())?.done).toBe(false);
+		await reader?.cancel("consumer stopped");
+
+		// The SDK issues the cancellation with its fault record and no
+		// declaration: the log reads the platform fault, and no deprecated
+		// per-throw option or unregistered code is reported for it.
+		const log = failureLog(events, requestId);
+		expect(log).toMatchObject({
+			status: CLIENT_CANCELLED_STATUS,
+			code: "client_cancelled",
+			errorCategory: "client_cancelled",
+			errorOrigin: "platform",
+			retryable: false,
+		});
+		expect(log).not.toHaveProperty("signal");
+		expect(
+			events.filter(
+				(entry) =>
+					entry.event === "provider_error_options_deprecated" && entry.code === "client_cancelled",
+			),
+		).toEqual([]);
 	});
 
 	it("serves the native client's unusable proxy endpoint as the proxy pool's fault", async () => {
