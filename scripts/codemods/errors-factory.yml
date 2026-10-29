@@ -53,6 +53,8 @@
 #   7. entry-not-a-row     diagnostic only (no fix): an errorCodes element that is not a row literal
 #                          (a spread, a row constant referenced by name); rule 2 skips the list and
 #                          `apifuse migrate` (errors-hoist) resolves the name across files
+#   9. throw-site-dynamic-option diagnostic only (no fix): a throw site whose retryable/category is a
+#                          shorthand or a variable; rule 1 skips it (the value cannot be checked)
 #   8. throw-site-locale-key diagnostic only (no fix): a throw site stating messageKey/fixKey, which
 #                          the factory input cannot carry; rule 1 skips it. A throw site of a code the
 #                          SDK runtime owns (MISSING_SECRET, reauth_required, HANDLE_*, ...) is never
@@ -60,6 +62,21 @@
 id: errors-factory-throw-site
 language: typescript
 utils:
+  # A retryable/category written as a shorthand or a non-literal value.
+  dynamic-option:
+    any:
+      - kind: shorthand_property_identifier
+        regex: '^(retryable|category)$'
+      - kind: pair
+        all:
+          - has: { field: key, regex: '^(retryable|category)$' }
+          - has:
+              field: value
+              not:
+                any:
+                  - kind: 'true'
+                  - kind: 'false'
+                  - kind: string
   # The options object of a throw whose per-throw retryable or category
   # contradicts the SDK registry for a registered code: rewriting it would
   # drop the option and flip what the site serves (rule 6 reports it).
@@ -238,6 +255,12 @@ rule:
           kind: pair
           has: { field: key, regex: '^(messageKey|fixKey)$' }
           stopBy: end
+    # A per-throw retryable/category that is not a literal (a shorthand, a
+    # variable) cannot be checked against the declaration; rule 9 reports it.
+    - not:
+        has:
+          matches: dynamic-option
+          stopBy: end
 constraints:
   CODE:
     kind: string
@@ -288,6 +311,21 @@ fix: 'errors.$CODE_NAME({ message: $MSG$INPUT })'
 id: errors-factory-throw-site-bracket
 language: typescript
 utils:
+  # A retryable/category written as a shorthand or a non-literal value.
+  dynamic-option:
+    any:
+      - kind: shorthand_property_identifier
+        regex: '^(retryable|category)$'
+      - kind: pair
+        all:
+          - has: { field: key, regex: '^(retryable|category)$' }
+          - has:
+              field: value
+              not:
+                any:
+                  - kind: 'true'
+                  - kind: 'false'
+                  - kind: string
   # The options object of a throw whose per-throw retryable or category
   # contradicts the SDK registry for a registered code: rewriting it would
   # drop the option and flip what the site serves (rule 6 reports it).
@@ -463,6 +501,12 @@ rule:
         has:
           kind: pair
           has: { field: key, regex: '^(messageKey|fixKey)$' }
+          stopBy: end
+    # A per-throw retryable/category that is not a literal (a shorthand, a
+    # variable) cannot be checked against the declaration; rule 9 reports it.
+    - not:
+        has:
+          matches: dynamic-option
           stopBy: end
 constraints:
   CODE:
@@ -1132,6 +1176,21 @@ severity: warning
 message: 'Throw site of $CODE states a retryable or category that differs from the SDK registry (sdkErrors.$CODE_NAME); errors.$CODE_NAME(...) would serve the registry value, so the site is left as new ProviderError(...).'
 note: 'Two choices: (a) accept the registry value: delete the per-throw retryable/category and re-run apifuse migrate; or (b) declare a distinct provider code for this condition in the defineErrors map (its own status, category and retryable) and throw that factory here.'
 utils:
+  # A retryable/category written as a shorthand or a non-literal value.
+  dynamic-option:
+    any:
+      - kind: shorthand_property_identifier
+        regex: '^(retryable|category)$'
+      - kind: pair
+        all:
+          - has: { field: key, regex: '^(retryable|category)$' }
+          - has:
+              field: value
+              not:
+                any:
+                  - kind: 'true'
+                  - kind: 'false'
+                  - kind: string
   # The options object of a throw whose per-throw retryable or category
   # contradicts the SDK registry for a registered code: rewriting it would
   # drop the option and flip what the site serves (rule 6 reports it).
@@ -1358,6 +1417,44 @@ rule:
     - has:
         kind: pair
         has: { field: key, regex: '^(messageKey|fixKey)$' }
+        stopBy: end
+constraints:
+  CODE:
+    kind: string
+---
+# Residue, not a rewrite: a throw site whose retryable or category is a
+# shorthand or a non-literal value. The declaration owns both, but a value
+# the codemod cannot read may differ from it, so the site stays.
+id: errors-factory-throw-site-dynamic-option
+language: typescript
+severity: warning
+message: 'Throw site of $CODE sets retryable or category from a variable; the declaration owns both and the value cannot be checked, so the site is left as new ProviderError(...).'
+note: 'Make the declaration carry the value (one code per retryable/category), delete the per-throw option, and re-run apifuse migrate; a condition that needs the other value is a distinct code.'
+utils:
+  dynamic-option:
+    any:
+      - kind: shorthand_property_identifier
+        regex: '^(retryable|category)$'
+      - kind: pair
+        all:
+          - has: { field: key, regex: '^(retryable|category)$' }
+          - has:
+              field: value
+              not:
+                any:
+                  - kind: 'true'
+                  - kind: 'false'
+                  - kind: string
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+        stopBy: end
+    - has:
+        matches: dynamic-option
         stopBy: end
 constraints:
   CODE:

@@ -15,3 +15,7 @@ export function parseItem(html: string): string {
 	}
 	return html;
 }
+
+export function upstreamError(message: string, retryable = true): ProviderError {
+	return new ProviderError(message, { code: "UPSTREAM_ERROR", retryable });
+}
