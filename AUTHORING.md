@@ -1836,6 +1836,10 @@ In order, old shape to new shape, and the one step each codemod cannot do:
 references that the error table becomes; the rest touch disjoint syntax. Run `biome format`
 afterwards: ast-grep writes the rewritten node on one line.
 
+The old shapes stay accepted for one release. SDK contributors prove that with
+`bun scripts/bump-safety-scan.ts` before a PR that changes a served contract or a public type, and
+the same command's window-rule table is the gate for deleting an old shape: see CONTRIBUTING.md.
+
 ### Running the pre-submission report
 
 ```bash

@@ -18,6 +18,27 @@ bun run pack:smoke
 - Release publishing only happens from a release PR whose validation evidence the Release PR Guard produced for the exact candidate SHA; merging that PR publishes to npm right away, so the merge is the approval
 - Do not include real credentials, cookies, HAR files, or private APIFuse infrastructure details in tests or fixtures
 
+## Bump safety scan (required before a PR that changes a served contract or a public type)
+
+A provider must keep loading, compiling and serving the same wire contract when it bumps the SDK without changing its own code. That is proven by a fleet scan, not claimed in the PR body:
+
+```bash
+bun scripts/bump-safety-scan.ts --base origin/main --head HEAD
+bun scripts/bump-safety-scan.ts --base origin/main --head HEAD --json > scan.json
+```
+
+`--base` and `--head` take a git ref of this repository or a directory that holds a build. The default targets are every provider checkout this host knows (`~/projects/apifuse-provider-*`, the apifuse `.provider-workspace/providers/*` and `providers-staging/*` workspaces) plus the apifuse test files that author `defineProvider` fixtures inline, which run as tests in a staged copy of the monorepo with the SDK swapped. `--targets <glob,...>` narrows the provider set, `--apifuse <dir>` points at another monorepo checkout and `--no-fixture-tests` skips it.
+
+Each target gets a shadow copy whose `node_modules/@apifuse/provider-sdk` and `zod` are symlinks to the build under test (a `--preload` resolve plugin does not fire for bare specifiers, so it would compare base to base). Per target and side the scan records module load, `tsc --noEmit` errors, the served contract digest (`digestProviderContract`), authoring lint diagnostics by rule and runtime warnings, then prints one diff table:
+
+- `BREAK`: the provider loaded or compiled on base and fails on head, or its contract digest changed. The command exits 1. Either the change gets a one-release deprecation path (DX rule 4) or the PR body lists every affected provider with `file:line` and the migration.
+- `WARN`: a new error-level lint rule or a new runtime warning on head. List them in the PR body.
+- `NOT COVERED`: the target fails on both sides (a provider that does not load, or a fixture test file that fails on base as well), so the diff says nothing about it. The row carries the failure class, the JSON carries `covered: false`, and the `not covered` section lists them; say so in the PR body when one of them is deployed.
+
+The second table counts the one-release window rules across the targets (legacy per-throw error options, `defineCursor`/`defineDraft` with `fieldName` or `issuedBy`, `proxy.session.poolSize`, `approval:`, `contextKeys`, raw `.describe(`). A rule and the path it guards can be deleted only when that table shows 0 users; a PR that deletes one quotes the row.
+
+Paste the summary line, the BREAK/WARN rows and the window-rule table into the PR body. The window-rule table is computed over the targets of that run, so read the deletion gate only from a default-target run. Scratch copies go under `/mnt/scratch/tmp/bump-safety-scan` (or `$TMPDIR`); the staged copies are removed unless `--keep` is passed, the SDK builds under `<scratch>/sdk/<sha>` stay as a cache.
+
 ## API reports and changesets
 
 Every pull request that changes files under `src/` or `bin/`, changes `package.json`'s `exports` map, or changes `config/api-extractor/` must add a new Changeset file. Other `package.json` edits, such as version-only or dependency-only changes, do not trigger this requirement. Editing or deleting an existing Changeset does not satisfy the gate. Use `bunx changeset` to describe the release intent. For a genuinely no-release change, use `bunx changeset --empty`; an empty changeset is the sanctioned escape hatch and passes the CI gate.
