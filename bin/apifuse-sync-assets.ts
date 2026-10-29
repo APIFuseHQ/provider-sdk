@@ -6,9 +6,9 @@ import {
 	syncPromptAssets,
 	verifyPromptAssets,
 } from "../src/cli/prompt-assets.js";
-import { resolveProviderRoot } from "./apifuse-check.js";
+import { findProviderRoot, resolveProviderRoot } from "./apifuse-check.js";
 
-const HELP_TEXT = `Usage: apifuse sync-assets [path] [--check]
+const HELP_TEXT = `Usage: apifuse sync-assets [path] [--check] [--if-provider-root]
 Example: apifuse sync-assets .
 Default: apifuse sync-assets .
 
@@ -18,8 +18,11 @@ AGENTS.md, .agents/skills/**, the CLAUDE.md/.claude/.codex symlinks, and the
 migrated. Idempotent.
 
 Options:
-  --check        Verify only; exit 1 with a diff list when assets are stale/missing/modified
-  --help, -h     Show this help`;
+  --check             Verify only; exit 1 with a diff list when assets are stale/missing/modified
+  --if-provider-root  Exit 0 without writing when no provider root (index.ts) exists at or
+                      above the path. For the scaffolded \`postinstall\` hook: a Dockerfile's
+                      install layer has package.json and the lockfile but no provider yet.
+  --help, -h          Show this help`;
 
 export async function main() {
 	const args = normalizeArgs(process.argv.slice(2));
@@ -30,10 +33,15 @@ export async function main() {
 	}
 
 	let checkOnly = false;
+	let ifProviderRoot = false;
 	let inputPath: string | undefined;
 	for (const arg of args) {
 		if (arg === "--check") {
 			checkOnly = true;
+			continue;
+		}
+		if (arg === "--if-provider-root") {
+			ifProviderRoot = true;
 			continue;
 		}
 		if (arg.startsWith("-")) {
@@ -45,7 +53,17 @@ export async function main() {
 		inputPath = arg;
 	}
 
-	const providerRoot = resolveProviderRoot(inputPath ?? ".");
+	const providerRoot = ifProviderRoot
+		? findProviderRoot(inputPath ?? ".")
+		: resolveProviderRoot(inputPath ?? ".");
+	if (providerRoot === undefined) {
+		// Not a provider (yet): nothing to regenerate. The freshness gate in
+		// `apifuse check` still fails closed wherever a provider root exists.
+		console.log(
+			`No provider root (index.ts) at or above ${inputPath ?? "."}; nothing to sync (--if-provider-root).`,
+		);
+		return;
+	}
 
 	if (checkOnly) {
 		const verification = verifyPromptAssets(providerRoot);

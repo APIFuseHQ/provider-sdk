@@ -56,8 +56,12 @@ export const COMMAND_MANIFEST: Record<
 		name: "sync-assets",
 		summary:
 			"Regenerate SDK-managed agent prompt assets (AGENTS.md, .agents/skills, symlinks, manifest) for the installed SDK version.",
-		usage: "apifuse sync-assets [path] [--check]",
-		examples: ["apifuse sync-assets .", "apifuse sync-assets . --check"],
+		usage: "apifuse sync-assets [path] [--check] [--if-provider-root]",
+		examples: [
+			"apifuse sync-assets .",
+			"apifuse sync-assets . --check",
+			"apifuse sync-assets . --if-provider-root",
+		],
 		modulePath: "./apifuse-sync-assets",
 	},
 	migrate: {
