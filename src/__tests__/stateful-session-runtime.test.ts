@@ -4,8 +4,7 @@ const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
 const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
 	builtStatefulSpecifier
 );
-const { buildSessionKey, InMemorySessionOwnerRegistry, PodLocalSessionPool } =
-	await builtStateful;
+const { buildSessionKey, InMemorySessionOwnerRegistry, PodLocalSessionPool } = await builtStateful;
 
 function testSessionKey(connectionId: string) {
 	return buildSessionKey({
@@ -215,9 +214,7 @@ describe("PodLocalSessionPool", () => {
 			'pool is closed; cannot get or create session "new"',
 		);
 		releaseFactory?.("created");
-		await expect(creating).rejects.toThrow(
-			'pool is closed; cannot get or create session "slow"',
-		);
+		await expect(creating).rejects.toThrow('pool is closed; cannot get or create session "slow"');
 		await closing;
 		expect(closed).toEqual([{ key: "slow", reason: "shutdown" }]);
 		await pool.invalidate("slow", "should-be-empty");
@@ -266,5 +263,196 @@ describe("PodLocalSessionPool", () => {
 
 		expect(maxActive).toBe(1);
 		expect(order).toEqual(["start-a", "end-a", "start-b", "end-b", "start-c", "end-c"]);
+	});
+});
+
+type Gate = { readonly promise: Promise<void>; readonly open: () => void };
+
+function gate(): Gate {
+	let open!: () => void;
+	const promise = new Promise<void>((resolve) => {
+		open = resolve;
+	});
+	return { promise, open };
+}
+
+type Outcome = { readonly settled: "resolved" | "rejected"; readonly value: unknown } | "pending";
+
+// How `promise` stands once the tasks queued so far have had their turn. A
+// queue wait that ignores the signal stays "pending" here.
+async function outcomeSoon(promise: Promise<unknown>): Promise<Outcome> {
+	const pending = Bun.sleep(1_000).then((): Outcome => "pending");
+	return Promise.race([
+		promise.then(
+			(value): Outcome => ({ settled: "resolved", value }),
+			(value): Outcome => ({ settled: "rejected", value }),
+		),
+		pending,
+	]);
+}
+
+function testPool() {
+	return new PodLocalSessionPool<string>(
+		{ maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
+		() => {},
+	);
+}
+
+describe("PodLocalSessionPool.runExclusive with the caller's signal", () => {
+	it("lets a waiter whose signal aborts leave at once, without running it or reordering the rest", async () => {
+		const pool = testPool();
+		const order: string[] = [];
+		const holdA = gate();
+		const startedA = gate();
+		const a = pool.runExclusive("same-session", async () => {
+			order.push("start-a");
+			startedA.open();
+			await holdA.promise;
+			order.push("end-a");
+			return "a";
+		});
+		const controller = new AbortController();
+		let bRuns = 0;
+		const b = pool.runExclusive(
+			"same-session",
+			async () => {
+				bRuns += 1;
+				order.push("start-b");
+			},
+			controller.signal,
+		);
+		const c = pool.runExclusive("same-session", async () => {
+			order.push("start-c");
+			await Bun.sleep(1);
+			order.push("end-c");
+			return "c";
+		});
+		await startedA.promise;
+		const reason = new Error("b's caller went away");
+		controller.abort(reason);
+
+		// b leaves while a still holds the session.
+		expect(await outcomeSoon(b)).toEqual({ settled: "rejected", value: reason });
+		expect(order).toEqual(["start-a"]);
+		holdA.open();
+		expect(await a).toBe("a");
+		expect(await c).toBe("c");
+		expect(bRuns).toBe(0);
+		expect(order).toEqual(["start-a", "end-a", "start-c", "end-c"]);
+	});
+
+	it("removes its abort listener when its turn comes", async () => {
+		const pool = testPool();
+		const signal = new AbortController().signal;
+		let added = 0;
+		let removed = 0;
+		const addEventListener = signal.addEventListener.bind(signal);
+		const removeEventListener = signal.removeEventListener.bind(signal);
+		signal.addEventListener = (...args: Parameters<AbortSignal["addEventListener"]>) => {
+			added += 1;
+			addEventListener(...args);
+		};
+		signal.removeEventListener = (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+			removed += 1;
+			removeEventListener(...args);
+		};
+		// One long-lived signal, without a deadline, used by several queued tasks.
+		for (const name of ["first", "second", "third"]) {
+			const hold = gate();
+			const holding = pool.runExclusive("same-session", () => hold.promise);
+			const queued = pool.runExclusive("same-session", async () => name, signal);
+			const listeningWhileQueued = added - removed;
+			hold.open();
+			await holding;
+			expect(await queued).toBe(name);
+			expect(listeningWhileQueued).toBe(1);
+		}
+		expect(added).toBe(3);
+		expect(removed).toBe(added);
+	});
+
+	it("rejects an already aborted signal without queueing the task", async () => {
+		const pool = testPool();
+		const hold = gate();
+		const holding = pool.runExclusive("same-session", () => hold.promise);
+		const controller = new AbortController();
+		const reason = new Error("aborted before queueing");
+		controller.abort(reason);
+		let runs = 0;
+		const rejected = pool.runExclusive(
+			"same-session",
+			async () => {
+				runs += 1;
+			},
+			controller.signal,
+		);
+		expect(await outcomeSoon(rejected)).toEqual({ settled: "rejected", value: reason });
+		const next = pool.runExclusive("same-session", async () => "next");
+		hold.open();
+		await holding;
+		expect(await next).toBe("next");
+		expect(runs).toBe(0);
+	});
+
+	it("lets a task that has started run to its end when its signal aborts", async () => {
+		const pool = testPool();
+		const controller = new AbortController();
+		const hold = gate();
+		const started = gate();
+		let settled = false;
+		const running = pool.runExclusive(
+			"same-session",
+			async () => {
+				started.open();
+				await hold.promise;
+				return "finished";
+			},
+			controller.signal,
+		);
+		void running.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await started.promise;
+		controller.abort(new Error("aborted after the task started"));
+		await Bun.sleep(5);
+		expect(settled).toBe(false);
+		hold.open();
+		expect(await running).toBe("finished");
+	});
+
+	it("skips a task whose signal is aborted in the turn its predecessor finishes", async () => {
+		const pool = testPool();
+		const controller = new AbortController();
+		const reason = new Error("aborted as the predecessor returned");
+		const order: string[] = [];
+		const a = pool.runExclusive("same-session", async () => {
+			order.push("a");
+			await Bun.sleep(1);
+			controller.abort(reason);
+			return "a";
+		});
+		let bRuns = 0;
+		const b = pool.runExclusive(
+			"same-session",
+			async () => {
+				bRuns += 1;
+				order.push("b");
+			},
+			controller.signal,
+		);
+		const c = pool.runExclusive("same-session", async () => {
+			order.push("c");
+			return "c";
+		});
+		expect(await a).toBe("a");
+		expect(await outcomeSoon(b)).toEqual({ settled: "rejected", value: reason });
+		expect(await c).toBe("c");
+		expect(bRuns).toBe(0);
+		expect(order).toEqual(["a", "c"]);
 	});
 });
