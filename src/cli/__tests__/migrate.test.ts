@@ -120,7 +120,7 @@ describe("apifuse migrate", () => {
 
 		expect(sourceFiles()).toEqual(before);
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 7, 3],
+			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 8, 3],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
@@ -195,7 +195,7 @@ describe("apifuse migrate", () => {
 		expect(detail).not.toContain("errorCodes");
 		expect(detail).toContain('itemId: z.string().describeKey("schema.itemId")');
 		expect(after["domain/errors.ts"]).toBe(
-			'import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";\n\nexport const errors = defineErrors({\n\tITEM_GONE: {\n\t\tstatus: 410,\n\t\tcategory: "upstream_rejected",\n\t\tretryable: false,\n\t\tdescription: "The item was removed.",\n\t},\n\tUPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,\n\tUPSTREAM_SCHEMA_ERROR: sdkErrors.UPSTREAM_SCHEMA_ERROR,\n});\n',
+			'import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";\n\nexport const errors = defineErrors({\n\tITEM_GONE: {\n\t\tstatus: 410,\n\t\tcategory: "upstream_rejected",\n\t\tretryable: false,\n\t\tdescription: "The item was removed.",\n\t},\n\tUPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,\n\tUPSTREAM_SCHEMA_ERROR: sdkErrors.UPSTREAM_SCHEMA_ERROR,\n\tNO_DATA: sdkErrors.NO_DATA,\n});\n',
 		);
 		// A list of rows referenced by name (another file) becomes references,
 		// never an empty list.
@@ -220,7 +220,7 @@ describe("apifuse migrate", () => {
 		expect(index).toContain("\tstate: true,\n\tcache: true,\n});");
 
 		expect(countsByCodemod(report)).toEqual({
-			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 7, 3],
+			"errors-factory": [["mappers/item.ts", "operations/search.ts", "upstream/client.ts"], 8, 3],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
@@ -274,6 +274,11 @@ describe("apifuse migrate", () => {
 		);
 		expect(client).toContain('throw SEARCH_ERRORS.NOT_FOUND({ message: "No item matches." });');
 		expect(client).toContain('throw errors.NEVER_DECLARED({ message: "Unknown." });');
+		// A registered code whose inline row sits in a list this step left whole
+		// (beside a spread it cannot read) is still declared by value for the
+		// throw sites that name it.
+		expect(client).toContain('throw errors.NO_DATA({ message: "Nothing." });');
+		expect(after["domain/errors.ts"]).toContain("\tNO_DATA: sdkErrors.NO_DATA,\n");
 		expect(search).toContain(
 			'import { ProviderError, defineOperation, defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider";',
 		);
@@ -344,7 +349,7 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   3                   7         3");
+		expect(text).toContain("errors-factory                   3                   8         3");
 		expect(text).toContain("errors-hoist                     7                   8         2");
 		expect(text).toContain(
 			"operations/search.ts:31:10 [errors-factory-throw-site-registry-conflict]",

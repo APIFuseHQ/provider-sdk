@@ -157,25 +157,6 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	const declarations = declareCodes(ts, lists, existing, throwCategories, residues, notes);
 	const maps = defineErrorsMaps(ts, sources);
 	const references = collectReferences(ts, sources, existing?.file.path ?? DEFAULT_MODULE);
-	// A registered code a throw site names that no map in the file's scope
-	// declares (its row sat in a table rule 3 does not convert, or in another
-	// operation's table) is declared by value in the provider map.
-	const referencedSdk = new Set<string>();
-	for (const fileReferences of references) {
-		const scope = mapsInScope(ts, maps, fileReferences.file);
-		for (const item of fileReferences.items) {
-			const code = item.code;
-			if (
-				Object.hasOwn(SDK_ERROR_REGISTRY, code) &&
-				!declarations.has(code) &&
-				!existing?.entries.has(code) &&
-				![...scope].some(([name, codes]) => name !== MAP_NAME && codes.has(code))
-			) {
-				declarations.set(code, { kind: "sdk", code: code as SdkErrorCode });
-				referencedSdk.add(code);
-			}
-		}
-	}
 
 	const hoisted = new Set<string>();
 	const edits = new Map<string, FileEdits>();
@@ -278,12 +259,38 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 		}
 	}
 
-	const newCodes = [...declarations.entries()].filter(
+	// A registered code a throw site names that no map in the file's scope
+	// declares (its row sat in a table rule 3 does not convert, or in another
+	// operation's table) is declared by value in the provider map.
+	const referencedSdk = new Set<string>();
+	for (const fileReferences of references) {
+		const scope = mapsInScope(ts, maps, fileReferences.file);
+		for (const item of fileReferences.items) {
+			const code = item.code;
+			// An inline row of the same code that stayed in errorCodes (a residue, or
+			// a list this step left whole) does not stop the throw sites:
+			// errors.CODE serves the registry value.
+			const declared = declarations.get(code);
+			if (
+				Object.hasOwn(SDK_ERROR_REGISTRY, code) &&
+				(declared === undefined || declared.kind === "residue" || !hoisted.has(code)) &&
+				!existing?.entries.has(code) &&
+				![...scope].some(([name, codes]) => name !== MAP_NAME && codes.has(code))
+			) {
+				referencedSdk.add(code);
+			}
+		}
+	}
+
+	const newCodes: Array<[string, DeclarationOrResidue]> = [...declarations.entries()].filter(
 		([code, declaration]) =>
-			declaration.kind !== "residue" &&
-			(hoisted.has(code) || referencedSdk.has(code)) &&
-			!existing?.entries.has(code),
+			declaration.kind !== "residue" && hoisted.has(code) && !existing?.entries.has(code),
 	);
+	for (const code of referencedSdk) {
+		if (!newCodes.some(([existingCode]) => existingCode === code)) {
+			newCodes.push([code, { kind: "sdk", code: code as SdkErrorCode }]);
+		}
+	}
 	const moduleResult = writeMap(
 		ts,
 		options,

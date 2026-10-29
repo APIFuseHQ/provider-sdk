@@ -5,6 +5,6 @@ import { REGISTRY_ROWS } from "../rows";
 
 export const statuslessOperation = defineOperation<ProviderContext>()({
 	descriptionKey: "operations.statusless.description",
-	errorCodes: [...REGISTRY_ROWS],
+	errorCodes: [...REGISTRY_ROWS, { code: "NO_DATA", description: "No rows; the SDK serves the status." }],
 	handler: async (input) => fetchItem(input.itemId),
 });
