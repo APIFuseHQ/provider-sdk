@@ -199,6 +199,26 @@
 			"file": "src/__tests__/schema-fields.test.ts",
 			"symbol": "description",
 			"reason": "The test builds the deprecated raw .describe() prose shape on purpose to pin how the SDK reports it."
+		},
+		{
+			"file": "src/define.ts",
+			"symbol": "poolSize",
+			"reason": "validateProviderProxy accepts the retired proxy.session.poolSize for one release and warns once per provider; the runtime never reads it."
+		},
+		{
+			"file": "src/__tests__/define.test.ts",
+			"symbol": "poolSize",
+			"reason": "The test declares the retired field on purpose to pin that it is accepted with one warning."
+		},
+		{
+			"file": "src/__tests__/proxy-policy-scope.test.ts",
+			"symbol": "poolSize",
+			"reason": "The test declares the retired field on purpose to pin that it is accepted with one warning."
+		},
+		{
+			"file": "src/__tests__/proxy.test.ts",
+			"symbol": "poolSize",
+			"reason": "The test declares the retired field on purpose to pin that the session id and the attempt budget ignore it."
 		}
 	]
 }

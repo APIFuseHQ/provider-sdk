@@ -70,7 +70,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		id: "declaration",
 		file: "declaration.yml",
 		manualStep:
-			'add the missing `allowedHosts` / `reviewed` field, give `auth` the shape its `mode` requires, and move a reported `auth.exchange` or `reviewed: "staging"` to a supported value',
+			'add the missing `allowedHosts` / `reviewed` field, give `auth` the shape its `mode` requires, move a reported `auth.exchange` or `reviewed: "staging"` to a supported value, and delete the comment that explained a removed `proxy.session.poolSize`',
 	},
 ];
 

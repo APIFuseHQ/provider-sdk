@@ -17,6 +17,7 @@ import {
 	type StatefulProviderAdapter,
 	type StatefulProviderMetricEmitter,
 	StatefulProviderSessionManager,
+	StatefulRoutingDeadlineError,
 	StatefulSessionRouter,
 	statefulForwardingContextFromProviderRequest,
 	withStatefulLocalProviderContext,
@@ -72,6 +73,8 @@ const provider: ProviderDefinition = {
 		"read-until-cancelled": operation,
 		"read-aborted-by-provider-timer": operation,
 		"fails-after-deadline-without-cause": operation,
+		"throws-deadline-class-before-deadline": operation,
+		"rethrows-deadline-class-caused-by-deadline": operation,
 	},
 };
 
@@ -136,6 +139,20 @@ function holdingAdapter(podId: string): StatefulProviderAdapter<HoldSession> {
 					// deadline's reason: not something the deadline cancelled.
 					await aborted(ctx.signal);
 					throw new Error("Session read failed.");
+				}
+				case "throws-deadline-class-before-deadline": {
+					// The public StatefulRoutingDeadlineError, constructed by the
+					// provider and thrown well before the deadline.
+					throw new StatefulRoutingDeadlineError("provider-made", "provider-made");
+				}
+				case "rethrows-deadline-class-caused-by-deadline": {
+					// The read the deadline cancelled, rethrown by the provider as
+					// its own StatefulRoutingDeadlineError that keeps the
+					// deadline's reason as its cause.
+					await aborted(ctx.signal);
+					const rethrown = new StatefulRoutingDeadlineError("provider-made", "provider-made");
+					Object.defineProperty(rethrown, "cause", { value: ctx.signal.reason });
+					throw rethrown;
 				}
 				default:
 					throw new Error(`unexpected operation ${request.operationId}`);
@@ -439,6 +456,59 @@ describe("stateful forwarding deadline expiring during the owner pod's local exe
 			expect(result.ownerLog?.code).toBe("internal_error");
 			expect(result.ownerLog?.errorClass).toBe("Error");
 			expect(result.ownerDeadlineMetrics).toEqual([]);
+		},
+		{ timeout: 10_000 },
+	);
+
+	it(
+		"serves a StatefulRoutingDeadlineError the provider threw on the local route like any other provider error",
+		async () => {
+			const result = await callSourcePod(
+				"throws-deadline-class-before-deadline",
+				"owner-provider-throws-deadline-class",
+			);
+			expect(result.holdReached).toBe(true);
+			// Not the deadline: the router leaves it alone and serve masks it.
+			expect(result.owner?.status).toBe(500);
+			expect(result.owner?.observability).toEqual({
+				category: "internal_error",
+				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+				retryable: false,
+			});
+			expect(result.ownerLog?.code).toBe("internal_error");
+			expect(result.ownerLog?.errorClass).toBe("StatefulRoutingDeadlineError");
+			expect(result.ownerDeadlineMetrics).toEqual([]);
+			expect(result.caller.status).toBe(500);
+			expect(result.caller.observability).not.toEqual(DEADLINE_EXPIRED_OBSERVABILITY);
+		},
+		{ timeout: 10_000 },
+	);
+
+	it(
+		"serves the deadline when the provider rethrows the cancelled read as its own StatefulRoutingDeadlineError",
+		async () => {
+			const result = await callSourcePod(
+				"rethrows-deadline-class-caused-by-deadline",
+				"owner-provider-rethrows-deadline-class",
+			);
+			expect(result.holdReached).toBe(true);
+			// The router's timer stopped the read, so the router raises its own
+			// deadline error with the provider's error as the cause, exactly as
+			// for any other failure that carries the deadline's reason. The
+			// provider's instance is not taken as the SDK's.
+			expect(result.owner?.status).toBe(504);
+			expect(result.owner?.observability).toEqual(DEADLINE_EXPIRED_OBSERVABILITY);
+			expect(result.owner?.body).toEqual(
+				DEADLINE_EXPIRED_BODY("owner-provider-rethrows-deadline-class"),
+			);
+			expect(result.ownerLog?.code).toBe("STATEFUL_FORWARDING_DEADLINE_EXPIRED");
+			expect(result.ownerLog?.causeChain?.slice(0, 2)).toEqual([
+				expect.objectContaining({ errorClass: "StatefulRoutingDeadlineError" }),
+				expect.objectContaining({ errorClass: "AbortError" }),
+			]);
+			expect(result.ownerDeadlineMetrics).toHaveLength(1);
+			expect(result.caller.status).toBe(504);
+			expect(result.caller.observability).toEqual(DEADLINE_EXPIRED_OBSERVABILITY);
 		},
 		{ timeout: 10_000 },
 	);

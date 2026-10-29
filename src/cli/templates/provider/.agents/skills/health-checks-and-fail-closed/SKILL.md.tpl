@@ -164,19 +164,25 @@ answers non-2xx, before any guard runs — so without a declaration every quiet
 day is recorded `down`.
 
 Declare the answer on the operation step itself, by reference to the code the
-operation declares. The monitor matches the provider's own error envelope
+provider declares. The monitor matches the provider's own error envelope
 (`source: "upstream_failure"`) on `status` and `code` together, completes the
 attempt with `attribute` as the guard attribution, and never retries it:
 
 ```ts
-// operations/weather-alerts.ts
-export const weatherAlertsErrorCodes = [
-  { code: "NO_DATA", status: 404, description: "No alert is issued today." },
-] as const satisfies readonly OperationErrorCode[];
+// errors.ts
+export const errors = defineErrors({
+  NO_DATA: sdkErrors.NO_DATA, // 404 from the SDK registry
+});
 
 // health-scenarios.ts
 import { errorRefs } from "@apifuse/provider-sdk/provider";
-const errors = errorRefs(weatherAlertsErrorCodes);
+import { errors as declaredErrors } from "./errors";
+const errors = errorRefs(declaredErrors);
+// legacy table form, same result:
+//   export const weatherAlertsErrorCodes = [
+//     { code: "NO_DATA", status: 404, description: "No alert is issued today." },
+//   ] as const satisfies readonly OperationErrorCode[];
+//   const errors = errorRefs(weatherAlertsErrorCodes);
 
 {
   id: "read-weather-alerts",
@@ -202,12 +208,19 @@ const errors = errorRefs(weatherAlertsErrorCodes);
 
 - Only `expected_absence` is admitted here. A stale-cache serve is a 2xx; a
   non-2xx is either the declared absence or a real failure.
-- `errors.<CODE>` exists only for a code the operation declares in its
-  `errorCodes` with status 400 or 404. An undeclared code, a code declared
-  with another status (409/410/422 are upstream refusals; 401/403/429 and
-  every 5xx are never an absence) and the auth and rate-limit codes are
-  compile errors, so a typo cannot leave a quiet day recorded as `down`.
-  Declare the codes `as const` so each one is a literal.
+- `errorRefs` takes the `defineErrors` map (the reference carries the status
+  and category each factory declared; an `sdkErrors` entry carries the
+  registry's) or the legacy `errorCodes` table. `errors.<CODE>` exists only
+  for a code declared with status 400 or 404 whose category the monitor
+  matches on: one served as the upstream's own envelope (`upstream_http`;
+  the `source: "upstream_failure"` class). An undeclared code, a code
+  declared with another status (409/410/422 are upstream refusals; 401/403/429
+  and every 5xx are never an absence), a code declared `upstream_rejected`
+  or `input_validation` at 400/404 (served as `upstream_rule` or `client`,
+  which the monitor never matches) and the auth and rate-limit codes are
+  compile errors, so a typo or a mis-categorized code cannot leave a quiet
+  day recorded as `down`. Declare a table `as const` so each code is a
+  literal.
 - Throw the code as the upstream's own envelope: a registered upstream code
   such as `NO_DATA`, or a provider code declared or thrown with `category:
   "upstream_http"`. An envelope attributed elsewhere never matches.
