@@ -15,6 +15,9 @@
 #      import { errorRefs } from "@apifuse/provider-sdk/provider";
 #      const errors = errorRefs(<operation>ErrorCodes);
 #
+#    A provider that declares its codes with `defineErrors` passes that map
+#    instead (`errorRefs(errors)`); the rewritten entries are the same.
+#
 # 2. A per-call `staleIfErrorMs` on `ctx.cache.getOrSet` / `ctx.cache.set` is
 #    reported with the operation declaration that replaces it. Not rewritten:
 #    the declaration lives on `defineOperation({ cache: { staleIfErrorMs } })`,

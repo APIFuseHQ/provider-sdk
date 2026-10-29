@@ -1,5 +1,11 @@
 import { z } from "zod";
 import type { JsonPrimitive, JsonValue } from "./contract-json.js";
+import { isProviderErrorFactory, type ProviderErrorFactory } from "./define-errors.js";
+import {
+	type ProviderErrorCategory,
+	type ProviderErrorCategoryOfSource,
+	sourceForCategory,
+} from "./observability.js";
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 const finiteInt = (min: number, max?: number) => {
@@ -662,14 +668,14 @@ const EXPECTED_ERROR_REFUSAL_CODE_SET: ReadonlySet<string> = new Set(EXPECTED_ER
 
 /**
  * A reference to one declared operation error, by value: the `code` and the
- * `status` the runtime serves for it, read from the operation's `errorCodes`
- * declaration through {@link errorRefs}.
+ * `status` the runtime serves for it, read from the provider's `defineErrors`
+ * map or the operation's legacy `errorCodes` declaration through
+ * {@link errorRefs}.
  *
- * Structural on purpose. TODO(lane A `defineErrors`): the factory's entries
- * (`errors.NO_DATA`) plug in here by exposing the same two fields; once the
- * declaration carries `category`, narrow this type to the upstream-envelope
- * categories (`sourceForCategory(category) === "upstream_failure"`) so the
- * monitor's source match is refused by the type as well.
+ * Structural on purpose. TODO: once the reference carries `category`, narrow
+ * this type to the upstream-envelope categories
+ * (`sourceForCategory(category) === "upstream_failure"`) so the monitor's
+ * source match is refused by the type as well.
  */
 export type OperationErrorRef<
 	TCode extends string = string,
@@ -679,68 +685,156 @@ export type OperationErrorRef<
 	readonly status: TStatus;
 };
 
-/** The slice of an `errorCodes` entry {@link errorRefs} reads. */
+/**
+ * The slice of a declaration {@link errorRefs} reads: an `errorCodes` row
+ * (no category; the serve layer derives it from the status) or a
+ * `defineErrors` declaration (category declared).
+ */
 export type OperationErrorCodeDeclaration = {
 	readonly code: string;
 	readonly status?: number;
+	readonly category?: ProviderErrorCategory;
 };
 
-/** The {@link OperationErrorRef} one `errorCodes` entry yields, or `never` when it may not be an absence. */
+/**
+ * A category the monitor can match an expected absence on: the one served
+ * as the upstream's own envelope (`source: "upstream_failure"`). The monitor
+ * ignores an expected error whose envelope is attributed elsewhere (a
+ * deterministic refusal is `upstream_rule`, a caller fault is `client`), so
+ * a declaration in another category never becomes a reference.
+ */
+export type ExpectedAbsenceCategory = ProviderErrorCategoryOfSource<"upstream_failure">;
+
+/**
+ * The {@link OperationErrorRef} one declaration yields, or `never` when it
+ * may not be an absence: a status outside {@link ExpectedAbsenceStatus}, a
+ * refusal code, or a declared category the monitor does not match on
+ * ({@link ExpectedAbsenceCategory}). A declaration without a category (an
+ * `errorCodes` row) is judged on status and code alone.
+ */
 export type AbsenceErrorRef<T> = T extends {
 	readonly code: infer TCode extends string;
 	readonly status: infer TStatus extends ExpectedAbsenceStatus;
 }
 	? TCode extends ExpectedErrorRefusalCode
 		? never
-		: OperationErrorRef<TCode, TStatus>
+		: T extends { readonly category: infer TCategory extends ProviderErrorCategory }
+			? TCategory extends ExpectedAbsenceCategory
+				? OperationErrorRef<TCode, TStatus>
+				: never
+			: OperationErrorRef<TCode, TStatus>
 	: never;
 
+/** What `defineErrors({...})` returns: one factory per code, each carrying its declaration. */
+export type DefinedErrorsMap = {
+	readonly [code: string]: ProviderErrorFactory;
+};
+
+/** The declarations {@link errorRefs} reads from one input: the table's rows, or the map's factory declarations. */
+type ErrorRefsSource<T> = T extends readonly OperationErrorCodeDeclaration[]
+	? T[number]
+	: T extends DefinedErrorsMap
+		? T[keyof T]["declaration"]
+		: never;
+
 /**
- * One {@link OperationErrorRef} per `errorCodes` entry an expected absence
- * may name, keyed by code. An entry without a status, with a status outside
- * {@link ExpectedAbsenceStatus}, or whose code is a refusal
- * ({@link EXPECTED_ERROR_REFUSAL_CODES}) has no key, so referencing it is a
- * compile error. A widened declaration (`status: number`) yields no keys at
- * all: declare `errorCodes` as a literal (`as const`) so each code is one.
+ * One {@link OperationErrorRef} per declared code an expected absence may
+ * name, keyed by code. The input is the `defineErrors` map (each factory's
+ * declaration) or the legacy `errorCodes` table (each row). An entry without
+ * a status, with a status outside {@link ExpectedAbsenceStatus}, or whose
+ * code is a refusal ({@link EXPECTED_ERROR_REFUSAL_CODES}) has no key, so
+ * referencing it is a compile error. A widened table (`status: number`)
+ * yields no keys at all: declare `errorCodes` as a literal (`as const`) so
+ * each code is one.
  */
-export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[]> = {
-	readonly [TRef in AbsenceErrorRef<T[number]> as TRef["code"]]: TRef;
+export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[] | DefinedErrorsMap> = {
+	readonly [TRef in AbsenceErrorRef<ErrorRefsSource<T>> as TRef["code"]]: TRef;
 };
 
 /**
- * Typed references to the error codes an operation declares, for
- * `expectedErrors`. Declare the codes once, reference them by value:
+ * Typed references to the error codes a provider declares, for
+ * `expectedErrors`. Declare the codes once, reference them by value.
+ *
+ * From the `defineErrors` map (each reference carries the status the
+ * factory declared; an `sdkErrors` entry carries the registry's):
+ *
+ * ```ts
+ * export const errors = defineErrors({
+ *   NO_DATA: sdkErrors.NO_DATA,
+ *   BAD_DISTRICT: { status: 400, category: "upstream_rejected", description: "Unknown district." },
+ * });
+ * const refs = errorRefs(errors);
+ *
+ * // in the scenario's operation step
+ * expectedErrors: [{ error: refs.NO_DATA, attribute: [...] }]
+ * ```
+ *
+ * From the legacy `errorCodes` table (a duplicate code resolves to its last
+ * row, as the server does):
  *
  * ```ts
  * export const weatherAlertsErrorCodes = [
  *   { code: "NO_DATA", status: 404, description: "No alert is issued today." },
  * ] as const satisfies readonly OperationErrorCode[];
  * const errors = errorRefs(weatherAlertsErrorCodes);
- *
- * // in the scenario's operation step
- * expectedErrors: [{ error: errors.NO_DATA, attribute: [...] }]
  * ```
  *
- * `errors.TYPO` and `errors.RATE_LIMITED` do not exist on the returned type.
- * The runtime object carries exactly the keys the type does, so a reference
- * built from a widened declaration fails at `defineHealthScenario` instead of
- * silently never matching.
+ * `errors.TYPO`, `errors.RATE_LIMITED`, a code declared with a non-absence
+ * status (`UPSTREAM_ERROR` at 502) and a code whose declared category is not
+ * served as the upstream's own envelope (`upstream_rejected` at 404,
+ * `INVALID_REQUEST`) do not exist on the returned type. The runtime object
+ * carries exactly the keys the type does, so a reference built from a
+ * widened declaration fails at `defineHealthScenario` instead of silently
+ * never matching.
  */
 export function errorRefs<const T extends readonly OperationErrorCodeDeclaration[]>(
 	errorCodes: T,
-): ErrorRefs<T> {
-	// `buildOperationErrorCodeLookup` resolves a duplicate code to its LAST
-	// declaration, so the reference follows the same reading: resolve first,
-	// then decide whether the resolved declaration names an absence. Filtering
-	// per row would keep an earlier absence row that the server never serves.
-	const resolved = new Map<string, OperationErrorCodeDeclaration>();
-	for (const declaration of errorCodes) resolved.set(declaration.code, declaration);
+): ErrorRefs<T>;
+/** The map form: one reference per `defineErrors` factory whose declared status is an absence. */
+export function errorRefs<const T extends DefinedErrorsMap>(errors: T): ErrorRefs<T>;
+export function errorRefs(
+	input: readonly OperationErrorCodeDeclaration[] | DefinedErrorsMap,
+): Readonly<Record<string, OperationErrorRef>> {
 	const refs: Record<string, OperationErrorRef> = {};
-	for (const { code, status } of resolved.values()) {
+	for (const { code, status, category } of declaredErrorCodes(input)) {
 		if (!isExpectedAbsenceStatus(status) || EXPECTED_ERROR_REFUSAL_CODE_SET.has(code)) continue;
+		if (category !== undefined && sourceForCategory(category) !== "upstream_failure") continue;
 		refs[code] = Object.freeze({ code, status });
 	}
-	return Object.freeze(refs) as ErrorRefs<T>;
+	return Object.freeze(refs);
+}
+
+/**
+ * The declarations one `errorRefs` input resolves to, one per code. A table
+ * resolves a duplicate code to its LAST row, as `buildOperationErrorCodeLookup`
+ * does, so the reference follows the server's reading: resolve first, then
+ * decide whether the resolved declaration names an absence (filtering per row
+ * would keep an earlier absence row the server never serves). A map holds one
+ * factory per code already; `defineErrors` keyed each by its own code.
+ */
+function declaredErrorCodes(
+	input: readonly OperationErrorCodeDeclaration[] | DefinedErrorsMap,
+): Iterable<OperationErrorCodeDeclaration> {
+	if (Array.isArray(input)) {
+		const resolved = new Map<string, OperationErrorCodeDeclaration>();
+		for (const declaration of input as readonly OperationErrorCodeDeclaration[]) {
+			resolved.set(declaration.code, declaration);
+		}
+		return resolved.values();
+	}
+	if (typeof input !== "object" || input === null) {
+		throw new TypeError(
+			"errorRefs: expected the defineErrors map or an errorCodes table; pass errorRefs(errors) or errorRefs(<operation>ErrorCodes).",
+		);
+	}
+	return Object.entries(input).map(([key, factory]) => {
+		if (!isProviderErrorFactory(factory)) {
+			throw new TypeError(
+				`errorRefs: "${key}" is not a defineErrors factory; pass the map defineErrors returns (errorRefs(errors)), not its input.`,
+			);
+		}
+		return factory.declaration;
+	});
 }
 
 function isExpectedAbsenceStatus(status: number | undefined): status is ExpectedAbsenceStatus {

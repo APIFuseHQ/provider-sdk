@@ -72,28 +72,42 @@ export const PROVIDER_ERROR_SOURCES = [
 
 export type ProviderErrorSource = (typeof PROVIDER_ERROR_SOURCES)[number];
 
+// The one category -> source mapping. `sourceForCategory` reads it at
+// runtime and `ProviderErrorCategoryOfSource` reads it at the type level, so
+// a declaration that names a category can be refused by the compiler on the
+// source it would be served with.
+export const PROVIDER_ERROR_CATEGORY_SOURCES = {
+	// ok never reaches error serialization.
+	ok: "apifuse",
+	timeout: "upstream_failure",
+	stateful_forwarding_deadline: "apifuse",
+	network: "upstream_failure",
+	upstream_http: "upstream_failure",
+	upstream_rate_limited: "upstream_rule",
+	upstream_auth: "upstream_failure",
+	upstream_rejected: "upstream_rule",
+	upstream_schema_drift: "upstream_failure",
+	proxy_pool: "apifuse",
+	anti_bot_blocked: "upstream_failure",
+	credential_expired: "client",
+	credential_unavailable: "client",
+	input_validation: "client",
+	output_validation: "apifuse",
+	provider_error: "apifuse",
+	internal_error: "apifuse",
+	dependency_unavailable: "apifuse",
+	unsupported_transport: "apifuse",
+	client_cancelled: "client",
+	unclassified: "apifuse",
+} as const satisfies Record<ProviderErrorCategory, ProviderErrorSource>;
+
+/** The categories served with `TSource`, read from {@link PROVIDER_ERROR_CATEGORY_SOURCES}. */
+export type ProviderErrorCategoryOfSource<TSource extends ProviderErrorSource> = {
+	[K in ProviderErrorCategory]: (typeof PROVIDER_ERROR_CATEGORY_SOURCES)[K] extends TSource
+		? K
+		: never;
+}[ProviderErrorCategory];
+
 export function sourceForCategory(category: ProviderErrorCategory): ProviderErrorSource {
-	switch (category) {
-		case "input_validation":
-		case "credential_expired":
-		case "credential_unavailable":
-		case "client_cancelled":
-			return "client";
-		case "upstream_rejected":
-		case "upstream_rate_limited":
-			return "upstream_rule";
-		case "timeout":
-		case "network":
-		case "upstream_http":
-		case "upstream_auth":
-		case "upstream_schema_drift":
-		case "anti_bot_blocked":
-			return "upstream_failure";
-		default:
-			// ok never reaches error serialization; provider_error,
-			// internal_error, output_validation, proxy_pool,
-			// dependency_unavailable, unsupported_transport,
-			// stateful_forwarding_deadline, unclassified are APIFuse-side faults.
-			return "apifuse";
-	}
+	return PROVIDER_ERROR_CATEGORY_SOURCES[category];
 }

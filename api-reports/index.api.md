@@ -16,7 +16,9 @@ import { ZodType } from 'zod';
 export type AbsenceErrorRef<T> = T extends {
     readonly code: infer TCode extends string;
     readonly status: infer TStatus extends ExpectedAbsenceStatus;
-} ? TCode extends ExpectedErrorRefusalCode ? never : OperationErrorRef<TCode, TStatus> : never;
+} ? TCode extends ExpectedErrorRefusalCode ? never : T extends {
+    readonly category: infer TCategory extends ProviderErrorCategory;
+} ? TCategory extends ExpectedAbsenceCategory ? OperationErrorRef<TCode, TStatus> : never : OperationErrorRef<TCode, TStatus> : never;
 
 // @public
 export function acceptLanguageHeaderValue(headers: Readonly<Record<string, unknown>> | undefined): string | undefined;
@@ -1773,6 +1775,16 @@ interface DeclarativeStealthResponse {
 }
 
 // @public
+type DeclaredErrorCategory<TEntry> = TEntry extends ProviderErrorFactory<string, ProviderErrorStatus, infer TCategory> ? TCategory : TEntry extends {
+    readonly category: infer TCategory extends ProviderErrorCategory;
+} ? TCategory : ProviderErrorCategory;
+
+// @public
+type DeclaredErrorStatus<TEntry> = TEntry extends ProviderErrorFactory<string, infer TStatus> ? TStatus : TEntry extends {
+    readonly status: infer TStatus extends ProviderErrorStatus;
+} ? TStatus : ProviderErrorStatus;
+
+// @public
 export type DeclaredHandleKind<TConfig> = TConfig extends {
     handle: readonly (infer K)[];
 } ? [K] extends [never] ? HandleKind : K extends HandleKind ? K : HandleKind : HandleKind;
@@ -1886,9 +1898,17 @@ export interface DefinedCredentialsAuth {
     };
 }
 
+// Warning: (ae-forgotten-export) The symbol "DeclaredErrorStatus" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "DeclaredErrorCategory" needs to be exported by the entry point index.d.ts
+//
 // @public
 export type DefinedErrors<T extends DefineErrorsInput> = {
-    readonly [K in keyof T & string]: ProviderErrorFactory<K>;
+    readonly [K in keyof T & string]: ProviderErrorFactory<K, DeclaredErrorStatus<T[K]>, DeclaredErrorCategory<T[K]>>;
+};
+
+// @public
+export type DefinedErrorsMap = {
+    readonly [code: string]: ProviderErrorFactory;
 };
 
 // @public
@@ -2071,13 +2091,21 @@ export function error(code: string, message: string, options?: Omit<SseErrorData
 // @public
 export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
 
+// Warning: (ae-forgotten-export) The symbol "ErrorRefsSource" needs to be exported by the entry point index.d.ts
+//
 // @public
-export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[]> = {
-    readonly [TRef in AbsenceErrorRef<T[number]> as TRef["code"]]: TRef;
+export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[] | DefinedErrorsMap> = {
+    readonly [TRef in AbsenceErrorRef<ErrorRefsSource<T>> as TRef["code"]]: TRef;
 };
 
 // @public
 export function errorRefs<const T extends readonly OperationErrorCodeDeclaration[]>(errorCodes: T): ErrorRefs<T>;
+
+// @public
+export function errorRefs<const T extends DefinedErrorsMap>(errors: T): ErrorRefs<T>;
+
+// @public
+type ErrorRefsSource<T> = T extends readonly OperationErrorCodeDeclaration[] ? T[number] : T extends DefinedErrorsMap ? T[keyof T]["declaration"] : never;
 
 // @public (undocumented)
 export type EstablishedConnectionReference = CredentialReference & {
@@ -2110,6 +2138,9 @@ export const EXPECTED_ERROR_REFUSAL_CODES: readonly ["AUTH_REQUIRED", "reauth_re
 export type ExpectedAbsenceAttribution = Omit<GuardAttribution, "reasonCode"> & {
     reasonCode: "expected_absence";
 };
+
+// @public
+export type ExpectedAbsenceCategory = ProviderErrorCategoryOfSource<"upstream_failure">;
 
 // @public
 export type ExpectedAbsenceStatus = 400 | 404;
@@ -4525,6 +4556,7 @@ export interface OperationErrorCode {
 export type OperationErrorCodeDeclaration = {
     readonly code: string;
     readonly status?: number;
+    readonly category?: ProviderErrorCategory;
 };
 
 // @public
@@ -5146,6 +5178,31 @@ export const PROVIDER_ERROR_CATALOG_NAMESPACE = "errors";
 
 // @public (undocumented)
 export const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+
+// @public (undocumented)
+export const PROVIDER_ERROR_CATEGORY_SOURCES: {
+    readonly ok: "apifuse";
+    readonly timeout: "upstream_failure";
+    readonly stateful_forwarding_deadline: "apifuse";
+    readonly network: "upstream_failure";
+    readonly upstream_http: "upstream_failure";
+    readonly upstream_rate_limited: "upstream_rule";
+    readonly upstream_auth: "upstream_failure";
+    readonly upstream_rejected: "upstream_rule";
+    readonly upstream_schema_drift: "upstream_failure";
+    readonly proxy_pool: "apifuse";
+    readonly anti_bot_blocked: "upstream_failure";
+    readonly credential_expired: "client";
+    readonly credential_unavailable: "client";
+    readonly input_validation: "client";
+    readonly output_validation: "apifuse";
+    readonly provider_error: "apifuse";
+    readonly internal_error: "apifuse";
+    readonly dependency_unavailable: "apifuse";
+    readonly unsupported_transport: "apifuse";
+    readonly client_cancelled: "client";
+    readonly unclassified: "apifuse";
+};
 
 // @public
 export const PROVIDER_ERROR_LOCALES: readonly ["en", "ko", "ja"];
@@ -5819,6 +5876,11 @@ export class ProviderError<TCode extends string = string> extends Error {
 // @public (undocumented)
 export type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 
+// @public
+export type ProviderErrorCategoryOfSource<TSource extends ProviderErrorSource> = {
+    [K in ProviderErrorCategory]: (typeof PROVIDER_ERROR_CATEGORY_SOURCES)[K] extends TSource ? K : never;
+}[ProviderErrorCategory];
+
 // @public (undocumented)
 export type ProviderErrorCauseFrame = {
     errorClass: string;
@@ -5830,10 +5892,10 @@ export type ProviderErrorCauseFrame = {
 };
 
 // @public
-export type ProviderErrorDeclaration<TCode extends string = string> = {
+export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
     readonly code: TCode;
-    readonly status: ProviderErrorStatus;
-    readonly category: ProviderErrorCategory;
+    readonly status: TStatus;
+    readonly category: TCategory;
     readonly retryable: boolean;
     readonly description: string;
     readonly messageKey?: ProviderLocaleKeyInput;
@@ -5851,10 +5913,10 @@ export type ProviderErrorDeclarationInput = {
 };
 
 // @public
-export type ProviderErrorFactory<TCode extends string = string> = {
+export type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
-    readonly declaration: ProviderErrorDeclaration<TCode>;
+    readonly declaration: ProviderErrorDeclaration<TCode, TStatus, TCategory>;
 };
 
 // @public
