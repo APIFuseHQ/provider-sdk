@@ -1,6 +1,11 @@
 import { z } from "zod";
 import type { JsonPrimitive, JsonValue } from "./contract-json.js";
 import { isProviderErrorFactory, type ProviderErrorFactory } from "./define-errors.js";
+import {
+	type ProviderErrorCategory,
+	type ProviderErrorCategoryOfSource,
+	sourceForCategory,
+} from "./observability.js";
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 const finiteInt = (min: number, max?: number) => {
@@ -680,20 +685,44 @@ export type OperationErrorRef<
 	readonly status: TStatus;
 };
 
-/** The slice of an `errorCodes` entry {@link errorRefs} reads. */
+/**
+ * The slice of a declaration {@link errorRefs} reads: an `errorCodes` row
+ * (no category; the serve layer derives it from the status) or a
+ * `defineErrors` declaration (category declared).
+ */
 export type OperationErrorCodeDeclaration = {
 	readonly code: string;
 	readonly status?: number;
+	readonly category?: ProviderErrorCategory;
 };
 
-/** The {@link OperationErrorRef} one `errorCodes` entry yields, or `never` when it may not be an absence. */
+/**
+ * A category the monitor can match an expected absence on: the one served
+ * as the upstream's own envelope (`source: "upstream_failure"`). The monitor
+ * ignores an expected error whose envelope is attributed elsewhere (a
+ * deterministic refusal is `upstream_rule`, a caller fault is `client`), so
+ * a declaration in another category never becomes a reference.
+ */
+export type ExpectedAbsenceCategory = ProviderErrorCategoryOfSource<"upstream_failure">;
+
+/**
+ * The {@link OperationErrorRef} one declaration yields, or `never` when it
+ * may not be an absence: a status outside {@link ExpectedAbsenceStatus}, a
+ * refusal code, or a declared category the monitor does not match on
+ * ({@link ExpectedAbsenceCategory}). A declaration without a category (an
+ * `errorCodes` row) is judged on status and code alone.
+ */
 export type AbsenceErrorRef<T> = T extends {
 	readonly code: infer TCode extends string;
 	readonly status: infer TStatus extends ExpectedAbsenceStatus;
 }
 	? TCode extends ExpectedErrorRefusalCode
 		? never
-		: OperationErrorRef<TCode, TStatus>
+		: T extends { readonly category: infer TCategory extends ProviderErrorCategory }
+			? TCategory extends ExpectedAbsenceCategory
+				? OperationErrorRef<TCode, TStatus>
+				: never
+			: OperationErrorRef<TCode, TStatus>
 	: never;
 
 /** What `defineErrors({...})` returns: one factory per code, each carrying its declaration. */
@@ -750,11 +779,13 @@ export type ErrorRefs<T extends readonly OperationErrorCodeDeclaration[] | Defin
  * const errors = errorRefs(weatherAlertsErrorCodes);
  * ```
  *
- * `errors.TYPO`, `errors.RATE_LIMITED` and a code declared with a
- * non-absence status (`UPSTREAM_ERROR` at 502) do not exist on the returned
- * type. The runtime object carries exactly the keys the type does, so a
- * reference built from a widened declaration fails at `defineHealthScenario`
- * instead of silently never matching.
+ * `errors.TYPO`, `errors.RATE_LIMITED`, a code declared with a non-absence
+ * status (`UPSTREAM_ERROR` at 502) and a code whose declared category is not
+ * served as the upstream's own envelope (`upstream_rejected` at 404,
+ * `INVALID_REQUEST`) do not exist on the returned type. The runtime object
+ * carries exactly the keys the type does, so a reference built from a
+ * widened declaration fails at `defineHealthScenario` instead of silently
+ * never matching.
  */
 export function errorRefs<const T extends readonly OperationErrorCodeDeclaration[]>(
 	errorCodes: T,
@@ -765,8 +796,9 @@ export function errorRefs(
 	input: readonly OperationErrorCodeDeclaration[] | DefinedErrorsMap,
 ): Readonly<Record<string, OperationErrorRef>> {
 	const refs: Record<string, OperationErrorRef> = {};
-	for (const { code, status } of declaredErrorCodes(input)) {
+	for (const { code, status, category } of declaredErrorCodes(input)) {
 		if (!isExpectedAbsenceStatus(status) || EXPECTED_ERROR_REFUSAL_CODE_SET.has(code)) continue;
+		if (category !== undefined && sourceForCategory(category) !== "upstream_failure") continue;
 		refs[code] = Object.freeze({ code, status });
 	}
 	return Object.freeze(refs);

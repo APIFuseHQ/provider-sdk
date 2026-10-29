@@ -2647,11 +2647,13 @@ class ProviderError<TCode extends string = string> extends Error {
 // @public (undocumented)
 type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 
+// Warning: (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+//
 // @public
-type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus> = {
+type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
     readonly code: TCode;
     readonly status: TStatus;
-    readonly category: ProviderErrorCategory;
+    readonly category: TCategory;
     readonly retryable: boolean;
     readonly description: string;
     readonly messageKey?: ProviderLocaleKeyInput;
@@ -2659,10 +2661,10 @@ type ProviderErrorDeclaration<TCode extends string = string, TStatus extends Pro
 };
 
 // @public
-type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus> = {
+type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
-    readonly declaration: ProviderErrorDeclaration<TCode, TStatus>;
+    readonly declaration: ProviderErrorDeclaration<TCode, TStatus, TCategory>;
 };
 
 // @public
@@ -4343,34 +4345,33 @@ interface VerificationCodeExtractionResult {
 
 // Warnings were encountered during analysis:
 //
-// dist/define-errors.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
 // dist/define-errors.d.ts:70:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point index.d.ts
 // dist/define-errors.d.ts:71:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point index.d.ts
 // dist/define-errors.d.ts:75:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point index.d.ts
 // dist/define-errors.d.ts:75:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point index.d.ts
 // dist/define-errors.d.ts:77:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:188:5 - (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1504:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1513:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1543:5 - (ae-forgotten-export) The symbol "StepReference" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1554:5 - (ae-forgotten-export) The symbol "Reference" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1587:5 - (ae-forgotten-export) The symbol "GuardReasonCode" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1622:5 - (ae-forgotten-export) The symbol "ExpectedAbsenceAttribution" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1820:5 - (ae-forgotten-export) The symbol "ScopedAssertionExpression" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1827:5 - (ae-forgotten-export) The symbol "JsonTemplate" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1828:5 - (ae-forgotten-export) The symbol "CredentialReference" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1829:5 - (ae-forgotten-export) The symbol "RetryPolicy" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1830:5 - (ae-forgotten-export) The symbol "CandidatePolicy" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1830:5 - (ae-forgotten-export) The symbol "CandidateBlock" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1831:5 - (ae-forgotten-export) The symbol "JournalPolicy" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1833:5 - (ae-forgotten-export) The symbol "ExpectedError" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "BoundedJsonPath" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "FindFirst" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1839:5 - (ae-forgotten-export) The symbol "ValueType" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:1845:5 - (ae-forgotten-export) The symbol "AssertionExpression" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:2081:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:2083:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
-// dist/health-scenario.d.ts:2084:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:189:5 - (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1505:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1514:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1544:5 - (ae-forgotten-export) The symbol "StepReference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1555:5 - (ae-forgotten-export) The symbol "Reference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1588:5 - (ae-forgotten-export) The symbol "GuardReasonCode" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1623:5 - (ae-forgotten-export) The symbol "ExpectedAbsenceAttribution" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1844:5 - (ae-forgotten-export) The symbol "ScopedAssertionExpression" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1851:5 - (ae-forgotten-export) The symbol "JsonTemplate" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1852:5 - (ae-forgotten-export) The symbol "CredentialReference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1853:5 - (ae-forgotten-export) The symbol "RetryPolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1854:5 - (ae-forgotten-export) The symbol "CandidatePolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1854:5 - (ae-forgotten-export) The symbol "CandidateBlock" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1855:5 - (ae-forgotten-export) The symbol "JournalPolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1857:5 - (ae-forgotten-export) The symbol "ExpectedError" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1862:5 - (ae-forgotten-export) The symbol "BoundedJsonPath" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1862:5 - (ae-forgotten-export) The symbol "FindFirst" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1863:5 - (ae-forgotten-export) The symbol "ValueType" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1869:5 - (ae-forgotten-export) The symbol "AssertionExpression" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:2105:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:2107:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:2108:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:130:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:166:5 - (ae-forgotten-export) The symbol "SafeRegex" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:199:9 - (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point index.d.ts

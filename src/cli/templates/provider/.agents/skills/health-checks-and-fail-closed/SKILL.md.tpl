@@ -209,13 +209,18 @@ const errors = errorRefs(declaredErrors);
 - Only `expected_absence` is admitted here. A stale-cache serve is a 2xx; a
   non-2xx is either the declared absence or a real failure.
 - `errorRefs` takes the `defineErrors` map (the reference carries the status
-  each factory declared; an `sdkErrors` entry carries the registry's) or the
-  legacy `errorCodes` table. `errors.<CODE>` exists only for a code declared
-  with status 400 or 404. An undeclared code, a code declared with another
-  status (409/410/422 are upstream refusals; 401/403/429 and every 5xx are
-  never an absence) and the auth and rate-limit codes are compile errors, so
-  a typo cannot leave a quiet day recorded as `down`. Declare a table
-  `as const` so each code is a literal.
+  and category each factory declared; an `sdkErrors` entry carries the
+  registry's) or the legacy `errorCodes` table. `errors.<CODE>` exists only
+  for a code declared with status 400 or 404 whose category the monitor
+  matches on: one served as the upstream's own envelope (`upstream_http`;
+  the `source: "upstream_failure"` class). An undeclared code, a code
+  declared with another status (409/410/422 are upstream refusals; 401/403/429
+  and every 5xx are never an absence), a code declared `upstream_rejected`
+  or `input_validation` at 400/404 (served as `upstream_rule` or `client`,
+  which the monitor never matches) and the auth and rate-limit codes are
+  compile errors, so a typo or a mis-categorized code cannot leave a quiet
+  day recorded as `down`. Declare a table `as const` so each code is a
+  literal.
 - Throw the code as the upstream's own envelope: a registered upstream code
   such as `NO_DATA`, or a provider code declared or thrown with `category:
   "upstream_http"`. An envelope attributed elsewhere never matches.

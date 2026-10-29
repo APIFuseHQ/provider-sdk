@@ -1000,13 +1000,19 @@ describe("declarative health scenarios", () => {
 		}
 	});
 
-	it("references a defineErrors map by value: declared status per code, registry status for sdkErrors, absences only", () => {
+	it("references a defineErrors map by value: declared status per code, registry status for sdkErrors, upstream-envelope absences only", () => {
 		const declared = defineErrors({
 			NO_DATA: sdkErrors.NO_DATA,
 			UPSTREAM_ERROR: sdkErrors.UPSTREAM_ERROR,
 			RATE_LIMITED: sdkErrors.RATE_LIMITED,
-			BAD_DISTRICT: { status: 400, category: "upstream_rejected", description: "Unknown district." },
+			INVALID_REQUEST: sdkErrors.INVALID_REQUEST,
+			BAD_DISTRICT: { status: 400, category: "upstream_http", description: "Unknown district." },
 			ITEM_GONE: { status: 404, category: "upstream_http", description: "The item is gone." },
+			PRODUCT_NOT_FOUND: {
+				status: 404,
+				category: "upstream_rejected",
+				description: "The shop refused the product id.",
+			},
 			SHOP_CLOSED: { status: 409, category: "upstream_rejected", description: "Closed today." },
 			UPSTREAM_DOWN: { status: 500, category: "upstream_http", description: "Upstream fault." },
 		});
@@ -1021,6 +1027,10 @@ describe("declarative health scenarios", () => {
 		expect([noData.status, badDistrict.status]).toEqual([404, 400]);
 		// @ts-expect-error test-invalid: a 500 provider code is a fault, not an absence
 		errors.UPSTREAM_DOWN;
+		// @ts-expect-error test-invalid: a 404 served as upstream_rule (upstream_rejected) is never matched by the monitor
+		errors.PRODUCT_NOT_FOUND;
+		// @ts-expect-error test-invalid: an SDK 400 served as a client fault (input_validation) is never matched by the monitor
+		errors.INVALID_REQUEST;
 		// @ts-expect-error test-invalid: a 409 is an upstream refusal, not an absence
 		errors.SHOP_CLOSED;
 		// @ts-expect-error test-invalid: an SDK code registered at 502 is never an absence
@@ -1041,6 +1051,9 @@ describe("declarative health scenarios", () => {
 		]);
 		// @ts-expect-error test-invalid: the spread 500 code stays refused
 		spread.UPSTREAM_DOWN;
+		// @ts-expect-error test-invalid: the spread upstream_rejected code stays refused
+		spread.PRODUCT_NOT_FOUND;
+		expect(Object.keys(spread).sort()).toEqual(["BAD_DISTRICT", "ITEM_GONE", "NO_DATA", "NO_ROUTE"]);
 
 		// The reference serializes to the same wire entry as the table form.
 		const base = validScenario();

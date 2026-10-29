@@ -128,6 +128,7 @@ export type {
 	DefinedErrorsMap,
 	ErrorRefs,
 	ExpectedAbsenceAttribution,
+	ExpectedAbsenceCategory,
 	ExpectedAbsenceStatus,
 	ExpectedError,
 	ExpectedErrorInput,
