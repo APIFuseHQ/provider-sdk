@@ -407,6 +407,7 @@ type World = {
 async function startWorld(): Promise<World> {
 	const plane = startControlPlane();
 	const holds = new Map<string, Waiter>();
+	const calls: Promise<unknown>[] = [];
 	const owner = startPod("pod-owner", "owner", plane, holds);
 	const source = startPod("pod-source", "source", plane, holds);
 	const { record: ownerRecord } = await plane.registry.acquire({
@@ -432,27 +433,33 @@ async function startWorld(): Promise<World> {
 		release(requestId) {
 			holds.get(requestId)?.resolve();
 		},
-		async call(requestId, options = {}) {
+		call(requestId, options = {}) {
 			ownerServed(requestId);
-			const response = await fetch(`${source.endpoint}/v1/read`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					requestId,
-					input: {},
-					headers:
-						options.deadlineMs === undefined
-							? {}
-							: {
-									"x-test-deadline-at": new Date(Date.now() + options.deadlineMs).toISOString(),
-								},
-				}),
-			});
-			return {
-				status: response.status,
-				observability: parseObservability(response),
-				body: await response.json(),
-			};
+			const answered = (async () => {
+				const response = await fetch(`${source.endpoint}/v1/read`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						requestId,
+						input: {},
+						headers:
+							options.deadlineMs === undefined
+								? {}
+								: {
+										"x-test-deadline-at": new Date(Date.now() + options.deadlineMs).toISOString(),
+									},
+					}),
+				});
+				return {
+					status: response.status,
+					observability: parseObservability(response),
+					body: await response.json(),
+				};
+			})();
+			// A scenario that fails before awaiting a call leaves it to stop(),
+			// which settles it; until then its rejection is observed here.
+			calls.push(answered.catch(() => undefined));
+			return answered;
 		},
 		async ownerServedWithin(requestId, ms) {
 			await within(ownerServed(requestId).promise, ms);
@@ -471,9 +478,13 @@ async function startWorld(): Promise<World> {
 		async stop() {
 			for (const held of holds.values()) held.resolve();
 			plane.hook = undefined;
+			// Every call settles before the pods stop, so none is left
+			// rejecting unobserved after the scenario.
+			await within(Promise.allSettled(calls), ANSWER_WAIT_MS);
 			await source.stop();
 			await owner.stop();
 			plane.stop();
+			await Promise.allSettled(calls);
 		},
 	};
 }

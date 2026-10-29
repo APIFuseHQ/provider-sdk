@@ -105,9 +105,16 @@ function causeChainSome(error: unknown, matches: (link: unknown) => boolean): bo
  * Whether `error` or one of its first `cause` links is `target` itself. An
  * aborted signal's registry call fails with the signal's own reason, either
  * thrown as it is or kept as the cause of the registry's error, so this tells
- * a failure the caller's own abort produced from any other failure.
+ * a failure the caller's own abort produced from any other failure. A reason
+ * that is not an object (`controller.abort(null)`, `abort("x")`) matches only
+ * as the thrown value itself: an unrelated error whose own `cause` happens to
+ * be the same primitive, such as `{ cause: null }`, is not that abort.
  */
 export function errorCauseChainIncludes(error: unknown, target: unknown): boolean {
+	if (error === target) return true;
+	if (target === null || (typeof target !== "object" && typeof target !== "function")) {
+		return false;
+	}
 	return causeChainSome(error, (link) => link === target);
 }
 

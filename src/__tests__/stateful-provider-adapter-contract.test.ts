@@ -479,6 +479,9 @@ async function outcomeSoon(promise: Promise<unknown>): Promise<Outcome> {
 	]);
 }
 
+// test-invalid: a JavaScript caller outside the declared type calls without a signal.
+const missingSignal: AbortSignal = undefined as never;
+
 const ESTABLISHMENT_FAILURE = Symbol.for(
 	"@apifuse/provider-sdk/stateful/session-establishment-failure@1",
 );
@@ -656,6 +659,93 @@ describe("StatefulProviderSessionManager queue wait and the request's signal", (
 		await world.manager.closeAll("test");
 	});
 
+	it("keeps the pooled session when a null abort reason is itself what the re-check threw", async () => {
+		const world = revalidationWorld((signal) => {
+			signal.throwIfAborted();
+		});
+		const { error } = await world.recheckThatFails({ abort: true, reason: null });
+		expect(error).toBeNull();
+		expect(world.closes).toEqual([]);
+		await world.invokeAgain();
+		expect(world.connects()).toBe(1);
+		await world.manager.closeAll("test");
+	});
+
+	it("still closes the pooled session for an unrelated error whose own cause is null when the abort reason is null", async () => {
+		const unrelated = new Error("registry unavailable", { cause: null });
+		const world = revalidationWorld(() => {
+			throw unrelated;
+		});
+		const { error } = await world.recheckThatFails({ abort: true, reason: null });
+		expect(error).toBe(unrelated);
+		expect(hasEstablishmentFailureMark(error)).toBe(true);
+		expect(world.closes).toEqual(["ownership-validation-failed"]);
+		await world.manager.closeAll("test");
+	});
+
+	it("closes the pooled session with the original error for a caller that passes no signal", async () => {
+		const sessionKey = testSessionKey();
+		const closes: string[] = [];
+		const unrelated = new Error("control plane unavailable");
+		let failValidation = false;
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				close: async (_ctx, _session, reason) => {
+					closes.push(reason);
+				},
+			}),
+			poolPolicy,
+		});
+		const validateOwnership = async (expected: SessionOwnerRecord) => {
+			if (failValidation) throw unrelated;
+			return expected;
+		};
+		await manager.invoke(owner(sessionKey), request(sessionKey), missingSignal, validateOwnership);
+		failValidation = true;
+		const error = await manager
+			.invoke(owner(sessionKey), request(sessionKey, "r2"), missingSignal, validateOwnership)
+			.then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+		expect(error).toBe(unrelated);
+		expect(hasEstablishmentFailureMark(error)).toBe(true);
+		expect(closes).toEqual(["ownership-validation-failed"]);
+		await manager.closeAll("test");
+	});
+
+	it("queues a parallel operation without a signal behind maxInFlight as before", async () => {
+		const sessionKey = testSessionKey();
+		const hold = gate();
+		const started = gate();
+		const order: string[] = [];
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				policy: { concurrency: { mode: "parallel", maxInFlight: 1 }, reconnect: "resume" },
+				invoke: async (_ctx, _session, operation) => {
+					order.push(`start-${operation.requestId}`);
+					if (operation.requestId === "r1") {
+						started.open();
+						await hold.promise;
+					}
+					order.push(`end-${operation.requestId}`);
+					return { output: operation.requestId };
+				},
+			}),
+			poolPolicy,
+		});
+		const r1 = manager.invoke(owner(sessionKey), request(sessionKey, "r1"), missingSignal);
+		await started.promise;
+		const r2 = manager.invoke(owner(sessionKey), request(sessionKey, "r2"), missingSignal);
+		await Bun.sleep(5);
+		expect(order).toEqual(["start-r1"]);
+		hold.open();
+		expect(await r1).toEqual({ output: "r1" });
+		expect(await r2).toEqual({ output: "r2" });
+		expect(order).toEqual(["start-r1", "end-r1", "start-r2", "end-r2"]);
+		await manager.closeAll("test");
+	});
+
 	it("lets a queued health check whose signal aborts leave without running the health hook", async () => {
 		const sessionKey = testSessionKey();
 		const hold = gate();
@@ -729,14 +819,17 @@ function revalidationWorld(failure: (signal: AbortSignal) => void) {
 		manager,
 		closes,
 		connects: () => connects,
-		async recheckThatFails(options: { readonly abort: boolean }) {
+		async recheckThatFails(options: { readonly abort: boolean; readonly reason?: unknown }) {
 			await invokeWith("pools-the-session", new AbortController().signal);
 			failNext = true;
 			const controller = new AbortController();
-			const reason = new DOMException(
-				"Stateful operation request recheck deadline has expired.",
-				"AbortError",
-			);
+			const reason =
+				"reason" in options
+					? options.reason
+					: new DOMException(
+							"Stateful operation request recheck deadline has expired.",
+							"AbortError",
+						);
 			const recheck = invokeWith("recheck", controller.signal);
 			await recheckEntered.promise;
 			if (options.abort) controller.abort(reason);

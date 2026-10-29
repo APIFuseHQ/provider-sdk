@@ -415,8 +415,10 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			// The request's own abort ended the re-check before it learned
 			// anything about the owner. That is no evidence the pod lost the
 			// session, so the pooled session and the owner lease stay; only a
-			// failure that is not this signal's reason closes them.
-			if (signal.aborted && errorCauseChainIncludes(error, signal.reason)) throw error;
+			// failure that is not this signal's reason closes them. A caller
+			// outside the declared type may pass no signal at all; its failure
+			// closes them as before.
+			if (signal?.aborted && errorCauseChainIncludes(error, signal.reason)) throw error;
 			await this.#pool
 				.invalidate(owner.sessionKey, "ownership-validation-failed")
 				.catch(() => undefined);
@@ -488,15 +490,15 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 	 * waiter, so an arrival in between cannot take it. A waiter whose signal
 	 * aborts leaves the line at once with the signal's reason; one that was
 	 * handed a slot in the same turn its signal aborted passes the slot on and
-	 * does not run.
+	 * does not run. Without a signal the wait is unconditional, as before.
 	 */
 	private async runLimited<R>(
 		sessionKey: string,
 		maxInFlight: number,
 		run: () => Promise<R>,
-		signal: AbortSignal,
+		signal: AbortSignal | undefined,
 	): Promise<R> {
-		signal.throwIfAborted();
+		signal?.throwIfAborted();
 		let limiter = this.#parallelLimiters.get(sessionKey);
 		if (!limiter) {
 			limiter = { active: 0, waiting: [] };
@@ -506,7 +508,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			limiter.active += 1;
 		} else {
 			await waitForLimiterSlot(limiter, signal);
-			if (signal.aborted) {
+			if (signal?.aborted) {
 				this.releaseLimiterSlot(sessionKey, limiter);
 				throw signal.reason;
 			}
@@ -530,7 +532,13 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		}
 	}
 
-	private schedule<R>(sessionKey: string, run: () => Promise<R>, signal: AbortSignal): Promise<R> {
+	// `signal` is declared on every public entry, but a JavaScript caller can
+	// leave it out; the wait then behaves as it did before signals reached it.
+	private schedule<R>(
+		sessionKey: string,
+		run: () => Promise<R>,
+		signal: AbortSignal | undefined,
+	): Promise<R> {
 		const concurrency = this.#adapter.policy.concurrency;
 		if (concurrency.mode === "serialize") return this.#pool.runExclusive(sessionKey, run, signal);
 		if (concurrency.maxInFlight === undefined) return run();
@@ -549,19 +557,22 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
  * takes its wake-up out of the line, so the next hand-off reaches a waiter
  * that is still there.
  */
-function waitForLimiterSlot(limiter: ParallelLimiter, signal: AbortSignal): Promise<void> {
+function waitForLimiterSlot(
+	limiter: ParallelLimiter,
+	signal: AbortSignal | undefined,
+): Promise<void> {
 	return new Promise<void>((resolve, reject) => {
 		const onAbort = () => {
 			const index = limiter.waiting.indexOf(wake);
 			if (index !== -1) limiter.waiting.splice(index, 1);
-			reject(signal.reason);
+			reject(signal?.reason);
 		};
 		const wake = () => {
-			signal.removeEventListener("abort", onAbort);
+			signal?.removeEventListener("abort", onAbort);
 			resolve();
 		};
 		limiter.waiting.push(wake);
-		signal.addEventListener("abort", onAbort, { once: true });
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
 
