@@ -115,6 +115,8 @@ type ErrorList = {
 	/** The property `errors` is inserted before: the list itself, or the pre-#238 `docs` block holding it. */
 	readonly anchor: TS.PropertyAssignment;
 	readonly entries: readonly Entry[];
+	/** `errorCodes: NAME` (a table named whole, no array literal): becomes `errors: Object.values(NAME)`. */
+	readonly wholeName?: string;
 };
 
 type Declaration =
@@ -163,6 +165,27 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	let rewrites = 0;
 
 	for (const list of lists) {
+		if (list.wholeName !== undefined) {
+			if (isDefineErrorsMap(ts, maps, list.file, list.wholeName)) {
+				rewrites += 1;
+				editsFor(edits, list.file).push({
+					start: list.pair.getStart(list.file.source),
+					end: list.pair.end,
+					text: `errors: Object.values(${list.wholeName})`,
+				});
+			} else {
+				residues.push(
+					finding(
+						list.file,
+						list.pair.getStart(list.file.source),
+						ERRORS_HOIST_RULES.spreadNotATable,
+						`errorCodes names ${list.wholeName}, which is not declared with defineErrors, so it cannot become errors: Object.values(${list.wholeName}); it is left in place.`,
+						"Give the rows a defineErrors map and name that, then re-run apifuse migrate. A `const T = [...] as const` table becomes one through the errors-factory codemod when its rows carry code and status.",
+					),
+				);
+			}
+			continue;
+		}
 		const moved: string[] = [];
 		const movedCodes: string[] = [];
 		const kept: TS.Expression[] = [];
@@ -219,7 +242,12 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 			}
 		}
 		if (moved.length === 0 || blocked) continue;
-		if (!ensureMapImport(ts, list.file, existing, residues, imports)) continue;
+		// A list that only spreads maps references no `errors.CODE`: no import,
+		// and no map to create for it.
+		const needsMap = moved.some(
+			(item) => item.startsWith(`${MAP_NAME}.`) || item.startsWith(`${MAP_NAME}[`),
+		);
+		if (needsMap && !ensureMapImport(ts, list.file, existing, residues, imports)) continue;
 		for (const code of movedCodes) hoisted.add(code);
 		rewrites += 1;
 		editsFor(edits, list.file).push(...listEdits(ts, list, moved, kept));
@@ -303,7 +331,19 @@ function collectLists(
 				ts.isObjectLiteralExpression(node.parent)
 			) {
 				const array = unwrapExpression(ts, node.initializer);
-				if (ts.isArrayLiteralExpression(array)) {
+				if (ts.isIdentifier(array)) {
+					const placement = listPlacement(ts, node);
+					if (placement !== undefined) {
+						lists.push({
+							file,
+							pair: node,
+							array: ts.factory.createArrayLiteralExpression([]),
+							...placement,
+							entries: [],
+							wholeName: array.text,
+						});
+					}
+				} else if (ts.isArrayLiteralExpression(array)) {
 					const entries = array.elements.map((element) =>
 						classifyEntry(ts, file, element, sources),
 					);
