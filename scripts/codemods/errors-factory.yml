@@ -53,6 +53,10 @@
 #   7. entry-not-a-row     diagnostic only (no fix): an errorCodes element that is not a row literal
 #                          (a spread, a row constant referenced by name); rule 2 skips the list and
 #                          `apifuse migrate` (errors-hoist) resolves the name across files
+#   8. throw-site-locale-key diagnostic only (no fix): a throw site stating messageKey/fixKey, which
+#                          the factory input cannot carry; rule 1 skips it. A throw site of a code the
+#                          SDK runtime owns (MISSING_SECRET, reauth_required, HANDLE_*, ...) is never
+#                          rewritten: no factory can exist for it and the SDK serves it as it is
 id: errors-factory-throw-site
 language: typescript
 utils:
@@ -227,10 +231,20 @@ rule:
         has:
           matches: registry-conflict-options
           stopBy: end
+    # A per-throw messageKey/fixKey has no place in the factory input; rule 8
+    # reports it until it moves to the declaration.
+    - not:
+        has:
+          kind: pair
+          has: { field: key, regex: '^(messageKey|fixKey)$' }
+          stopBy: end
 constraints:
   CODE:
     kind: string
     regex: "^[\"'][A-Za-z_$][A-Za-z0-9_$]*[\"']$"
+    # A code the SDK runtime owns cannot be declared, so no factory exists for it.
+    not:
+      regex: "^[\"'](AMBIGUOUS_CODE|AUTH_FLOW_NOT_CONFIGURED|AUTH_PROMPT_UNAVAILABLE|BROWSER_CDP_POOL_REQUIRED|BROWSER_RUNTIME_UNSUPPORTED|EGRESS_LEASE_BINDING_INVALID|EGRESS_LEASE_INVALID|EGRESS_LEASE_KEY_MISSING|EGRESS_LEASE_KEY_WEAK|HANDLE_BUSY|HANDLE_COMMITTED|HANDLE_CONNECTION_REQUIRED|HANDLE_EXPIRED|HANDLE_INVALID|HANDLE_INVALID_DATA|HANDLE_KIND_MISMATCH|HANDLE_NOT_FOUND|HANDLE_STORAGE_UNAVAILABLE|HANDLE_TOO_LARGE|INVALID_STT_AUDIO|INVALID_STT_VERIFICATION_CODE_OPTIONS|MISSING_SECRET|NO_CODE_FOUND|OCR_UNAVAILABLE|OCR_UPSTREAM_FAILED|OUTPUT_VALIDATION_FAILED|PICK_NOT_OFFERED|PROVIDER_EGRESS_DENIED|PROVIDER_ENGINE_AUTHENTICATION_FAILED|PROVIDER_ENGINE_MODE_UNSUPPORTED|PROVIDER_ENGINE_PROTOCOL_VERSION_MISMATCH|PROVIDER_ENGINE_UNAVAILABLE|PROVIDER_STATE_UNSUPPORTED|REPLAY_ALREADY_ATTEMPTED|REPLAY_SESSION_MISMATCH|RUNTIME_UNSUPPORTED|SSE_EVENT_UNDECLARED|SSE_RESULT_UNSUPPORTED|STATEFUL_CONTROL_PLANE_HTTP_ERROR|STATEFUL_CONTROL_PLANE_INVALID_RESPONSE|STATEFUL_CONTROL_PLANE_OPERATION_AMBIGUOUS|STATEFUL_CONTROL_PLANE_REQUEST_FAILED|STATEFUL_FILE_FORWARDING_UNSUPPORTED|STATEFUL_FORWARDING_BAD_RESPONSE|STATEFUL_FORWARDING_CONTEXT_INVALID|STATEFUL_FORWARDING_CONTEXT_MISSING|STATEFUL_FORWARDING_ENVELOPE_INVALID|STATEFUL_FORWARDING_NONCE_INVALID|STATEFUL_FORWARDING_NOT_CONFIGURED|STATEFUL_FORWARDING_OWNER_FENCE_INVALID|STATEFUL_FORWARDING_PROVIDER_MISMATCH|STATEFUL_FORWARDING_REPLAY_CACHE_FULL|STATEFUL_FORWARDING_REPLAY_DETECTED|STATEFUL_FORWARDING_REQUEST_FAILED|STATEFUL_FORWARDING_SIGNATURE_INVALID|STATEFUL_FORWARDING_SIGNATURE_MISSING|STATEFUL_FORWARDING_SOURCE_POD_MISMATCH|STATEFUL_FORWARDING_TIMESTAMP_INVALID|STATEFUL_INTERNAL_EXECUTOR_NOT_CONFIGURED|STEALTH_BODY_UNSUPPORTED|STEALTH_HEADER_OVERRIDE_UNSUPPORTED|STEALTH_RUNTIME_UNSUPPORTED|STREAM_CHUNK_TOO_LARGE|STREAM_EVENT_TOO_LARGE|STREAM_RESULT_UNSUPPORTED|STT_AUDIO_TOO_LARGE|STT_UNAVAILABLE|STT_UPSTREAM_FAILED|UNSUPPORTED_OCR_BACKEND|UNSUPPORTED_STT_BACKEND|UNSUPPORTED_STT_OPTION|auth_abort_unsafe_data|context_access_error|credential_key_error|credential_mode_error|credentials_auth_invalid_login_result|credentials_auth_missing_credential|credentials_auth_missing_credential_keys|credentials_auth_unknown_challenge|credentials_auth_unknown_pending_challenge|flow_expired|http_header_factory_failed|http_redirect_loop|http_redirect_max_hops|http_redirect_missing_location|http_redirect_policy_invalid|http_redirect_stopped|http_transport_override_unsupported|provider_secret_error|reauth_required|refresh_not_supported|response_too_large|retry_exhausted|retry_invalid_policy|retry_unsafe_method|stealth_cookie_store_serialize_failed|transport_invalid_method|transport_invalid_url|transport_stream_unavailable|turn_validation_error|unsupported_stealth_cookie_store_version)[\"']$"
 rewriters:
   - id: keep-throw-props
     rule:
@@ -445,10 +459,17 @@ rule:
         has:
           matches: registry-conflict-options
           stopBy: end
+    - not:
+        has:
+          kind: pair
+          has: { field: key, regex: '^(messageKey|fixKey)$' }
+          stopBy: end
 constraints:
   CODE:
     kind: string
     regex: "^[\"'](.*[^A-Za-z0-9_$].*|[0-9].*)[\"']$"
+    not:
+      regex: "^[\"'](AMBIGUOUS_CODE|AUTH_FLOW_NOT_CONFIGURED|AUTH_PROMPT_UNAVAILABLE|BROWSER_CDP_POOL_REQUIRED|BROWSER_RUNTIME_UNSUPPORTED|EGRESS_LEASE_BINDING_INVALID|EGRESS_LEASE_INVALID|EGRESS_LEASE_KEY_MISSING|EGRESS_LEASE_KEY_WEAK|HANDLE_BUSY|HANDLE_COMMITTED|HANDLE_CONNECTION_REQUIRED|HANDLE_EXPIRED|HANDLE_INVALID|HANDLE_INVALID_DATA|HANDLE_KIND_MISMATCH|HANDLE_NOT_FOUND|HANDLE_STORAGE_UNAVAILABLE|HANDLE_TOO_LARGE|INVALID_STT_AUDIO|INVALID_STT_VERIFICATION_CODE_OPTIONS|MISSING_SECRET|NO_CODE_FOUND|OCR_UNAVAILABLE|OCR_UPSTREAM_FAILED|OUTPUT_VALIDATION_FAILED|PICK_NOT_OFFERED|PROVIDER_EGRESS_DENIED|PROVIDER_ENGINE_AUTHENTICATION_FAILED|PROVIDER_ENGINE_MODE_UNSUPPORTED|PROVIDER_ENGINE_PROTOCOL_VERSION_MISMATCH|PROVIDER_ENGINE_UNAVAILABLE|PROVIDER_STATE_UNSUPPORTED|REPLAY_ALREADY_ATTEMPTED|REPLAY_SESSION_MISMATCH|RUNTIME_UNSUPPORTED|SSE_EVENT_UNDECLARED|SSE_RESULT_UNSUPPORTED|STATEFUL_CONTROL_PLANE_HTTP_ERROR|STATEFUL_CONTROL_PLANE_INVALID_RESPONSE|STATEFUL_CONTROL_PLANE_OPERATION_AMBIGUOUS|STATEFUL_CONTROL_PLANE_REQUEST_FAILED|STATEFUL_FILE_FORWARDING_UNSUPPORTED|STATEFUL_FORWARDING_BAD_RESPONSE|STATEFUL_FORWARDING_CONTEXT_INVALID|STATEFUL_FORWARDING_CONTEXT_MISSING|STATEFUL_FORWARDING_ENVELOPE_INVALID|STATEFUL_FORWARDING_NONCE_INVALID|STATEFUL_FORWARDING_NOT_CONFIGURED|STATEFUL_FORWARDING_OWNER_FENCE_INVALID|STATEFUL_FORWARDING_PROVIDER_MISMATCH|STATEFUL_FORWARDING_REPLAY_CACHE_FULL|STATEFUL_FORWARDING_REPLAY_DETECTED|STATEFUL_FORWARDING_REQUEST_FAILED|STATEFUL_FORWARDING_SIGNATURE_INVALID|STATEFUL_FORWARDING_SIGNATURE_MISSING|STATEFUL_FORWARDING_SOURCE_POD_MISMATCH|STATEFUL_FORWARDING_TIMESTAMP_INVALID|STATEFUL_INTERNAL_EXECUTOR_NOT_CONFIGURED|STEALTH_BODY_UNSUPPORTED|STEALTH_HEADER_OVERRIDE_UNSUPPORTED|STEALTH_RUNTIME_UNSUPPORTED|STREAM_CHUNK_TOO_LARGE|STREAM_EVENT_TOO_LARGE|STREAM_RESULT_UNSUPPORTED|STT_AUDIO_TOO_LARGE|STT_UNAVAILABLE|STT_UPSTREAM_FAILED|UNSUPPORTED_OCR_BACKEND|UNSUPPORTED_STT_BACKEND|UNSUPPORTED_STT_OPTION|auth_abort_unsafe_data|context_access_error|credential_key_error|credential_mode_error|credentials_auth_invalid_login_result|credentials_auth_missing_credential|credentials_auth_missing_credential_keys|credentials_auth_unknown_challenge|credentials_auth_unknown_pending_challenge|flow_expired|http_header_factory_failed|http_redirect_loop|http_redirect_max_hops|http_redirect_missing_location|http_redirect_policy_invalid|http_redirect_stopped|http_transport_override_unsupported|provider_secret_error|reauth_required|refresh_not_supported|response_too_large|retry_exhausted|retry_invalid_policy|retry_unsafe_method|stealth_cookie_store_serialize_failed|transport_invalid_method|transport_invalid_url|transport_stream_unavailable|turn_validation_error|unsupported_stealth_cookie_store_version)[\"']$"
 rewriters:
   - id: keep-throw-props
     rule:
@@ -1317,3 +1338,27 @@ rule:
       has:
         field: key
         regex: '^errorCodes$'
+---
+# Residue, not a rewrite: a throw site that states a messageKey or fixKey.
+# The factory input carries neither (the declaration does), so rule 1 leaves
+# the site; the author moves the key to the defineErrors row.
+id: errors-factory-throw-site-locale-key
+language: typescript
+severity: warning
+message: 'Throw site of $CODE states a messageKey or fixKey; the factory input carries neither, so the site is left as new ProviderError(...).'
+note: 'Move the key to the code''s defineErrors declaration (messageKey / fixKey on the row) and delete it here, then re-run apifuse migrate.'
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+        stopBy: end
+    - has:
+        kind: pair
+        has: { field: key, regex: '^(messageKey|fixKey)$' }
+        stopBy: end
+constraints:
+  CODE:
+    kind: string

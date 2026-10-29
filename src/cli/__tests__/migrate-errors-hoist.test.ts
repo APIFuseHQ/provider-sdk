@@ -12,6 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
 
+import {
+	SDK_ERROR_REGISTRY,
+	SDK_RUNTIME_OWNED_ERROR_CODES,
+	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
+} from "../../error-resolution.js";
 import { ERRORS_HOIST_RULES, hoistInlineErrorRows } from "../migrate-errors-hoist.js";
 import type { MigrateFinding, SourceStepResult } from "../migrate-source.js";
 
@@ -172,6 +177,7 @@ describe("errors-hoist", () => {
 			expect(mapper).toContain(
 				'throw COMMON_ERRORS.UPSTREAM_SCHEMA_ERROR({ message: "Shape drift." });',
 			);
+			expect(read("domain/errors.ts")).not.toContain("UPSTREAM_SCHEMA_ERROR");
 			expect(mapper).toContain('throw errors.NEVER_DECLARED({ message: "Unknown." });');
 			expect(parses("mappers/item.ts")).toBe(true);
 			// No map in scope: the one map elsewhere that declares the code is
@@ -182,7 +188,7 @@ describe("errors-hoist", () => {
 					'import { COMMON_ERRORS } from "../shared";\nimport { errors } from "../domain/errors";\n',
 				),
 			).toBe(true);
-			expect(remote).toContain("throw COMMON_ERRORS.UPSTREAM_SCHEMA_ERROR({");
+			expect(remote).toContain("throw COMMON_ERRORS.SHARED_ONLY({");
 			expect(remote).toContain("throw errors.RATE_LIMITED({");
 			expect(read("domain/errors.ts")).toContain("\tRATE_LIMITED: sdkErrors.RATE_LIMITED,\n");
 			expect(parses("mappers/remote.ts")).toBe(true);
@@ -288,5 +294,27 @@ describe("errors-hoist", () => {
 			for (const file of ["domain/errors.ts", "operations/list.ts"])
 				expect(parses(file)).toBe(true);
 		});
+	});
+});
+
+describe("errors-factory.yml owned-code guard", () => {
+	it("lists exactly the codes defineErrors refuses, so rule 1 never writes a factory that cannot exist", () => {
+		const yaml = readFileSync(
+			join(import.meta.dir, "../../../scripts/codemods/errors-factory.yml"),
+			"utf8",
+		);
+		const guards = [...yaml.matchAll(/regex: "\^\[\\"'\]\(([A-Za-z_|]+)\)\[\\"'\]\$"/g)]
+			.map((match) => match[1] as string)
+			.filter((list) => list.includes("MISSING_SECRET"));
+		expect(guards).toHaveLength(2);
+		const expected = [
+			...new Set([
+				...SDK_RUNTIME_OWNED_ERROR_CODES,
+				...SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.keys(),
+			]),
+		]
+			.filter((code) => !Object.hasOwn(SDK_ERROR_REGISTRY, code))
+			.sort();
+		for (const guard of guards) expect(guard.split("|").sort()).toEqual(expected);
 	});
 });

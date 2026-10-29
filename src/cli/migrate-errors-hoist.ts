@@ -6,6 +6,7 @@ import type TS from "typescript";
 import {
 	SDK_ERROR_REGISTRY,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
+	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 	type SdkErrorCode,
 } from "../error-resolution.js";
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
@@ -156,21 +157,19 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	const declarations = declareCodes(ts, lists, existing, throwCategories, residues, notes);
 	const maps = defineErrorsMaps(ts, sources);
 	const references = collectReferences(ts, sources, existing?.file.path ?? DEFAULT_MODULE);
-	// A registered code a throw site names that no map declares (its row sat
-	// in a table rule 3 does not convert) is declared by value in the map.
-	const declaredSomewhere = new Set<string>();
-	for (const byName of maps.values())
-		for (const entry of byName.values())
-			for (const code of entry.codes) declaredSomewhere.add(code);
+	// A registered code a throw site names that no map in the file's scope
+	// declares (its row sat in a table rule 3 does not convert, or in another
+	// operation's table) is declared by value in the provider map.
 	const referencedSdk = new Set<string>();
 	for (const fileReferences of references) {
+		const scope = mapsInScope(ts, maps, fileReferences.file);
 		for (const item of fileReferences.items) {
 			const code = item.code;
 			if (
 				Object.hasOwn(SDK_ERROR_REGISTRY, code) &&
 				!declarations.has(code) &&
 				!existing?.entries.has(code) &&
-				!declaredSomewhere.has(code)
+				![...scope].some(([name, codes]) => name !== MAP_NAME && codes.has(code))
 			) {
 				declarations.set(code, { kind: "sdk", code: code as SdkErrorCode });
 				referencedSdk.add(code);
@@ -526,6 +525,13 @@ function factoryRewriteCode(ts: TypeScriptModule, node: TS.NewExpression): strin
 	const codePair = propertyOf(ts, options, "code");
 	const code = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
 	if (code === undefined) return undefined;
+	if (
+		propertyOf(ts, options, "messageKey") !== undefined ||
+		propertyOf(ts, options, "fixKey") !== undefined
+	) {
+		return undefined;
+	}
+	if (!Object.hasOwn(SDK_ERROR_REGISTRY, code) && isSdkOwnedCode(code)) return undefined;
 	if (Object.hasOwn(SDK_ERROR_REGISTRY, code)) {
 		const registry = SDK_ERROR_REGISTRY[code as SdkErrorCode];
 		const retryable = propertyOf(ts, options, "retryable");
@@ -563,6 +569,13 @@ function healthRefsRewriteCode(
 		return undefined;
 	}
 	return literalString(ts, code.initializer);
+}
+
+/** A code the SDK runtime throws itself: defineErrors refuses it, so no factory exists and the throw site stays. */
+export function isSdkOwnedCode(code: string): boolean {
+	return (
+		SDK_RUNTIME_OWNED_ERROR_CODES.has(code) || SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.has(code)
+	);
 }
 
 /** Top-level names a file binds (declarations and imports), which a reference to `errors` resolves to before any import this step adds. */
