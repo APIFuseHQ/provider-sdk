@@ -6,7 +6,8 @@ import {
 	type ProxyResolutionOptions,
 	type ProxyUserAgentSource,
 } from "../config/loader.js";
-import { ProviderError, sdkErrorOptions } from "../errors.js";
+import { ProviderError } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import type {
 	ChallengeSolution,

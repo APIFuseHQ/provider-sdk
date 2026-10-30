@@ -437,8 +437,8 @@ interface AuthContext {
 
 // @public (undocumented)
 export class AuthError extends ProviderError {
-    // Warning: (ae-forgotten-export) The symbol "ProviderErrorOptions" needs to be exported by the entry point provider.d.ts
-    constructor(message: string, options?: ProviderErrorOptions);
+    // Warning: (ae-forgotten-export) The symbol "ProviderErrorConstructorOptions" needs to be exported by the entry point provider.d.ts
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -4324,7 +4324,7 @@ export interface ProviderEngineAttachmentInput {
 
 // @public
 export class ProviderEngineAuthenticationError extends SDKError {
-    constructor(message?: string, options?: ProviderErrorOptions);
+    constructor(message?: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -4418,13 +4418,15 @@ export class ProviderEngineUnavailableError extends SDKError {
 
 // @public
 export class ProviderError<TCode extends string = string> extends Error {
-    constructor(message: string, options?: ProviderErrorOptions | undefined);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
     // (undocumented)
     get code(): TCode | undefined;
     // (undocumented)
     get details(): unknown;
     // (undocumented)
     get fix(): string | undefined;
+    // Warning: (ae-forgotten-export) The symbol "ProviderErrorOptions" needs to be exported by the entry point provider.d.ts
+    //
     // (undocumented)
     readonly options?: ProviderErrorOptions | undefined;
 }
@@ -4441,6 +4443,11 @@ type ProviderErrorCategory = PlatformFaultCategory | ProviderFailureCategory;
 type ProviderErrorCategoryOfSource<TSource extends ProviderErrorSource> = {
     [K in ProviderErrorCategory]: (typeof PROVIDER_ERROR_CATEGORY_SOURCES)[K] extends TSource ? K : never;
 }[ProviderErrorCategory];
+
+// Warning: (ae-forgotten-export) The symbol "RetiredErrorContractFields" needs to be exported by the entry point provider.d.ts
+//
+// @public
+type ProviderErrorConstructorOptions<T extends ProviderErrorOptions = ProviderErrorOptions> = T & RetiredErrorContractFields;
 
 // @public
 export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
@@ -5118,6 +5125,12 @@ export interface ResponseMatcher {
 
 // @public (undocumented)
 export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
+
+// @public
+type RetiredErrorContractFields = {
+    readonly category?: never;
+    readonly retryable?: never;
+};
 
 // @public (undocumented)
 export type RetryPolicy = {
@@ -6038,7 +6051,7 @@ export type SdkCopyLocale = "en" | "ko" | "ja";
 
 // @public (undocumented)
 export class SDKError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // Warning: (ae-forgotten-export) The symbol "SDK_ERROR_REGISTRY" needs to be exported by the entry point provider.d.ts
@@ -6764,7 +6777,7 @@ const VALID_OPERATION_ERROR_STATUSES: readonly [400, 401, 404, 409, 410, 422, 42
 // @public (undocumented)
 export class ValidationError extends ProviderError {
     // Warning: (ae-forgotten-export) The symbol "ValidationErrorOptions" needs to be exported by the entry point provider.d.ts
-    constructor(message: string, options?: ValidationErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions<ValidationErrorOptions>);
     // (undocumented)
     readonly zodError?: unknown;
 }

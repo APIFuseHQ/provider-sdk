@@ -13,9 +13,9 @@ import {
 	hasHandleErrorBrand,
 	ProviderError,
 	type SdkErrorOptions,
-	sdkErrorOptions,
 	ValidationError,
 } from "./errors.js";
+import { sdkErrorOptions } from "./sdk-error-contract.js";
 import {
 	APIFUSE_HANDLE_META_KEY,
 	formatHandleIssuers,

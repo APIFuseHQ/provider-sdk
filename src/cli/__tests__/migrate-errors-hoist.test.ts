@@ -251,7 +251,7 @@ describe("errors-hoist", () => {
 				(residue) => residue.ruleId === ERRORS_HOIST_RULES.throwSiteConflict,
 			);
 			expect(site?.message).toBe(
-				'Throw site of "ITEM_NOT_FOUND" serves category "upstream_http", and the declaration serves category "provider_error", retryable false; it is left as new ProviderError(...) and keeps serving its own value.',
+				'Throw site of "ITEM_NOT_FOUND" serves category "upstream_http", and the declaration serves category "provider_error", retryable false; it is left as new ProviderError(...), which refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.',
 			);
 			expect(read("operations/list.ts")).toContain(
 				'throw new ProviderError("No item matches the id.", {\n\t\t\t\tcode: "ITEM_NOT_FOUND",\n\t\t\t\tcategory: "upstream_http",\n\t\t\t});',
@@ -452,13 +452,13 @@ describe("a site the factory cannot replace", () => {
 		);
 		expect(result.residues[5]?.message).toBe(result.residues[4]?.message);
 		expect(result.residues[0]?.message).toBe(
-			'Throw site of "SHOP_DOWN" (ValidationError) states category "upstream_http" and retryable false; reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category "input_validation", retryable false once the option is gone, so the site is left as written and keeps serving its own value for one more release.',
+			'Throw site of "SHOP_DOWN" (ValidationError) states category "upstream_http" and retryable false; reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category "input_validation", retryable false once the option is gone; the site is left as written, and new ValidationError(...) refuses the option at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.',
 		);
 		expect(result.residues[6]?.message).toBe(
-			'Throw site of "NOT_FOUND" (ValidationError) sets retryable true per throw, and the SDK registry (sdkErrors.NOT_FOUND, which this provider\'s rows match) serves category "upstream_http", retryable false; the per-throw value is served for one more release, so the site is left as written.',
+			'Throw site of "NOT_FOUND" (ValidationError) sets retryable true per throw, and the SDK registry (sdkErrors.NOT_FOUND, which this provider\'s rows match) serves category "upstream_http", retryable false; the site is left as written, and new ValidationError(...) refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.',
 		);
 		expect(result.residues[7]?.message).toBe(
-			'Throw site of "MISSING_SECRET" (ProviderError) sets category "provider_error" per throw, and the SDK runtime (which owns this code and reads no declaration for it) serves category "credential_unavailable", retryable false; the per-throw value is served for one more release, so the site is left as written.',
+			'Throw site of "MISSING_SECRET" (ProviderError) sets category "provider_error" per throw, and the SDK runtime (which owns this code and reads no declaration for it) serves category "credential_unavailable", retryable false; the site is left as written, and new ProviderError(...) refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.',
 		);
 		expect(parses("upstream/sites.ts")).toBe(true);
 		// The second run sees the map stating MIXED_INPUT's category: the sites

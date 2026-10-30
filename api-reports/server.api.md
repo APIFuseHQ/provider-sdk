@@ -3648,7 +3648,8 @@ interface ProviderEngineResidentSurface {
 
 // @public
 class ProviderError<TCode extends string = string> extends Error {
-    constructor(message: string, options?: ProviderErrorOptions | undefined);
+    // Warning: (ae-forgotten-export) The symbol "ProviderErrorConstructorOptions" needs to be exported by the entry point index.d.ts
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
     // (undocumented)
     get code(): TCode | undefined;
     // (undocumented)
@@ -3678,6 +3679,11 @@ export type ProviderErrorCauseFrame = {
     messageFingerprint: string;
     providerObservability?: ProviderErrorObservability;
 };
+
+// Warning: (ae-forgotten-export) The symbol "RetiredErrorContractFields" needs to be exported by the entry point index.d.ts
+//
+// @public
+type ProviderErrorConstructorOptions<T extends ProviderErrorOptions = ProviderErrorOptions> = T & RetiredErrorContractFields;
 
 // @public
 type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
@@ -4067,7 +4073,7 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     providerObservability?: ProviderErrorObservability;
     causeChain?: ProviderErrorCauseFrame[];
     stack?: string[];
-    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
+    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category" | "per_throw_error_options_retired";
     signalFix?: string;
     issues?: Array<{
         path: string;
@@ -4929,6 +4935,12 @@ interface ResponseMatcher {
 
 // @public (undocumented)
 type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
+
+// @public
+type RetiredErrorContractFields = {
+    readonly category?: never;
+    readonly retryable?: never;
+};
 
 // @public (undocumented)
 type RetryPolicy = {

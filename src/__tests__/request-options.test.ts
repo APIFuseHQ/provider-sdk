@@ -2,11 +2,11 @@ import { describe, expect, it } from "bun:test";
 import {
 	ProviderError,
 	ProviderSecretError,
-	sdkErrorOptions,
 	SessionExpiredError,
 	StealthCookieStoreVersionError,
 	TransportError,
 } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import {
 	REDACTED_QUERY_VALUE,
 	redactSensitiveError,

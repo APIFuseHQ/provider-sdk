@@ -455,7 +455,8 @@ const PROVIDER_FAILURE_CATEGORIES: readonly ["timeout", "network", "upstream_htt
 
 // @public
 class ProviderError<TCode extends string = string> extends Error {
-    constructor(message: string, options?: ProviderErrorOptions | undefined);
+    // Warning: (ae-forgotten-export) The symbol "ProviderErrorConstructorOptions" needs to be exported by the entry point native-network.d.ts
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
     // (undocumented)
     get code(): TCode | undefined;
     // (undocumented)
@@ -467,6 +468,11 @@ class ProviderError<TCode extends string = string> extends Error {
     // (undocumented)
     readonly options?: ProviderErrorOptions | undefined;
 }
+
+// Warning: (ae-forgotten-export) The symbol "RetiredErrorContractFields" needs to be exported by the entry point native-network.d.ts
+//
+// @public
+type ProviderErrorConstructorOptions<T extends ProviderErrorOptions = ProviderErrorOptions> = T & RetiredErrorContractFields;
 
 // @public
 type ProviderErrorMessageParams = Readonly<Record<string, string | number>>;
@@ -599,6 +605,12 @@ type ProxyVendorName = "smartproxy" | "nodemaven";
 
 // @public
 export function resolveNativeGatewayProxy(input: NativeGatewayProxyResolutionInput): Promise<NativeGatewayProxy | undefined>;
+
+// @public
+type RetiredErrorContractFields = {
+    readonly category?: never;
+    readonly retryable?: never;
+};
 
 // @public
 type SdkErrorContract = {

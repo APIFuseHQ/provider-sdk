@@ -1,4 +1,5 @@
-import { isValidationError, ProviderError, sdkErrorOptions, ValidationError } from "../errors.js";
+import { isValidationError, ProviderError, ValidationError } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import { z } from "zod";
 import { parseSchema } from "../schema.js";
 import type { EnvContext, ProviderDefinition } from "../types.js";

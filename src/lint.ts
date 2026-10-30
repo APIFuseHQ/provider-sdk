@@ -2022,6 +2022,32 @@ export function lintProvider(
 	return lintProviderWithInformation(provider, options).diagnostics;
 }
 
+/**
+ * The `errorCodes` table is still read (`@deprecated`) but `defineErrors` is
+ * the declaration: each operation still on the table is named with the move.
+ * Warning level: the table keeps serving, so this must not fail `apifuse check`.
+ */
+function lintDeprecatedErrorCodesTable(provider: {
+	id?: string;
+	operations?: Record<string, { errorCodes?: ReadonlyArray<{ code: string }> }>;
+}): LintDiagnostic[] {
+	const providerId = provider.id ?? "unknown";
+	const diagnostics: LintDiagnostic[] = [];
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const codes = (operation.errorCodes ?? []).flatMap((entry) =>
+			typeof entry?.code === "string" ? [entry.code] : [],
+		);
+		if (codes.length === 0) continue;
+		diagnostics.push({
+			rule: "deprecated-error-codes-table",
+			level: "warn",
+			field: `operations.${operationKey}.errorCodes`,
+			message: `Provider "${providerId}" operation "${operationKey}" declares ${codes.join(", ")} in the deprecated errorCodes table. Declare each code once with defineErrors({ ${codes[0]}: { status, category, description } }) (an SDK-registered code is sdkErrors.${codes[0]}) and list the factories as errors: [errors.${codes[0]}, ...]; status, retryable and the locale keys then come from that declaration (apifuse migrate --only errors-hoist).`,
+		});
+	}
+	return diagnostics;
+}
+
 /** Internal detailed result used by the CLI to render suppression audits. */
 export function lintProviderWithInformation(
 	provider: Parameters<typeof lintProvider>[0],
@@ -2035,6 +2061,7 @@ export function lintProviderWithInformation(
 		...lintHealthCheckMonitorability(provider),
 		...lintHealthCheckStaleServe(provider),
 		...lintHealthCheckExpectedErrors(provider),
+		...lintDeprecatedErrorCodesTable(provider),
 	];
 	if (provider.operations) {
 		const authMode = provider.auth?.mode;

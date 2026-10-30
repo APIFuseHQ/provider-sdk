@@ -392,10 +392,10 @@ describe("serving an explicit category or an unregistered code", () => {
 		);
 
 		expect(served).toMatchObject({
-			status: 400,
+			status: 500,
 			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
-			category: "input_validation",
-			source: "client",
+			category: "internal_error",
+			source: "apifuse",
 		});
 	});
 

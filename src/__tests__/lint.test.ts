@@ -237,6 +237,49 @@ describe("flat operation safety lint", () => {
 	});
 });
 
+describe("lintProvider deprecated errorCodes table", () => {
+	function lintWithErrorCodes(errorCodes?: ReadonlyArray<{ code: string; status: number }>) {
+		return lintProvider({
+			id: "table-provider",
+			operations: {
+				lookup: {
+					descriptionKey: "operations.lookup.description",
+					input: describeKey(z.object({}), "operations.lookup.input.description"),
+					output: describeKey(z.object({}), "operations.lookup.output.description"),
+					fixtures: { request: {}, response: {} },
+					...(errorCodes ? { errorCodes } : {}),
+				},
+			},
+		});
+	}
+
+	it("warns on an operation that still declares codes in the errorCodes table", () => {
+		const diagnostics = lintWithErrorCodes([
+			{ code: "ITEM_GONE", status: 502 },
+			{ code: "UPSTREAM_ERROR", status: 502 },
+		]);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "deprecated-error-codes-table",
+				level: "warn",
+				field: "operations.lookup.errorCodes",
+				message: expect.stringContaining(
+					"declares ITEM_GONE, UPSTREAM_ERROR in the deprecated errorCodes table",
+				),
+			}),
+		]);
+		expect(diagnostics[0]?.message).toContain(
+			"defineErrors({ ITEM_GONE: { status, category, description } })",
+		);
+	});
+
+	it("stays silent for an operation without the table", () => {
+		expect(lintWithErrorCodes()).toEqual([]);
+		expect(lintWithErrorCodes([])).toEqual([]);
+	});
+});
+
 describe("lintProvider browser-version-literal owned headers", () => {
 	const OWNED_HEADER_LITERALS = `
 export const HEADERS = {

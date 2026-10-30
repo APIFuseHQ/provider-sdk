@@ -2629,7 +2629,8 @@ interface ProviderDeploymentOverrides {
 
 // @public
 class ProviderError<TCode extends string = string> extends Error {
-    constructor(message: string, options?: ProviderErrorOptions | undefined);
+    // Warning: (ae-forgotten-export) The symbol "ProviderErrorConstructorOptions" needs to be exported by the entry point index.d.ts
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
     // (undocumented)
     get code(): TCode | undefined;
     // (undocumented)
@@ -2641,6 +2642,11 @@ class ProviderError<TCode extends string = string> extends Error {
     // (undocumented)
     readonly options?: ProviderErrorOptions | undefined;
 }
+
+// Warning: (ae-forgotten-export) The symbol "RetiredErrorContractFields" needs to be exported by the entry point index.d.ts
+//
+// @public
+type ProviderErrorConstructorOptions<T extends ProviderErrorOptions = ProviderErrorOptions> = T & RetiredErrorContractFields;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderFailureCategory" needs to be exported by the entry point index.d.ts
 //
@@ -3188,6 +3194,12 @@ interface ResponseMatcher {
 
 // @public (undocumented)
 type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
+
+// @public
+type RetiredErrorContractFields = {
+    readonly category?: never;
+    readonly retryable?: never;
+};
 
 // @public (undocumented)
 type RetryPolicy = {

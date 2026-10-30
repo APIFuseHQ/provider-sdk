@@ -629,6 +629,74 @@ const NEGATIVE_CONTROLS = [
 			"export const state: TelemetryContributor<StateTelemetryLogPayload, StateTelemetryHeaderPayload> = new StateTelemetryCollector();",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-provider-error-typed-parameter-options.ts",
+		expectedCode: "TS2345",
+		description:
+			"ProviderError rejects per-throw category/retryable arriving through a typed parameter (not only an object literal)",
+		source: [
+			'import { ProviderError } from "@apifuse/provider-sdk";',
+			"",
+			"export function mustNotCompile(",
+			"	message: string,",
+			'	options: { code: string; category: "network" | "provider_error"; retryable: boolean },',
+			"): ProviderError {",
+			"	return new ProviderError(message, options);",
+			"}",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-provider-error-typed-spread-options.ts",
+		expectedCode: "TS2345",
+		description:
+			"ProviderError rejects per-throw category/retryable arriving through a spread of a typed object",
+		source: [
+			'import { ProviderError } from "@apifuse/provider-sdk";',
+			"",
+			'const base = { code: "X", fix: "f", category: "input_validation" as const, retryable: false as const };',
+			'export const mustNotCompile = new ProviderError("m", { ...base, code: "Y" });',
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-provider-error-subclass-super-options.ts",
+		expectedCode: "TS2322",
+		description:
+			"a ProviderError subclass cannot pass per-throw category/retryable through super()",
+		source: [
+			'import { ValidationError } from "@apifuse/provider-sdk";',
+			"",
+			"export class MustNotCompile extends ValidationError {",
+			"	constructor(never: boolean) {",
+			'		super("m", { code: "INVALID_INPUT", retryable: !never, category: "input_validation" });',
+			"	}",
+			"}",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-provider-error-constructor-options.ts",
+		expectedCode: "",
+		description:
+			"provider-facing constructors keep accepting ProviderErrorOptions, conditional spreads that leave undefined, and the SDK-owned contract classes keep their fields",
+		source: [
+			'import { AuthError, HandleError, ProviderError, SessionExpiredError, TransportError, ValidationError, type ProviderErrorOptions } from "@apifuse/provider-sdk";',
+			"",
+			'const options: ProviderErrorOptions = { code: "OK", fix: "f" };',
+			'export const plain = new ProviderError("m", options);',
+			'export const nestedDetails = new AuthError("m", { code: "A", details: { retryable: true } });',
+			'export const validation = new ValidationError("m", { code: "V", zodError: undefined });',
+			"const maybe: { retryable?: undefined } = {};",
+			'export const conditionalSpread = new ProviderError("m", { code: "U", ...maybe });',
+			'export const transport = new TransportError("m", { code: "t", status: 0, category: "network", retryable: true });',
+			'export const session = new SessionExpiredError("m", { retryable: true });',
+			'export const handle = new HandleError("HANDLE_EXPIRED", "m", { retryable: true });',
+			'export const asBase: ProviderError = new TransportError("m");',
+			"export const ctor: new (message: string, options?: ProviderErrorOptions) => ProviderError = ProviderError;",
+			"",
+		].join("\n"),
+	},
 ] as const;
 
 assertTelemetryContributorControls();

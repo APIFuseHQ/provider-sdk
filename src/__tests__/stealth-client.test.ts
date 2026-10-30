@@ -12,11 +12,10 @@ import {
 	HttpRedirectError,
 	ProviderError,
 	SDKError,
-	sdkErrorContractOf,
-	sdkErrorOptions,
 	StealthCookieStoreVersionError,
 	TransportError,
 } from "../errors.js";
+import { sdkErrorContractOf, sdkErrorOptions } from "../sdk-error-contract.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
 import { withDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { createDiagnosticRedactor } from "../runtime/diagnostic-redactor.js";

@@ -15,9 +15,19 @@ import {
 	AuthError,
 	isProviderError,
 	ProviderError,
+	ProviderSecretError,
+	SDKError,
+	SessionExpiredError,
 	TransportError,
 	ValidationError,
 } from "../errors.js";
+import { HandleError } from "../handle.js";
+import {
+	PROVIDER_ERROR_SOURCES,
+	PROVIDER_FAILURE_CATEGORIES,
+	type ProviderFailureCategory,
+} from "../observability.js";
+import { platformFaultOf } from "../sdk-issued-errors.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
@@ -405,7 +415,9 @@ describe("defineOperation errors", () => {
 
 type Served = {
 	status: number;
-	body: { error: { code: string; retryable: boolean; source: string; message: string } };
+	body: {
+		error: { code: string; retryable: boolean; source: string; message: string; fix?: string };
+	};
 	header: { origin: string; category: string; retryable: boolean; taxonomyVersion: string };
 	events: ProviderServerLogEvent[];
 };
@@ -540,47 +552,51 @@ describe("per-throw category / retryable options are refused", () => {
 		return undefined;
 	}
 
-	it("throws a ValidationError at construction that names the code, the options and the codemod", () => {
+	it("throws an SDK-issued platform fault at construction that names the code and the options", () => {
 		const error = construct({
 			code: "UPSTREAM_ERROR",
 			category: "upstream_http",
 			retryable: false,
 		});
-		expect(error).toBeInstanceOf(ValidationError);
-		const validation = error as ValidationError;
-		expect(validation.code).toBe("PER_THROW_ERROR_OPTIONS_RETIRED");
-		expect(validation.message).toContain(
+		expect(error).toBeInstanceOf(SDKError);
+		expect(error).not.toBeInstanceOf(ValidationError);
+		const refusal = error as SDKError;
+		expect(refusal.code).toBe("PER_THROW_ERROR_OPTIONS_RETIRED");
+		expect(refusal.message).toContain(
 			'new ProviderError(..., { code: "UPSTREAM_ERROR", category, retryable }) sets category and retryable per throw',
 		);
-		expect(validation.fix).toContain(
-			"defineErrors({ UPSTREAM_ERROR: { status, category, retryable, description } })",
-		);
-		expect(validation.fix).toContain("apifuse migrate --only errors-factory");
-		expect(validation.details).toEqual({
+		expect(refusal.details).toEqual({
 			code: "UPSTREAM_ERROR",
 			options: ["category", "retryable"],
+		});
+		// The author guidance is not on the error: it reaches the failure log, not
+		// the caller's response body.
+		expect(refusal.fix).toBeUndefined();
+		expect(platformFaultOf(refusal)).toEqual({
+			category: "internal_error",
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			status: 500,
+			retryable: false,
 		});
 	});
 
 	it("refuses either option alone, on every provider-facing class, and names the missing code as CODE", () => {
-		expect(
-			(construct({ code: "SHOP_CLOSED", retryable: true }) as ValidationError).details,
-		).toEqual({
+		expect((construct({ code: "SHOP_CLOSED", retryable: true }) as SDKError).details).toEqual({
 			code: "SHOP_CLOSED",
 			options: ["retryable"],
 		});
-		expect((construct({ category: "upstream_http" }) as ValidationError).message).toContain(
+		expect((construct({ category: "upstream_http" }) as SDKError).message).toContain(
 			'{ code: "CODE", category }',
 		);
 		// test-invalid: the options were removed from the type.
 		expect(() => new AuthError("refused", { code: "LOGIN", retryable: false } as never)).toThrow(
-			ValidationError,
+			SDKError,
 		);
 		// test-invalid: the options were removed from the type.
 		expect(
 			() =>
 				new ValidationError("bad", { code: "BAD_INPUT", category: "input_validation" } as never),
-		).toThrow(ValidationError);
+		).toThrow(SDKError);
 	});
 
 	it("accepts an option that is present but undefined, the shape a conditional spread leaves", () => {
@@ -589,7 +605,7 @@ describe("per-throw category / retryable options are refused", () => {
 		).toBeUndefined();
 	});
 
-	it("serves a declared code from its declaration alone: the refusal happens before anything is served", async () => {
+	it("serves the refusal as a platform fault the SDK detected, not as the caller's input failure", async () => {
 		const served = await serve(
 			() =>
 				new ProviderError(
@@ -603,9 +619,31 @@ describe("per-throw category / retryable options are refused", () => {
 			{ errors: [errors.UPSTREAM_SCHEMA_ERROR] },
 		);
 
-		expect(served.body.error.code).toBe("PER_THROW_ERROR_OPTIONS_RETIRED");
-		expect(served.events.map((event) => event.event)).not.toContain(
-			"provider_error_options_deprecated",
+		// The declared code, its 502 and the per-throw words never reach the
+		// caller: the SDK refused the construction, and that is its own fault to
+		// report, like OUTPUT_VALIDATION_FAILED.
+		expect(served.status).toBe(500);
+		expect(served.body.error).toMatchObject({
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			source: "apifuse",
+			retryable: false,
+		});
+		expect(served.body.error.fix).toBeUndefined();
+		expect(served.header).toMatchObject({
+			origin: "platform",
+			category: "internal_error",
+			retryable: false,
+		});
+		const failure = served.events.find((event) => event.event === "provider_request_failed");
+		expect(failure).toMatchObject({
+			status: 500,
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			errorOrigin: "platform",
+			errorCategory: "internal_error",
+			signal: "per_throw_error_options_retired",
+		});
+		expect((failure as { signalFix?: string }).signalFix).toContain(
+			"apifuse migrate --only errors-factory",
 		);
 	});
 
@@ -630,5 +668,100 @@ describe("per-throw category / retryable options are refused", () => {
 
 		expect(served.status).toBe(502);
 		expect(served.header).toMatchObject({ category: "upstream_http", retryable: false });
+	});
+});
+
+describe("an SDK-contract error a provider built with a category outside the provider-failure domain", () => {
+	// A provider can hand TransportError, SessionExpiredError, HandleError and
+	// ProviderSecretError a category through a cast or from JavaScript. A
+	// platform word or an unknown word there is no value: the failure is
+	// classified as if none were set, served under origin provider with a
+	// provider-failure category and a source, and the failure log names it.
+	const rows: ReadonlyArray<{
+		readonly name: string;
+		readonly word: string;
+		readonly create: () => Error;
+		readonly derived?: ProviderFailureCategory;
+	}> = [
+		{
+			name: "TransportError with a platform word",
+			word: "internal_error",
+			derived: "network",
+			create: () =>
+				new TransportError("upstream closed the socket", {
+					code: "transport_network_error",
+					status: 0,
+					category: "internal_error" as never /* test-invalid: outside the domain */,
+					retryable: true,
+				}),
+		},
+		{
+			name: "TransportError with an unknown word",
+			word: "not_a_category",
+			derived: "network",
+			create: () =>
+				new TransportError("upstream closed the socket", {
+					code: "transport_network_error",
+					status: 0,
+					category: "not_a_category" as never /* test-invalid: outside the domain */,
+				}),
+		},
+		{
+			name: "SessionExpiredError with a platform word",
+			word: "proxy_pool",
+			derived: "credential_expired",
+			create: () =>
+				new SessionExpiredError("expired", {
+					category: "proxy_pool" as never /* test-invalid: outside the domain */,
+				}),
+		},
+		{
+			name: "HandleError with a platform word",
+			word: "client_cancelled",
+			create: () =>
+				new HandleError("HANDLE_EXPIRED", "handle expired", {
+					category: "client_cancelled" as never /* test-invalid: outside the domain */,
+				}),
+		},
+		{
+			name: "ProviderSecretError with a platform word",
+			word: "dependency_unavailable",
+			create: () =>
+				new ProviderSecretError("secret unreadable", {
+					category: "dependency_unavailable" as never /* test-invalid: outside the domain */,
+				}),
+		},
+	];
+
+	for (const row of rows) {
+		it(`never serves ${row.name} under origin provider with that word`, async () => {
+			const served = await serve(row.create);
+
+			expect(served.header.origin).toBe("provider");
+			expect(served.header.category).not.toBe(row.word);
+			expect(PROVIDER_FAILURE_CATEGORIES as readonly string[]).toContain(served.header.category);
+			if (row.derived) expect(served.header.category).toBe(row.derived);
+			expect(PROVIDER_ERROR_SOURCES as readonly string[]).toContain(served.body.error.source);
+			expect(
+				served.events.find((event) => event.event === "provider_request_failed"),
+			).toMatchObject({
+				errorOrigin: "provider",
+				errorCategory: served.header.category,
+				signal: "unknown_provider_error_category",
+			});
+		});
+	}
+
+	it("keeps an in-domain contract word as served", async () => {
+		const served = await serve(
+			() =>
+				new SessionExpiredError("expired", {
+					category: "credential_unavailable",
+				}),
+		);
+		expect(served.header).toMatchObject({ origin: "provider", category: "credential_unavailable" });
+		expect(
+			served.events.find((event) => event.event === "provider_request_failed"),
+		).not.toHaveProperty("signal");
 	});
 });

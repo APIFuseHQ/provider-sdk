@@ -2,11 +2,12 @@ import { describe, expect, it, setSystemTime, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { ProviderError, ValidationError } from "../errors.js";
-import type {
-	ProviderContext,
-	ProviderDefinition,
-	OperationRiskClass,
-	SchemaLike,
+import {
+	defaultApprovalPolicy,
+	type OperationRiskClass,
+	type ProviderContext,
+	type ProviderDefinition,
+	type SchemaLike,
 } from "../types.js";
 import { createProviderContextDouble, defineTestProvider as defineProvider } from "./test-utils.js";
 
@@ -1243,6 +1244,62 @@ describe("defineProvider", () => {
 			expect(caught).toMatchObject({
 				fix: expect.stringContaining("APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"),
 			});
+		});
+	});
+
+	describe("operation approval equal to the riskClass default", () => {
+		// `approval` is a deliberate override of the riskClass default; a copy of
+		// the default is the same fact declared twice and is refused at definition.
+		const defaults = [
+			{ riskClass: "read", approval: "never" },
+			{ riskClass: "write", approval: "risk-based" },
+			{ riskClass: "destructive", approval: "always" },
+			{ riskClass: "external-send", approval: "always" },
+		] as const;
+
+		for (const { riskClass, approval } of defaults) {
+			it(`refuses approval "${approval}" on riskClass "${riskClass}" with the codemod`, () => {
+				expect(defaultApprovalPolicy(riskClass)).toBe(approval);
+				let caught: unknown;
+				try {
+					defineProvider({
+						...validConfig,
+						id: "redundant-approval",
+						operations: {
+							prices: { ...validConfig.operations.prices, riskClass, approval },
+						},
+					});
+				} catch (error) {
+					caught = error;
+				}
+				expect(caught).toBeInstanceOf(ValidationError);
+				expect(caught).toMatchObject({
+					code: "REDUNDANT_APPROVAL",
+					message: `Provider "redundant-approval" operation "prices" declares approval "${approval}", which is already the default for riskClass "${riskClass}".`,
+					fix: expect.stringContaining("apifuse migrate-operation-declaration ."),
+				});
+			});
+		}
+
+		it("accepts an approval override that differs from the risk default", () => {
+			const provider = defineProvider({
+				...validConfig,
+				id: "approval-override",
+				operations: {
+					prices: { ...validConfig.operations.prices, riskClass: "write", approval: "always" },
+				},
+			});
+			expect(provider.operations.prices.approval).toBe("always");
+		});
+
+		it("accepts an operation that states no approval", () => {
+			const provider = defineProvider({
+				...validConfig,
+				id: "approval-absent",
+				operations: { prices: { ...validConfig.operations.prices, riskClass: "write" } },
+			});
+			expect(provider.operations.prices.riskClass).toBe("write");
+			expect("approval" in provider.operations.prices).toBe(false);
 		});
 	});
 

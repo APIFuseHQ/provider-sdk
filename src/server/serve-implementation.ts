@@ -45,12 +45,12 @@ import {
 	isValidationError,
 	ProviderError,
 	SDKError,
-	sdkErrorContractOf,
-	sdkErrorOptions,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
+	type SdkErrorContract,
 	type TransportError,
 } from "../errors.js";
+import { sdkErrorContractOf, sdkErrorOptions } from "../sdk-error-contract.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
 	loadProviderLocaleCatalogs,
@@ -1533,7 +1533,10 @@ export type ProviderServerLogEvent =
 			providerObservability?: ProviderErrorObservability;
 			causeChain?: ProviderErrorCauseFrame[];
 			stack?: string[];
-			signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
+			signal?:
+				| "unregistered_provider_error_code"
+				| "unknown_provider_error_category"
+				| "per_throw_error_options_retired";
 			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
 	  })
@@ -2047,6 +2050,13 @@ function isProviderTimeoutAbortTransportError(
 // request ZodError, not a fault the SDK issued. Its body is masked, and the
 // platform reports it as its own internal_error. Nothing the thrown value
 // carries is read for it.
+// The construction `new ProviderError` refuses (src/errors.ts): a per-throw
+// category or retryable. Recognized by the platform fault record's code, which
+// only SDK code writes, never by the error's own code.
+const PER_THROW_ERROR_OPTIONS_RETIRED_CODE = "PER_THROW_ERROR_OPTIONS_RETIRED";
+const PER_THROW_ERROR_OPTIONS_RETIRED_FIX =
+	"Declare the code once with defineErrors({ CODE: { status, category, retryable, description } }) and throw errors.CODE({ details, cause }); for a condition with a different category or retryability declare a distinct code. `apifuse migrate --only errors-factory` (scripts/codemods/errors-factory.yml) rewrites the throw sites.";
+
 const MASKED_THROW_FAULT: PlatformFault = {
 	category: "internal_error",
 	code: "internal_error",
@@ -2117,21 +2127,37 @@ function isCategoryOutsideProviderFailureDomain(value: unknown): boolean {
 	return value !== undefined && value !== null && providerFailureCategoryIn(value) === undefined;
 }
 
-// Whether the category the provider declared for the code lies outside the
-// provider-failure categories. A throw site cannot set one: `new
-// ProviderError` refuses a per-throw category, so the declaration is the only
-// place a provider states it.
+// Whether a category the provider set lies outside the provider-failure
+// categories: on the code's declaration, or on the throw of an error whose
+// options carry the SDK contract (a provider-built TransportError,
+// SessionExpiredError, HandleError or ProviderSecretError; `new
+// ProviderError` refuses a per-throw category on every other class).
 function providerErrorCategoryOutsideDomain(
 	error: unknown,
 	declaredErrorCode: DeclaredErrorCode | undefined,
 ): boolean {
 	const declaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
-	return isCategoryOutsideProviderFailureDomain(declaration?.category);
+	return (
+		isCategoryOutsideProviderFailureDomain(sdkErrorContractOf(error).category) ||
+		isCategoryOutsideProviderFailureDomain(declaration?.category)
+	);
+}
+
+// The contract an SDK-constructed error carries, its category read in the
+// provider-failure domain (providerFailureCategoryIn): a platform word or an
+// unknown word there is no value, never served under origin provider.
+function providerFailureSdkContract(error: unknown): SdkErrorContract {
+	const contract = sdkErrorContractOf(error);
+	const category = providerFailureCategoryIn(contract.category);
+	return {
+		...(category === undefined ? {} : { category }),
+		...(contract.retryable === undefined ? {} : { retryable: contract.retryable }),
+	};
 }
 
 // What the provider serializer reads: the one resolution
 // (resolveProviderErrorContract) over the contract an SDK-constructed error
-// carries and the code's declaration, the declared category read in the
+// carries and the code's declaration, each category read in the
 // provider-failure domain (providerFailureCategoryIn), so a category outside
 // it resolves as if unset.
 function providerFailureContract(
@@ -2153,7 +2179,7 @@ function providerFailureContract(
 						...(declaration.retryable === undefined ? {} : { retryable: declaration.retryable }),
 						...(declaredCategory === undefined ? {} : { category: declaredCategory }),
 					},
-		sdkContract: sdkErrorContractOf(error),
+		sdkContract: providerFailureSdkContract(error),
 	});
 	return { category: contract.category, retryable: contract.retryable };
 }
@@ -2563,6 +2589,12 @@ function logProviderError(
 		declaredErrorCode === undefined;
 	const isUnknownProviderErrorCategory =
 		details.origin === "provider" && providerErrorCategoryOutsideDomain(error, declaredErrorCode);
+	// A construction the SDK refused (per-throw category / retryable): the
+	// platform fault record, which only SDK code writes, is the evidence; the
+	// author guidance belongs here, not in the served body.
+	const isPerThrowErrorOptionsRetired =
+		details.origin === "platform" &&
+		platformFaultOf(error)?.code === PER_THROW_ERROR_OPTIONS_RETIRED_CODE;
 	const telemetryPayload = telemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	// The logger is caller-supplied and may mutate the event synchronously.
@@ -2617,7 +2649,12 @@ function logProviderError(
 						signalFix:
 							"Set category to a provider-failure category (ProviderFailureCategory) or leave it unset so the SDK derives one. The SDK reports platform faults itself; a thrown error cannot carry one.",
 					}
-				: {}),
+				: isPerThrowErrorOptionsRetired
+					? {
+							signal: "per_throw_error_options_retired" as const,
+							signalFix: PER_THROW_ERROR_OPTIONS_RETIRED_FIX,
+						}
+					: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error, redact) } : {}),
 	});
 }

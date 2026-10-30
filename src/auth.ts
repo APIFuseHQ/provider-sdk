@@ -1,4 +1,5 @@
-import { AuthError, ProviderError, sdkErrorOptions, ValidationError } from "./errors.js";
+import { AuthError, ProviderError, ValidationError } from "./errors.js";
+import { sdkErrorOptions } from "./sdk-error-contract.js";
 import {
 	declarationInvalidError,
 	DECLARATION_RULE_IDS,

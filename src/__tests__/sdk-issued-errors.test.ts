@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { HandleError } from "../handle.js";
-import { ProviderError, sdkErrorOptions, ValidationError } from "../errors.js";
+import { ProviderError, ValidationError } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import {
 	isSdkIssuedError,
 	issueSdkError,

@@ -4,7 +4,8 @@ import {
 	type ProviderEngine,
 	type ProviderEngineMode,
 } from "../engine.js";
-import { ProviderError, sdkErrorOptions, ValidationError } from "../errors.js";
+import { ProviderError, ValidationError } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 
 /**
  * Engine attachment selection. Internal on purpose: ADR-0011 removes the

@@ -10,11 +10,11 @@ import {
 	ProviderError,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
-	sdkErrorOptions,
 	SessionExpiredError,
 	TransportError,
 	ValidationError,
 } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import { NativeNetworkError } from "../runtime/native-network.js";
 import { createProxyEdgeAuthRejectedError } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
@@ -4464,8 +4464,8 @@ describe("operation-declared error resolution", () => {
 			},
 			{
 				// A provider ValidationError that states its own category is refused
-				// at construction; the served envelope is the refusal, not the stated
-				// category.
+				// at construction; the served envelope is the refusal, a platform fault
+				// the SDK detected, not the stated category and not the caller's input.
 				name: "instance-explicit output failure is refused",
 				entry: {
 					code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
@@ -4480,8 +4480,8 @@ describe("operation-declared error resolution", () => {
 							category: "upstream_schema_drift",
 						} as never /* test-invalid: the option was removed from the type */,
 					),
-				status: 400,
-				category: "input_validation",
+				status: 500,
+				category: "internal_error",
 			},
 			{
 				name: "undeclared input failure",

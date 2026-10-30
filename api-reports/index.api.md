@@ -534,7 +534,7 @@ export interface AuthContext {
 
 // @public (undocumented)
 export class AuthError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -1294,7 +1294,7 @@ export type ConnectionMode = AuthMode;
 
 // @public (undocumented)
 export class ContextAccessError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -1574,7 +1574,7 @@ export interface CredentialDeclaration {
 
 // @public (undocumented)
 export class CredentialKeyError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public
@@ -1582,7 +1582,7 @@ type CredentialKeysName<TKeys, TWord extends string> = TKeys extends readonly (i
 
 // @public (undocumented)
 export class CredentialModeError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -2296,7 +2296,7 @@ export type FlowContextStore = ContextScratchpad;
 
 // @public (undocumented)
 export class FlowExpiredError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public
@@ -5791,7 +5791,7 @@ export interface ProviderEngineAttachmentInput {
 
 // @public
 export class ProviderEngineAuthenticationError extends SDKError {
-    constructor(message?: string, options?: ProviderErrorOptions);
+    constructor(message?: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -5885,7 +5885,7 @@ export class ProviderEngineUnavailableError extends SDKError {
 
 // @public
 export class ProviderError<TCode extends string = string> extends Error {
-    constructor(message: string, options?: ProviderErrorOptions | undefined);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
     // (undocumented)
     get code(): TCode | undefined;
     // (undocumented)
@@ -5916,6 +5916,9 @@ export type ProviderErrorCauseFrame = {
     messageFingerprint: string;
     providerObservability?: ProviderErrorObservability;
 };
+
+// @public
+export type ProviderErrorConstructorOptions<T extends ProviderErrorOptions = ProviderErrorOptions> = T & RetiredErrorContractFields;
 
 // @public
 export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
@@ -6445,7 +6448,7 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     providerObservability?: ProviderErrorObservability;
     causeChain?: ProviderErrorCauseFrame[];
     stack?: string[];
-    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
+    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category" | "per_throw_error_options_retired";
     signalFix?: string;
     issues?: Array<{
         path: string;
@@ -7633,6 +7636,12 @@ export interface ResponseMatcher {
 // @public (undocumented)
 export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
 
+// @public
+export type RetiredErrorContractFields = {
+    readonly category?: never;
+    readonly retryable?: never;
+};
+
 // @public (undocumented)
 export type RetryPolicy = {
     maxAttempts: number;
@@ -8567,7 +8576,7 @@ export type SdkCopyLocale = "en" | "ko" | "ja";
 
 // @public (undocumented)
 export class SDKError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // Warning: (ae-forgotten-export) The symbol "SDK_ERROR_REGISTRY" needs to be exported by the entry point index.d.ts
@@ -8582,13 +8591,7 @@ export type SdkErrorContract = {
 };
 
 // @public
-export function sdkErrorContractOf(error: unknown): SdkErrorContract;
-
-// @public
 export type SdkErrorOptions = ProviderErrorOptions & SdkErrorContract;
-
-// @public
-export function sdkErrorOptions<T extends SdkErrorOptions>(options: T): T;
 
 // @public
 export type SdkErrorRef<TCode extends SdkErrorCode = SdkErrorCode> = {
@@ -9843,7 +9846,7 @@ export function truncate(str: string, maxLength: number, suffix?: string): strin
 
 // @public (undocumented)
 export class TurnValidationError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public
@@ -9914,7 +9917,7 @@ export function validateProviderLocaleCatalogs(options: {
 
 // @public (undocumented)
 export class ValidationError extends ProviderError {
-    constructor(message: string, options?: ValidationErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions<ValidationErrorOptions>);
     // (undocumented)
     readonly zodError?: unknown;
 }

@@ -5,6 +5,8 @@ import {
 	CredentialKeyError,
 	CredentialModeError,
 	FlowExpiredError,
+	ProviderEgressDeniedError,
+	ProviderEngineUnavailableError,
 	ProviderError,
 	ProviderSecretError,
 	SDKError,
@@ -13,6 +15,7 @@ import {
 	TurnValidationError,
 	ValidationError,
 } from "../errors.js";
+import { sdkErrorContractOf } from "../sdk-error-contract.js";
 
 describe("ProviderError", () => {
 	it("should include fix hint", () => {
@@ -105,5 +108,29 @@ describe("new provider-sdk foundation errors", () => {
 		expect(new FlowExpiredError("expired")).toBeInstanceOf(ProviderError);
 		expect(new TurnValidationError("invalid")).toBeInstanceOf(ProviderError);
 		expect(new ContextAccessError("bad")).toBeInstanceOf(ProviderError);
+	});
+});
+
+describe("SDK-owned engine errors carry their contract through the SDK brand", () => {
+	// Both state `retryable` with the throw, which `new ProviderError` refuses on
+	// unbranded options: constructing them at all proves the brand, and the
+	// contract read back proves it is the one the serve layer resolves.
+	it("ProviderEngineUnavailableError is retryable and keeps its cause", () => {
+		const cause = new Error("ECONNREFUSED");
+		const error = new ProviderEngineUnavailableError(undefined, cause);
+		expect(error).toBeInstanceOf(SDKError);
+		expect(error.name).toBe("ProviderEngineUnavailableError");
+		expect(error.code).toBe("PROVIDER_ENGINE_UNAVAILABLE");
+		expect(error.cause).toBe(cause);
+		expect(sdkErrorContractOf(error)).toEqual({ retryable: true });
+	});
+
+	it("ProviderEgressDeniedError is not retryable and keeps its details", () => {
+		const error = new ProviderEgressDeniedError("egress denied", { host: "evil.example" });
+		expect(error).toBeInstanceOf(ProviderError);
+		expect(error.name).toBe("ProviderEgressDeniedError");
+		expect(error.code).toBe("PROVIDER_EGRESS_DENIED");
+		expect(error.details).toEqual({ host: "evil.example" });
+		expect(sdkErrorContractOf(error)).toEqual({ retryable: false });
 	});
 });

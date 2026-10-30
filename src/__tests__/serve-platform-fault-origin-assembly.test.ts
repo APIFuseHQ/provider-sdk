@@ -478,26 +478,33 @@ const PLATFORM_ONLY_WORDS = PLATFORM_FAULT_CATEGORIES.filter(
 
 describe("a provider's category option, whatever word it carries", () => {
 	for (const category of [...PLATFORM_ONLY_WORDS, "upstream_http", "not_a_category", 7, true]) {
-		it(`refuses ${JSON.stringify(category)} at construction and serves the refusal as the provider's input failure`, async () => {
+		it(`refuses ${JSON.stringify(category)} at construction and serves the refusal as a platform fault the SDK detected`, async () => {
 			const requestId = `category-${String(category)}`;
 			const served = await call("category-option", requestId, { category, declared: true });
 
 			// The throw never reaches resolution: the declared code, its 502 and
-			// the option's word are all replaced by the refusal.
+			// the option's word are all replaced by the refusal, which is the
+			// provider's defect reported by the platform, never the caller's input.
 			expect(outcome(served)).toEqual({
-				status: 400,
-				origin: "provider",
-				category: "input_validation",
+				status: 500,
+				origin: "platform",
+				category: "internal_error",
 				retryable: false,
 				code: "PER_THROW_ERROR_OPTIONS_RETIRED",
-				source: "client",
+				source: "apifuse",
 			});
-			expect(failureLog(events, requestId)).toMatchObject({
-				status: 400,
+			expect(served.body.error.fix).toBeUndefined();
+			const failure = failureLog(events, requestId);
+			expect(failure).toMatchObject({
+				status: 500,
 				code: "PER_THROW_ERROR_OPTIONS_RETIRED",
-				errorCategory: "input_validation",
-				errorOrigin: "provider",
+				errorCategory: "internal_error",
+				errorOrigin: "platform",
+				signal: "per_throw_error_options_retired",
 			});
+			expect((failure as { signalFix?: string }).signalFix).toContain(
+				"apifuse migrate --only errors-factory",
+			);
 		});
 	}
 
@@ -508,12 +515,12 @@ describe("a provider's category option, whatever word it carries", () => {
 		});
 
 		expect(outcome(served)).toEqual({
-			status: 400,
-			origin: "provider",
-			category: "input_validation",
+			status: 500,
+			origin: "platform",
+			category: "internal_error",
 			retryable: false,
 			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
-			source: "client",
+			source: "apifuse",
 		});
 	});
 

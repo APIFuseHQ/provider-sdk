@@ -399,13 +399,13 @@ describe("apifuse migrate", () => {
 			(residue) => residue.ruleId === "errors-hoist-throw-site-sdk-conflict",
 		);
 		expect(sdkConflict?.message).toBe(
-			'Throw site of "MISSING_SECRET" (ProviderError) sets category "provider_error" per throw, and the SDK runtime (which owns this code and reads no declaration for it) serves category "credential_unavailable", retryable false; the per-throw value is served for one more release, so the site is left as written.',
+			'Throw site of "MISSING_SECRET" (ProviderError) sets category "provider_error" per throw, and the SDK runtime (which owns this code and reads no declaration for it) serves category "credential_unavailable", retryable false; the site is left as written, and new ProviderError(...) refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.',
 		);
 		const retrying = hoist?.residues.find(
 			(residue) => residue.file === "upstream/sites.ts" && residue.line === 72,
 		);
 		expect(retrying?.message).toBe(
-			'Throw site of "SHOP_DOWN" serves category "upstream_http" and retryable true, and the declaration serves category "upstream_http", retryable false; it is left as new ValidationError(...) and keeps serving its own value for one more release.',
+			'Throw site of "SHOP_DOWN" serves category "upstream_http" and retryable true, and the declaration serves category "upstream_http", retryable false; it is left as new ValidationError(...), which refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.',
 		);
 		// statusless.ts spreads rows this step cannot read, so a legacy row of any
 		// code may stay in an operation: a registry-equal ValidationError site
@@ -454,7 +454,7 @@ describe("apifuse migrate", () => {
 		);
 		const busy = hoist?.residues.find((residue) => residue.file === "upstream/sites.ts");
 		expect(busy?.message).toBe(
-			'Throw site of "SHOP_BUSY" serves retryable true, and the declaration serves category "provider_error", retryable false; it is left as new ProviderError(...) and keeps serving its own value.',
+			'Throw site of "SHOP_BUSY" serves retryable true, and the declaration serves category "provider_error", retryable false; it is left as new ProviderError(...), which refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.',
 		);
 		// A list of rows referenced by name (another file) becomes references,
 		// never an empty list.
