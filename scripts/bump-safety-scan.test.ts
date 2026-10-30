@@ -4,6 +4,7 @@ import {
 	cpSync,
 	existsSync,
 	mkdtempSync,
+	readdirSync,
 	renameSync,
 	rmSync,
 	symlinkSync,
@@ -14,17 +15,25 @@ import path from "node:path";
 
 import {
 	countWindowRules,
+	dedupeClones,
+	groupRepositories,
 	judge,
+	normalizeRemote,
+	type ProviderProbe,
 	parseFixtureTestOutput,
+	parseTscOutput,
 	renderReport,
 	type ScanReport,
-	stripComments,
 	type TargetReport,
+	WINDOW_RULES,
+	windowSignalLabel,
 } from "./bump-safety-scan.js";
 
 const SDK = path.resolve(import.meta.dirname, "..");
 const SCRIPT = path.join(SDK, "scripts", "bump-safety-scan.ts");
 const FIXTURES = path.join(SDK, "scripts", "__fixtures__", "bump-safety-scan");
+/** One provider per window rule, named after the rule, that trips it under the SDK build under test. */
+const WINDOW_FIXTURES = path.join(FIXTURES, "window");
 
 let scratch: string;
 let head: string;
@@ -65,7 +74,7 @@ function breakingHeadBuild(root: string): string {
 	return dir;
 }
 
-function runScan(targets: string, scratchName: string, json: boolean) {
+function runScan(targets: string, scratchName: string, json: boolean, headBuild = head) {
 	return spawnSync(
 		"bun",
 		[
@@ -73,14 +82,14 @@ function runScan(targets: string, scratchName: string, json: boolean) {
 			"--base",
 			SDK,
 			"--head",
-			head,
+			headBuild,
 			"--targets",
 			targets,
 			"--no-fixture-tests",
 			"--scratch",
 			path.join(scratch, scratchName),
 			"--jobs",
-			"2",
+			"4",
 			...(json ? ["--json"] : []),
 		],
 		{ cwd: SDK, encoding: "utf8", timeout: 240_000 },
@@ -137,15 +146,40 @@ describe("bump-safety-scan", () => {
 
 		expect(report.summary).toEqual({ SAME: 1, BREAK: 2, WARN: 0, "NOT COVERED": 1, SKIP: 0 });
 		expect(report.targetPatterns).toEqual([path.join(FIXTURES, "*")]);
-		expect(report.windowRules.map((usage) => usage.rule)).toEqual([
-			"legacy-error-options",
-			"legacy-handle-declaration",
-			"proxy-session-pool-size",
-			"redundant-approval",
-			"context-keys",
-			"schema-describe-prose",
-		]);
-		expect(report.windowRules.every((usage) => usage.providers.length === 0)).toBe(true);
+		expect(report.duplicateClones).toEqual([]);
+		expect(report.targets.every((target) => target.staleCloneOf === undefined)).toBe(true);
+		expect(report.windowRules.map((usage) => usage.rule)).toEqual(
+			WINDOW_RULES.map((entry) => entry.rule),
+		);
+		expect(report.windowRules.map((usage) => usage.signal)).toEqual(
+			WINDOW_RULES.map((entry) => windowSignalLabel(entry.signal)),
+		);
+		const expectedUsage = Object.fromEntries(
+			countWindowRules(report.targets).map((usage) => [usage.rule, usage.sites]),
+		);
+		expect(
+			Object.fromEntries(report.windowRules.map((usage) => [usage.rule, usage.sites])),
+		).toEqual(expectedUsage);
+		for (const target of report.targets) {
+			for (const entry of WINDOW_RULES) {
+				if ("lint" in entry.signal)
+					expect(target.base.probe?.lint[entry.signal.lint]).toBeUndefined();
+			}
+		}
+		// The four verdict fixtures leave public fields undescribed, so the missing-key row lists exactly the
+		// targets whose base warning carries that tag, and the raw-prose row lists none.
+		const missingKeyUsers = report.targets
+			.filter((target) =>
+				target.base.probe?.warnings.some((line) => line.includes("(no description)")),
+			)
+			.map((target) => target.name)
+			.sort();
+		expect(missingKeyUsers.length).toBeGreaterThan(0);
+		for (const usage of report.windowRules) {
+			if (usage.rule === "schema-missing-key")
+				expect([...usage.providers].sort()).toEqual(missingKeyUsers);
+			else expect(usage.providers).toEqual([]);
+		}
 	}, 120_000);
 
 	it("renders the verdict table, the not-covered section and exits 1", () => {
@@ -161,13 +195,30 @@ describe("bump-safety-scan", () => {
 		expect(result.stdout).toContain("not covered: 1 target(s) fail on both sides");
 		expect(result.stdout).toMatch(/^ {2}unloadable: Error: fixture: cannot load on any SDK/m);
 		expect(result.stdout).toContain("DELETABLE");
+		expect(result.stdout).toContain("read DELETABLE together with a BREAK-free verdict table");
 	}, 120_000);
+
+	it("counts every window rule from the base SDK's own signal: one fixture provider per rule trips exactly its rule", () => {
+		const fixtureNames = readdirSync(WINDOW_FIXTURES).sort();
+		expect(fixtureNames).toEqual(WINDOW_RULES.map((entry) => entry.rule).sort());
+		const result = runScan(path.join(WINDOW_FIXTURES, "*"), "scan-window", true, SDK);
+		expect(result.status).toBe(0);
+		const report = JSON.parse(result.stdout) as ScanReport;
+		for (const target of report.targets) {
+			expect(target.base.probe?.load.status).toBe("ok");
+			expect(target.base.tsc?.errors).toBe(0);
+		}
+		for (const usage of report.windowRules) {
+			expect(usage.providers).toEqual([usage.rule]);
+			expect(usage.sites).toBeGreaterThan(0);
+		}
+	}, 180_000);
 });
 
 describe("judge", () => {
 	const ok = (digest: string) => ({
 		probe: { load: { status: "ok" as const }, digest, lint: {}, warnings: [] },
-		tsc: { errors: 0, sample: [] },
+		tsc: { errors: 0, sample: [], keys: [] },
 	});
 	const failing = {
 		probe: {
@@ -190,10 +241,38 @@ describe("judge", () => {
 	});
 
 	it("is BREAK when tsc goes from clean to red", () => {
-		const head = { ...ok("a"), tsc: { errors: 3, sample: ["index.ts(1,1): error TS1"] } };
+		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED, "/p", []) };
 		const judged = judge({ kind: "provider", base: ok("a"), head });
 		expect(judged.verdict).toBe("BREAK");
-		expect(judged.reasons[0]).toContain("tsc 0 -> 3");
+		expect(judged.reasons[0]).toContain(
+			`tsc 0 -> ${head.tsc.errors}, ${head.tsc.errors} new on head`,
+		);
+	});
+
+	it("is BREAK when head has a tsc error base does not, even at the same count", () => {
+		const base = { ...ok("a"), tsc: parseTscOutput(TSC_RED, "/p", []) };
+		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED_ELSEWHERE, "/p", []) };
+		expect(head.tsc.errors).toBe(base.tsc.errors);
+		expect(head.tsc.keys.some((key) => !base.tsc.keys.includes(key))).toBe(true);
+		const judged = judge({ kind: "provider", base, head });
+		expect(judged.verdict).toBe("BREAK");
+		const introduced = head.tsc.keys.filter((key) => !base.tsc.keys.includes(key));
+		expect(judged.reasons[0]).toBe(
+			`tsc ${base.tsc.errors} -> ${head.tsc.errors}, ${introduced.length} new on head: ${introduced[0]}`,
+		);
+	});
+
+	it("is not BREAK when head only repeats or drops base tsc errors, or when tsc did not run on a side", () => {
+		const red = { ...ok("a"), tsc: parseTscOutput(TSC_RED, "/p", []) };
+		expect(judge({ kind: "provider", base: red, head: red }).verdict).toBe("SAME");
+		const fewer = {
+			...ok("a"),
+			tsc: parseTscOutput(TSC_RED.split("\n").slice(1).join("\n"), "/p", []),
+		};
+		expect(fewer.tsc.errors).toBe(red.tsc.errors - 1);
+		expect(judge({ kind: "provider", base: red, head: fewer }).verdict).toBe("SAME");
+		const notRun = { ...ok("a"), tsc: { errors: -1, sample: ["no tsconfig"], keys: [] } };
+		expect(judge({ kind: "provider", base: notRun, head: red }).verdict).toBe("SAME");
 	});
 
 	it("is BREAK when the head SDK cannot extract a contract it extracted on base, NOT COVERED when neither side can", () => {
@@ -293,6 +372,7 @@ describe("renderReport", () => {
 			head: { spec: "b", dir: "/b", version: "1" },
 			targetPatterns: ["/apifuse (fixture-tests)"],
 			targets: [target],
+			duplicateClones: [],
 			windowRules: [],
 			summary: { SAME: 0, BREAK: 0, WARN: 0, "NOT COVERED": 1, SKIP: 0 },
 		});
@@ -324,68 +404,500 @@ describe("parseFixtureTestOutput", () => {
 	});
 });
 
-describe("stripComments", () => {
-	it("removes comments but keeps comment-looking text inside strings and templates", () => {
-		const source = [
-			'const accept = "application/json, text/plain, */*";',
-			"// a line comment with new ProviderError(",
-			'const url = "https://example.com/path"; // trailing',
-			`const tpl = \`https://$\{host}/x\`; /* block */ const after = 1;`,
-			"/* multi",
-			"   line */",
-			'const slash = "contains // slash";',
-			"const last = 2;",
-		].join("\n");
-		const stripped = stripComments(source);
-		expect(stripped).toContain('"application/json, text/plain, */*"');
-		expect(stripped).toContain('"https://example.com/path"');
-		expect(stripped).toContain(`\`https://$\{host}/x\``);
-		expect(stripped).toContain('"contains // slash"');
-		expect(stripped).toContain("const after = 1;");
-		expect(stripped).toContain("const last = 2;");
-		expect(stripped).not.toContain("a line comment");
-		expect(stripped).not.toContain("trailing");
-		expect(stripped).not.toContain("block");
-		expect(stripped).not.toContain("multi");
+describe("parseTscOutput", () => {
+	it("keys each diagnostic by file, line, column and code with the per-side roots removed", () => {
+		const parsed = parseTscOutput(
+			[
+				"/scratch/head/p/index.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+				"/scratch/sdk/abc/dist/types.d.ts(9,1): error TS1005: ';' expected.",
+				"Found 2 errors.",
+			].join("\n"),
+			"/scratch/head/p",
+			["/scratch/head/p", "/scratch/sdk/abc"],
+		);
+		expect(parsed.errors).toBe(2);
+		expect(parsed.keys).toEqual([
+			"dist/types.d.ts(9,1): error TS1005",
+			"index.ts(3,7): error TS2322",
+		]);
+		expect(parsed.sample).toEqual([
+			"index.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+			"dist/types.d.ts(9,1): error TS1005: ';' expected.",
+		]);
+	});
+
+	it("resolves a path tsc printed relative to its cwd, so the same SDK diagnostic keys alike under two per-side SHAs", () => {
+		const sdkLine = (sha: string) =>
+			`../../sdk/${sha}/dist/types.d.ts(9,1): error TS1005: ';' expected.`;
+		const sideA = parseTscOutput(sdkLine("aaaa1111"), "/scratch/run/base/p", [
+			"/scratch/run/base/p",
+			"/scratch/run/sdk/aaaa1111",
+		]);
+		const sideB = parseTscOutput(sdkLine("bbbb2222"), "/scratch/run/head/p", [
+			"/scratch/run/head/p",
+			"/scratch/run/sdk/bbbb2222",
+		]);
+		expect(sideA.keys).toEqual(["dist/types.d.ts(9,1): error TS1005"]);
+		expect(sideB.keys).toEqual(sideA.keys);
+		const ok = { probe: { load: { status: "ok" as const }, digest: "d", lint: {}, warnings: [] } };
+		expect(
+			judge({ kind: "provider", base: { ...ok, tsc: sideA }, head: { ...ok, tsc: sideB } }).verdict,
+		).toBe("SAME");
+		const headWithNew = parseTscOutput(
+			`${sdkLine("bbbb2222")}\nindex.ts(1,1): error TS2304: Cannot find name 'x'.`,
+			"/scratch/run/head/p",
+			["/scratch/run/head/p", "/scratch/run/sdk/bbbb2222"],
+		);
+		const judged = judge({
+			kind: "provider",
+			base: { ...ok, tsc: sideA },
+			head: { ...ok, tsc: headWithNew },
+		});
+		expect(judged.verdict).toBe("BREAK");
+		expect(judged.reasons[0]).toContain("index.ts(1,1): error TS2304");
+		expect(
+			parseTscOutput("/elsewhere/x.ts(1,1): error TS1: m", "/scratch/run/head/p", [
+				"/scratch/run/head/p",
+			]).keys,
+		).toEqual(["/elsewhere/x.ts(1,1): error TS1"]);
+	});
+
+	it("removes the per-side roots from a location-less diagnostic and from message text, so both sides key alike", () => {
+		const side = (name: string, sha: string) => {
+			const staged = `/scratch/run/${name}/p`;
+			const sdk = `/scratch/run/sdk/${sha}`;
+			return parseTscOutput(
+				[
+					`error TS5083: Cannot read file '${staged}/missing.json'.`,
+					`error TS18003: No inputs were found in config file '${staged}/tsconfig.json'.`,
+					`index.ts(2,3): error TS2307: Cannot find module '${sdk}/dist/index.js'.`,
+				].join("\n"),
+				staged,
+				[staged, sdk],
+			);
+		};
+		const sideA = side("base", "aaaa1111");
+		const sideB = side("head", "bbbb2222");
+		expect(sideA.keys).toEqual([
+			"error TS18003: No inputs were found in config file 'tsconfig.json'.",
+			"error TS5083: Cannot read file 'missing.json'.",
+			"index.ts(2,3): error TS2307",
+		]);
+		expect(sideB.keys).toEqual(sideA.keys);
+		expect(sideB.sample).toEqual(sideA.sample);
+		expect(sideA.sample[2]).toBe(
+			"index.ts(2,3): error TS2307: Cannot find module 'dist/index.js'.",
+		);
+		const ok = { probe: { load: { status: "ok" as const }, digest: "d", lint: {}, warnings: [] } };
+		expect(
+			judge({ kind: "provider", base: { ...ok, tsc: sideA }, head: { ...ok, tsc: sideB } }).verdict,
+		).toBe("SAME");
 	});
 });
 
+const TSC_RED = [
+	"index.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+	"index.ts(10,2): error TS2345: Argument of type 'A' is not assignable to parameter of type 'B'.",
+	"upstream/client.ts(44,12): error TS2339: Property 'x' does not exist on type 'Y'.",
+].join("\n");
+
+/** The same count as TSC_RED, every diagnostic at another site. */
+const TSC_RED_ELSEWHERE = [
+	"index.ts(4,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+	"index.ts(10,2): error TS2554: Expected 1 arguments, but got 2.",
+	"upstream/other.ts(44,12): error TS2339: Property 'x' does not exist on type 'Y'.",
+].join("\n");
+
 describe("countWindowRules", () => {
-	it("counts each window rule per target, skips comments and survives */* in strings", () => {
-		const dir = mkdtempSync(path.join(process.env.TMPDIR ?? tmpdir(), "window-rules-"));
-		try {
-			const file = path.join(dir, "ops.ts");
-			writeFileSync(
-				file,
-				[
-					'const headers = { Accept: "application/json, text/plain, */*" };',
-					'throw new ProviderError("x", { code: "X", retryable: false });',
-					'throw new ProviderError("y", { code: "Y" });',
-					"// throw new ProviderError('z', { category: 'upstream_http' });",
-					'const note = "contains // slash"; throw new ProviderError("w", { code: "W", category: "upstream_http" });',
-					'const cursor = defineCursor({ name: "page", fieldName: "page_token" });',
-					"const session = { poolSize: 3 };",
-					'const op = { approval: "always", contextKeys: ["a"] };',
-					'const schema = z.string().describe("prose");',
-					"/* .describe('in a block comment') */",
-				].join("\n"),
-			);
-			const usage = Object.fromEntries(
-				countWindowRules([{ name: "t", sources: [file] }]).map((entry) => [
-					entry.rule,
-					entry.sites,
-				]),
-			);
-			expect(usage).toEqual({
-				"legacy-error-options": 2,
-				"legacy-handle-declaration": 1,
-				"proxy-session-pool-size": 1,
-				"redundant-approval": 1,
-				"context-keys": 1,
-				"schema-describe-prose": 1,
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
+	const probe = (lint: ProviderProbe["lint"], warnings: string[] = []): ProviderProbe => ({
+		load: { status: "ok" },
+		digest: "d",
+		lint,
+		warnings,
+	});
+	const lintRules = WINDOW_RULES.flatMap((entry) =>
+		"lint" in entry.signal ? [[entry.rule, entry.signal.lint] as const] : [],
+	);
+	const warningRules = WINDOW_RULES.filter((entry) => !("lint" in entry.signal));
+	const localeKeyWarning = (fields: Array<[string, "raw .describe() prose" | "no description"]>) =>
+		`[provider-sdk] Provider "p" has ${fields.length} public schema field${fields.length === 1 ? "" : "s"} without a locale key: ${fields.map(([path, reason]) => `operations.ping.${path} (${reason})`).join(", ")}. Describe each with .describeKey("<locale key>") instead of .describe("prose") (codemod: scripts/codemods/schema.yml); the next release refuses them at defineProvider.`;
+
+	it("counts a user per base lint diagnostic of the rule's lint id and nothing from source text, skipping stale and probe-less targets", () => {
+		const lintOnA = Object.fromEntries(
+			lintRules.map(([, lintId], index) => [lintId, { level: "warn" as const, count: index + 2 }]),
+		);
+		const fields: Array<[string, "raw .describe() prose" | "no description"]> = [
+			["output.a", "raw .describe() prose"],
+			["output.b", "no description"],
+		];
+		const targets = [
+			{ name: "a", base: { probe: probe(lintOnA, [localeKeyWarning(fields)]) } },
+			{
+				name: "b",
+				base: { probe: probe({ "allowed-hosts-required": { level: "error", count: 1 } }) },
+			},
+			{ name: "c", base: { probe: probe(lintOnA, [localeKeyWarning(fields)]) }, staleCloneOf: "a" },
+			{ name: "d", base: {} },
+		];
+		const usage = Object.fromEntries(countWindowRules(targets).map((entry) => [entry.rule, entry]));
+		for (const [rule, lintId] of lintRules) {
+			expect(usage[rule]?.providers).toEqual(["a"]);
+			expect(usage[rule]?.sites).toBe(lintOnA[lintId]?.count);
+			expect(usage[rule]?.signal).toBe(`lint ${lintId}`);
 		}
+		for (const entry of warningRules) {
+			expect(usage[entry.rule]?.providers).toEqual(["a"]);
+			expect(usage[entry.rule]?.signal).toBe("defineProvider warning");
+		}
+	});
+
+	it("reads each public-schema reason of the base locale-key warning as its own row, sites = fields with that tag", () => {
+		const fields: Array<[string, "raw .describe() prose" | "no description"]> = [
+			["output.a", "raw .describe() prose"],
+			["output.b", "no description"],
+			["output.c", "no description"],
+			["input.value", "raw .describe() prose"],
+		];
+		const byReason = (reason: string) => fields.filter(([, tag]) => tag === reason).length;
+		const warnings = [
+			localeKeyWarning(fields),
+			"[provider-sdk] some unrelated warning mentioning describe and (no description) outside the locale-key warning",
+		];
+		const usage = Object.fromEntries(
+			countWindowRules([{ name: "p", base: { probe: probe({}, warnings) } }]).map((entry) => [
+				entry.rule,
+				entry,
+			]),
+		);
+		expect(usage["schema-describe-prose"]).toMatchObject({
+			providers: ["p"],
+			sites: byReason("raw .describe() prose"),
+		});
+		expect(usage["schema-missing-key"]).toMatchObject({
+			providers: ["p"],
+			sites: byReason("no description"),
+		});
+		for (const [rule] of lintRules) expect(usage[rule]?.providers).toEqual([]);
+	});
+
+	it("keeps the two schema reasons apart: a provider with only undescribed fields is not a raw-prose user and vice versa", () => {
+		const onlyMissing = countWindowRules([
+			{
+				name: "p",
+				base: { probe: probe({}, [localeKeyWarning([["output.a", "no description"]])]) },
+			},
+		]);
+		expect(onlyMissing.find((entry) => entry.rule === "schema-describe-prose")).toMatchObject({
+			providers: [],
+			sites: 0,
+		});
+		expect(onlyMissing.find((entry) => entry.rule === "schema-missing-key")).toMatchObject({
+			providers: ["p"],
+			sites: 1,
+		});
+		const onlyProse = countWindowRules([
+			{
+				name: "p",
+				base: { probe: probe({}, [localeKeyWarning([["output.a", "raw .describe() prose"]])]) },
+			},
+		]);
+		expect(onlyProse.find((entry) => entry.rule === "schema-missing-key")).toMatchObject({
+			providers: [],
+			sites: 0,
+		});
+		expect(onlyProse.find((entry) => entry.rule === "schema-describe-prose")).toMatchObject({
+			providers: ["p"],
+			sites: 1,
+		});
+	});
+});
+
+describe("normalizeRemote", () => {
+	it("maps scp, ssh and https spellings of one repository to one key", () => {
+		const spellings = [
+			"git@github.com:APIFuseHQ/apifuse-provider-catchtable.git",
+			"ssh://git@github.com/APIFuseHQ/apifuse-provider-catchtable",
+			"https://github.com/APIFuseHQ/apifuse-provider-catchtable.git",
+			"https://user@github.com/apifusehq/apifuse-provider-catchtable/\n",
+		];
+		expect(new Set(spellings.map(normalizeRemote))).toEqual(
+			new Set(["github.com/apifusehq/apifuse-provider-catchtable"]),
+		);
+		expect(normalizeRemote("https://github.com/a/b")).not.toBe(
+			normalizeRemote("https://github.com/a/c"),
+		);
+	});
+});
+
+describe("groupRepositories", () => {
+	const clone = (remote: string, roots: string[], head = "h", committedAt = 0) => ({
+		remote: normalizeRemote(remote),
+		roots: [...roots].sort(),
+		head,
+		committedAt,
+		dirty: false,
+	});
+
+	it("joins clones that share a root commit or a remote, and keeps unrelated repositories apart", () => {
+		const clones = [
+			clone("https://github.com/O/modu-parking.git", ["ac83"]),
+			clone("https://github.com/O/modu-phone-otp.git", ["ac83"]),
+			clone("git@github.com:O/catchtable.git", ["1111"]),
+			clone("https://github.com/O/catchtable", ["1111"]),
+			clone("https://github.com/O/careem", ["2222"]),
+			clone("https://github.com/O/careem", []),
+			clone("https://github.com/O/orphan", []),
+			clone("https://github.com/O/grafted", ["3333", "4444"]),
+			clone("https://github.com/O/grafted-fork", ["4444"]),
+		];
+		const groups = groupRepositories(clones);
+		const same = (left: number, right: number) => groups[left] === groups[right];
+		expect(same(0, 1)).toBe(true);
+		expect(same(2, 3)).toBe(true);
+		expect(same(4, 5)).toBe(true);
+		expect(same(7, 8)).toBe(true);
+		for (const [left, right] of [
+			[0, 2],
+			[0, 4],
+			[0, 6],
+			[2, 4],
+			[4, 6],
+			[6, 7],
+			[0, 7],
+		] as const) {
+			expect(same(left, right)).toBe(false);
+		}
+		expect(new Set(groups).size).toBe(5);
+	});
+});
+
+describe("dedupeClones", () => {
+	const clone = (
+		remote: string,
+		roots: string[],
+		head: string,
+		committedAt: number,
+		dirty = false,
+	) => ({
+		remote: normalizeRemote(remote),
+		roots: [...roots].sort(),
+		head,
+		committedAt,
+		dirty,
+	});
+	/** The real shapes: catchtable clones under several URL spellings, and the renamed modu repository (two origin URLs, one root commit). */
+	const fixtures = [
+		{
+			name: "catchtable",
+			clone: clone("https://github.com/O/catchtable.git", ["1111"], "c26a", 300),
+		},
+		{
+			name: "catchtable-agent",
+			clone: clone("git@github.com:O/catchtable.git", ["1111"], "8c14", 100),
+		},
+		{
+			name: "catchtable-w3507-a",
+			clone: clone("https://github.com/O/catchtable", ["1111"], "c26a", 300),
+		},
+		{
+			name: "catchtable-w3507-b",
+			clone: clone("https://github.com/O/catchtable", ["1111"], "8c14", 100),
+		},
+		{
+			name: "modu-parking",
+			clone: clone("https://github.com/O/apifuse-provider-modu-parking.git", ["ac83"], "5e00", 200),
+		},
+		{
+			name: "modu-phone-otp",
+			clone: clone(
+				"https://github.com/O/apifuse-provider-modu-phone-otp.git",
+				["ac83"],
+				"ef60",
+				150,
+			),
+		},
+		{
+			name: "fleet/modu-parking",
+			clone: clone("https://github.com/O/apifuse-provider-modu-parking.git", ["ac83"], "3607", 400),
+		},
+		{
+			name: "fleet/modu-phone-otp",
+			clone: clone(
+				"https://github.com/O/apifuse-provider-modu-phone-otp.git",
+				["ac83"],
+				"3607",
+				400,
+			),
+		},
+		{ name: "careem", clone: clone("https://github.com/O/careem", ["2222"], "cccc", 50) },
+		{ name: "plain-copy" },
+	];
+	const withClone = fixtures.filter((target) => target.clone !== undefined);
+	const repositoryOf = new Map<(typeof fixtures)[number], number>(
+		groupRepositories(withClone.map((target) => target.clone!)).map((group, index) => [
+			withClone[index]!,
+			group,
+		]),
+	);
+
+	it("scans one clone per repository and HEAD, keeps every HEAD, and marks the older HEADs stale", () => {
+		const result = dedupeClones(fixtures);
+		const byIdentity = new Map<string, string>();
+		for (const target of fixtures) {
+			if (!target.clone) continue;
+			const key = `${repositoryOf.get(target)}@${target.clone.head}`;
+			if (!byIdentity.has(key)) byIdentity.set(key, target.name);
+		}
+		const expectedKept = fixtures.filter(
+			(target) =>
+				!target.clone ||
+				byIdentity.get(`${repositoryOf.get(target)}@${target.clone.head}`) === target.name,
+		);
+		expect(result.kept).toEqual(expectedKept);
+		expect(result.duplicates.map((entry) => [entry.dropped.name, entry.keptAs.name])).toEqual(
+			fixtures
+				.filter((target) => !expectedKept.includes(target))
+				.map((target) => [
+					target.name,
+					byIdentity.get(`${repositoryOf.get(target)}@${target.clone?.head}`),
+				]),
+		);
+		const newestByRepository = new Map<number, (typeof fixtures)[number]>();
+		for (const target of result.kept) {
+			if (!target.clone) continue;
+			const repository = repositoryOf.get(target)!;
+			const best = newestByRepository.get(repository);
+			if (!best || (best.clone?.committedAt ?? 0) < target.clone.committedAt)
+				newestByRepository.set(repository, target);
+		}
+		const expectedStale = result.kept.filter((target) => {
+			if (!target.clone) return false;
+			const newest = newestByRepository.get(repositoryOf.get(target)!)!;
+			return newest !== target && newest.clone?.head !== target.clone.head;
+		});
+		expect(result.stale.map((entry) => entry.clone)).toEqual(expectedStale);
+		for (const entry of result.stale) {
+			expect(entry.newest).toBe(newestByRepository.get(repositoryOf.get(entry.clone)!)!);
+			expect(entry.newest.clone!.committedAt).toBeGreaterThan(entry.clone.clone!.committedAt);
+		}
+		expect(expectedStale.length).toBeGreaterThan(0);
+		expect(result.duplicates.length).toBeGreaterThan(0);
+	});
+
+	it("treats the renamed modu repository as one: the old-name clone at the same HEAD is a duplicate, at an older HEAD a stale clone", () => {
+		const result = dedupeClones(fixtures);
+		const byName = (name: string) => fixtures.find((target) => target.name === name)!;
+		expect(result.duplicates).toContainEqual({
+			dropped: byName("fleet/modu-phone-otp"),
+			keptAs: byName("fleet/modu-parking"),
+		});
+		const staleNames = result.stale.map((entry) => [entry.clone.name, entry.newest.name]);
+		expect(staleNames).toContainEqual(["modu-phone-otp", "fleet/modu-parking"]);
+		expect(staleNames).toContainEqual(["modu-parking", "fleet/modu-parking"]);
+		expect(result.kept.map((target) => target.name)).not.toContain("fleet/modu-phone-otp");
+	});
+
+	it("never folds a dirty clone: same repository and HEAD with one dirty side scans both, both clean scans one", () => {
+		const cleanA = { name: "clean-a", clone: clone("https://github.com/O/x", ["r1"], "h1", 100) };
+		const cleanB = { name: "clean-b", clone: clone("https://github.com/O/x", ["r1"], "h1", 100) };
+		const dirtyB = {
+			name: "dirty-b",
+			clone: clone("https://github.com/O/x", ["r1"], "h1", 100, true),
+		};
+		const dirtyFirst = {
+			name: "dirty-first",
+			clone: clone("https://github.com/O/x", ["r1"], "h1", 100, true),
+		};
+		expect(dedupeClones([cleanA, cleanB])).toEqual({
+			kept: [cleanA],
+			duplicates: [{ dropped: cleanB, keptAs: cleanA }],
+			stale: [],
+		});
+		expect(dedupeClones([cleanA, dirtyB])).toEqual({
+			kept: [cleanA, dirtyB],
+			duplicates: [],
+			stale: [],
+		});
+		// A dirty clone found first does not absorb a clean twin either.
+		expect(dedupeClones([dirtyFirst, cleanA])).toEqual({
+			kept: [dirtyFirst, cleanA],
+			duplicates: [],
+			stale: [],
+		});
+		// Dirty does not exempt a clone from the stale rule across HEADs.
+		const dirtyOld = {
+			name: "dirty-old",
+			clone: clone("https://github.com/O/x", ["r1"], "h0", 50, true),
+		};
+		const result = dedupeClones([cleanA, dirtyOld]);
+		expect(result.kept).toEqual([cleanA, dirtyOld]);
+		expect(result.stale).toEqual([{ clone: dirtyOld, newest: cleanA }]);
+	});
+
+	it("leaves targets without a clone identity and single clones alone", () => {
+		const lone = fixtures.filter((target) => !target.clone || target.name === "careem");
+		expect(dedupeClones(lone)).toEqual({ kept: lone, duplicates: [], stale: [] });
+	});
+});
+
+describe("renderReport stale clones", () => {
+	it("shows a stale clone's verdict as non-gating and keeps it out of the summary lines", () => {
+		const ok = (digest: string) => ({
+			probe: { load: { status: "ok" as const }, digest, lint: {}, warnings: [] },
+			tsc: { errors: 0, sample: [], keys: [] },
+		});
+		const row = (
+			name: string,
+			head: ReturnType<typeof ok>,
+			staleCloneOf?: string,
+		): TargetReport => {
+			const target: TargetReport = {
+				name,
+				kind: "provider",
+				path: `/clones/${name}`,
+				clone: {
+					remote: "github.com/o/catchtable",
+					roots: ["1111"],
+					head: `${name}-sha-000000`,
+					committedAt: 1,
+					dirty: name === "catchtable-agent",
+				},
+				...(staleCloneOf === undefined ? {} : { staleCloneOf }),
+				base: ok("a"),
+				head,
+				verdict: "SKIP",
+				covered: false,
+				reasons: [],
+			};
+			return Object.assign(target, judge(target));
+		};
+		const targets = [row("catchtable", ok("a")), row("catchtable-agent", ok("b"), "catchtable")];
+		expect(targets[1]?.verdict).toBe("BREAK");
+		const rendered = renderReport({
+			base: { spec: "a", dir: "/a", version: "1" },
+			head: { spec: "b", dir: "/b", version: "1" },
+			targetPatterns: ["/clones/*"],
+			targets,
+			duplicateClones: [{ path: "/clones/catchtable-w3507-a", scannedAs: "catchtable" }],
+			windowRules: countWindowRules(targets),
+			summary: { SAME: 1, BREAK: 0, WARN: 0, "NOT COVERED": 0, SKIP: 0 },
+		});
+		expect(rendered).toContain(
+			"targets: 1 from /clones/* (+1 stale clone(s), not gating) (1 duplicate clone(s) scanned once)",
+		);
+		expect(rendered).toMatch(
+			/^catchtable-agent\s+.*stale clone \(BREAK\) dirty\s+newest clone is catchtable; contract digest/m,
+		);
+		expect(rendered).toContain("(dirty working tree, local changes were not gated)");
+		expect(rendered).toContain("summary: 0 BREAK, 0 WARN, 1 SAME, 0 NOT COVERED, 0 SKIP");
+		expect(rendered).not.toMatch(/^ {2}BREAK catchtable-agent/m);
+		expect(rendered).toContain(
+			"stale clones: 1 target(s) share a repository with a newer clone; reported, not gating",
+		);
+		expect(rendered).toContain(
+			`  catchtable-agent: BREAK, ${targets[1]?.clone?.head.slice(0, 12)} is older than catchtable (dirty working tree, local changes were not gated): contract digest`,
+		);
+		expect(rendered).toContain("  /clones/catchtable-w3507-a = catchtable");
+		expect(rendered).toContain("window rules over the 1 target(s) above");
 	});
 });
