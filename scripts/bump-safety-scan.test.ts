@@ -241,7 +241,7 @@ describe("judge", () => {
 	});
 
 	it("is BREAK when tsc goes from clean to red", () => {
-		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED, []) };
+		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED, "/p", []) };
 		const judged = judge({ kind: "provider", base: ok("a"), head });
 		expect(judged.verdict).toBe("BREAK");
 		expect(judged.reasons[0]).toContain(
@@ -250,8 +250,8 @@ describe("judge", () => {
 	});
 
 	it("is BREAK when head has a tsc error base does not, even at the same count", () => {
-		const base = { ...ok("a"), tsc: parseTscOutput(TSC_RED, []) };
-		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED_ELSEWHERE, []) };
+		const base = { ...ok("a"), tsc: parseTscOutput(TSC_RED, "/p", []) };
+		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED_ELSEWHERE, "/p", []) };
 		expect(head.tsc.errors).toBe(base.tsc.errors);
 		expect(head.tsc.keys.some((key) => !base.tsc.keys.includes(key))).toBe(true);
 		const judged = judge({ kind: "provider", base, head });
@@ -263,11 +263,11 @@ describe("judge", () => {
 	});
 
 	it("is not BREAK when head only repeats or drops base tsc errors, or when tsc did not run on a side", () => {
-		const red = { ...ok("a"), tsc: parseTscOutput(TSC_RED, []) };
+		const red = { ...ok("a"), tsc: parseTscOutput(TSC_RED, "/p", []) };
 		expect(judge({ kind: "provider", base: red, head: red }).verdict).toBe("SAME");
 		const fewer = {
 			...ok("a"),
-			tsc: parseTscOutput(TSC_RED.split("\n").slice(1).join("\n"), []),
+			tsc: parseTscOutput(TSC_RED.split("\n").slice(1).join("\n"), "/p", []),
 		};
 		expect(fewer.tsc.errors).toBe(red.tsc.errors - 1);
 		expect(judge({ kind: "provider", base: red, head: fewer }).verdict).toBe("SAME");
@@ -412,6 +412,7 @@ describe("parseTscOutput", () => {
 				"/scratch/sdk/abc/dist/types.d.ts(9,1): error TS1005: ';' expected.",
 				"Found 2 errors.",
 			].join("\n"),
+			"/scratch/head/p",
 			["/scratch/head/p", "/scratch/sdk/abc"],
 		);
 		expect(parsed.errors).toBe(2);
@@ -423,6 +424,42 @@ describe("parseTscOutput", () => {
 			"index.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
 			"dist/types.d.ts(9,1): error TS1005: ';' expected.",
 		]);
+	});
+
+	it("resolves a path tsc printed relative to its cwd, so the same SDK diagnostic keys alike under two per-side SHAs", () => {
+		const sdkLine = (sha: string) =>
+			`../../sdk/${sha}/dist/types.d.ts(9,1): error TS1005: ';' expected.`;
+		const sideA = parseTscOutput(sdkLine("aaaa1111"), "/scratch/run/base/p", [
+			"/scratch/run/base/p",
+			"/scratch/run/sdk/aaaa1111",
+		]);
+		const sideB = parseTscOutput(sdkLine("bbbb2222"), "/scratch/run/head/p", [
+			"/scratch/run/head/p",
+			"/scratch/run/sdk/bbbb2222",
+		]);
+		expect(sideA.keys).toEqual(["dist/types.d.ts(9,1): error TS1005"]);
+		expect(sideB.keys).toEqual(sideA.keys);
+		const ok = { probe: { load: { status: "ok" as const }, digest: "d", lint: {}, warnings: [] } };
+		expect(
+			judge({ kind: "provider", base: { ...ok, tsc: sideA }, head: { ...ok, tsc: sideB } }).verdict,
+		).toBe("SAME");
+		const headWithNew = parseTscOutput(
+			`${sdkLine("bbbb2222")}\nindex.ts(1,1): error TS2304: Cannot find name 'x'.`,
+			"/scratch/run/head/p",
+			["/scratch/run/head/p", "/scratch/run/sdk/bbbb2222"],
+		);
+		const judged = judge({
+			kind: "provider",
+			base: { ...ok, tsc: sideA },
+			head: { ...ok, tsc: headWithNew },
+		});
+		expect(judged.verdict).toBe("BREAK");
+		expect(judged.reasons[0]).toContain("index.ts(1,1): error TS2304");
+		expect(
+			parseTscOutput("/elsewhere/x.ts(1,1): error TS1: m", "/scratch/run/head/p", [
+				"/scratch/run/head/p",
+			]).keys,
+		).toEqual(["/elsewhere/x.ts(1,1): error TS1"]);
 	});
 });
 
@@ -566,6 +603,7 @@ describe("groupRepositories", () => {
 		roots: [...roots].sort(),
 		head,
 		committedAt,
+		dirty: false,
 	});
 
 	it("joins clones that share a root commit or a remote, and keeps unrelated repositories apart", () => {
@@ -602,11 +640,18 @@ describe("groupRepositories", () => {
 });
 
 describe("dedupeClones", () => {
-	const clone = (remote: string, roots: string[], head: string, committedAt: number) => ({
+	const clone = (
+		remote: string,
+		roots: string[],
+		head: string,
+		committedAt: number,
+		dirty = false,
+	) => ({
 		remote: normalizeRemote(remote),
 		roots: [...roots].sort(),
 		head,
 		committedAt,
+		dirty,
 	});
 	/** The real shapes: catchtable clones under several URL spellings, and the renamed modu repository (two origin URLs, one root commit). */
 	const fixtures = [
@@ -693,9 +738,11 @@ describe("dedupeClones", () => {
 			if (!best || (best.clone?.committedAt ?? 0) < target.clone.committedAt)
 				newestByRepository.set(repository, target);
 		}
-		const expectedStale = result.kept.filter(
-			(target) => target.clone && newestByRepository.get(repositoryOf.get(target)!) !== target,
-		);
+		const expectedStale = result.kept.filter((target) => {
+			if (!target.clone) return false;
+			const newest = newestByRepository.get(repositoryOf.get(target)!)!;
+			return newest !== target && newest.clone?.head !== target.clone.head;
+		});
 		expect(result.stale.map((entry) => entry.clone)).toEqual(expectedStale);
 		for (const entry of result.stale) {
 			expect(entry.newest).toBe(newestByRepository.get(repositoryOf.get(entry.clone)!)!);
@@ -716,6 +763,43 @@ describe("dedupeClones", () => {
 		expect(staleNames).toContainEqual(["modu-phone-otp", "fleet/modu-parking"]);
 		expect(staleNames).toContainEqual(["modu-parking", "fleet/modu-parking"]);
 		expect(result.kept.map((target) => target.name)).not.toContain("fleet/modu-phone-otp");
+	});
+
+	it("never folds a dirty clone: same repository and HEAD with one dirty side scans both, both clean scans one", () => {
+		const cleanA = { name: "clean-a", clone: clone("https://github.com/O/x", ["r1"], "h1", 100) };
+		const cleanB = { name: "clean-b", clone: clone("https://github.com/O/x", ["r1"], "h1", 100) };
+		const dirtyB = {
+			name: "dirty-b",
+			clone: clone("https://github.com/O/x", ["r1"], "h1", 100, true),
+		};
+		const dirtyFirst = {
+			name: "dirty-first",
+			clone: clone("https://github.com/O/x", ["r1"], "h1", 100, true),
+		};
+		expect(dedupeClones([cleanA, cleanB])).toEqual({
+			kept: [cleanA],
+			duplicates: [{ dropped: cleanB, keptAs: cleanA }],
+			stale: [],
+		});
+		expect(dedupeClones([cleanA, dirtyB])).toEqual({
+			kept: [cleanA, dirtyB],
+			duplicates: [],
+			stale: [],
+		});
+		// A dirty clone found first does not absorb a clean twin either.
+		expect(dedupeClones([dirtyFirst, cleanA])).toEqual({
+			kept: [dirtyFirst, cleanA],
+			duplicates: [],
+			stale: [],
+		});
+		// Dirty does not exempt a clone from the stale rule across HEADs.
+		const dirtyOld = {
+			name: "dirty-old",
+			clone: clone("https://github.com/O/x", ["r1"], "h0", 50, true),
+		};
+		const result = dedupeClones([cleanA, dirtyOld]);
+		expect(result.kept).toEqual([cleanA, dirtyOld]);
+		expect(result.stale).toEqual([{ clone: dirtyOld, newest: cleanA }]);
 	});
 
 	it("leaves targets without a clone identity and single clones alone", () => {
@@ -744,6 +828,7 @@ describe("renderReport stale clones", () => {
 					roots: ["1111"],
 					head: `${name}-sha-000000`,
 					committedAt: 1,
+					dirty: name === "catchtable-agent",
 				},
 				...(staleCloneOf === undefined ? {} : { staleCloneOf }),
 				base: ok("a"),
@@ -769,15 +854,16 @@ describe("renderReport stale clones", () => {
 			"targets: 1 from /clones/* (+1 stale clone(s), not gating) (1 duplicate clone(s) scanned once)",
 		);
 		expect(rendered).toMatch(
-			/^catchtable-agent\s+.*stale clone \(BREAK\)\s+newest clone is catchtable; contract digest/m,
+			/^catchtable-agent\s+.*stale clone \(BREAK\) dirty\s+newest clone is catchtable; contract digest/m,
 		);
+		expect(rendered).toContain("(dirty working tree, local changes were not gated)");
 		expect(rendered).toContain("summary: 0 BREAK, 0 WARN, 1 SAME, 0 NOT COVERED, 0 SKIP");
 		expect(rendered).not.toMatch(/^ {2}BREAK catchtable-agent/m);
 		expect(rendered).toContain(
 			"stale clones: 1 target(s) share a repository with a newer clone; reported, not gating",
 		);
 		expect(rendered).toContain(
-			`  catchtable-agent: BREAK, ${targets[1]?.clone?.head.slice(0, 12)} is older than catchtable: contract digest`,
+			`  catchtable-agent: BREAK, ${targets[1]?.clone?.head.slice(0, 12)} is older than catchtable (dirty working tree, local changes were not gated): contract digest`,
 		);
 		expect(rendered).toContain("  /clones/catchtable-w3507-a = catchtable");
 		expect(rendered).toContain("window rules over the 1 target(s) above");

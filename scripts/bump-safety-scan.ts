@@ -175,6 +175,13 @@ export interface CloneIdentity {
 	head: string;
 	/** HEAD commit time (unix seconds); the newest clone of a remote is the one that gates. */
 	committedAt: number;
+	/**
+	 * Working tree differs from HEAD (`git status --porcelain`, untracked
+	 * included, ignored excluded). The scan stages the working tree, so a dirty
+	 * clone is never folded into another clone and never absorbs one: it is
+	 * scanned and gates on its own.
+	 */
+	dirty: boolean;
 }
 
 export interface TargetReport {
@@ -531,11 +538,12 @@ async function cloneIdentity(dir: string): Promise<CloneIdentity | undefined> {
 	} catch {
 		return undefined;
 	}
-	const [remote, head, committed, roots] = await Promise.all([
+	const [remote, head, committed, roots, status] = await Promise.all([
 		git(["remote", "get-url", "origin"]),
 		git(["rev-parse", "HEAD"]),
 		git(["log", "-1", "--format=%ct", "HEAD"]),
 		git(["rev-list", "--max-parents=0", "HEAD"]),
+		git(["status", "--porcelain", "--untracked-files=all"]),
 	]);
 	if (remote.code !== 0 || head.code !== 0) return undefined;
 	return {
@@ -543,6 +551,8 @@ async function cloneIdentity(dir: string): Promise<CloneIdentity | undefined> {
 		roots: roots.code === 0 ? roots.stdout.split("\n").filter(Boolean).sort() : [],
 		head: head.stdout.trim(),
 		committedAt: Number.parseInt(committed.stdout.trim(), 10) || 0,
+		// A status that cannot be read is treated as dirty: never fold a clone we cannot vouch for.
+		dirty: status.code !== 0 || status.stdout.trim().length > 0,
 	};
 }
 
@@ -588,7 +598,10 @@ export interface CloneDedupe<T> {
  * Same repository (shared root commit or same remote, see
  * `groupRepositories`) and same HEAD: one scan is enough, the first one found
  * keeps the row. Same repository at different HEADs: every clone is scanned,
- * the one with the newest commit gates, the rest are stale clones.
+ * the one with the newest commit gates, the rest are stale clones. A dirty
+ * clone (working tree differs from HEAD) is what the scan actually stages, so
+ * it is neither dropped as a duplicate nor used as the kept twin of another
+ * clone: it is always scanned, and the stale rule still applies to it.
  */
 export function dedupeClones<T extends { clone?: CloneIdentity }>(targets: T[]): CloneDedupe<T> {
 	const kept: T[] = [];
@@ -604,7 +617,9 @@ export function dedupeClones<T extends { clone?: CloneIdentity }>(targets: T[]):
 			continue;
 		}
 		const group = byRepository.get(repository) ?? [];
-		const twin = group.find((other) => other.clone?.head === target.clone?.head);
+		const twin = target.clone?.dirty
+			? undefined
+			: group.find((other) => !other.clone?.dirty && other.clone?.head === target.clone?.head);
 		if (twin) {
 			duplicates.push({ dropped: target, keptAs: twin });
 			continue;
@@ -619,7 +634,11 @@ export function dedupeClones<T extends { clone?: CloneIdentity }>(targets: T[]):
 		const newest = group.reduce((best, candidate) =>
 			(candidate.clone?.committedAt ?? 0) > (best.clone?.committedAt ?? 0) ? candidate : best,
 		);
-		for (const clone of group) if (clone !== newest) stale.push({ clone, newest });
+		// Only an older HEAD is stale; a dirty twin kept at the newest HEAD gates on its own.
+		for (const clone of group) {
+			if (clone !== newest && clone.clone?.head !== newest.clone?.head)
+				stale.push({ clone, newest });
+		}
 	}
 	return { kept, duplicates, stale };
 }
@@ -970,24 +989,40 @@ async function typecheck(staged: string, sdk: SdkBuild): Promise<TscResult> {
 		timeoutMs: 300_000,
 	});
 	if (result.timedOut) return { errors: -1, sample: ["tsc timed out after 300s"], keys: [] };
-	return parseTscOutput(`${result.stdout}\n${result.stderr}`, [staged, sdk.dir]);
+	return parseTscOutput(`${result.stdout}\n${result.stderr}`, staged, [staged, sdk.dir]);
 }
 
 /**
- * One diagnostic per `file(line,col): error TSnnnn: message` line. The staged
- * copy and the SDK build differ per side, so both prefixes are removed from
- * the file before it becomes part of the key the verdict compares.
+ * One diagnostic per `file(line,col): error TSnnnn: message` line. tsc prints
+ * the file relative to the directory it ran in (`cwd`), so a diagnostic inside
+ * the SDK build arrives as `../../sdk/<sha>/dist/x.d.ts`; the file is resolved
+ * against `cwd` first, then the per-side roots (staged copy, SDK build) are
+ * removed, so the key the verdict compares carries no per-side path or SHA.
  */
-export function parseTscOutput(text: string, roots: string[]): TscResult {
+export function parseTscOutput(text: string, cwd: string, roots: string[]): TscResult {
 	const lines: string[] = [];
 	const keys: string[] = [];
+	const strip = (file: string): string => {
+		const absolute = path.resolve(cwd, file);
+		for (const root of roots) {
+			if (absolute === root) return ".";
+			if (absolute.startsWith(`${root}/`)) return absolute.slice(root.length + 1);
+		}
+		return absolute;
+	};
 	for (const raw of text.split("\n")) {
-		let line = raw.trim();
+		const line = raw.trim();
 		if (!/error TS\d+/.test(line)) continue;
-		for (const root of roots) line = line.split(`${root}/`).join("");
-		lines.push(line);
-		const key = /^(.*?\(\d+,\d+\)): error (TS\d+)/.exec(line);
-		keys.push(key ? `${key[1]}: error ${key[2]}` : line);
+		const match = /^(.*?)\((\d+),(\d+)\): error (TS\d+)(.*)$/.exec(line);
+		if (!match) {
+			lines.push(line);
+			keys.push(line);
+			continue;
+		}
+		const [, file, row, column, code, rest] = match;
+		const location = `${strip(file!)}(${row},${column})`;
+		lines.push(`${location}: error ${code}${rest}`);
+		keys.push(`${location}: error ${code}`);
 	}
 	return { errors: lines.length, sample: lines.slice(0, 5), keys: keys.sort() };
 }
@@ -1302,7 +1337,9 @@ export function renderReport(report: ScanReport): string {
 			digest,
 			`${lintCell(target.base)} / ${lintCell(target.head)}`,
 			`${target.base.probe?.warnings.length ?? "-"} / ${target.head.probe?.warnings.length ?? "-"}`,
-			target.staleCloneOf === undefined ? target.verdict : `stale clone (${target.verdict})`,
+			target.staleCloneOf === undefined
+				? target.verdict
+				: `stale clone (${target.verdict})${target.clone?.dirty ? " dirty" : ""}`,
 			target.staleCloneOf === undefined
 				? (target.reasons[0] ?? "")
 				: `newest clone is ${target.staleCloneOf}; ${target.reasons[0] ?? ""}`,
@@ -1326,7 +1363,7 @@ export function renderReport(report: ScanReport): string {
 		);
 		for (const target of stale) {
 			out.push(
-				`  ${target.name}: ${target.verdict}, ${target.clone?.head.slice(0, 12) ?? "?"} is older than ${target.staleCloneOf}${target.reasons[0] ? `: ${target.reasons[0]}` : ""}`,
+				`  ${target.name}: ${target.verdict}, ${target.clone?.head.slice(0, 12) ?? "?"} is older than ${target.staleCloneOf}${target.clone?.dirty ? " (dirty working tree, local changes were not gated)" : ""}${target.reasons[0] ? `: ${target.reasons[0]}` : ""}`,
 			);
 		}
 	}
