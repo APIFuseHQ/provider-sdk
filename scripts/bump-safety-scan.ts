@@ -998,6 +998,9 @@ async function typecheck(staged: string, sdk: SdkBuild): Promise<TscResult> {
  * the SDK build arrives as `../../sdk/<sha>/dist/x.d.ts`; the file is resolved
  * against `cwd` first, then the per-side roots (staged copy, SDK build) are
  * removed, so the key the verdict compares carries no per-side path or SHA.
+ * Location-less diagnostics (`error TS5083: Cannot read file '<abs path>'`) and
+ * message text get the same roots removed textually, so neither the key nor the
+ * sample text differs between the two sides.
  */
 export function parseTscOutput(text: string, cwd: string, roots: string[]): TscResult {
 	const lines: string[] = [];
@@ -1010,18 +1013,24 @@ export function parseTscOutput(text: string, cwd: string, roots: string[]): TscR
 		}
 		return absolute;
 	};
+	const neutral = (fragment: string): string => {
+		let out = fragment;
+		for (const root of roots) out = out.split(`${root}/`).join("");
+		return out;
+	};
 	for (const raw of text.split("\n")) {
 		const line = raw.trim();
 		if (!/error TS\d+/.test(line)) continue;
 		const match = /^(.*?)\((\d+),(\d+)\): error (TS\d+)(.*)$/.exec(line);
 		if (!match) {
-			lines.push(line);
-			keys.push(line);
+			const neutralLine = neutral(line);
+			lines.push(neutralLine);
+			keys.push(neutralLine);
 			continue;
 		}
 		const [, file, row, column, code, rest] = match;
 		const location = `${strip(file!)}(${row},${column})`;
-		lines.push(`${location}: error ${code}${rest}`);
+		lines.push(`${location}: error ${code}${neutral(rest!)}`);
 		keys.push(`${location}: error ${code}`);
 	}
 	return { errors: lines.length, sample: lines.slice(0, 5), keys: keys.sort() };

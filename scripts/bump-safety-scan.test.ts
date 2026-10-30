@@ -461,6 +461,38 @@ describe("parseTscOutput", () => {
 			]).keys,
 		).toEqual(["/elsewhere/x.ts(1,1): error TS1"]);
 	});
+
+	it("removes the per-side roots from a location-less diagnostic and from message text, so both sides key alike", () => {
+		const side = (name: string, sha: string) => {
+			const staged = `/scratch/run/${name}/p`;
+			const sdk = `/scratch/run/sdk/${sha}`;
+			return parseTscOutput(
+				[
+					`error TS5083: Cannot read file '${staged}/missing.json'.`,
+					`error TS18003: No inputs were found in config file '${staged}/tsconfig.json'.`,
+					`index.ts(2,3): error TS2307: Cannot find module '${sdk}/dist/index.js'.`,
+				].join("\n"),
+				staged,
+				[staged, sdk],
+			);
+		};
+		const sideA = side("base", "aaaa1111");
+		const sideB = side("head", "bbbb2222");
+		expect(sideA.keys).toEqual([
+			"error TS18003: No inputs were found in config file 'tsconfig.json'.",
+			"error TS5083: Cannot read file 'missing.json'.",
+			"index.ts(2,3): error TS2307",
+		]);
+		expect(sideB.keys).toEqual(sideA.keys);
+		expect(sideB.sample).toEqual(sideA.sample);
+		expect(sideA.sample[2]).toBe(
+			"index.ts(2,3): error TS2307: Cannot find module 'dist/index.js'.",
+		);
+		const ok = { probe: { load: { status: "ok" as const }, digest: "d", lint: {}, warnings: [] } };
+		expect(
+			judge({ kind: "provider", base: { ...ok, tsc: sideA }, head: { ...ok, tsc: sideB } }).verdict,
+		).toBe("SAME");
+	});
 });
 
 const TSC_RED = [
