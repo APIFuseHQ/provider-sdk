@@ -18,6 +18,7 @@ it("reports zero missing-profile invocations in the public body and request log 
 		operations: {
 			solve: {
 				riskClass: "read",
+				descriptionKey: "operations.solve.description",
 				input: z.object({}),
 				output: z.object({}),
 				async handler(ctx) {
@@ -49,7 +50,12 @@ it("reports zero missing-profile invocations in the public body and request log 
 			retryable: false,
 			source: "apifuse",
 			fix: "Retry the request or contact support if the challenge continues.",
-			details: { challengeKind: "akamai_sbsd", attempts: 0, outcome: "exhausted", retryable: false },
+			details: {
+				challengeKind: "akamai_sbsd",
+				attempts: 0,
+				outcome: "exhausted",
+				retryable: false,
+			},
 		},
 	});
 	const log = events.find((event) => event.event === "provider_request_failed")?.resolver;

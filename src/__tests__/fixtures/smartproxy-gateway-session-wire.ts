@@ -368,6 +368,7 @@ function servedProvider(id: string) {
 		operations: {
 			"read-through-gateway": {
 				riskClass: "read",
+				descriptionKey: "operations.readThroughGateway.description",
 				input: z.object({}),
 				output: Output,
 				upstream: { baseUrl: originUrl },

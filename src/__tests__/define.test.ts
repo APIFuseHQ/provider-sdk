@@ -37,6 +37,7 @@ const validConfig = {
 	operations: {
 		prices: {
 			riskClass: READ_RISK_CLASS,
+			descriptionKey: "operations.prices.description",
 			input: InputSchema,
 			output: OutputSchema,
 			handler: async (_ctx: ProviderContext, input: unknown) => {
@@ -981,6 +982,45 @@ describe("defineProvider", () => {
 		});
 	});
 
+	describe("operation descriptionKey", () => {
+		const withDescriptionKey = (descriptionKey: string | undefined) => {
+			const { descriptionKey: _declared, ...prices } = validConfig.operations.prices;
+			return {
+				...validConfig,
+				operations: {
+					prices: descriptionKey === undefined ? prices : { ...prices, descriptionKey },
+				},
+			};
+		};
+		const refusalOf = (config: Parameters<typeof defineProvider>[0]): ProviderError => {
+			try {
+				defineProvider(config);
+			} catch (error) {
+				if (error instanceof ProviderError) return error;
+				throw error;
+			}
+			throw new Error("defineProvider accepted the declaration");
+		};
+
+		it("refuses an operation that declares no descriptionKey at load time", () => {
+			const refusal = refusalOf(withDescriptionKey(undefined));
+
+			expect(refusal).toBeInstanceOf(ValidationError);
+			expect(refusal.code).toBe("DESCRIPTION_KEY_REQUIRED");
+			expect(refusal.message).toContain('operation "prices"');
+			expect(refusal.fix).toContain("operations.prices.description");
+		});
+
+		it("refuses an empty descriptionKey", () => {
+			expect(refusalOf(withDescriptionKey("  ")).code).toBe("DESCRIPTION_KEY_REQUIRED");
+		});
+
+		it("accepts a declared descriptionKey", () => {
+			const provider = defineProvider(validConfig);
+			expect(provider.operations.prices.descriptionKey).toBe("operations.prices.description");
+		});
+	});
+
 	describe("deployment passthrough", () => {
 		it("passes a full deployment object through verbatim", () => {
 			const deployment = {
@@ -1080,7 +1120,6 @@ describe("defineProvider", () => {
 
 			const prices = provider.operations.prices as ProviderDefinition["operations"][string];
 			expect(prices.titleKey).toBeUndefined();
-			expect(prices.descriptionKey).toBeUndefined();
 		});
 	});
 

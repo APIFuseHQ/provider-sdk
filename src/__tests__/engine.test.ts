@@ -80,6 +80,7 @@ describe("provider engine attachment", () => {
 			operations: {
 				"read-credential": {
 					riskClass: "read",
+					descriptionKey: "operations.readCredential.description",
 					input: z.object({}),
 					output: z.object({ serviceKey: z.string().optional() }),
 					handler: async (ctx) => ({
@@ -148,6 +149,7 @@ describe("provider engine attachment", () => {
 			operations: {
 				"read-credential": {
 					riskClass: "read",
+					descriptionKey: "operations.readCredential.description",
 					connectionMode: "required",
 					input: z.object({}),
 					output: z.object({ serviceKey: z.string().optional() }),
@@ -389,6 +391,7 @@ describe("engine credential containment", () => {
 				operations: {
 					inspectEnvironment: {
 						riskClass: "read",
+						descriptionKey: "operations.inspectEnvironment.description",
 						input: z.object({}),
 						output: z.object({
 							alias: z.string().optional(),
@@ -434,6 +437,7 @@ describe("engine credential containment", () => {
 				operations: {
 					inspectEnvironment: {
 						riskClass: "read",
+						descriptionKey: "operations.inspectEnvironment.description",
 						input: z.object({}),
 						output: z.object({
 							headers: z.string().optional(),
@@ -479,6 +483,7 @@ describe("engine credential containment", () => {
 				operations: {
 					inspectEnvironment: {
 						riskClass: "read",
+						descriptionKey: "operations.inspectEnvironment.description",
 						input: z.object({}),
 						output: z.object({
 							proxyKey: z.string().optional(),
@@ -520,6 +525,7 @@ describe("engine credential containment", () => {
 				operations: {
 					inspectEnvironment: {
 						riskClass: "read",
+						descriptionKey: "operations.inspectEnvironment.description",
 						input: z.object({}),
 						output: z.object({ hyperKey: z.string().optional() }),
 						handler: async (ctx) => ({ hyperKey: ctx.env.get(name) }),

@@ -29,9 +29,11 @@ const testProvider = defineProvider({
 		descriptionKey: "test-provider.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		search: {
 			riskClass: "read",
+			descriptionKey: "operations.search.description",
 			input: z.object({ q: z.string() }),
 			output: z.object({ result: z.string() }),
 			handler: async (_ctx, input: unknown) => {
@@ -45,7 +47,8 @@ const testProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const snapshotFixtureDir = `/tmp/apifuse-standard-tests-${Date.now()}/__fixtures__`;
 mkdirSync(snapshotFixtureDir, { recursive: true });
@@ -109,9 +112,11 @@ const fixtureHarnessProvider = defineProvider({
 		descriptionKey: "fixture-harness-provider.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		lookup: {
 			riskClass: "read",
+			descriptionKey: "operations.lookup.description",
 			input: z.object({ q: z.string() }),
 			output: z.object({ result: z.string() }),
 			handler: async (_ctx, input: unknown) => {
@@ -124,7 +129,8 @@ const fixtureHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const snapshotHarnessProvider = defineProvider({
 	allowedHosts: ["example.com"],
@@ -138,9 +144,11 @@ const snapshotHarnessProvider = defineProvider({
 		descriptionKey: "snapshot-harness-provider.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		normalize: {
 			riskClass: "read",
+			descriptionKey: "operations.normalize.description",
 			input: z.object({ id: z.string() }),
 			output: z.object({ id: z.string(), label: z.string() }),
 			handler: async (ctx, input: unknown) => {
@@ -156,7 +164,8 @@ const snapshotHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const streamSnapshotHarnessProvider = defineProvider({
 	allowedHosts: ["example.com"],
@@ -170,9 +179,11 @@ const streamSnapshotHarnessProvider = defineProvider({
 		descriptionKey: "stream-snapshot-harness-provider.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		download: {
 			riskClass: "read",
+			descriptionKey: "operations.download.description",
 			input: z.object({}),
 			output: z.object({
 				body: z.string(),
@@ -219,7 +230,8 @@ const streamSnapshotHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const multiStreamSnapshotHarnessProvider = defineProvider({
 	allowedHosts: ["example.com"],
@@ -233,9 +245,11 @@ const multiStreamSnapshotHarnessProvider = defineProvider({
 		descriptionKey: "multi-stream-snapshot-harness-provider.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		download: {
 			riskClass: "read",
+			descriptionKey: "operations.download.description",
 			input: z.object({}),
 			output: z.object({ first: z.string(), second: z.string() }),
 			handler: async (ctx) => {
@@ -253,7 +267,8 @@ const multiStreamSnapshotHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const authHarnessProvider = defineProvider({
 	allowedHosts: ["example.com"],
@@ -274,16 +289,19 @@ const authHarnessProvider = defineProvider({
 		descriptionKey: "auth-harness-provider.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		me: {
 			riskClass: "read",
+			descriptionKey: "operations.me.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async () => ({ ok: true }),
 			fixtures: { request: {}, response: { ok: true } },
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const handlerE2eProvider = defineProvider({
 	allowedHosts: ["example.com"],
@@ -297,9 +315,11 @@ const handlerE2eProvider = defineProvider({
 		descriptionKey: "handler-e2e-provider.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		lookup: {
 			riskClass: "read",
+			descriptionKey: "operations.lookup.description",
 			input: z.object({
 				id: z.string(),
 				date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -321,7 +341,8 @@ const handlerE2eProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const stealthHeaderHarnessProvider = defineProvider({
 	allowedHosts: ["example.com"],
@@ -335,9 +356,11 @@ const stealthHeaderHarnessProvider = defineProvider({
 		descriptionKey: "meta.description",
 		category: "test",
 	},
-})({ operations: {
+})({
+	operations: {
 		"imported-constants": {
 			riskClass: "read",
+			descriptionKey: "operations.importedConstants.description",
 			input: z.object({}),
 			output: z.object({ status: z.number() }),
 			handler: async (ctx) => {
@@ -351,6 +374,7 @@ const stealthHeaderHarnessProvider = defineProvider({
 		},
 		"user-agent-variable": {
 			riskClass: "read",
+			descriptionKey: "operations.userAgentVariable.description",
 			input: z.object({}),
 			output: z.object({ status: z.number() }),
 			handler: async (ctx) => {
@@ -367,6 +391,7 @@ const stealthHeaderHarnessProvider = defineProvider({
 		},
 		"caller-headers": {
 			riskClass: "read",
+			descriptionKey: "operations.callerHeaders.description",
 			input: z.object({}),
 			output: z.object({ status: z.number() }),
 			handler: async (ctx) => {
@@ -379,7 +404,8 @@ const stealthHeaderHarnessProvider = defineProvider({
 			fixtures: { request: {}, response: { status: 200 } },
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	} });
+	},
+});
 
 const { operations: _handlerOperations, ...handlerE2eDeclaration } = handlerE2eProvider;
 const brokenHandlerProvider = defineProvider({
@@ -389,7 +415,8 @@ const brokenHandlerProvider = defineProvider({
 	auth: { mode: "none" },
 	id: "broken-handler-provider",
 	http: true,
-})({ operations: {
+})({
+	operations: {
 		lookup: {
 			...handlerE2eProvider.operations.lookup,
 			handler: async (ctx, input: unknown) => {
@@ -403,7 +430,8 @@ const brokenHandlerProvider = defineProvider({
 				return { wrong: body.label };
 			},
 		},
-	} });
+	},
+});
 
 const nativeEgressHarnessProvider = defineProvider({
 	allowedHosts: ["example.com"],
@@ -432,9 +460,11 @@ const nativeEgressHarnessProvider = defineProvider({
 			],
 		},
 	},
-})({ operations: {
+})({
+	operations: {
 		"snapshot-connect": {
 			riskClass: "read",
+			descriptionKey: "operations.snapshotConnect.description",
 			input: z.object({}),
 			output: z.object({ reads: z.number() }),
 			fixtures: { request: {}, response: { reads: 1 } },
@@ -455,6 +485,7 @@ const nativeEgressHarnessProvider = defineProvider({
 		},
 		denied: {
 			riskClass: "read",
+			descriptionKey: "operations.denied.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			fixtures: { request: {}, response: { ok: true } },
@@ -466,6 +497,7 @@ const nativeEgressHarnessProvider = defineProvider({
 		},
 		"grant-lifecycle": {
 			riskClass: "read",
+			descriptionKey: "operations.grantLifecycle.description",
 			input: z.object({}),
 			output: z.object({ revokedCode: z.string() }),
 			fixtures: {
@@ -492,7 +524,8 @@ const nativeEgressHarnessProvider = defineProvider({
 				return { revokedCode: "missing_denial" };
 			},
 		},
-	} });
+	},
+});
 
 const handlerE2eStub = ({ url }: { url?: string }) =>
 	/^https:\/\/example\.test\/items\/fixture-id\?date=\d{4}-\d{2}-\d{2}$/.test(url ?? "")

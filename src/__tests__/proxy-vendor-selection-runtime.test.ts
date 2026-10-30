@@ -280,6 +280,7 @@ describe("served process", () => {
 			operations: {
 				fetchDirect: {
 					riskClass: "read",
+					descriptionKey: "operations.fetchDirect.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) =>

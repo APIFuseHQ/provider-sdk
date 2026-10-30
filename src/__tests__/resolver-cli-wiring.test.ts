@@ -141,6 +141,7 @@ function createProvider(options: {
 		operations: {
 			lookup: {
 				riskClass: "read",
+				descriptionKey: "operations.lookup.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -426,7 +427,9 @@ describe("resolver CLI wiring", () => {
 				/^(vendor echoed )?\[REDACTED\]$/,
 			);
 			expect(JSON.stringify(payload)).not.toContain("query-secret-value");
-			expect(formatResolverTelemetry(runtime.resolverTelemetry)).not.toContain("query-secret-value");
+			expect(formatResolverTelemetry(runtime.resolverTelemetry)).not.toContain(
+				"query-secret-value",
+			);
 		} finally {
 			upstream.stop(true);
 		}

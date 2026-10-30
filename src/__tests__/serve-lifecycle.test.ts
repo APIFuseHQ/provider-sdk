@@ -20,6 +20,7 @@ function provider(): ProviderDefinition {
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -33,7 +34,10 @@ describe("serve lifecycle", () => {
 		const listen = spyOn(Bun, "serve");
 		try {
 			await expect(
-				serve({ ...provider(), proxy: true }, { port: 0, metricsPort: 0, shutdown: { signals: false } }),
+				serve(
+					{ ...provider(), proxy: true },
+					{ port: 0, metricsPort: 0, shutdown: { signals: false } },
+				),
 			).rejects.toMatchObject({
 				code: DECLARATION_INVALID_CODE,
 				details: {
@@ -186,9 +190,11 @@ describe("serve lifecycle", () => {
 			shutdown: {
 				signals: ["SIGTERM"],
 				timeoutMs: 1_000,
-					hooks: [async () => {
+				hooks: [
+					async () => {
 						order.push("a-hook-end");
-					}],
+					},
+				],
 			},
 		});
 		const second = await serve(provider(), {

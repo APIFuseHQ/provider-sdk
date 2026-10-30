@@ -2854,7 +2854,7 @@ export interface OperationDefinition<
 	approval?: OperationApprovalPolicy;
 	timeoutMs?: number;
 	titleKey?: ProviderLocaleKeyInput;
-	descriptionKey?: ProviderLocaleKeyInput;
+	descriptionKey: ProviderLocaleKeyInput;
 	summaryKey?: ProviderLocaleKeyInput;
 	markdownKey?: ProviderLocaleKeyInput;
 	whenToUseKeys?: readonly ProviderLocaleKeyInput[];

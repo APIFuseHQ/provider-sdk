@@ -1,12 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
-import {
-	centered,
-	delayed,
-	defineHealthJourney,
-	defineSmsOtpMatcher,
-	every,
-} from "./index.js";
+import { centered, delayed, defineHealthJourney, defineSmsOtpMatcher, every } from "./index.js";
 import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
 
 const noopHandler = async () => ({});
@@ -14,6 +8,7 @@ const noopHandler = async () => ({});
 function dummyOperation() {
 	return {
 		riskClass: "read",
+		descriptionKey: "operations.operation.description",
 		description: "Dummy operation for health journey tests.",
 		input: z.object({}),
 		output: z.object({}),

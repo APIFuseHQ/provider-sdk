@@ -254,6 +254,7 @@ describe("OCR/STT redaction and retained storage", () => {
 			operations: {
 				probe: {
 					riskClass: "read",
+					descriptionKey: "operations.probe.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {

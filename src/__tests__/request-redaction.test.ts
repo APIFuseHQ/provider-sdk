@@ -267,6 +267,7 @@ async function exerciseServer(shape: Shape, throwing = false): Promise<void> {
 		operations: {
 			fail: {
 				riskClass: "read",
+				descriptionKey: "operations.fail.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => {
@@ -276,6 +277,7 @@ async function exerciseServer(shape: Shape, throwing = false): Promise<void> {
 			},
 			complete: {
 				riskClass: "read",
+				descriptionKey: "operations.complete.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => {
@@ -285,6 +287,7 @@ async function exerciseServer(shape: Shape, throwing = false): Promise<void> {
 			},
 			stream: {
 				riskClass: "read",
+				descriptionKey: "operations.stream.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				transport: { kind: "sse", events: { ready: z.object({ ok: z.boolean() }) } },

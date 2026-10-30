@@ -5,7 +5,7 @@ import { describeKey, fields } from "../schema.js";
 import type { AuthMode, OperationRiskClass } from "../types.js";
 
 describe("lintOperation", () => {
-	it("reports expected diagnostics for weak operation metadata", () => {
+	it("reports one-directional fixtures and leaves descriptionKey to defineProvider", () => {
 		const diagnostics = lintOperation({
 			input: z.object({
 				filters: z.object({ ids: z.array(z.string()) }),
@@ -14,15 +14,11 @@ describe("lintOperation", () => {
 			fixtures: { request: { filters: { ids: ["btc"] } } },
 		});
 
-		expect(diagnostics.map((item) => item.rule)).toEqual([
-			"description-key-required",
-			"fixtures-both-directions",
-		]);
+		expect(diagnostics.map((item) => item.rule)).toEqual(["fixtures-both-directions"]);
 	});
 
 	it("accepts key-owned simple operations", () => {
 		const diagnostics = lintOperation({
-			descriptionKey: "operations.price.description",
 			input: describeKey(
 				z.object({
 					symbol: describeKey(z.string(), "operations.price.fields.symbol.description"),
@@ -46,7 +42,6 @@ describe("lintOperation", () => {
 
 	it("does not lint schema descriptions or sensitive-looking names; defineProvider owns the declarations", () => {
 		const diagnostics = lintOperation({
-			descriptionKey: "operations.login.description",
 			input: z.object({ password: z.string(), phoneNumber: z.string() }),
 			output: z.object({ accessToken: fields.token(), ok: z.boolean() }),
 			fixtures: {

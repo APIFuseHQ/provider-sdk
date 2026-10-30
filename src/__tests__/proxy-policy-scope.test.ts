@@ -36,6 +36,7 @@ const OutputSchema = z.object({ name: z.string() });
 function operation() {
 	return {
 		riskClass: READ_RISK_CLASS,
+		descriptionKey: "operations.operation.description",
 		input: InputSchema,
 		output: OutputSchema,
 		handler: async (_ctx: unknown, input: unknown) => ({ name: InputSchema.parse(input).id }),
@@ -454,6 +455,7 @@ describe("createServerApp: proxy.operations scopes ctx.http, ctx.stealth and res
 	function scopedProvider() {
 		const readOperation = () => ({
 			riskClass: READ_RISK_CLASS,
+			descriptionKey: "operations.operation.description",
 			input: z.object({}),
 			output: OutputSchema,
 			handler: async (ctx: { http: { get(url: string): Promise<unknown> } }) => {

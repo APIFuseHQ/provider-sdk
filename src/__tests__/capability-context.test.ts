@@ -32,6 +32,7 @@ const READ_RISK_CLASS: OperationRiskClass = "read";
 
 const operationSchemas = {
 	riskClass: READ_RISK_CLASS,
+	descriptionKey: "operations.operationSchemas.description",
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),
 	healthCheckUnsupported: { reason: "type fixture" },
@@ -260,6 +261,7 @@ describe("declaration-derived provider contexts", () => {
 		// B: stream operations survive the context-preserving provider index signature.
 		const events = defineStreamOperation<Context>()({
 			riskClass: "read",
+			descriptionKey: "operations.operation.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			transport: {

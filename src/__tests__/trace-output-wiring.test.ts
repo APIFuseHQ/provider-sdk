@@ -143,6 +143,7 @@ const provider = createProviderDefinitionDouble({
 	operations: {
 		echo: {
 			riskClass: "read",
+			descriptionKey: "operations.echo.description",
 			input: z.object({ value: z.string() }),
 			output: z.object({ value: z.string() }),
 			handler: async (ctx, input) => {
@@ -152,6 +153,7 @@ const provider = createProviderDefinitionDouble({
 		},
 		fail: {
 			riskClass: "read",
+			descriptionKey: "operations.fail.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx) => {
@@ -174,6 +176,7 @@ const provider = createProviderDefinitionDouble({
 		},
 		get_flea_market_item: {
 			riskClass: "read",
+			descriptionKey: "operations.getFleaMarketItem.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx) => {
@@ -817,6 +820,7 @@ describe("server trace output wiring", () => {
 			operations: {
 				tracedEvents: {
 					riskClass: "read",
+					descriptionKey: "operations.tracedEvents.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: {
@@ -880,6 +884,7 @@ describe("server trace output wiring", () => {
 			operations: {
 				bodyful: {
 					riskClass: "read",
+					descriptionKey: "operations.bodyful.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: { kind: "http-stream", contentType: "text/plain" },
@@ -913,6 +918,7 @@ describe("server trace output wiring", () => {
 			operations: {
 				bodyless: {
 					riskClass: "read",
+					descriptionKey: "operations.bodyless.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: { kind: "http-stream", contentType: "text/plain" },
@@ -947,6 +953,7 @@ describe("server trace output wiring", () => {
 			operations: {
 				cooperativeCancel: {
 					riskClass: "read",
+					descriptionKey: "operations.cooperativeCancel.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: {
@@ -999,6 +1006,7 @@ describe("server trace output wiring", () => {
 			operations: {
 				stalledCancel: {
 					riskClass: "read",
+					descriptionKey: "operations.stalledCancel.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: {
@@ -1046,6 +1054,7 @@ describe("server trace output wiring", () => {
 			operations: {
 				stalledAbort: {
 					riskClass: "read",
+					descriptionKey: "operations.stalledAbort.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: {
@@ -1104,6 +1113,7 @@ describe("server trace output wiring", () => {
 			operations: {
 				neverReturns: {
 					riskClass: "read",
+					descriptionKey: "operations.neverReturns.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: {

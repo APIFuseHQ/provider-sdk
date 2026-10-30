@@ -81,6 +81,7 @@ describe("ProviderDefinition types", () => {
 			operations: {
 				"read-credential": {
 					riskClass: "read",
+					descriptionKey: "operations.readCredential.description",
 					input: providerZ.object({}),
 					output: providerZ.object({ value: providerZ.string().optional() }),
 					healthCheckUnsupported: { reason: "Compile-time context fixture." },

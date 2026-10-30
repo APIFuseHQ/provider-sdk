@@ -328,15 +328,18 @@ describe("STT Provider SDK context integration", () => {
 				descriptionKey: "stt-demo.description",
 				category: "test",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				transcribe: {
 					riskClass: "read",
+					descriptionKey: "operations.transcribe.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => ({ ok: true }),
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			} });
+			},
+		});
 
 		expect(provider.stt?.mode).toBe("required");
 	});
@@ -395,9 +398,11 @@ describe("STT Provider SDK context integration", () => {
 					},
 				},
 			},
-		})({ operations: {
+		})({
+			operations: {
 				transcribe: {
 					riskClass: "read",
+					descriptionKey: "operations.transcribe.description",
 					input: z.object({}),
 					output: z.object({ text: z.string() }),
 					async handler(ctx) {
@@ -408,7 +413,8 @@ describe("STT Provider SDK context integration", () => {
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			} });
+			},
+		});
 		const app = createServerApp(provider, { stt });
 
 		const operationResponse = await app.request("/v1/transcribe", {
@@ -446,9 +452,11 @@ describe("STT Provider SDK context integration", () => {
 				descriptionKey: "stt-unavailable-demo.description",
 				category: "test",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				transcribe: {
 					riskClass: "read",
+					descriptionKey: "operations.transcribe.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx) {
@@ -459,7 +467,8 @@ describe("STT Provider SDK context integration", () => {
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			} });
+			},
+		});
 		const app = createServerApp(provider, { logger: () => undefined });
 
 		const response = await app.request("/v1/transcribe", {

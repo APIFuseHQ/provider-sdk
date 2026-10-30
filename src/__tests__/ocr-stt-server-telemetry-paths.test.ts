@@ -70,6 +70,7 @@ async function probe(
 		operations: {
 			probe: {
 				riskClass: "read",
+				descriptionKey: "operations.probe.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: invoke,

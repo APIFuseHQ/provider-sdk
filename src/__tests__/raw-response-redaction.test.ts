@@ -66,6 +66,7 @@ for (const route of [
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.unknown(),
 					handler,
@@ -202,6 +203,7 @@ it.each([
 				operations: {
 					inspect: {
 						riskClass: "read",
+						descriptionKey: "operations.inspect.description",
 						input: z.object({}),
 						output: z.unknown(),
 						handler: async () => new Response(SECRET, { status: 502, statusText: SECRET }),
@@ -235,6 +237,7 @@ for (const registered of [false, true]) {
 					operations: {
 						inspect: {
 							riskClass: "read",
+							descriptionKey: "operations.inspect.description",
 							input: z.object({}),
 							output: z.unknown(),
 							handler: async () =>
@@ -276,6 +279,7 @@ it("returns an open raw 503 stream without reading it to completion", async () =
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.unknown(),
 					handler: async () =>
@@ -314,6 +318,7 @@ it("preserves secret-free FF bytes even when U+FFFD is registered", async () => 
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.unknown(),
 					handler: async () =>

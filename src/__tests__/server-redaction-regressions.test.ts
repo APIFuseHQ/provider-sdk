@@ -52,6 +52,7 @@ describe("server request credential redaction", () => {
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async () => ({}),
@@ -197,6 +198,7 @@ describe("server request credential redaction", () => {
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async () => {
@@ -302,6 +304,7 @@ describe("server redactor failure modes", () => {
 			operations: {
 				complete: {
 					riskClass: "read",
+					descriptionKey: "operations.complete.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {
@@ -311,6 +314,7 @@ describe("server redactor failure modes", () => {
 				},
 				fail: {
 					riskClass: "read",
+					descriptionKey: "operations.fail.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {
@@ -320,6 +324,7 @@ describe("server redactor failure modes", () => {
 				},
 				stream: {
 					riskClass: "read",
+					descriptionKey: "operations.stream.description",
 					input: z.object({}),
 					output: z.object({}),
 					transport: { kind: "sse", events: { ready: z.object({}) } },
@@ -468,6 +473,7 @@ describe("server static credential sources", () => {
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {
@@ -506,6 +512,7 @@ describe("server static credential sources", () => {
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {
@@ -534,6 +541,7 @@ describe("server static credential sources", () => {
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async () => ({}),
@@ -630,6 +638,7 @@ describe("server redaction before diagnostic bounds", () => {
 			operations: {
 				fail: {
 					riskClass: "read",
+					descriptionKey: "operations.fail.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {
@@ -642,6 +651,7 @@ describe("server redaction before diagnostic bounds", () => {
 				},
 				stream: {
 					riskClass: "read",
+					descriptionKey: "operations.stream.description",
 					input: z.object({}),
 					output: z.object({}),
 					transport: { kind: "sse", events: { ready: z.object({}) } },
@@ -800,6 +810,7 @@ it("registers a rotated declared env credential on ctx.env access before use", a
 			operations: {
 				inspect: {
 					riskClass: "read",
+					descriptionKey: "operations.inspect.description",
 					input: z.object({}),
 					output: z.unknown(),
 					handler: async (ctx) => {
@@ -828,6 +839,7 @@ it("rechecks the already-started root and completed log metadata after harvest",
 			operations: {
 				[SECRET]: {
 					riskClass: "read",
+					descriptionKey: "operations.SECRET.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {

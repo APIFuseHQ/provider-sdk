@@ -65,6 +65,7 @@ it("preserves critical fields and base64 cursors across 200 realistic secret-fre
 				operations: {
 					inspect: {
 						riskClass: "read",
+						descriptionKey: "operations.inspect.description",
 						input: z.object({ index: z.number() }),
 						output: z.unknown(),
 						handler: async (ctx, input) => {

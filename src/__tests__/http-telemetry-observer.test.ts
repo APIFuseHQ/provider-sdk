@@ -56,6 +56,7 @@ it.each([
 		operations: {
 			probe: {
 				riskClass: "read",
+				descriptionKey: "operations.probe.description",
 				input: z.object({}),
 				output: z.object({ status: z.number() }),
 				handler: async (ctx) => ({

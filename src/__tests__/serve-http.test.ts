@@ -212,6 +212,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 		operations: {
 			echo: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.echo.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({
 					echoed: z.string(),
@@ -232,6 +233,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			issueServerChoice: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.issueServerChoice.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ token: z.string() }),
 				handler: async (ctx, input) => {
@@ -243,6 +245,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			parseServerChoice: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.parseServerChoice.description",
 				input: z.object({ token: z.string() }),
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
@@ -252,6 +255,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			cached: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.cached.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
@@ -266,6 +270,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			retryThenEcho: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.retryThenEcho.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => {
@@ -280,6 +285,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			retryUnknownThenEcho: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.retryUnknownThenEcho.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => {
@@ -295,6 +301,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			cachedRetryThenEcho: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.cachedRetryThenEcho.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
@@ -315,6 +322,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			events: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.events.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -329,6 +337,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			invalidEvents: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.invalidEvents.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -343,6 +352,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			undeclaredEvents: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.undeclaredEvents.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -357,6 +367,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			rawSseResponse: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.rawSseResponse.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -372,6 +383,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			rawTelemetryResponse: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.rawTelemetryResponse.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (_ctx, input) =>
@@ -386,6 +398,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			oversizedEvents: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.oversizedEvents.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -401,6 +414,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			abortableEvents: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.abortableEvents.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -420,6 +434,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			download: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.download.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: { kind: "http-stream", contentType: "text/plain" },
@@ -433,6 +448,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			oversizedDownload: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.oversizedDownload.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -450,6 +466,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			abortableDownload: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.abortableDownload.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: { kind: "http-stream", contentType: "text/plain" },
@@ -462,6 +479,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			providerError: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.providerError.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -470,6 +488,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			validationError: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.validationError.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -478,6 +497,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			invalidOutput: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.invalidOutput.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				// test-invalid: runtime output validation must reject a string in a boolean field.
@@ -485,6 +505,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			providerActionRequired: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.providerActionRequired.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -500,6 +521,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			noData: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.noData.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -508,6 +530,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			lowercaseNotFound: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.lowercaseNotFound.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -518,6 +541,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			upstreamProviderError: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.upstreamProviderError.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -528,6 +552,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			blockedProviderError: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.blockedProviderError.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -538,6 +563,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			rateLimitedProviderError: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.rateLimitedProviderError.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -548,6 +574,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			transportTimeout: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.transportTimeout.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -560,6 +587,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			nativeConnectionTimeout: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.nativeConnectionTimeout.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -568,6 +596,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			nativeConnectionIdleTimeout: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.nativeConnectionIdleTimeout.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -579,6 +608,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			transportNetwork: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.transportNetwork.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -590,6 +620,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			httpHeaderFactoryFailure: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.httpHeaderFactoryFailure.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => {
@@ -603,6 +634,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			transportWithDetails: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.transportWithDetails.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -615,6 +647,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			transportExplicitNonRetryable: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.transportExplicitNonRetryable.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -628,6 +661,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			transportStringDetails: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.transportStringDetails.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -639,6 +673,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			transportArrayDetails: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.transportArrayDetails.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -650,6 +685,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			proxyAuthIpDenied: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.proxyAuthIpDenied.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -663,6 +699,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			// rejects a session, from the factory it uses.
 			proxyEdgeAuthRejected: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.proxyEdgeAuthRejected.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -672,6 +709,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			// The same class, code and message built by the provider itself.
 			proxyEdgeAuthRejectedLookalike: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.proxyEdgeAuthRejectedLookalike.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -683,6 +721,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			upstreamBadRequest: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.upstreamBadRequest.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -694,6 +733,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			unexpectedError: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.unexpectedError.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -702,6 +742,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			sessionExpiredRetryable: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.sessionExpiredRetryable.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -714,6 +755,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			},
 			sessionExpiredUnmarked: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.sessionExpiredUnmarked.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -938,6 +980,7 @@ describe("provider HTTP server", () => {
 				...baseProvider.operations,
 				proxyOptionalFallback: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.proxyOptionalFallback.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) => {
@@ -1003,6 +1046,7 @@ describe("provider HTTP server", () => {
 				...baseProvider.operations,
 				proxyRequiredFailure: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.proxyRequiredFailure.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) => {
@@ -1132,6 +1176,7 @@ describe("provider HTTP server", () => {
 				...baseProvider.operations,
 				requestShape: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.requestShape.description",
 					input: z.object({}),
 					output: z.object({ keys: z.array(z.string()) }),
 					handler: async (ctx) => ({ keys: Object.keys(ctx.request ?? {}).sort() }),
@@ -1178,6 +1223,7 @@ describe("provider HTTP server", () => {
 		const target = { host: "127.0.0.1", port: address.port };
 		const operation = {
 			riskClass: READ_RISK_CLASS,
+			descriptionKey: "operations.operation.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx: ProviderContext) => {
@@ -1209,6 +1255,7 @@ describe("provider HTTP server", () => {
 				operations: {
 					unsupportedGrant: {
 						riskClass: READ_RISK_CLASS,
+						descriptionKey: "operations.unsupportedGrant.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx: ProviderContext) => {
@@ -1313,6 +1360,7 @@ describe("provider HTTP server", () => {
 				operations: {
 					open: {
 						riskClass: READ_RISK_CLASS,
+						descriptionKey: "operations.open.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx) => {
@@ -1689,6 +1737,7 @@ describe("provider HTTP server", () => {
 		// output schema does not reshape it.
 		const rawOperation = (status: number) => ({
 			riskClass: READ_RISK_CLASS,
+			descriptionKey: "operations.operation.description",
 			input: z.object({}),
 			output: z.unknown(),
 			handler: async () => rawResponse(status),
@@ -2215,6 +2264,7 @@ describe("provider HTTP server", () => {
 				operations: {
 					statusProbe: {
 						riskClass: READ_RISK_CLASS,
+						descriptionKey: "operations.statusProbe.description",
 						input: z.object({ value: z.string() }),
 						output: z.object({ ok: z.boolean() }),
 						handler: async () => {
@@ -2245,6 +2295,7 @@ describe("provider HTTP server", () => {
 			operations: {
 				reserve: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.reserve.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -2328,6 +2379,7 @@ describe("provider HTTP server", () => {
 				operations: {
 					statusProbe: {
 						riskClass: READ_RISK_CLASS,
+						descriptionKey: "operations.statusProbe.description",
 						input: z.object({ value: z.string() }),
 						output: z.object({ ok: z.boolean() }),
 						handler: async () => {
@@ -2602,6 +2654,7 @@ describe("provider HTTP server", () => {
 				...baseProvider.operations,
 				sessionExpiredObservable: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.sessionExpiredObservable.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -2801,6 +2854,7 @@ describe("provider HTTP server", () => {
 				...baseProvider.operations,
 				proxyGatewayCredentialsMissing: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.proxyGatewayCredentialsMissing.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) => {
@@ -2952,6 +3006,7 @@ describe("provider HTTP server", () => {
 				operations: {
 					crash: {
 						riskClass: READ_RISK_CLASS,
+						descriptionKey: "operations.crash.description",
 						input: z.object({ value: z.string() }),
 						output: z.object({ ok: z.boolean() }),
 						handler: async () => {
@@ -3118,6 +3173,7 @@ describe("provider HTTP server", () => {
 						operations: {
 							crash: {
 								riskClass: READ_RISK_CLASS,
+								descriptionKey: "operations.crash.description",
 								input: z.object({ value: z.string() }),
 								output: z.object({ ok: z.boolean() }),
 								handler: async () => {
@@ -3258,6 +3314,7 @@ describe("provider HTTP server", () => {
 			operations: {
 				causeError: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.causeError.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -3314,6 +3371,7 @@ describe("provider HTTP server", () => {
 					operations: {
 						causeError: {
 							riskClass: READ_RISK_CLASS,
+							descriptionKey: "operations.causeError.description",
 							input: z.object({ value: z.string() }),
 							output: z.object({ ok: z.boolean() }),
 							handler: async () => {
@@ -4159,6 +4217,7 @@ describe("operation-declared error resolution", () => {
 			operations: {
 				declaredError: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.declaredError.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					...(input.entry ? { errorCodes: [input.entry] } : {}),
@@ -4520,6 +4579,7 @@ describe("operation-declared error resolution", () => {
 			operations: {
 				structuralError: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.structuralError.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					errorCodes: [
@@ -4579,6 +4639,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				...base.operations,
 				dupProviderError: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.dupProviderError.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -4590,6 +4651,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				},
 				dupDeclaredProviderError: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.dupDeclaredProviderError.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					errorCodes: [
@@ -4608,6 +4670,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				},
 				dupSessionExpired: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.dupSessionExpired.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -4616,6 +4679,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				},
 				dupTransport: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.dupTransport.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -4626,6 +4690,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				},
 				dupValidation: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.dupValidation.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -4636,6 +4701,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				},
 				preBrandValidation: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.preBrandValidation.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -4648,6 +4714,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				},
 				unbrandedLookalike: {
 					riskClass: READ_RISK_CLASS,
+					descriptionKey: "operations.unbrandedLookalike.description",
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {

@@ -66,6 +66,7 @@ const provider: ProviderDefinition = {
 	operations: {
 		[OPERATION_ID]: {
 			riskClass: "read" as const,
+			descriptionKey: "operations.OPERATIONID.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async () => {

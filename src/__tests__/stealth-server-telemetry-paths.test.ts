@@ -157,6 +157,7 @@ function createStealthProvider(): ProviderDefinition {
 		operations: {
 			probe: {
 				riskClass: "read",
+				descriptionKey: "operations.probe.description",
 				input: z.object({}),
 				output: z.object({ status: z.number() }),
 				handler: async (ctx) => ({ status: (await fetchStealth(ctx)).status }),
@@ -327,6 +328,7 @@ describe("stealth server terminal telemetry paths", () => {
 			provider.operations = {
 				seed: {
 					riskClass: "read",
+					descriptionKey: "operations.seed.description",
 					input: z.object({}),
 					output: z.object({ status: z.number() }),
 					handler: async (ctx) => {
@@ -338,6 +340,7 @@ describe("stealth server terminal telemetry paths", () => {
 				},
 				solve: {
 					riskClass: "read",
+					descriptionKey: "operations.solve.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) => {
@@ -367,7 +370,9 @@ describe("stealth server terminal telemetry paths", () => {
 				body: JSON.stringify({ requestId: "resolver-after-cookie", input: {} }),
 			});
 			expect(solveResponse.status).toBe(500);
-			const failed = [...events].reverse().find((event) => event.event === "provider_request_failed");
+			const failed = [...events]
+				.reverse()
+				.find((event) => event.event === "provider_request_failed");
 			expect(failed?.resolver).toMatchObject({
 				lastVendorErrorDescription: sentinelDescription,
 			});
@@ -431,6 +436,7 @@ describe("stealth server terminal telemetry paths", () => {
 		provider.operations = {
 			unused: {
 				riskClass: "read",
+				descriptionKey: "operations.unused.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -482,6 +488,7 @@ describe("stealth server construction-path sink matrix", () => {
 		provider.operations = {
 			probe: {
 				riskClass: "read",
+				descriptionKey: "operations.probe.description",
 				input: z.object({}),
 				output: z.object({ status: z.number() }),
 				handler: async (ctx) => {
@@ -588,6 +595,7 @@ it("redacts cookie material from retained stealth diagnostics", async () => {
 		operations: {
 			probe: {
 				riskClass: "read",
+				descriptionKey: "operations.probe.description",
 				input: z.object({}),
 				output: z.object({ status: z.number() }),
 				handler: async (ctx) => {

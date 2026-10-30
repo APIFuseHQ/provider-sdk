@@ -24,6 +24,7 @@ test("self-test HTTP response preserves the reviewed base bytes", async () => {
 			operations: {
 				probe: {
 					riskClass: "read",
+					descriptionKey: "operations.probe.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async () => ({}),

@@ -52,6 +52,7 @@ const DEADLINE_METRIC = "apifuse_stateful_provider_routing_deadline_expired_tota
 
 const operation = {
 	riskClass: "read" as const,
+	descriptionKey: "operations.operation.description",
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),
 	handler: async () => {

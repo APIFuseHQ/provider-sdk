@@ -68,6 +68,7 @@ const provider: ProviderDefinition = {
 	operations: {
 		[OPERATION_ID]: {
 			riskClass: "read",
+			descriptionKey: "operations.OPERATIONID.description",
 			input: WatchInputSchema,
 			output: WatchOutputSchema,
 			handler: async () => {

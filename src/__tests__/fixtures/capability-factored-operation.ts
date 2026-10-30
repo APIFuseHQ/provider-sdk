@@ -9,6 +9,7 @@ async function fetchLabel(http: HttpClient): Promise<string> {
 
 export const factoredOperation = defineOperation<Ctx>()({
 	riskClass: "read",
+	descriptionKey: "operations.operation.description",
 	input: {
 		"~standard": {
 			version: 1,

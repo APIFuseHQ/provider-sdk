@@ -55,6 +55,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 		operations: {
 			echo: {
 				riskClass: "read",
+				descriptionKey: "operations.echo.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ echoed: z.string() }),
 				handler: async (_ctx, input) => ({
@@ -93,6 +94,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 			},
 			leak: {
 				riskClass: "read",
+				descriptionKey: "operations.leak.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -108,6 +110,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 			},
 			slow: {
 				riskClass: "read",
+				descriptionKey: "operations.slow.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -124,6 +127,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 			},
 			mutate: {
 				riskClass: "write",
+				descriptionKey: "operations.mutate.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -134,6 +138,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 			},
 			connected: {
 				riskClass: "read",
+				descriptionKey: "operations.connected.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => ({
@@ -185,18 +190,20 @@ function postSelfTest(
 	token: string | "no-token" = validToken,
 	path: string = SELF_TEST_PATH,
 ): Promise<Response> {
-	return Promise.resolve(app.request(path, {
-		method: "POST",
-		headers: {
-			"content-type": "application/json",
-			...(token === "no-token" ? {} : { authorization: `Bearer ${token}` }),
-		},
-		body: JSON.stringify({
-			schemaVersion: 1,
-			requestId: "req-test",
-			...body,
+	return Promise.resolve(
+		app.request(path, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...(token === "no-token" ? {} : { authorization: `Bearer ${token}` }),
+			},
+			body: JSON.stringify({
+				schemaVersion: 1,
+				requestId: "req-test",
+				...body,
+			}),
 		}),
-	}));
+	);
 }
 
 describe("self-test internal listener", () => {
@@ -360,6 +367,7 @@ describe("self-test internal listener", () => {
 		const provider = createProvider();
 		provider.operations.abortableHttp = {
 			riskClass: "read",
+			descriptionKey: "operations.operation.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx) => {

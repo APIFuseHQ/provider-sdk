@@ -361,6 +361,7 @@ describe("recorder redaction seeding", () => {
 		operations: {
 			lookup: {
 				riskClass: "read",
+				descriptionKey: "operations.lookup.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),

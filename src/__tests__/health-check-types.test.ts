@@ -17,9 +17,11 @@ function providerWithHealthCheckInterval(interval: string) {
 			descriptionKey: "meta.description",
 			category: "demo",
 		},
-	})({ operations: {
+	})({
+		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				async handler() {
@@ -37,13 +39,15 @@ function providerWithHealthCheckInterval(interval: string) {
 					],
 				},
 			},
-		} });
+		},
+	});
 }
 
 describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("flows TOutput from operation.output schema into ctx.data", () => {
 		const operation = defineOperation<unknown>()({
 			riskClass: "read",
+			descriptionKey: "operations.operation.description",
 			input: z.object({ market: z.string() }),
 			output: z.object({ price: z.number(), tradeId: z.string() }),
 			async handler(_ctx, input) {
@@ -83,9 +87,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -104,7 +110,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							// test-invalid: runtime validation must reject the misspelled health-check field.
 						} as never,
 					},
-				} }),
+				},
+			}),
 		).toThrow(/Did you mean "cases"\?/);
 	});
 
@@ -121,9 +128,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -135,7 +144,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							cases: [] as never,
 						},
 					},
-				} }),
+				},
+			}),
 		).toThrow(ValidationError);
 	});
 
@@ -156,9 +166,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					"test-provider/ping": { interval: "8h" },
 				},
 			},
-		})({ operations: {
+		})({
+			operations: {
 				ping: {
 					riskClass: "read",
+					descriptionKey: "operations.ping.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -175,7 +187,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						],
 					},
 				},
-			} });
+			},
+		});
 
 		expect(provider.operations.ping.healthCheck?.interval).toBe("2m");
 		expect(provider.healthMonitor?.probeOverrides?.["test-provider/ping"]?.interval).toBe("8h");
@@ -233,9 +246,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				descriptionKey: "meta.description",
 				category: "demo",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				ping: {
 					riskClass: "read",
+					descriptionKey: "operations.ping.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -253,7 +268,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						],
 					},
 				},
-			} });
+			},
+		});
 
 		expect(provider.operations.ping.healthCheck?.schedule).toEqual({
 			randomize: { mode: "centered", maxOffset: "PT6H" },
@@ -272,9 +288,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				descriptionKey: "meta.description",
 				category: "demo",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				ping: {
 					riskClass: "read",
+					descriptionKey: "operations.ping.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -292,7 +310,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						],
 					},
 				},
-			} });
+			},
+		});
 
 		expect(provider.operations.ping.healthCheck?.schedule).toEqual({
 			randomize: { mode: "centered", maxOffset: "PT6H" },
@@ -312,9 +331,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -333,7 +354,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							// test-invalid: runtime validation must reject legacy schedule jitter metadata.
 						} as never,
 					},
-				} }),
+				},
+			}),
 		).toThrow(/schedule\.jitter is not supported.*Use schedule\.randomize instead/);
 	});
 
@@ -350,9 +372,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -370,7 +394,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							],
 						},
 					},
-				} }),
+				},
+			}),
 		).toThrow(/duration must be shorter than schedule interval/);
 	});
 
@@ -396,9 +421,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					},
 				},
 			},
-		})({ operations: {
+		})({
+			operations: {
 				ping: {
 					riskClass: "read",
+					descriptionKey: "operations.ping.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -419,7 +446,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						],
 					},
 				},
-			} });
+			},
+		});
 
 		expect(provider.healthMonitor?.defaultProbeTimeoutMs).toBe(45_000);
 		expect(provider.operations.ping.healthCheck?.timeoutMs).toBe(30_000);
@@ -445,9 +473,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				healthMonitor: {
 					defaultProbeTimeoutMs: 0,
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -464,7 +494,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							],
 						},
 					},
-				} }),
+				},
+			}),
 		).toThrow(/healthMonitor\.defaultProbeTimeoutMs/);
 
 		expect(() =>
@@ -479,9 +510,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -499,7 +532,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							],
 						},
 					},
-				} }),
+				},
+			}),
 		).toThrow(/healthCheck\.cases\[0\]\.timeoutMs/);
 	});
 
@@ -516,9 +550,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -536,7 +572,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							],
 						},
 					},
-				} }),
+				},
+			}),
 		).toThrow(/positive ms-style duration string/);
 	});
 
@@ -553,9 +590,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -573,7 +612,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						},
 						healthCheckUnsupported: { reason: "conflict" },
 					},
-				} }),
+				},
+			}),
 		).toThrow(/declares both healthCheck and healthCheckUnsupported/);
 	});
 
@@ -590,9 +630,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -600,7 +642,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						},
 						healthCheckUnsupported: { reason: "   " },
 					},
-				} }),
+				},
+			}),
 		).toThrow(/reason must be a non-empty string/);
 	});
 
@@ -616,9 +659,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				descriptionKey: "meta.description",
 				category: "demo",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				"wipe-all": {
 					riskClass: "read",
+					descriptionKey: "operations.wipeAll.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -629,7 +674,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						trackedIn: "https://example.com/issues/1",
 					},
 				},
-			} });
+			},
+		});
 		expect(provider.operations["wipe-all"]?.healthCheckUnsupported?.reason).toContain(
 			"Destructive",
 		);
@@ -654,9 +700,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 				serviceAccount: "sa_health_monitor_prod",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				ping: {
 					riskClass: "read",
+					descriptionKey: "operations.ping.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -664,7 +712,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					},
 					healthCheckUnsupported: { reason: "skip for test" },
 				},
-			} });
+			},
+		});
 		expect(provider.healthMonitor?.requiredSecrets).toEqual([
 			"APIFUSE__HEALTH_MONITOR__TEST_TOKEN",
 		]);
@@ -688,9 +737,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 				// test-invalid: runtime validation must reject the legacy provider health interval field.
 				healthMonitor: { interval: "1m" } as never,
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -698,7 +749,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						},
 						healthCheckUnsupported: { reason: "skip" },
 					},
-				} }),
+				},
+			}),
 		).toThrow(/Unknown field "interval"/);
 	});
 
@@ -721,9 +773,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					},
 					// test-invalid: runtime validation must reject malformed probe override intervals.
 				} as never,
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -731,7 +785,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						},
 						healthCheckUnsupported: { reason: "skip" },
 					},
-				} }),
+				},
+			}),
 		).toThrow(/invalid healthMonitor\.probeOverrides/);
 	});
 
@@ -748,9 +803,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					descriptionKey: "meta.description",
 					category: "demo",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					ping: {
 						riskClass: "read",
+						descriptionKey: "operations.ping.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -772,7 +829,8 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							],
 						},
 					},
-				} }),
+				},
+			}),
 		).toThrow(/duplicate case name "same"/);
 	});
 

@@ -192,6 +192,7 @@ function stayApp(id: string, egress: "independent" | "pinned") {
 		operations: {
 			"get-stay-detail": {
 				riskClass: "read",
+				descriptionKey: "operations.getStayDetail.description",
 				input: z.object({}),
 				output: z.object({ status: z.number() }),
 				upstream: { baseUrl: originUrl },

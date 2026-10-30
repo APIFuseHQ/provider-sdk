@@ -1626,6 +1626,18 @@ function validateOperationMetadata(
 			VALID_OPERATION_RISK_CLASSES,
 			providerId,
 		);
+		if (
+			typeof operation.descriptionKey !== "string" ||
+			operation.descriptionKey.trim().length === 0
+		) {
+			throw new ValidationError(
+				`Provider "${providerId}" operation "${operationName}" declares no descriptionKey; every operation names the locale key of its description.`,
+				{
+					code: "DESCRIPTION_KEY_REQUIRED",
+					fix: `Add descriptionKey: "operations.${operationName}.description" to operations.${operationName} and the text under operations.${operationName}.description in locales/en.json and every other locale catalog the provider declares. A key still written under docs.descriptionKey is hoisted by \`apifuse migrate-operation-declaration .\`.`,
+				},
+			);
+		}
 		if (operation.approval !== undefined) {
 			assertLiteralField(
 				operation.approval,

@@ -25,6 +25,7 @@ function baseConfig(
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				async handler() {

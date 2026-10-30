@@ -406,6 +406,7 @@ describe("operational assembly: a served process at the default values", () => {
 			operations: {
 				read: {
 					riskClass: "read",
+					descriptionKey: "operations.read.description",
 					input: ReadInput,
 					output: ReadInput,
 					handler: async (ctx, input) => {

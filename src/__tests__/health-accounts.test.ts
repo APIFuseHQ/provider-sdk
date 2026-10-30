@@ -86,6 +86,7 @@ function buildWeverseProvider(healthAccounts?: readonly HealthAccountDeclaration
 		operations: {
 			profile: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.profile.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				healthCheckUnsupported: { reason: "health accounts assembly fixture" },

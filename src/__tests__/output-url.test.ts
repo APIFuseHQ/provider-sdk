@@ -481,6 +481,7 @@ describe("noMedia", () => {
 function operationWith(output: z.ZodType, extra: Record<string, unknown> = {}) {
 	return {
 		riskClass: READ,
+		descriptionKey: "operations.operation.description",
 		input: z.object({}),
 		output,
 		handler: async () => ({}),
@@ -725,6 +726,7 @@ describe("output URL observation events", () => {
 			declaration({
 				photos: {
 					riskClass: READ,
+					descriptionKey: "operations.photos.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					transport: {
@@ -772,6 +774,7 @@ describe("output URL observation events", () => {
 			declaration({
 				search: {
 					riskClass: READ,
+					descriptionKey: "operations.search.description",
 					input: z.object({}),
 					output: z.object({
 						items: z.array(z.object({ name: z.string(), image_url: image() })),
@@ -840,6 +843,7 @@ describe("output URL fields under the operation executor", () => {
 			operations: {
 				search: {
 					riskClass: READ,
+					descriptionKey: "operations.search.description",
 					input: z.object({}),
 					output: z.object({ items: z.array(Item) }),
 					healthCheckUnsupported: { reason: "Unit test operation without an upstream." },
@@ -897,6 +901,7 @@ describe("output URL fields under the operation executor", () => {
 			operations: {
 				search: {
 					riskClass: READ,
+					descriptionKey: "operations.search.description",
 					input: z.object({}),
 					output: z.object({ image_url: image() }),
 					healthCheckUnsupported: { reason: "Unit test operation without an upstream." },
