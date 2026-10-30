@@ -1,0 +1,15 @@
+---
+"@apifuse/provider-sdk": minor
+---
+
+**Breaking.** The one-release-window paths of the DX program are deleted. Each shape is now refused where it enters, with a `ValidationError` whose `fix` names the `apifuse migrate` step that rewrites it; the codemods themselves stay.
+
+- Per-throw error options. `new ProviderError(message, { code, category, retryable })` (and the same on `AuthError` / `ValidationError`) throws `PER_THROW_ERROR_OPTIONS_RETIRED` at construction; `category` and `retryable` are gone from `ProviderErrorOptions`. A provider code's status, category and retryability come from its declaration alone (`defineErrors`, or the still-read `errorCodes` row), so `resolveProviderErrorContract` no longer takes `legacyOptions`, the `provider_error_options_deprecated` server warning is gone, and the `legacy-error-options` lint rule is deleted. SDK-constructed errors (transport failures, session expiry, missing secrets, output validation, stream limits, handle errors) keep their own contract through `sdkErrorOptions(...)` (`TransportErrorOptions`, `SessionExpiredError`, `HandleErrorOptions` and `ProviderSecretError` take `SdkErrorOptions`); `sdkErrorContractOf(error)` reads it. Served behaviour changes only for a provider throw that set one of the two options: it is refused instead of served. Fix: `apifuse migrate --only errors-factory`.
+- Handle declaration. `fieldName` and `issuedBy` are gone from `DefineCursorOptions` / `DefineDraftOptions`; `defineCursor` / `defineDraft` throw `HANDLE_OPTION_RETIRED` when either is present. The key and the issuer come from the operation schemas only (no declared-option precedence, no issuer-disagreement warning); `legacyHandleOptionsOf` and `LegacyHandleOption` are removed from `handle/contract`, and the `legacy-handle-declaration` lint rule is deleted. Fix: `apifuse migrate --only handles`.
+- `proxy.session.poolSize`. Gone from `ProviderProxyPolicy.session`; `defineProvider` throws `PROXY_POOL_SIZE_RETIRED` instead of warning. Fix: `apifuse migrate --only declaration`.
+- Redundant approval. `defineProvider` throws `REDUNDANT_APPROVAL` when an operation's `approval` equals the `riskClass` default (`read -> never`, `write -> risk-based`, otherwise `always`); `defaultApprovalPolicy` is exported from `types` as the one definition. The `redundant-approval` lint rule is deleted. Fix: `apifuse migrate-operation-declaration .` removes an approval equal to the default.
+- Context keys. The `context-keys-required` lint rule is deleted; an auth flow reading an undeclared `ctx.context` key is already refused at run time (`ContextAccessError`), which stays the one refusal.
+
+Kept: `description-key-required` (the fleet scan's lint column reads 0 users only over the targets that load; 69 of 224 are not covered, and the deletion is a type change that touches about 300 SDK test literals, so it goes in its own PR) and the `errorCodes` table (still read, `@deprecated`).
+
+Retired lint rule ids: `legacy-error-options`, `legacy-handle-declaration`, `redundant-approval`, `context-keys-required`.

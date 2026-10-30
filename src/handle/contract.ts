@@ -18,7 +18,6 @@ import {
 	type HandleIssuedBy,
 	type HandleKindDeclaration,
 	handleFieldDescription,
-	handleIssuerList,
 	isHandleFieldDescription,
 	isHandleFieldMeta,
 } from "../handle-meta.js";
@@ -42,8 +41,6 @@ export const HANDLE_KIND_INTERNALS = Symbol.for("apifuse.provider-sdk.handle.kin
 /** Same-symbol link from a `kind.field()` meta object back to its kind. */
 export const HANDLE_META_KIND = Symbol.for("apifuse.provider-sdk.handle.meta-kind");
 
-export type LegacyHandleOption = "fieldName" | "issuedBy";
-
 /** Contract facts resolved from the operation schemas by `defineProvider`. */
 export interface ResolvedHandleContract {
 	readonly fieldName?: string;
@@ -62,9 +59,7 @@ export type MutableHandleFieldMeta = {
 };
 
 export interface HandleKindInternals {
-	/** Options still passed to `defineCursor`/`defineDraft` on the deprecated path. */
-	readonly declared: readonly LegacyHandleOption[];
-	/** Facts bound by `defineProvider`; read by the kind's getters when nothing was declared. */
+	/** Facts bound by `defineProvider`; read by the kind's getters. */
 	resolved: ResolvedHandleContract;
 	/** Every meta object this kind has emitted through `field()`, kept in sync on bind. */
 	readonly metas: Set<MutableHandleFieldMeta>;
@@ -78,16 +73,7 @@ export function getHandleKindInternals(kind: unknown): HandleKindInternals | und
 	return value && typeof value === "object" ? (value as HandleKindInternals) : undefined;
 }
 
-/** Options a kind still declares on the deprecated path, or an empty list. */
-export function legacyHandleOptionsOf(kind: unknown): readonly LegacyHandleOption[] {
-	return getHandleKindInternals(kind)?.declared ?? [];
-}
-
-/**
- * Binds the contract `defineProvider` resolved from the schemas onto a kind.
- * Declared (deprecated) options keep precedence inside the kind's getters, so
- * a provider that has not run the codemod sees byte-identical text.
- */
+/** Binds the contract `defineProvider` resolved from the schemas onto a kind. */
 export function bindHandleContract(kind: unknown, contract: ResolvedHandleContract): void {
 	const internals = getHandleKindInternals(kind);
 	if (!internals) return;
@@ -187,14 +173,7 @@ function collectBelow(
 			const below =
 				child.kind === "property" && child.key !== undefined
 					? collect(child.schema, side, `${path}.${child.key}`, child.key, ancestors, out)
-					: collect(
-							child.schema,
-							side,
-							mode === "list" ? `${path}[]` : path,
-							key,
-							ancestors,
-							out,
-						);
+					: collect(child.schema, side, mode === "list" ? `${path}[]` : path, key, ancestors, out);
 			if (mode === "always") for (const kind of below) required.add(kind);
 			else if (mode === "branch") branches.push(below);
 		}
@@ -239,8 +218,6 @@ interface KindUsage {
 	readonly keys: { input: Map<string, string>; output: Map<string, string> };
 	readonly issuers: string[];
 }
-
-const warnedIssuerDisagreements = new Set<string>();
 
 /**
  * Resolves and binds the handle contract for every kind used by `operations`,
@@ -345,7 +322,6 @@ export function bindHandleContracts(
 					? { issuedBy: Object.freeze([...usage.issuers]) }
 					: {}),
 		});
-		warnIssuerDisagreement(providerId, usage);
 	}
 
 	for (const occurrence of occurrences) refreshFieldDescription(occurrence.node, occurrence.meta);
@@ -353,25 +329,6 @@ export function bindHandleContracts(
 
 function first(keys: Map<string, string>): string | undefined {
 	return keys.keys().next().value;
-}
-
-/**
- * During the deprecation window a declared `issuedBy` keeps precedence; when
- * the schemas derive a different issuer set, say so once so the disagreement
- * is fixed before the option goes away.
- */
-function warnIssuerDisagreement(providerId: string, usage: KindUsage): void {
-	const internals = getHandleKindInternals(usage.kind);
-	if (!internals?.declared.includes("issuedBy")) return;
-	const declared = handleIssuerList((usage.kind as Partial<HandleKindDeclaration>).issuedBy);
-	const derived = usage.issuers;
-	if (declared.length === derived.length && declared.every((op, i) => op === derived[i])) return;
-	const token = `${providerId}:${usage.name}`;
-	if (warnedIssuerDisagreements.has(token)) return;
-	warnedIssuerDisagreements.add(token);
-	console.warn(
-		`[provider-sdk] Provider "${providerId}" handle kind "${usage.name}" declares issuedBy ${JSON.stringify(declared)} but its schemas derive ${JSON.stringify(derived)}; the declared value stays in effect until the option is removed. An operation issues a kind when its output places ${usage.name}.field() and its input does not require it. Fix the placements or the declaration so they agree.`,
-	);
 }
 
 /**

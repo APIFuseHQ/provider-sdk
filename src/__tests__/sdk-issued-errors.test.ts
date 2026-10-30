@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { HandleError } from "../handle.js";
-import { ProviderError, ValidationError } from "../errors.js";
+import { ProviderError, sdkErrorOptions, ValidationError } from "../errors.js";
 import {
 	isSdkIssuedError,
 	issueSdkError,
@@ -39,7 +39,10 @@ describe("sdk-issued error record", () => {
 	it("records the platform fault beside the issued object", () => {
 		const cause = new Error("schema");
 		const error = issueSdkError(
-			new ValidationError("output", { code: "OUTPUT_VALIDATION_FAILED", retryable: false }),
+			new ValidationError(
+				"output",
+				sdkErrorOptions({ code: "OUTPUT_VALIDATION_FAILED", retryable: false }),
+			),
 			{
 				category: "output_validation",
 				code: "OUTPUT_VALIDATION_FAILED",

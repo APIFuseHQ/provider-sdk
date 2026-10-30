@@ -1008,13 +1008,13 @@ codes is typed by the union of their names. One map can
 spread another (`defineErrors({ ...commonErrors, ... })`), and
 `Object.values(commonErrors)` lists a whole map on an operation.
 
-The legacy shape, `errorCodes: [{ code, status, retryable, description }]` plus
-`new ProviderError("...", { code, category, retryable })`, still serves for one
-more release. `errorCodes` and the per-throw `category` / `retryable` options
-are `@deprecated` (the hover text names the replacement), the server logs one
-`provider_error_options_deprecated` warning per code per process, and
-`apifuse check` reports `legacy-error-options` (warn) on each site.
-`scripts/codemods/errors-factory.yml` (ast-grep) rewrites both shapes.
+The per-throw options are gone: `new ProviderError("...", { code, category,
+retryable })` is refused at construction with a `ValidationError`
+(`PER_THROW_ERROR_OPTIONS_RETIRED`) whose fix names the declaration and the
+codemod. The `errorCodes: [{ code, status, retryable, description }]` table is
+still read (`@deprecated`, the hover text names the replacement).
+`apifuse migrate --only errors-factory` (`scripts/codemods/errors-factory.yml`)
+rewrites both shapes.
 
 `defineErrors` and `defineProvider` accept only statuses the server can emit:
 400, 401, 404, 409, 410, 422, 429, 500, 502, 503, and 504. An invalid status,
@@ -1025,9 +1025,10 @@ every served provider error, per field, in this order:
 1. SDK-owned errors retain SDK semantics. A declaration cannot override
    SDK-owned codes, stateful-forwarding failures, Zod/deadline errors, or
    `TransportError` values.
-2. The deprecated per-throw `category` / `retryable` options (status has no
-   per-throw form). While they exist they are served over the declaration, the
-   order the server always had, so bumping the SDK changes no served verdict.
+2. The contract an SDK-constructed error carries with the throw (transport
+   failures, session expiry, missing secrets, output validation, stream
+   limits: errors no provider declaration describes). A provider throw has no
+   per-throw contract.
 3. The declaration: the `defineErrors` declaration a factory-made error
    carries, or the operation's legacy `errorCodes` entry for the code. This
    slot applies to `ValidationError` as well as ordinary `ProviderError`, and
@@ -1039,12 +1040,10 @@ every served provider error, per field, in this order:
    `ValidationError` 400 (output validation 500), other unregistered
    `ProviderError` values 500 and non-retryable.
 
-A factory-made error carries no per-throw option, so its declaration is its
-whole contract: a code declared `retryable: false` and thrown as
-`errors.CODE(...)` is served non-retryable. A legacy throw that still sets
-`retryable` is served that value and the server warns, naming both values when
-they differ; the fix is a distinct code for the other condition, not a
-per-throw override.
+A provider error's declaration is its whole contract: a code declared
+`retryable: false` and thrown as `errors.CODE(...)` is served non-retryable,
+and a condition with a different category or retryability is a distinct code,
+not a per-throw override.
 
 The registered mappings are:
 
@@ -1062,9 +1061,9 @@ The registered mappings are:
 Every code provider code throws that the SDK registers (`sdkErrors`) carries
 its category and retryability with its status. When a `ProviderError` (or any
 subclass, `ValidationError` included) with one of these codes is thrown with
-no declaration and no per-throw option, the server reports the registry's
-category, with origin `provider`, in `X-ApiFuse-Error-Observability`, serves its
-retryability, and the public `source` follows from the category:
+no declaration, the server reports the registry's category, with origin
+`provider`, in `X-ApiFuse-Error-Observability`, serves its retryability, and
+the public `source` follows from the category:
 
 | Error code | Category | `source` | `retryable` |
 | --- | --- | --- | --- |
@@ -1882,10 +1881,10 @@ In order, old shape to new shape, and the one step each codemod cannot do:
 | `errors-hoist` | `errorCodes: [{ code: "X", status, description, retryable }, ...]` written inline in an operation (also the pre-#238 `docs: { errorCodes }` block and a meta object spread into the operation) | one `defineErrors` map for the provider: the existing `export const errors = defineErrors({` if there is one, else `domain/errors.ts` (created or appended to); `errors: [errors.X, ...Object.values(T), ...]` in the list's order with `import { errors } from "<path>/domain/errors"`; a code several operations list gets one entry; a registry-equal row becomes `X: sdkErrors.X` | nothing for a row it moved. A row it leaves in `errorCodes` names its reason: `errors-hoist-sdk-row-conflict` (a registered code whose status or retryable differs from the SDK registry: accept the SDK value or declare a distinct code), `errors-hoist-code-conflict` (one code declared with different status, retryable or locale keys across operations: give each contract its own code), `errors-hoist-row-not-literal`, `errors-hoist-row-without-status`, `errors-hoist-spread-not-a-table` (a spread that is not a map or a table `errors-factory` converts leaves the whole list), `errors-hoist-outside-operation`. The entry serves what the legacy path served: the row's status, its retryable (else `false`), and the category every throw site of the code served (a literal per-throw `category`, or for a site without one the serve default: `upstream_rejected` for 409/410/422, `input_validation` for a 4xx `ValidationError`, else `provider_error`) when all served one value (`errors-hoist-category-from-sites` notes it), else the serve default. Every `new ProviderError` site is rewritten to `errors.X({...})` only when the provider declares X with one contract (status, category, retryable, across operations' rows, tables and maps) and that contract serves what the site served (its literal per-throw values, or the serve default); otherwise the site stays as written and is a residue naming why: `errors-hoist-throw-site-conflict` (a per-throw value the declaration does not serve: accept the declared value, or declare a distinct code), `errors-hoist-throw-site-code-conflict` (X declared with two contracts, listed; a factory would carry one of them to every operation that reaches the site: give each contract its own code), `errors-hoist-throw-site-row-conflict` (a registered code whose provider row departs from the registry), `errors-hoist-throw-site-undeclared` (no map declares X), `errors-hoist-throw-site-shadowed` (a local `errors` shadows the import). An `AuthError` / `ValidationError` site is never rewritten to a factory; its per-throw `category` / `retryable` are deleted when they equal what the declaration serves (so the `legacy-error-options` lint has no user left and nothing served changes), and the site is reported when they differ (`errors-hoist-throw-site-conflict`) or cannot be checked (`errors-hoist-throw-site-dynamic-option`). A site of a code the SDK runtime owns (`MISSING_SECRET`, `reauth_required`, `HANDLE_*`, ...), or a subclass site of a registered code, loses its per-throw options the same way when they equal the SDK's own value for the code (the serve branch's default for `MISSING_SECRET` is `credential_unavailable`), else it stays and is named `errors-hoist-throw-site-sdk-conflict`. A subclass site keeps its options while a legacy `errorCodes` row of its code may stay in an operation (a row this run refused, or any code when a list is left whole behind a spread it cannot read; the server would read that row, which states no category): `errors-hoist-throw-site-code-conflict` names it. It also keeps them when the serving branch's no-declaration default differs (a site reached from an auth flow or a health scenario reads no declaration): `errors-hoist-throw-site-conflict` names it with that default. A file whose own table is named `errors` rewrites its sites to that map where it declares the code and names the rest (the provider map cannot be imported under the taken name); only an exported `errors` map is taken for the provider's. A `TransportError` / `SessionExpiredError` site is resolved by the server without the declaration, so it is neither. A registered-code row whose description differs from the registry's is noted (`errors-hoist-description-registry`). A `--dry-run` decides every site and declaration as the apply does. When rows of one code differ only in description the first (by file path) wins and each dropped wording is a note (`errors-hoist-description-dropped`). A `ValidationError` or `AuthError` site that states no category served its constructor's default under a legacy row; when the declaration this run writes states another category, the site serves it from then on and is named `errors-hoist-throw-site-conflict` (nothing at the site keeps the default). Only a table errors-factory rule 3 converts (`const T = [...]`, `[...] as const`, `const T: X = [...]` with `{ code, status }` rows) stands for a map in a dry run; in the apply an array is never one, so a `[...] satisfies X[]` table's sites are left and named `throw-site-undeclared`. An `errorCodes` whose rows the step cannot read (a call, a property access: `errors-hoist-list-not-readable`; a name that is not a map: `errors-hoist-spread-not-a-table`) counts as a row of any code left, so no subclass site is stripped while it stands. A `...MAP` of a defineErrors map (one rule 3 just made, or an existing one) inside a plain array literal throws at import; `errors-hoist-map-spread-in-array` names each with the `Object.values(MAP)` fix. A map another file imports must be exported: the step adds `export` to a plain top-level `const` map (once, dry run and apply alike) and otherwise writes no import, naming the site (`throw-site-undeclared`, "declares it but is not exported"). Reachability is decided against the imports the run itself adds, so one run is its own fixed point. Every `{ code, status }` row literal in the sources is read for a registered code that departs from the registry (`throw-site-row-conflict`), whatever table holds it; while a list's rows cannot be read at all (a call, a property access, a name bound to a non-literal; a `defineErrors` map and an array literal are readable), a registered code's `ProviderError` site is not rewritten to the registry factory (`errors-hoist-throw-site-row-unknown`). A `new ProviderError/AuthError/ValidationError` whose code is not a literal and that sets `category`/`retryable` (literally, or in a spread naming them) is `errors-hoist-throw-site-dynamic-code`; a literal-code site whose option sits in such a spread is `throw-site-dynamic-option`. No import is written when the map's module already reaches the site's file through value imports (the import would close a cycle and module evaluation would read a half-initialised module): `throw-site-undeclared` names the path. A `...NAME` inside the map errors-factory makes of a table where NAME is not a map, and a table spreading a property access or a call (which rule 3 leaves an array), are `errors-hoist-array-spread-in-map`; a map entry under a registered key whose values depart from the registry is `errors-hoist-sdk-entry-conflict` on every run (defineErrors refuses it at import). |
 | `health-refs` | `expectedErrors: [{ code: "X", status, attribute }]` | `expectedErrors: [{ error: errors.X, attribute }]` | declare `errors` once in the scenario module. |
 | `health-stale-window` | `ctx.cache.getOrSet(key, fn, { ttlMs, staleIfErrorMs: N })` / `ctx.cache.set(key, value, { staleIfErrorMs: N })` inside an operation handler or a helper it reaches | `defineOperation({ cache: { staleIfErrorMs: N } })` on every operation whose handler reaches the call (by name, through imports), the per-call option deleted, `N` imported (and exported) when it is a constant of another file, and `cache: true` added to the provider declaration when it lacks the capability | nothing for a call it moved. A call it leaves names its reason: `health-stale-window-two-values` (one operation reaches two different windows: declare the one it wants and give the other its own operation or cache key), `health-stale-window-unreachable` (no handler reaches the call by name), `health-stale-window-declared-differently`, `health-stale-window-value-not-portable` (name the window as a top-level constant), `health-stale-window-no-cache-capability`. |
-| `handles` | `defineCursor({ fieldName, issuedBy, ... })` / `defineDraft({ ... })` | the same call without the two options: the key and the issuer are read from the operation schemas where `kind.field()` is placed | refresh contract snapshots that pinned the old issuer wording; `legacy-handle-declaration` must be 0 in `apifuse check`. |
+| `handles` | `defineCursor({ fieldName, issuedBy, ... })` / `defineDraft({ ... })` | the same call without the two options: the key and the issuer are read from the operation schemas where `kind.field()` is placed | refresh contract snapshots that pinned the old issuer wording; `defineCursor` / `defineDraft` refuse a leftover option (`HANDLE_OPTION_RETIRED`). |
 | `runtime-boundary-allow-comments` | `// @apifuse-allow process-env-direct-read \| node-runtime-module-import \| direct-fetch-call: reason` | no comment: the build-time boundary has no escape hatch | fix what the comment acknowledged; `apifuse check` names the `file:line`. |
 | `schema` | `name: z.string().describe("prose")`; `fields.<preset>({ description: "prose" })` | `name: z.string().describeKey("schema.name")`; `fields.<preset>()` | add `"schema.<name>": "prose"` to `locales/en.json` (and the other catalogs); the report quotes the prose per rewrite. A `.describe()` that is not a property value (an input root, a union branch, a shared constant) is a residue (`schema-describe-prose-without-property`): wrap it as `describeKey(<schema>, "<key>")`. |
-| `declaration` | `const x: AuthConfig = { ... }`; `session: { ..., poolSize: 6 }` | `const x = { ... } satisfies AuthConfig` (the annotated form compiles one more release through a `@deprecated` `defineProvider` overload); `session: { ... }` without `poolSize` (the field is accepted and ignored one more release, `defineProvider` warns once per provider; the next minor refuses it) | add a missing `allowedHosts` / `reviewed`; give `auth` the shape its `mode` requires; replace a reported `auth.exchange` or `reviewed: "staging"`; delete the comment that explained the pool size |
+| `declaration` | `const x: AuthConfig = { ... }`; `session: { ..., poolSize: 6 }` | `const x = { ... } satisfies AuthConfig` (the annotated form compiles one more release through a `@deprecated` `defineProvider` overload); `session: { ... }` without `poolSize` (`defineProvider` refuses the field: `PROXY_POOL_SIZE_RETIRED`) | add a missing `allowedHosts` / `reviewed`; give `auth` the shape its `mode` requires; replace a reported `auth.exchange` or `reviewed: "staging"`; delete the comment that explained the pool size |
 
 `errors-factory` runs first: it turns every table into a map, rewrites throw sites to `errors.X`, and
 leaves a list with inline rows whole. `health-refs` next rewrites scenarios to `errors.X`. `errors-hoist`

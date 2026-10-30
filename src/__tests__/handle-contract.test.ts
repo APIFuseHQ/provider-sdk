@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { defineProvider, type ProviderContextOf, type ProviderDeclaration } from "../define.js";
 import { ValidationError } from "../errors.js";
@@ -331,79 +331,6 @@ describe("handle contract bound from the operation schemas", () => {
 		await expect(ctx.read(Offer, "offer_zzzz-zzzz")).rejects.toThrow(
 			"Call `list` again and pass the new `offer_ref` exactly as returned.",
 		);
-	});
-
-	describe("deprecated fieldName / issuedBy options", () => {
-		let warn: ReturnType<typeof spyOn>;
-		beforeEach(() => {
-			warn = spyOn(console, "warn").mockImplementation(() => {});
-		});
-		afterEach(() => {
-			warn.mockRestore();
-		});
-
-		it("still win over the bound contract, byte for byte, and warn once per kind", () => {
-			const Legacy = defineCursor({
-				name: "legacy",
-				fieldName: { input: "cursor", output: "next_cursor" },
-				schema: z.object({}),
-				ttl: "10m",
-				issuedBy: "declared-op",
-			});
-			defineCursor({
-				name: "legacy",
-				fieldName: "cursor",
-				schema: z.object({}),
-				ttl: "10m",
-				issuedBy: "declared-op",
-			});
-			const field = Legacy.field();
-
-			defineProvider({ ...DECLARATION, id: "legacy-demo", state: {}, handle: [Legacy] })({
-				operations: {
-					search: op({ token: field }, { token: Legacy.field() }),
-				},
-			});
-
-			expect(warn).toHaveBeenCalledTimes(2);
-			expect(String(warn.mock.calls[0]?.[0])).toContain(
-				'defineCursor "legacy": fieldName and issuedBy are deprecated',
-			);
-			// `search` requires the handle on input, so the schemas derive no issuer;
-			// the declared one stays in effect and the disagreement is said once.
-			expect(String(warn.mock.calls[1]?.[0])).toContain(
-				'Provider "legacy-demo" handle kind "legacy" declares issuedBy ["declared-op"] but its schemas derive []; the declared value stays in effect',
-			);
-			expect(Legacy.fieldName).toBe("cursor");
-			expect(Legacy.outputFieldName).toBe("next_cursor");
-			expect(Legacy.issuedBy).toBe("declared-op");
-			expect(field.meta()?.[APIFUSE_HANDLE_META_KEY]).toEqual({
-				kind: "legacy",
-				type: "cursor",
-				fieldName: "cursor",
-				outputFieldName: "next_cursor",
-				issuedBy: "declared-op",
-			});
-			expect(field.description).toBe(handleFieldDescription({ issuedBy: "declared-op" }));
-		});
-
-		it("a declared fieldName alone keeps its single-name meta even when the schemas use two keys", () => {
-			const Legacy = defineDraft({
-				name: "legacy",
-				fieldName: "token",
-				schema: z.object({}),
-				ttl: { idle: "1m", max: "2m" },
-			});
-
-			defineProvider({ ...DECLARATION, id: "legacy-one", state: {}, handle: [Legacy] })({
-				operations: {
-					search: op({ token: Legacy.field().optional() }, { next_token: Legacy.field() }),
-				},
-			});
-
-			expect(Legacy.outputFieldName).toBeUndefined();
-			expect(Legacy.issuedBy).toBe("search");
-		});
 	});
 });
 

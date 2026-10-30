@@ -14,6 +14,12 @@ const SESSION_EXPIRED_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/sessi
 const TRANSPORT_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/transport@1");
 const VALIDATION_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/validation@1");
 const HANDLE_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/handle@1");
+// Marks an options object built by the SDK's own error constructors (transport,
+// session expiry, secrets, output validation, ...): those carry their served
+// category and retryability with the throw because no provider declaration
+// describes them. A provider throw never carries this mark, so its category
+// and retryability come from its `defineErrors` declaration alone.
+const SDK_ERROR_CONTRACT_BRAND = Symbol.for("@apifuse/provider-sdk/error-contract@1");
 
 // Defines a non-enumerable, non-writable, non-configurable own data property.
 // Immutable + own means a guard can trust it via a single descriptor read
@@ -41,32 +47,18 @@ function hasOwnBrand(value: unknown, brand: symbol, expected: number | true): bo
 	);
 }
 
+/**
+ * Options of a provider-thrown error. The served status, category and
+ * retryability of a code are not options: they are declared once with
+ * `defineErrors({ CODE: { status, category, retryable, description } })` and
+ * thrown as `errors.CODE({ details, cause })`. A `category` or `retryable`
+ * passed here is refused at construction (`PER_THROW_ERROR_OPTIONS_RETIRED`).
+ */
 export type ProviderErrorOptions = {
 	fix?: string;
 	code?: string;
 	details?: unknown;
 	cause?: Error;
-	/**
-	 * How the upstream call failed, one of the provider-failure categories. A
-	 * platform fault (`internal_error`, `client_cancelled`, `proxy_pool`,
-	 * `output_validation`, ...) is reported by the SDK for an event it observed
-	 * itself and is not set here.
-	 *
-	 * @deprecated Declare the code once with `defineErrors({ CODE: { status, category, description } })`
-	 * and throw `errors.CODE({ details, cause })`; the category then comes from the
-	 * declaration. A per-throw category is honored for one more release and the
-	 * server logs one warning per code.
-	 */
-	category?: ProviderFailureCategory;
-	/**
-	 * @deprecated Declare the code once with `defineErrors({ CODE: { status, category, retryable, description } })`
-	 * and throw `errors.CODE({ details, cause })`; retryability then comes from the
-	 * declaration. This option is honored for one more release and still wins over
-	 * the declaration while it exists; the server logs one warning per code, naming
-	 * both values when they differ. For a condition with a different retryability,
-	 * declare a distinct code rather than override per throw.
-	 */
-	retryable?: boolean;
 	/** Provider-authored, bounded metadata safe for operational logs and error headers. */
 	observability?: ProviderErrorObservability;
 	/**
@@ -105,6 +97,86 @@ export type ProviderErrorObservability = {
 };
 
 /**
+ * The served category and retryability an SDK-owned error carries with the
+ * throw. Read by the serve layer's resolution through {@link sdkErrorContractOf};
+ * only an options object built with {@link sdkErrorOptions} answers.
+ */
+export type SdkErrorContract = {
+	readonly category?: ProviderFailureCategory;
+	readonly retryable?: boolean;
+};
+
+/**
+ * Options for an error the SDK itself constructs (transport failures, session
+ * expiry, missing secrets, output validation, stream limits, ...). These are
+ * not provider codes and no declaration describes them, so the SDK states
+ * their category and retryability where it throws. Not for provider code: a
+ * provider declares its codes with `defineErrors`.
+ */
+export type SdkErrorOptions = ProviderErrorOptions & SdkErrorContract;
+
+/**
+ * Marks `options` as SDK-constructed so `ProviderError` accepts the category
+ * and retryability it carries. The mark is an own non-enumerable property, so
+ * a spread of these options into a new object drops it (and the new object is
+ * then refused like any provider options object).
+ */
+export function sdkErrorOptions<T extends SdkErrorOptions>(options: T): T {
+	defineErrorBrand(options, SDK_ERROR_CONTRACT_BRAND, true);
+	return options;
+}
+
+/**
+ * The category and retryability an SDK-constructed error carries, or an empty
+ * contract for a provider-thrown error (whose declaration is the only source).
+ * Reads own data properties only, like the brand guards: the error's `options`
+ * may come from another SDK copy.
+ */
+export function sdkErrorContractOf(error: unknown): SdkErrorContract {
+	if (!isProviderError(error)) return {};
+	let options: unknown;
+	try {
+		options = (error as ProviderError).options;
+	} catch {
+		return {};
+	}
+	if (!hasOwnBrand(options, SDK_ERROR_CONTRACT_BRAND, true)) return {};
+	const record = options as Record<string, unknown>;
+	const category = Object.getOwnPropertyDescriptor(record, "category")?.value;
+	const retryable = Object.getOwnPropertyDescriptor(record, "retryable")?.value;
+	return {
+		...(typeof category === "string" ? { category: category as ProviderFailureCategory } : {}),
+		...(typeof retryable === "boolean" ? { retryable } : {}),
+	};
+}
+
+const RETIRED_PER_THROW_OPTIONS = ["category", "retryable"] as const;
+
+/**
+ * The pre-`defineErrors` shape, `new ProviderError(message, { code, category,
+ * retryable })`, is refused at construction. The declaration is the only
+ * source of a code's category and retryability; a per-throw value that
+ * differed from it used to win, which made the served verdict depend on the
+ * throw site instead of the contract. SDK-owned construction (see
+ * {@link sdkErrorOptions}) is exempt: no declaration describes those errors.
+ */
+function rejectPerThrowContractOptions(options: ProviderErrorOptions | undefined): void {
+	if (options === undefined || hasOwnBrand(options, SDK_ERROR_CONTRACT_BRAND, true)) return;
+	const record = options as Record<string, unknown>;
+	const present = RETIRED_PER_THROW_OPTIONS.filter((option) => record[option] !== undefined);
+	if (present.length === 0) return;
+	const code = typeof record.code === "string" ? record.code : "CODE";
+	throw new ValidationError(
+		`new ProviderError(..., { code: "${code}", ${present.join(", ")} }) sets ${present.join(" and ")} per throw; these options were removed. A code's status, category and retryability come from its declaration only.`,
+		{
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			fix: `Declare the code once with defineErrors({ ${code}: { status, category, retryable, description } }) and throw errors.${code}({ details, cause }); for a condition with a different category or retryability declare a distinct code. \`apifuse migrate --only errors-factory\` (scripts/codemods/errors-factory.yml) rewrites the throw sites.`,
+			details: { code, options: present },
+		},
+	);
+}
+
+/**
  * `TCode` is the error's `code` as a literal union when a `defineErrors`
  * factory made it (`errors.ITEM_NOT_FOUND()` is a `ProviderError<"ITEM_NOT_FOUND">`);
  * a hand-constructed error is a `ProviderError<string>`.
@@ -115,6 +187,7 @@ export class ProviderError<TCode extends string = string> extends Error {
 		public readonly options?: ProviderErrorOptions,
 	) {
 		super(message);
+		rejectPerThrowContractOptions(options);
 		this.name = "ProviderError";
 		if (options?.cause) {
 			this.cause = options.cause;
@@ -175,12 +248,15 @@ export class ProviderEngineAuthenticationError extends SDKError {
 /** Raised when the remote engine cannot be reached. There is no local fallback. */
 export class ProviderEngineUnavailableError extends SDKError {
 	constructor(message = "The remote APIFuse provider engine is unavailable", cause?: Error) {
-		super(message, {
-			code: "PROVIDER_ENGINE_UNAVAILABLE",
-			retryable: true,
-			fix: "Check network access and the provider engine endpoint, then retry.",
-			...(cause ? { cause } : {}),
-		});
+		super(
+			message,
+			sdkErrorOptions({
+				code: "PROVIDER_ENGINE_UNAVAILABLE",
+				retryable: true,
+				fix: "Check network access and the provider engine endpoint, then retry.",
+				...(cause ? { cause } : {}),
+			}),
+		);
 		this.name = "ProviderEngineUnavailableError";
 	}
 }
@@ -188,12 +264,15 @@ export class ProviderEngineUnavailableError extends SDKError {
 /** Raised when the engine refuses egress outside the workspace's pinned allowlist. */
 export class ProviderEgressDeniedError extends ProviderError {
 	constructor(message: string, details?: unknown) {
-		super(message, {
-			code: "PROVIDER_EGRESS_DENIED",
-			retryable: false,
-			details,
-			fix: "Use a host in the provider's pinned allowedHosts declaration, or request a trusted pin update.",
-		});
+		super(
+			message,
+			sdkErrorOptions({
+				code: "PROVIDER_EGRESS_DENIED",
+				retryable: false,
+				details,
+				fix: "Use a host in the provider's pinned allowedHosts declaration, or request a trusted pin update.",
+			}),
+		);
 		this.name = "ProviderEgressDeniedError";
 	}
 }
@@ -220,14 +299,24 @@ export class AuthError extends ProviderError {
 	}
 }
 
+/**
+ * Session expiry is SDK-owned resolution (`reauth_required`, 401,
+ * `credential_expired`); the options carry the SDK contract fields so a
+ * caller may still mark one as retryable.
+ */
 export class SessionExpiredError extends AuthError {
-	constructor(message = "Provider session expired", options?: ProviderErrorOptions) {
-		super(message, {
-			code: "reauth_required",
-			category: "credential_expired",
-			retryable: false,
-			...options,
-		});
+	declare readonly options?: SdkErrorOptions;
+
+	constructor(message = "Provider session expired", options?: SdkErrorOptions) {
+		super(
+			message,
+			sdkErrorOptions({
+				code: "reauth_required",
+				category: "credential_expired",
+				retryable: false,
+				...options,
+			}),
+		);
 		this.name = "SessionExpiredError";
 		defineErrorBrand(this, SESSION_EXPIRED_BRAND, true);
 	}
@@ -248,17 +337,23 @@ export class ValidationError extends ProviderError {
 	}
 }
 
-export type TransportErrorOptions = ProviderErrorOptions & {
+/**
+ * A transport failure is SDK-owned: the SDK's HTTP and stealth layers state
+ * its category and retryability where they build it, so these options carry
+ * the SDK contract fields.
+ */
+export type TransportErrorOptions = SdkErrorOptions & {
 	status?: number;
 	upstreamStatus?: number;
 };
 
 export class TransportError extends ProviderError {
+	declare readonly options?: TransportErrorOptions;
 	readonly status?: number;
 	readonly upstreamStatus?: number;
 
 	constructor(message: string, options?: TransportErrorOptions) {
-		super(message, options);
+		super(message, options === undefined ? undefined : sdkErrorOptions({ ...options }));
 		this.name = "TransportError";
 		this.status = options?.status;
 		this.upstreamStatus = options?.upstreamStatus ?? options?.status;
@@ -329,8 +424,8 @@ export function isValidationError(value: unknown): value is ValidationError {
 }
 
 export class ProviderSecretError extends ProviderError {
-	constructor(message: string, options?: ProviderErrorOptions) {
-		super(message, { code: "provider_secret_error", ...options });
+	constructor(message: string, options?: SdkErrorOptions) {
+		super(message, sdkErrorOptions({ code: "provider_secret_error", ...options }));
 		this.name = "ProviderSecretError";
 	}
 }

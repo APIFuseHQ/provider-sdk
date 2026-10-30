@@ -12,6 +12,8 @@ import {
 	HttpRedirectError,
 	ProviderError,
 	SDKError,
+	sdkErrorContractOf,
+	sdkErrorOptions,
 	StealthCookieStoreVersionError,
 	TransportError,
 } from "../errors.js";
@@ -2485,12 +2487,17 @@ describe("createStealthClient", () => {
 				url: "/login",
 				sensitiveParams: { serviceKey: secret },
 				stopWhen: (hop) => {
-					throw new ProviderError(`Unexpected redirect to ${hop.nextUrl}`, {
-						code: hop.nextUrl,
-						// @ts-expect-error test-invalid: preserves a legacy category value for redaction coverage
-						category: "upstream",
-						retryable: false,
-					});
+					// SDK-constructed options are the only ones that still carry a
+					// category; the hop redaction must reach classification fields there.
+					throw new ProviderError(
+						`Unexpected redirect to ${hop.nextUrl}`,
+						sdkErrorOptions({
+							code: hop.nextUrl,
+							// @ts-expect-error test-invalid: preserves a legacy category value for redaction coverage
+							category: "upstream",
+							retryable: false,
+						}),
+					);
 				},
 			});
 		} catch (error) {
@@ -8158,7 +8165,7 @@ describe("stealth telemetry transport differential", () => {
 						name: error.name,
 						message: error.message,
 						...(error instanceof ProviderError
-							? { code: error.code, retryable: error.options?.retryable }
+							? { code: error.code, retryable: sdkErrorContractOf(error).retryable }
 							: {}),
 						...(error instanceof TransportError
 							? { status: error.status, upstreamStatus: error.upstreamStatus }

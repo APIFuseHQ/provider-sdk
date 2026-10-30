@@ -89,18 +89,33 @@ describe("defineProvider", () => {
 		};
 
 		it.each([
-			["missing allowedHosts", { allowedHosts: undefined }, "must declare at least one allowed host"],
+			[
+				"missing allowedHosts",
+				{ allowedHosts: undefined },
+				"must declare at least one allowed host",
+			],
 			["empty allowedHosts", { allowedHosts: [] }, "must declare at least one allowed host"],
 			[
 				"a wildcard host",
 				{ allowedHosts: ["*.example.com"] },
 				'must not declare wildcard allowedHosts entries like "*.example.com"',
 			],
-			["missing reviewed", { reviewed: undefined }, 'must declare reviewed as "first-party" or "community"'],
-			["reviewed staging", { reviewed: "staging" }, 'must declare reviewed as "first-party" or "community"'],
+			[
+				"missing reviewed",
+				{ reviewed: undefined },
+				'must declare reviewed as "first-party" or "community"',
+			],
+			[
+				"reviewed staging",
+				{ reviewed: "staging" },
+				'must declare reviewed as "first-party" or "community"',
+			],
 			[
 				"credentials without auth.flow.continue",
-				{ auth: { mode: "credentials", flow: { start: credentialsFlow.start } }, credential: { keys: ["id"] } },
+				{
+					auth: { mode: "credentials", flow: { start: credentialsFlow.start } },
+					credential: { keys: ["id"] },
+				},
 				"must define auth.flow.continue for credentials auth mode",
 			],
 			[
@@ -125,7 +140,10 @@ describe("defineProvider", () => {
 			],
 			[
 				"a reusable secret key without the opt-in",
-				{ auth: { mode: "oauth2", flow: credentialsFlow }, credential: { keys: ["refresh_token"] } },
+				{
+					auth: { mode: "oauth2", flow: credentialsFlow },
+					credential: { keys: ["refresh_token"] },
+				},
 				"must set credential.storesReusableSecret and credential.justification when credential.keys includes reusable secrets",
 			],
 			[
@@ -241,12 +259,12 @@ describe("defineProvider", () => {
 					prices: {
 						...validConfig.operations.prices,
 						errorCodes: [
-								{
-									code: "UPSTREAM_TEAPOT",
-									status: 418,
-									description: "Unsupported upstream response",
-								},
-							],
+							{
+								code: "UPSTREAM_TEAPOT",
+								status: 418,
+								description: "Unsupported upstream response",
+							},
+						],
 					},
 				},
 			}),
@@ -301,12 +319,12 @@ describe("defineProvider", () => {
 					prices: {
 						...validConfig.operations.prices,
 						errorCodes: [
-								{
-									code: "reauth_required",
-									status: 502,
-									description: "Provider session expired",
-								},
-							],
+							{
+								code: "reauth_required",
+								status: 502,
+								description: "Provider session expired",
+							},
+						],
 					},
 				},
 			});
@@ -1186,9 +1204,9 @@ describe("defineProvider", () => {
 			"apifuse__cdp_pool__url",
 			"APIFUSE__CACHE__KEY_PEPPER",
 		])("rejects %s in provider secrets", (name) => {
-			expect(() =>
-				defineProvider({ ...validConfig, secrets: [{ name, required: true }] }),
-			).toThrow(/cannot declare engine-owned runtime variable/);
+			expect(() => defineProvider({ ...validConfig, secrets: [{ name, required: true }] })).toThrow(
+				/cannot declare engine-owned runtime variable/,
+			);
 		});
 	});
 
@@ -1229,79 +1247,46 @@ describe("defineProvider", () => {
 	});
 
 	describe("proxy.session.poolSize", () => {
-		// The pool is gone, but a provider that still declares its size must load
-		// for one more release: the field is kept on the definition (the served
-		// contract does not change on bump), the provider is warned once at
-		// definition, and the runtime never reads it.
-		const withPoolSize = (id: string) =>
-			defineProvider({
-				...validConfig,
-				id,
-				proxy: {
-					mode: "required",
-					providers: ["smartproxy", "nodemaven"],
-					session: { affinity: "connection", lifetimeMinutes: 120, poolSize: 6 },
-				},
-			});
-
-		const poolSizeWarnings = (warn: { mock: { calls: unknown[][] } }, id: string) =>
-			warn.mock.calls.filter(
-				(call) =>
-					typeof call[0] === "string" &&
-					call[0].includes(`Provider "${id}" declares proxy.session.poolSize (6)`),
-			);
-
-		it("accepts the retired field and warns once per provider with the deletion step", () => {
-			const warn = spyOn(console, "warn").mockImplementation(() => {});
+		// The pool is gone (each attempt is its own vendor session). The field is
+		// refused at definition with the codemod that deletes it.
+		it("refuses the retired field with a ValidationError naming the codemod", () => {
+			let caught: unknown;
 			try {
-				const first = withPoolSize("pool-size-once");
-				const second = withPoolSize("pool-size-once");
-
-				for (const provider of [first, second]) {
-					const proxy = provider.proxy;
-					if (!proxy || typeof proxy === "boolean") throw new Error("expected a proxy policy");
-					expect(proxy.session).toEqual({
-						affinity: "connection",
-						lifetimeMinutes: 120,
-						poolSize: 6,
-					});
-				}
-				const warnings = poolSizeWarnings(warn, "pool-size-once");
-				expect(warnings).toHaveLength(1);
-				expect(warnings[0]?.[0]).toBe(
-					'[provider-sdk] Provider "pool-size-once" declares proxy.session.poolSize (6), which is ignored: the proxy pool is gone, every attempt mints its own vendor session and a vendor serves 3 attempts before the chain moves on. Delete the field (apifuse migrate --only declaration, scripts/codemods/declaration.yml); the next minor refuses it at defineProvider.',
-				);
-			} finally {
-				warn.mockRestore();
-			}
-		});
-
-		it("warns each provider separately and stays silent without the field", () => {
-			const warn = spyOn(console, "warn").mockImplementation(() => {});
-			try {
-				withPoolSize("pool-size-other");
 				defineProvider({
 					...validConfig,
-					id: "pool-size-absent",
+					id: "pool-size-refused",
 					proxy: {
 						mode: "required",
 						providers: ["smartproxy", "nodemaven"],
-						session: { affinity: "connection", lifetimeMinutes: 120 },
+						// test-invalid: the field was removed from the type.
+						session: { affinity: "connection", lifetimeMinutes: 120, poolSize: 6 } as never,
 					},
 				});
-
-				expect(poolSizeWarnings(warn, "pool-size-other")).toHaveLength(1);
-				expect(
-					warn.mock.calls.filter(
-						(call) =>
-							typeof call[0] === "string" &&
-							call[0].includes('"pool-size-absent"') &&
-							call[0].includes("poolSize"),
-					),
-				).toHaveLength(0);
-			} finally {
-				warn.mockRestore();
+			} catch (error) {
+				caught = error;
 			}
+			expect(caught).toBeInstanceOf(ValidationError);
+			expect(caught).toMatchObject({
+				code: "PROXY_POOL_SIZE_RETIRED",
+				message:
+					'Provider "pool-size-refused" declares proxy.session.poolSize, which no longer exists: the proxy pool is gone, every attempt mints its own vendor session and a vendor serves 3 attempts before the chain moves on.',
+				fix: "Delete proxy.session.poolSize: run `apifuse migrate --only declaration` (scripts/codemods/declaration.yml).",
+			});
+		});
+
+		it("loads the same session without the field", () => {
+			const provider = defineProvider({
+				...validConfig,
+				id: "pool-size-absent",
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					session: { affinity: "connection", lifetimeMinutes: 120 },
+				},
+			});
+			const proxy = provider.proxy;
+			if (!proxy || typeof proxy === "boolean") throw new Error("expected a proxy policy");
+			expect(proxy.session).toEqual({ affinity: "connection", lifetimeMinutes: 120 });
 		});
 	});
 

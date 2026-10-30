@@ -1,4 +1,4 @@
-import { isValidationError, ProviderError, ValidationError } from "../errors.js";
+import { isValidationError, ProviderError, sdkErrorOptions, ValidationError } from "../errors.js";
 import { z } from "zod";
 import { parseSchema } from "../schema.js";
 import type { EnvContext, ProviderDefinition } from "../types.js";
@@ -34,13 +34,16 @@ export async function executeOperation<
 	const operation = provider.operations[operationId];
 
 	if (!operation) {
-		throw new ProviderError(`Unknown operation: ${provider.id}/${operationId}`, {
-			code: "NOT_FOUND",
-			// No upstream was asked: keep the registered NOT_FOUND code from
-			// attributing this to one.
-			category: "provider_error",
-			fix: `Valid operations: ${Object.keys(provider.operations).join(", ")}`,
-		});
+		throw new ProviderError(
+			`Unknown operation: ${provider.id}/${operationId}`,
+			sdkErrorOptions({
+				code: "NOT_FOUND",
+				// No upstream was asked: keep the registered NOT_FOUND code from
+				// attributing this to one.
+				category: "provider_error",
+				fix: `Valid operations: ${Object.keys(provider.operations).join(", ")}`,
+			}),
+		);
 	}
 
 	// SDK-owned secret presence gate (single source of truth): declared
@@ -79,12 +82,15 @@ export async function executeOperation<
 			throw cause;
 		}
 		throw issueSdkError(
-			new ValidationError(`Operation handler output failed schema validation.`, {
-				code: "OUTPUT_VALIDATION_FAILED",
-				retryable: false,
-				zodError: isValidationError(cause) ? cause.zodError : cause,
-				...(cause instanceof Error ? { cause } : {}),
-			}),
+			new ValidationError(
+				`Operation handler output failed schema validation.`,
+				sdkErrorOptions({
+					code: "OUTPUT_VALIDATION_FAILED",
+					retryable: false,
+					zodError: isValidationError(cause) ? cause.zodError : cause,
+					...(cause instanceof Error ? { cause } : {}),
+				}),
+			),
 			{
 				category: "output_validation",
 				code: "OUTPUT_VALIDATION_FAILED",

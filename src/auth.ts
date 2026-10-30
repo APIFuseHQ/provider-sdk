@@ -1,4 +1,4 @@
-import { AuthError, ProviderError, ValidationError } from "./errors.js";
+import { AuthError, ProviderError, sdkErrorOptions, ValidationError } from "./errors.js";
 import {
 	declarationInvalidError,
 	DECLARATION_RULE_IDS,
@@ -204,10 +204,10 @@ export class AuthAbortError extends AuthError {
 	readonly turn: AuthTurn;
 
 	constructor(options: Parameters<AuthFlowTerminalContext["abort"]>[0]) {
-		super(options.message ?? options.code, {
-			code: options.code,
-			retryable: options.retry === "retry",
-		});
+		super(
+			options.message ?? options.code,
+			sdkErrorOptions({ code: options.code, retryable: options.retry === "retry" }),
+		);
 		this.name = "AuthAbortError";
 		this.turn = createAuthFlowHelpers().abort(options);
 	}

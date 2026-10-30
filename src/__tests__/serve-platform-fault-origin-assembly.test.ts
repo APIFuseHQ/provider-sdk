@@ -189,6 +189,23 @@ async function connectedSocket(): Promise<Socket> {
 
 const CategoryInput = z.object({ category: z.unknown(), declared: z.boolean() });
 
+// The provider failures the Gateway pair test reads, declared once: a throw
+// site cannot state a category, the declaration is where a provider does.
+const providerErrors = defineErrors({
+	UPSTREAM_FAILED: {
+		status: 502,
+		category: "upstream_http",
+		retryable: false,
+		description: "The upstream failed.",
+	},
+	CREDENTIAL_MISSING: {
+		status: 400,
+		category: "credential_unavailable",
+		retryable: false,
+		description: "The credential is missing.",
+	},
+});
+
 const output = z.object({ ok: z.boolean() });
 
 function operation(
@@ -261,10 +278,10 @@ const provider: ProviderDefinition = createProviderDefinitionDouble({
 	http: {},
 	operations: {
 		succeeds: operation(async () => ({ ok: true })),
-		// The provider's `category` option carries a value outside the
-		// provider-failure words: a platform word through a cast or from
-		// JavaScript, or not a string at all. Read from JSON, as a JavaScript
-		// provider would hand it over.
+		// The provider's `category` option carries a value, a platform word
+		// through a cast or from JavaScript, or not a string at all. Read from
+		// JSON, as a JavaScript provider would hand it over; the constructor
+		// refuses it before anything is served.
 		"category-option": operation(
 			async (_ctx, input) => {
 				const { category, declared } = CategoryInput.parse(input);
@@ -320,20 +337,18 @@ const provider: ProviderDefinition = createProviderDefinitionDouble({
 				code: "OUTPUT_VALIDATION_FAILED",
 			});
 		}),
-		"provider-upstream-http": operation(async () => {
-			throw new ProviderError("upstream failed", {
-				code: "UPSTREAM_FAILED",
-				category: "upstream_http",
-				retryable: false,
-			});
-		}),
-		"provider-credential-unavailable": operation(async () => {
-			throw new ProviderError("credential missing", {
-				code: "CREDENTIAL_MISSING",
-				category: "credential_unavailable",
-				retryable: false,
-			});
-		}),
+		"provider-upstream-http": operation(
+			async () => {
+				throw providerErrors.UPSTREAM_FAILED();
+			},
+			{ errors: [providerErrors.UPSTREAM_FAILED] },
+		),
+		"provider-credential-unavailable": operation(
+			async () => {
+				throw providerErrors.CREDENTIAL_MISSING();
+			},
+			{ errors: [providerErrors.CREDENTIAL_MISSING] },
+		),
 		// Platform faults.
 		"sdk-proxy-pool-exhausted": operation(async () => {
 			// What ctx.stealth throws once the vendor edge refused every session
@@ -461,49 +476,44 @@ const PLATFORM_ONLY_WORDS = PLATFORM_FAULT_CATEGORIES.filter(
 	(word) => !(PROVIDER_FAILURE_CATEGORIES as readonly string[]).includes(word),
 );
 
-describe("a provider's category option outside the provider-failure words", () => {
-	for (const category of [...PLATFORM_ONLY_WORDS, "not_a_category", 7, true]) {
-		it(`reads ${JSON.stringify(category)} as no value and signals it`, async () => {
+describe("a provider's category option, whatever word it carries", () => {
+	for (const category of [...PLATFORM_ONLY_WORDS, "upstream_http", "not_a_category", 7, true]) {
+		it(`refuses ${JSON.stringify(category)} at construction and serves the refusal as the provider's input failure`, async () => {
 			const requestId = `category-${String(category)}`;
 			const served = await call("category-option", requestId, { category, declared: true });
 
-			// Classified as if the provider had set none: the declared 502 of an
-			// unregistered code derives provider_error.
+			// The throw never reaches resolution: the declared code, its 502 and
+			// the option's word are all replaced by the refusal.
 			expect(outcome(served)).toEqual({
-				status: 502,
+				status: 400,
 				origin: "provider",
-				category: "provider_error",
+				category: "input_validation",
 				retryable: false,
-				code: DECLARED_CODE,
-				source: "apifuse",
+				code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+				source: "client",
 			});
 			expect(failureLog(events, requestId)).toMatchObject({
-				status: 502,
-				code: DECLARED_CODE,
-				errorCategory: "provider_error",
+				status: 400,
+				code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+				errorCategory: "input_validation",
 				errorOrigin: "provider",
-				signal: "unknown_provider_error_category",
 			});
 		});
 	}
 
-	it("keeps the unregistered code signal when that applies too", async () => {
+	it("refuses the option on an undeclared code the same way", async () => {
 		const served = await call("category-option", "category-undeclared", {
 			category: "internal_error",
 			declared: false,
 		});
 
 		expect(outcome(served)).toEqual({
-			status: 500,
+			status: 400,
 			origin: "provider",
-			category: "provider_error",
+			category: "input_validation",
 			retryable: false,
-			code: UNDECLARED_CODE,
-			source: "apifuse",
-		});
-		expect(failureLog(events, "category-undeclared")).toMatchObject({
-			errorOrigin: "provider",
-			signal: "unregistered_provider_error_code",
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			source: "client",
 		});
 	});
 
@@ -729,8 +739,8 @@ describe("platform faults the SDK observed itself", () => {
 		await reader?.cancel("consumer stopped");
 
 		// The SDK issues the cancellation with its fault record and no
-		// declaration: the log reads the platform fault, and no deprecated
-		// per-throw option or unregistered code is reported for it.
+		// declaration: the log reads the platform fault, and no unregistered
+		// code is reported for it.
 		const log = failureLog(events, requestId);
 		expect(log).toMatchObject({
 			status: CLIENT_CANCELLED_STATUS,
@@ -740,12 +750,6 @@ describe("platform faults the SDK observed itself", () => {
 			retryable: false,
 		});
 		expect(log).not.toHaveProperty("signal");
-		expect(
-			events.filter(
-				(entry) =>
-					entry.event === "provider_error_options_deprecated" && entry.code === "client_cancelled",
-			),
-		).toEqual([]);
 	});
 
 	it("serves the native client's unusable proxy endpoint as the proxy pool's fault", async () => {

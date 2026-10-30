@@ -4,7 +4,7 @@ import {
 	type ProviderEngine,
 	type ProviderEngineMode,
 } from "../engine.js";
-import { ProviderError, ValidationError } from "../errors.js";
+import { ProviderError, sdkErrorOptions, ValidationError } from "../errors.js";
 
 /**
  * Engine attachment selection. Internal on purpose: ADR-0011 removes the
@@ -181,11 +181,10 @@ export function createUnavailableProviderEngine(
 	const engine: ProviderEngine = {
 		kind,
 		attach: () => {
-			throw new ProviderError(reason.message, {
-				code: reason.code,
-				retryable: false,
-				fix: reason.fix,
-			});
+			throw new ProviderError(
+				reason.message,
+				sdkErrorOptions({ code: reason.code, retryable: false, fix: reason.fix }),
+			);
 		},
 	};
 	UNAVAILABLE_ENGINES.add(engine);
@@ -221,12 +220,12 @@ export function assertProcessEngineModeSupported(
 	if (resolution.mode !== DEFAULT_PROVIDER_ENGINE_MODE) {
 		throw new ProviderError(
 			`Provider engine mode "${resolution.mode}" was requested but this @apifuse/provider-sdk release only serves the ${DEFAULT_PROVIDER_ENGINE_MODE} engine`,
-			{
+			sdkErrorOptions({
 				code: "PROVIDER_ENGINE_MODE_UNSUPPORTED",
 				retryable: false,
 				details: { mode: resolution.mode, source: resolution.source },
 				fix: `Unset ${PROVIDER_ENGINE_MODE_ENV}, or upgrade to a release that serves this mode.`,
-			},
+			}),
 		);
 	}
 	return resolution;

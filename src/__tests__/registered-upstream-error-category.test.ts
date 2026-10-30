@@ -329,15 +329,6 @@ describe("serving a registered upstream code thrown without a category", () => {
 				errorCodes: [{ code: "ROW_INVALID", status: 502, description: "Row invalid" }],
 				expected: { status: 502, category: "provider_error", source: "apifuse" },
 			},
-			{
-				createError: () =>
-					new ValidationError("bad input", {
-						code: "UPSTREAM_SCHEMA_ERROR",
-						category: "input_validation",
-					}),
-				errorCodes: undefined,
-				expected: { status: 502, category: "input_validation", source: "client" },
-			},
 		] as const;
 		for (const testCase of cases) {
 			const served = await serveThrown(
@@ -390,37 +381,22 @@ describe("serving a registered upstream code thrown without a category", () => {
 });
 
 describe("serving an explicit category or an unregistered code", () => {
-	it("leaves an explicit category untouched on every registered upstream code", async () => {
-		for (const expected of EXPECTED_UPSTREAM_CODES) {
-			const served = await serveThrown(throwing(expected.code, { category: "provider_error" }));
+	it("refuses a provider throw that states its own category: the registry row is the only source", async () => {
+		// Before the per-throw options were removed, `{ category: "provider_error" }`
+		// on a registered upstream code re-attributed it. The throw is now refused
+		// at construction, so the served envelope is the refusal and the registry
+		// category of the code is never overridden.
+		const served = await serveThrown(
+			// test-invalid: the option was removed from the type; the refusal is under test.
+			throwing("UPSTREAM_SCHEMA_ERROR", { category: "provider_error" } as never),
+		);
 
-			expect({ code: expected.code, category: served.category }).toEqual({
-				code: expected.code,
-				category: "provider_error",
-			});
-		}
-	});
-
-	it("serves the source of an explicit category", async () => {
-		const cases = [
-			{ code: "UPSTREAM_SCHEMA_ERROR", category: "input_validation", source: "client" },
-			{ code: "NOT_FOUND", category: "upstream_rejected", source: "upstream_rule" },
-			{ code: "NO_DATA", category: "provider_error", source: "apifuse" },
-			{ code: "UPSTREAM_RATE_LIMIT", category: "upstream_auth", source: "upstream_failure" },
-			// UPSTREAM_ERROR and BLOCKED keep their code-level upstream
-			// attribution under any explicit category, as before this table.
-			{ code: "UPSTREAM_ERROR", category: "provider_error", source: "upstream_failure" },
-			{ code: "BLOCKED", category: "input_validation", source: "upstream_failure" },
-		] as const;
-		for (const testCase of cases) {
-			const served = await serveThrown(throwing(testCase.code, { category: testCase.category }));
-
-			expect({ code: testCase.code, category: served.category, source: served.source }).toEqual({
-				code: testCase.code,
-				category: testCase.category,
-				source: testCase.source,
-			});
-		}
+		expect(served).toMatchObject({
+			status: 400,
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			category: "input_validation",
+			source: "client",
+		});
 	});
 
 	it("serves caller-side registry rows as the caller's, and keeps custom and SDK-owned codes on their defaults", async () => {

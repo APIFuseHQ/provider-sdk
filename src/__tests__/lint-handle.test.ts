@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { defineCursor, defineDraft } from "../handle.js";
+import { defineDraft } from "../handle.js";
 import {
 	APIFUSE_HANDLE_META_KEY,
 	type HandleFieldMeta,
@@ -90,82 +90,10 @@ function rulesOf(diagnostics: readonly LintDiagnostic[], prefix: string): LintDi
 	return diagnostics.filter((diagnostic) => diagnostic.rule.startsWith(prefix));
 }
 
-function byRule(diagnostics: readonly LintDiagnostic[], rule: string): LintDiagnostic[] {
-	return diagnostics.filter((diagnostic) => diagnostic.rule === rule);
-}
-
 describe("handle lint rules", () => {
 	it("is silent for a provider that declares its kinds and places their fields", () => {
 		const diagnostics = lintProvider(validProvider());
 
 		expect(rulesOf(diagnostics, "handle-")).toEqual([]);
-		expect(byRule(diagnostics, "legacy-handle-declaration")).toEqual([]);
-	});
-
-	describe("legacy-handle-declaration", () => {
-		let warn: ReturnType<typeof spyOn>;
-		beforeEach(() => {
-			warn = spyOn(console, "warn").mockImplementation(() => {});
-		});
-		afterEach(() => {
-			warn.mockRestore();
-		});
-
-		it("warns once per kind that still declares fieldName or issuedBy and points at the codemod", () => {
-			const provider = validProvider();
-			provider.handle = [
-				WaitingDraft,
-				defineCursor({
-					name: "page",
-					fieldName: "page_cursor",
-					schema: z.object({}),
-					ttl: "10m",
-					issuedBy: "waiting-prepare",
-				}),
-				defineCursor({ name: "loc", schema: z.object({}), ttl: "10m", issuedBy: "search" }),
-			];
-
-			const found = byRule(lintProvider(provider), "legacy-handle-declaration");
-
-			expect(found).toEqual([
-				expect.objectContaining({
-					level: "warn",
-					field: "handle.page",
-					message: expect.stringContaining('kind "page" still declares fieldName and issuedBy'),
-				}),
-				expect.objectContaining({
-					level: "warn",
-					field: "handle.loc",
-					message: expect.stringContaining('kind "loc" still declares issuedBy'),
-				}),
-			]);
-			expect(found[0]?.message).toContain("apifuse migrate --only handles");
-		});
-
-		it("is silent for kinds defined without the deprecated options and for a missing or empty list", () => {
-			expect(byRule(lintProvider(validProvider()), "legacy-handle-declaration")).toEqual([]);
-
-			const provider = validProvider();
-			provider.handle = [];
-			expect(byRule(lintProvider(provider), "legacy-handle-declaration")).toEqual([]);
-
-			delete provider.handle;
-			expect(byRule(lintProvider(provider), "legacy-handle-declaration")).toEqual([]);
-		});
-
-		it("ignores plain declaration objects that carry no SDK internals", () => {
-			const provider = validProvider();
-			provider.handle = [
-				{
-					name: "waiting",
-					type: "draft",
-					fieldName: "waiting_token",
-					access: "bound",
-					issuedBy: "waiting-prepare",
-				},
-			];
-
-			expect(byRule(lintProvider(provider), "legacy-handle-declaration")).toEqual([]);
-		});
 	});
 });

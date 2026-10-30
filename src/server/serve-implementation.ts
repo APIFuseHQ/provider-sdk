@@ -31,7 +31,6 @@ import { resolveResolverDeadlineAtMs } from "./resolver-deadline.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import { providerErrorStackFrames } from "./error-stack-frames.js";
 import {
-	type LegacyProviderErrorOptions,
 	type ProviderErrorContract,
 	resolveProviderErrorContract,
 	SDK_OWNED_PROVIDER_ERROR_CODES,
@@ -46,6 +45,8 @@ import {
 	isValidationError,
 	ProviderError,
 	SDKError,
+	sdkErrorContractOf,
+	sdkErrorOptions,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
 	type TransportError,
@@ -1554,21 +1555,6 @@ export type ProviderServerLogEvent =
 			event: "provider_handle";
 	  } & HandleTelemetryEvent)
 	| {
-			/** Emitted once per error code (and per conflict shape) per process when a provider throw site still sets the deprecated per-throw category/retryable options. */
-			level: "warn";
-			event: "provider_error_options_deprecated";
-			providerId: string;
-			code: string;
-			options: string[];
-			/** The per-throw values that differ from the declaration; the per-throw value is the served one until the option is removed. */
-			conflicts?: Array<{
-				option: "category" | "retryable";
-				thrown: string | boolean;
-				declared: string | boolean;
-			}>;
-			fix: string;
-	  }
-	| {
 			level: "warn";
 			event: "provider_cleanup_failed";
 			providerId: string;
@@ -2131,24 +2117,23 @@ function isCategoryOutsideProviderFailureDomain(value: unknown): boolean {
 	return value !== undefined && value !== null && providerFailureCategoryIn(value) === undefined;
 }
 
-// Whether a category the provider set, on the throw (the deprecated
-// per-throw option) or on the code's declaration, lies outside the
-// provider-failure categories.
+// Whether the category the provider declared for the code lies outside the
+// provider-failure categories. A throw site cannot set one: `new
+// ProviderError` refuses a per-throw category, so the declaration is the only
+// place a provider states it.
 function providerErrorCategoryOutsideDomain(
 	error: unknown,
 	declaredErrorCode: DeclaredErrorCode | undefined,
 ): boolean {
 	const declaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
-	return (
-		isCategoryOutsideProviderFailureDomain(providerErrorOption(error, "category")) ||
-		isCategoryOutsideProviderFailureDomain(declaration?.category)
-	);
+	return isCategoryOutsideProviderFailureDomain(declaration?.category);
 }
 
 // What the provider serializer reads: the one resolution
-// (resolveProviderErrorContract) over the provider's per-throw options and the
-// code's declaration, each category read in the provider-failure domain
-// (providerFailureCategoryIn), so a category outside it resolves as if unset.
+// (resolveProviderErrorContract) over the contract an SDK-constructed error
+// carries and the code's declaration, the declared category read in the
+// provider-failure domain (providerFailureCategoryIn), so a category outside
+// it resolves as if unset.
 function providerFailureContract(
 	error: unknown,
 	declaredErrorCode: DeclaredErrorCode | undefined,
@@ -2157,8 +2142,6 @@ function providerFailureContract(
 	readonly retryable: boolean | undefined;
 } {
 	const declaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
-	const legacy = legacyProviderErrorOptions(error);
-	const legacyCategory = providerFailureCategoryIn(legacy.category);
 	const declaredCategory = providerFailureCategoryIn(declaration?.category);
 	const contract = resolveProviderErrorContract({
 		code: providerErrorCode(error),
@@ -2170,10 +2153,7 @@ function providerFailureContract(
 						...(declaration.retryable === undefined ? {} : { retryable: declaration.retryable }),
 						...(declaredCategory === undefined ? {} : { category: declaredCategory }),
 					},
-		legacyOptions: {
-			...(legacy.retryable === undefined ? {} : { retryable: legacy.retryable }),
-			...(legacyCategory === undefined ? {} : { category: legacyCategory }),
-		},
+		sdkContract: sdkErrorContractOf(error),
 	});
 	return { category: contract.category, retryable: contract.retryable };
 }
@@ -2464,18 +2444,9 @@ function declaredErrorCodeFor(
 	return lookup.get(operationId)?.get(code);
 }
 
-// The deprecated per-throw options, read without trusting provider accessors.
-function legacyProviderErrorOptions(error: unknown): LegacyProviderErrorOptions {
-	const category = providerErrorOption(error, "category");
-	const retryable = providerErrorOption(error, "retryable");
-	return {
-		...(category === undefined ? {} : { category }),
-		...(retryable === undefined ? {} : { retryable }),
-	};
-}
-
 // The one serve-side call into the resolution; SDK-owned failures ignore the
-// operation's declaration because their contract is the SDK's.
+// operation's declaration because their contract is the SDK's, and only an
+// SDK-constructed error carries a per-throw category or retryability.
 function providerErrorContract(
 	error: unknown,
 	declaredErrorCode: DeclaredErrorCode | undefined,
@@ -2483,84 +2454,7 @@ function providerErrorContract(
 	return resolveProviderErrorContract({
 		code: providerErrorCode(error),
 		declaration: sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode,
-		legacyOptions: legacyProviderErrorOptions(error),
-	});
-}
-
-const legacyErrorOptionsWarned = new Set<string>();
-
-type LegacyErrorOptionConflict = {
-	option: "category" | "retryable";
-	thrown: string | boolean;
-	declared: string | boolean;
-};
-
-// One warning per provider, code and conflict shape per process while the
-// deprecated per-throw options are still honored. A per-throw value that
-// differs from the declaration is named with both values: the per-throw one
-// is what is served (resolveProviderErrorContract), and the fix is a distinct
-// code for that condition rather than a per-throw override. A category outside
-// the provider-failure categories, thrown or declared, is no value
-// (providerFailureCategoryIn) and never a conflict: serve does not serve it,
-// and the failure log's unknown_provider_error_category signal names it.
-function warnLegacyErrorOptionsOnce(
-	emit: ProviderServerLogger,
-	provider: ProviderDefinition,
-	error: unknown,
-	declaredErrorCode: DeclaredErrorCode | undefined,
-	redact?: DiagnosticRedactor,
-): void {
-	if (!isProviderError(error) || sdkOwnsErrorResolution(error)) return;
-	const legacy = legacyProviderErrorOptions(error);
-	const options = Object.keys(legacy);
-	if (options.length === 0) return;
-	const code = providerErrorCode(error) ?? "";
-	const conflicts: LegacyErrorOptionConflict[] = [];
-	const thrownCategory = providerFailureCategoryIn(legacy.category);
-	const declaredCategory = providerFailureCategoryIn(declaredErrorCode?.category);
-	if (
-		thrownCategory !== undefined &&
-		declaredCategory !== undefined &&
-		thrownCategory !== declaredCategory
-	) {
-		conflicts.push({
-			option: "category",
-			thrown: thrownCategory,
-			declared: declaredCategory,
-		});
-	}
-	if (
-		legacy.retryable !== undefined &&
-		declaredErrorCode?.retryable !== undefined &&
-		legacy.retryable !== declaredErrorCode.retryable
-	) {
-		conflicts.push({
-			option: "retryable",
-			thrown: legacy.retryable,
-			declared: declaredErrorCode.retryable,
-		});
-	}
-	const key = `${provider.id}\u0000${code}\u0000${conflicts.map((conflict) => conflict.option).join(",")}`;
-	if (legacyErrorOptionsWarned.has(key)) return;
-	legacyErrorOptionsWarned.add(key);
-	const name = code || "CODE";
-	const conflictText = conflicts
-		.map(
-			(conflict) =>
-				`${conflict.option} is thrown as ${String(conflict.thrown)} but declared as ${String(conflict.declared)}`,
-		)
-		.join("; ");
-	emit({
-		level: "warn",
-		event: "provider_error_options_deprecated",
-		providerId: redactDiagnosticText(provider.id, redact),
-		code: redactCriticalDiagnosticText(code, redact),
-		options,
-		...(conflicts.length > 0 ? { conflicts } : {}),
-		fix:
-			conflicts.length > 0
-				? `${name}: ${conflictText}; the thrown value is served until the per-throw option is removed. Declare a distinct code for the ${conflicts.some((conflict) => conflict.option === "retryable" && conflict.thrown === false) ? "non-retryable" : "other"} condition with defineErrors (an SDK-registered code is sdkErrors.X) and throw errors.X({ details, cause }) there; the per-throw ${options.join(" and ")} option is deprecated.`
-				: `Declare the code once with defineErrors({ ${name}: { status, category, description } }) and throw errors.${name}({ details, cause }); the per-throw ${options.join(" and ")} option is deprecated and the declaration will be the only source after it is removed.`,
+		sdkContract: sdkErrorContractOf(error),
 	});
 }
 
@@ -2726,13 +2620,6 @@ function logProviderError(
 				: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error, redact) } : {}),
 	});
-	warnLegacyErrorOptionsOnce(
-		emit as ProviderServerLogger,
-		provider,
-		error,
-		sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode,
-		redact,
-	);
 }
 
 function logProviderCleanupError(
@@ -3475,11 +3362,11 @@ async function validateSseEvent(
 		throw issueSdkError(
 			new ProviderError(
 				`SSE event "${event.event}" is not declared in operation transport.events.`,
-				{
+				sdkErrorOptions({
 					code: "SSE_EVENT_UNDECLARED",
 					retryable: false,
 					fix: `Add "${event.event}" to transport.events or stop emitting that event.`,
-				},
+				}),
 			),
 			{
 				category: "output_validation",
@@ -3508,7 +3395,7 @@ function assertStreamPayloadWithinLimit(
 	if (maxBytes === undefined || actualBytes <= maxBytes) return;
 	throw new ProviderError(
 		`Stream ${kind} exceeded declared byte limit (${actualBytes} > ${maxBytes}).`,
-		{
+		sdkErrorOptions({
 			code: kind === "event" ? "STREAM_EVENT_TOO_LARGE" : "STREAM_CHUNK_TOO_LARGE",
 			retryable: false,
 			category: "input_validation",
@@ -3516,7 +3403,7 @@ function assertStreamPayloadWithinLimit(
 				kind === "event"
 					? "Emit smaller SSE events or increase transport.maxEventBytes."
 					: "Emit smaller stream chunks or increase transport.maxChunkBytes.",
-		},
+		}),
 	);
 }
 
@@ -3639,11 +3526,11 @@ function toStreamingResponse(
 		throw issueSdkError(
 			new ProviderError(
 				"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
-				{
+				sdkErrorOptions({
 					code: "SSE_RESULT_UNSUPPORTED",
 					retryable: false,
 					fix: "Return an async generator that yields stream.event(name, data) so APIFuse can validate event schemas and enforce event byte limits.",
-				},
+				}),
 			),
 			{
 				category: "output_validation",
@@ -4303,11 +4190,10 @@ function createServerAppWithCapabilityModules(
 	app.notFound((c) => {
 		// An unknown route is not an upstream answer: the explicit category keeps
 		// the registered not_found code from attributing it to an upstream.
-		const error = new ProviderError("Not found", {
-			code: "not_found",
-			category: "provider_error",
-			retryable: false,
-		});
+		const error = new ProviderError(
+			"Not found",
+			sdkErrorOptions({ code: "not_found", category: "provider_error", retryable: false }),
+		);
 		const observabilityDetails = errorObservabilityDetails(error);
 		return responseWithErrorObservability(
 			c.json(

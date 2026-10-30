@@ -14,7 +14,8 @@
 # Apply:
 #   bunx ast-grep scan -r node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml --update-all .
 #
-# After applying, run the provider lint: `legacy-handle-declaration` must be 0.
+# After applying, load the provider: a leftover option fails `defineCursor` /
+# `defineDraft` with `HANDLE_OPTION_RETIRED`.
 # A kind that used to declare no `issuedBy` but is issued by an operation now
 # names that operation in its field description and recovery sentences; refresh
 # contract snapshots that pinned the old wording. An operation issues a kind when

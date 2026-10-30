@@ -131,12 +131,10 @@ instance under two keys counts as two placements. A kind listed in
 input places (never accepted) also throws at definition time, naming the kind
 and the side to add `kind.field()` to.
 
-> `fieldName` and `issuedBy` on `defineCursor` / `defineDraft` are deprecated
-> and removed in the next release; while present they win over the bound
-> contract, so an unmigrated provider sees byte-identical text. Delete them
-> with the codemod (`bunx ast-grep scan -r
-> node_modules/@apifuse/provider-sdk/scripts/codemods/handles.yml --update-all .`).
-> The lint rule `legacy-handle-declaration` warns while they remain.
+> `fieldName` and `issuedBy` on `defineCursor` / `defineDraft` are removed:
+> a kind that still declares one fails at definition with a `ValidationError`
+> (`HANDLE_OPTION_RETIRED`). Delete them with the codemod
+> (`apifuse migrate --only handles`, `scripts/codemods/handles.yml`).
 
 ### A different name coming in and going out
 
@@ -599,9 +597,9 @@ asserted a synchronous `string` return from inline `issue` become `await`.
    `request.connectionId`.
 10. Remove `APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET` from every
     env file, compose file, and deployment manifest the repository owns.
-11. Run the provider lint. `legacy-handle-declaration` must not warn (no
-    `fieldName` / `issuedBy` left on a kind). `handle: [...]` without `state`
-    does not compile.
+11. Load the provider. A kind that still declares `fieldName` / `issuedBy`
+    fails at definition (`HANDLE_OPTION_RETIRED`). `handle: [...]` without
+    `state` does not compile.
 12. Update the consumer-facing contract docs for changed operations (field
     names, removed inputs) in the same PR, and note that in-flight tokens are
     invalidated at deploy.

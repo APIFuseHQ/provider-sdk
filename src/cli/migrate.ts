@@ -90,7 +90,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "ast-grep",
 		file: "handles.yml",
 		manualStep:
-			"refresh contract snapshots that pinned the old issuer wording; `legacy-handle-declaration` must be 0 in apifuse check",
+			"refresh contract snapshots that pinned the old issuer wording; a leftover fieldName / issuedBy fails defineCursor / defineDraft (HANDLE_OPTION_RETIRED)",
 	},
 	{
 		id: "runtime-boundary-allow-comments",
