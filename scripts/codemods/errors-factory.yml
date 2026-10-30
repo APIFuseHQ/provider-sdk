@@ -57,10 +57,11 @@
 #                          shorthand or a variable; rule 1 skips it (the value cannot be checked)
 #  10. throw-site-option  diagnostic only (no fix): a throw site; `apifuse migrate` (errors-hoist)
 #                          rewrites or names it and drops this diagnostic
-#   8. throw-site-locale-key diagnostic only (no fix): a throw site stating messageKey/fixKey, which
-#                          the factory input cannot carry; rule 1 skips it. A throw site of a code the
-#                          SDK runtime owns (MISSING_SECRET, reauth_required, HANDLE_*, ...) is never
-#                          rewritten: no factory can exist for it and the SDK serves it as it is
+#                          A throw site stating messageKey/fixKey is rewritten like any other: the
+#                          factory input carries both per throw, so the key rides into errors.X({...}).
+#                          A throw site of a code the SDK runtime owns (MISSING_SECRET, reauth_required,
+#                          HANDLE_*, ...) is never rewritten: no factory can exist for it and the SDK
+#                          serves it as it is
 id: errors-factory-operation-list
 language: typescript
 rule:
@@ -929,30 +930,6 @@ rule:
         field: key
         regex: '^errorCodes$'
 ---
-# Residue, not a rewrite: a throw site that states a messageKey or fixKey.
-# The factory input carries neither (the declaration does), so rule 1 leaves
-# the site; the author moves the key to the defineErrors row.
-id: errors-factory-throw-site-locale-key
-language: typescript
-severity: warning
-message: 'Throw site of $CODE states a messageKey or fixKey; the factory input carries neither, so the site is left as new ProviderError(...).'
-note: 'Move the key to the code''s defineErrors declaration (messageKey / fixKey on the row) and delete it here, then re-run apifuse migrate.'
-rule:
-  pattern: new ProviderError($MSG, { $$$PROPS })
-  all:
-    - has:
-        pattern:
-          context: '{ code: $CODE }'
-          selector: pair
-        stopBy: end
-    - has:
-        kind: pair
-        has: { field: key, regex: '^(messageKey|fixKey)$' }
-        stopBy: end
-constraints:
-  CODE:
-    kind: string
----
 # Residue, not a rewrite: a throw site whose retryable or category is a
 # shorthand or a non-literal value. The declaration owns both, but a value
 # the codemod cannot read may differ from it, so the site stays.
@@ -995,7 +972,7 @@ constraints:
 # migrate` (errors-hoist) rewrites one: it reads every row and declaration of
 # the code first, rewrites the site when exactly one contract serves what the
 # site served, and names the site when not. A site a registered-code or
-# locale-key or non-literal-option diagnostic names is reported there.
+# or non-literal-option diagnostic names is reported there.
 id: errors-factory-throw-site-option
 language: typescript
 severity: warning
@@ -1184,11 +1161,6 @@ rule:
           context: '{ code: $CODE }'
           selector: pair
         stopBy: end
-    - not:
-        has:
-          kind: pair
-          has: { field: key, regex: '^(messageKey|fixKey)$' }
-          stopBy: end
     - not:
         has:
           matches: registry-conflict-options

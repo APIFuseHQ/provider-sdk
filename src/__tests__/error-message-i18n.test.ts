@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
+import { defineErrors, sdkErrors } from "../define-errors.js";
 import { AuthError, ProviderError, TransportError } from "../errors.js";
 import type { ProviderLocaleCatalogMap } from "../i18n/catalog.js";
 import {
@@ -11,7 +12,12 @@ import {
 	providerLocaleFromAcceptLanguage,
 	resolveProviderErrorLocale,
 } from "../i18n/error-messages.js";
-import { createServerApp, type ProviderServerLogEvent, serve } from "../server/serve.js";
+import {
+	createServerApp,
+	ERROR_OBSERVABILITY_HEADER,
+	type ProviderServerLogEvent,
+	serve,
+} from "../server/serve.js";
 import type { OperationRiskClass, ProviderDefinition } from "../types.js";
 
 const READ_RISK_CLASS: OperationRiskClass = "read";
@@ -314,6 +320,18 @@ describe("localizeProviderErrorText", () => {
 	});
 });
 
+// The declared twins of the legacy `siteKey` and `registrySiteKey` operations
+// below: same contract, same per-throw key, thrown through the factory.
+const declaredErrors = defineErrors({
+	ITEM_SOLD_OUT: {
+		status: 409,
+		category: "upstream_rejected",
+		retryable: false,
+		description: "Upstream refused the purchase.",
+	},
+	NO_DATA: sdkErrors.NO_DATA,
+});
+
 function localizedProvider(): ProviderDefinition {
 	return {
 		allowedHosts: ["example.com"],
@@ -382,6 +400,41 @@ function localizedProvider(): ProviderDefinition {
 				handler: async () => {
 					throw new ProviderError("Sold out (literal)", {
 						code: "ITEM_SOLD_OUT",
+						messageKey: "errors.explicit.message",
+					});
+				},
+			},
+			factorySiteKey: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({}),
+				output: z.object({ ok: z.boolean() }),
+				errors: [declaredErrors.ITEM_SOLD_OUT],
+				handler: async () => {
+					throw declaredErrors.ITEM_SOLD_OUT({
+						message: "Sold out (literal)",
+						messageKey: "errors.explicit.message",
+					});
+				},
+			},
+			registrySiteKey: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({}),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new ProviderError("Nothing (literal)", {
+						code: "NO_DATA",
+						messageKey: "errors.explicit.message",
+					});
+				},
+			},
+			factoryRegistrySiteKey: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({}),
+				output: z.object({ ok: z.boolean() }),
+				errors: [declaredErrors.NO_DATA],
+				handler: async () => {
+					throw declaredErrors.NO_DATA({
+						message: "Nothing (literal)",
 						messageKey: "errors.explicit.message",
 					});
 				},
@@ -490,6 +543,34 @@ describe("serve error envelope localization", () => {
 		const { error } = await postOperation(app, "siteKey", { "accept-language": "ko" });
 
 		expect(error.message).toBe("명시적 한국어");
+	});
+
+	// The served-contract proof for the `errors-hoist` rewrite of a keyed site:
+	// `new ProviderError(msg, { code, messageKey })` and `errors.CODE({ message,
+	// messageKey })` serve the same status, retryable, source, category and
+	// localized text, for a provider code and for a registry code alike.
+	it.each([
+		["siteKey", "factorySiteKey"],
+		["registrySiteKey", "factoryRegistrySiteKey"],
+	])("serves %s and its factory twin %s identically", async (legacy, factory) => {
+		const serve = async (operation: string) => {
+			const response = await app.request(`/v1/${operation}`, {
+				method: "POST",
+				headers: { "content-type": "application/json", "accept-language": "ko" },
+				body: JSON.stringify({ requestId: "req_1", input: {} }),
+			});
+			const { error } = (await response.json()) as { error: Record<string, unknown> };
+			return {
+				status: response.status,
+				observability: response.headers.get(ERROR_OBSERVABILITY_HEADER),
+				error,
+			};
+		};
+		const before = await serve(legacy);
+		const after = await serve(factory);
+
+		expect(before.error.message).toBe("명시적 한국어");
+		expect(after).toEqual(before);
 	});
 
 	it("keeps the English literal when the key is missing from every catalog", async () => {
