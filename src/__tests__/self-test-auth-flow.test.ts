@@ -211,6 +211,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 		operations: {
 			session: {
 				riskClass: "read",
+				descriptionKey: "operations.session.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx: {
@@ -261,11 +262,12 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 			},
 			prep: {
 				riskClass: "read",
+				descriptionKey: "operations.prep.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
-				handler: async (ctx: {
-					credential: { get(key: string): string | undefined };
-				}) => ({ ok: ctx.credential.get("sessionCookie") === state.validCookie }),
+				handler: async (ctx: { credential: { get(key: string): string | undefined } }) => ({
+					ok: ctx.credential.get("sessionCookie") === state.validCookie,
+				}),
 				healthCheck: {
 					interval: "5m",
 					requiresConnection: true,
@@ -302,6 +304,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 			},
 			leaky: {
 				riskClass: "read",
+				descriptionKey: "operations.leaky.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx: { credential: { get(key: string): string | undefined } }) => {
@@ -345,6 +348,7 @@ function createFlowlessProvider(seenIds: string[] = []): ProviderDefinition {
 		operations: {
 			raw: {
 				riskClass: "read",
+				descriptionKey: "operations.raw.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx: { credential: { get(key: string): string | undefined } }) => ({
@@ -661,7 +665,13 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 
 		// Rejected credentials are memoized: the next cycle must not re-submit
 		// them upstream (lockout safety) — same distinct skip, zero contact.
-		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2", wrongInputs);
+		const second = await runCase(
+			selfTestApp,
+			"session",
+			"session case",
+			"req-cycle-2",
+			wrongInputs,
+		);
 		expect(second.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON);
 		expect(state.startCount).toBe(1);
 		expect(state.continueCount).toBe(1);
@@ -786,9 +796,7 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 			phone: CREDENTIAL_INPUTS.phone,
 			password: "rotated-password-5678",
 		});
-		expect(state.seenConnectionIds.every((id) => !id.includes("rotated-password-5678"))).toBe(
-			true,
-		);
+		expect(state.seenConnectionIds.every((id) => !id.includes("rotated-password-5678"))).toBe(true);
 	});
 
 	it("evicts a fresh credential the probe rejected — next cycle logs in anew, no stale replay", async () => {

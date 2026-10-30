@@ -594,7 +594,7 @@ export default {
   },
   operations: {
     lookup: {
-      description: "Too short.",
+      descriptionKey: "operations.lookup.description",
       input: z.object({ q: z.string() }),
       output: z.object({ mallName: z.string() }),
       handler: async () => ({ mallName: "x" }),
@@ -610,7 +610,7 @@ export default {
 		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
 
 		expect(authoring?.passed).toBe(false);
-		expect(authoring?.details?.join("\n")).toContain("description-key-required");
+		expect(authoring?.details?.join("\n")).not.toContain("description-key-required");
 		expect(authoring?.details?.join("\n")).toContain("public-schema-upstream-field");
 	});
 

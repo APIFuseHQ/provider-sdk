@@ -1879,7 +1879,6 @@ function lintHealthCheckExpectedErrors(provider: {
 }
 
 export function lintOperation(op: {
-	descriptionKey?: string;
 	whenToUseKeys?: readonly string[];
 	whenNotToUseKeys?: readonly string[];
 	input: unknown;
@@ -1887,19 +1886,6 @@ export function lintOperation(op: {
 	fixtures?: unknown;
 }): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [];
-	const hasDescriptionKey = typeof op.descriptionKey === "string" && op.descriptionKey.length > 0;
-
-	// Stays one release: making `descriptionKey` required on OperationDefinition
-	// touches 66 SDK test files (~300 operation literals) that wave 2 lanes edit
-	// concurrently; the fleet declares it on every operation (0 missing / 135).
-	if (!hasDescriptionKey) {
-		diagnostics.push({
-			rule: "description-key-required",
-			level: "error",
-			field: "descriptionKey",
-			message: "Operation must declare a locale-backed descriptionKey.",
-		});
-	}
 
 	if (!hasBidirectionalFixtures(op.fixtures)) {
 		diagnostics.push({
@@ -2104,7 +2090,6 @@ export function lintProviderWithInformation(
 		...Object.entries(provider.operations).flatMap(([operationKey, operation]) =>
 			[
 				...lintOperation({
-					descriptionKey: operation.descriptionKey,
 					whenToUseKeys: operation.whenToUseKeys,
 					whenNotToUseKeys: operation.whenNotToUseKeys,
 					input: operation.input,

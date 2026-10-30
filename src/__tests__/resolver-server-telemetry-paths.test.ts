@@ -92,6 +92,7 @@ describe("resolver server construction-path telemetry matrix", () => {
 						operations: {
 							solve: {
 								riskClass: "read",
+								descriptionKey: "operations.solve.description",
 								input: z.object({}),
 								output: z.object({ ok: z.boolean() }),
 								handler: solve,

@@ -124,6 +124,7 @@ describe("browser construction matrix", () => {
 				operations: {
 					probe: {
 						riskClass: "read",
+						descriptionKey: "operations.probe.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx) => {
@@ -262,6 +263,7 @@ describe("browser construction matrix", () => {
 							operations: {
 								probe: {
 									riskClass: "read",
+									descriptionKey: "operations.probe.description",
 									input: z.object({}),
 									output: z.object({ ok: z.boolean() }),
 									handler: use,
@@ -363,6 +365,7 @@ describe("browser construction matrix", () => {
 			operations: {
 				probe: {
 					riskClass: "read",
+					descriptionKey: "operations.probe.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx: ProviderContext) => {
@@ -419,6 +422,7 @@ describe("browser construction matrix", () => {
 				operations: {
 					probe: {
 						riskClass: "read",
+						descriptionKey: "operations.probe.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx) => {
@@ -525,6 +529,7 @@ describe("browser construction matrix", () => {
 				operations: {
 					probe: {
 						riskClass: "read",
+						descriptionKey: "operations.probe.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx) => {

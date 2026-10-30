@@ -2574,7 +2574,7 @@ interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput ex
     // (undocumented)
     contract?: OperationContractMetadata;
     // (undocumented)
-    descriptionKey?: ProviderLocaleKeyInput;
+    descriptionKey: ProviderLocaleKeyInput;
     // Warning: (ae-forgotten-export) The symbol "OperationErrorCode" needs to be exported by the entry point index.d.ts
     //
     // @deprecated (undocumented)

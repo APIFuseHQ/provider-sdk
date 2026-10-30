@@ -638,6 +638,7 @@ describe("OCR Provider SDK context integration", () => {
 			operations: {
 				recognize: {
 					riskClass: "read",
+					descriptionKey: "operations.recognize.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => ({ ok: true }),
@@ -660,6 +661,7 @@ describe("OCR Provider SDK context integration", () => {
 			operations: {
 				recognize: {
 					riskClass: "read",
+					descriptionKey: "operations.recognize.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => ({ ok: true }),
@@ -668,12 +670,8 @@ describe("OCR Provider SDK context integration", () => {
 			},
 		} as const;
 
-		expect(() =>
-			defineProvider({ ...base, ocr: true }),
-		).toThrow(/invalid ocr: must be an object/);
-		expect(() =>
-			defineProvider({ ...base, ocr: { mode: "sometimes" } }),
-		).toThrow(/ocr.mode/);
+		expect(() => defineProvider({ ...base, ocr: true })).toThrow(/invalid ocr: must be an object/);
+		expect(() => defineProvider({ ...base, ocr: { mode: "sometimes" } })).toThrow(/ocr.mode/);
 	});
 
 	it("createFlowContext exposes an unsupported OCR stub by default", async () => {
@@ -740,6 +738,7 @@ describe("OCR Provider SDK context integration", () => {
 			operations: {
 				recognize: {
 					riskClass: "read",
+					descriptionKey: "operations.recognize.description",
 					input: z.object({}),
 					output: z.object({ text: z.string() }),
 					async handler(ctx: { ocr: OcrContext }) {
@@ -789,6 +788,7 @@ describe("OCR Provider SDK context integration", () => {
 			operations: {
 				recognize: {
 					riskClass: "read",
+					descriptionKey: "operations.recognize.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx: { ocr: OcrContext }) {

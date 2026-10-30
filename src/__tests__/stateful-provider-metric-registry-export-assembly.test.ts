@@ -82,6 +82,7 @@ const provider: ProviderDefinition = {
 	operations: {
 		[WRITE_OPERATION_ID]: {
 			riskClass: "write" as const,
+			descriptionKey: "operations.WRITEOPERATIONID.description",
 			input: z.object({
 				outcome: z.enum(WRITE_LEDGER_OUTCOMES),
 				errorCode: z.string().optional(),

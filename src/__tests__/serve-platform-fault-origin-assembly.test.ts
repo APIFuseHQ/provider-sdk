@@ -214,6 +214,7 @@ function operation(
 ): OperationDefinition {
 	return {
 		riskClass: "read",
+		descriptionKey: "operations.operation.description",
 		input: z.object({}).passthrough(),
 		output,
 		upstream: { baseUrl: upstreamOrigin },
@@ -368,6 +369,7 @@ const provider: ProviderDefinition = createProviderDefinitionDouble({
 		// terminalizes it as its own client_cancelled.
 		"caller-stops-reading": {
 			riskClass: "read",
+			descriptionKey: "operations.callerStopsReading.description",
 			input: z.object({}).passthrough(),
 			output,
 			transport: { kind: "sse", events: { delta: z.object({ value: z.string() }) } },

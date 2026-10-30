@@ -349,6 +349,7 @@ function localizedProvider(): ProviderDefinition {
 		operations: {
 			declaredOnly: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.declaredOnly.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				errorCodes: [
@@ -369,6 +370,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			declarationKey: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.declarationKey.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				errorCodes: [
@@ -387,6 +389,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			siteKey: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.siteKey.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				errorCodes: [
@@ -406,6 +409,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			factorySiteKey: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.factorySiteKey.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				errors: [declaredErrors.ITEM_SOLD_OUT],
@@ -418,6 +422,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			registrySiteKey: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.registrySiteKey.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -429,6 +434,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			factoryRegistrySiteKey: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.factoryRegistrySiteKey.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				errors: [declaredErrors.NO_DATA],
@@ -441,6 +447,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			missingKey: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.missingKey.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -453,6 +460,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			untrustedParam: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.untrustedParam.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				errorCodes: [
@@ -472,6 +480,7 @@ function localizedProvider(): ProviderDefinition {
 			},
 			sdkOwned: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.sdkOwned.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -702,6 +711,7 @@ function fleetConsensusProvider(): ProviderDefinition {
 	for (const { operation, code } of FLEET_CONSENSUS_CODES) {
 		operations[operation] = {
 			riskClass: READ_RISK_CLASS,
+			descriptionKey: "operations.operation.description",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			// No errorCodes: registration is what makes this servable.
@@ -718,6 +728,7 @@ function fleetConsensusProvider(): ProviderDefinition {
 	// error-code-status-conflicts-sdk / error-code-retryable-conflicts-sdk.
 	operations.keysOnlyDeclaration = {
 		riskClass: READ_RISK_CLASS,
+		descriptionKey: "operations.operation.description",
 		input: z.object({}),
 		output: z.object({ ok: z.boolean() }),
 		errorCodes: [

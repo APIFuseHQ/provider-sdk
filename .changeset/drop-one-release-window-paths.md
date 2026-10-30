@@ -10,6 +10,6 @@
 - Redundant approval. `defineProvider` throws `REDUNDANT_APPROVAL` when an operation's `approval` equals the `riskClass` default (`read -> never`, `write -> risk-based`, otherwise `always`); `defaultApprovalPolicy` is exported from `types` as the one definition. The `redundant-approval` lint rule is deleted. Fix: `apifuse migrate-operation-declaration .` removes an approval equal to the default.
 - Context keys. The `context-keys-required` lint rule is deleted; an auth flow reading an undeclared `ctx.context` key is already refused at run time (`ContextAccessError`), which stays the one refusal.
 
-Kept: `description-key-required` (the fleet scan's lint column reads 0 users only over the targets that load; 69 of 224 are not covered, and the deletion is a type change that touches about 300 SDK test literals, so it goes in its own PR) and the `errorCodes` table (still read, `@deprecated`).
+Kept: the `errorCodes` table (still read, `@deprecated`). `description-key-required` is removed by its own change, which makes `descriptionKey` required on every operation.
 
 Retired lint rule ids: `legacy-error-options`, `legacy-handle-declaration`, `redundant-approval`, `context-keys-required`.

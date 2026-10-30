@@ -24,6 +24,7 @@ function provider(overrides: Partial<ProviderDefinition> = {}): ProviderDefiniti
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -155,9 +156,12 @@ describe("resolveProviderEngineMode", () => {
 		expect(
 			resolveProviderEngineMode({ engine: { kind: " In-Process " }, environment: {} }),
 		).toEqual({ mode: "in-process", source: "engine", deprecated: true, warnings: [] });
-		expect(
-			resolveProviderEngineMode({ engine: { kind: "REMOTE" }, environment: {} }),
-		).toEqual({ mode: "remote", source: "engine", deprecated: false, warnings: [] });
+		expect(resolveProviderEngineMode({ engine: { kind: "REMOTE" }, environment: {} })).toEqual({
+			mode: "remote",
+			source: "engine",
+			deprecated: false,
+			warnings: [],
+		});
 		expect(
 			resolveProviderEngineMode({
 				engine: createInProcessProviderEngine(),
@@ -441,6 +445,7 @@ describe("secret issuer declaration", () => {
 			operations: {
 				ping: {
 					riskClass: "read" as const,
+					descriptionKey: "operations.ping.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => ({ ok: true }),

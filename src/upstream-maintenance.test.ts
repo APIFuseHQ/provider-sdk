@@ -51,6 +51,7 @@ function providerWith(
 		operations: {
 			search: {
 				riskClass: "read",
+				descriptionKey: "operations.search.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				async handler() {
@@ -63,6 +64,7 @@ function providerWith(
 			},
 			"get-item": {
 				riskClass: "read",
+				descriptionKey: "operations.getItem.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				async handler() {

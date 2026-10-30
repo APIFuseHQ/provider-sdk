@@ -60,6 +60,7 @@ function provider(): ProviderDefinition {
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -150,8 +151,7 @@ describe("providerStateBackendLogEvent", () => {
 	it("withholds the endpoint when the URL's query can move it", async () => {
 		const event = await withEnv(
 			{
-				[PROVIDER_STATE_REDIS_URL_ENV]:
-					"redis://state.example:6379?path=/tmp/cache.sock",
+				[PROVIDER_STATE_REDIS_URL_ENV]: "redis://state.example:6379?path=/tmp/cache.sock",
 			},
 			() => bootEvent(),
 		);
@@ -177,9 +177,7 @@ describe("providerStateBackendLogEvent", () => {
 		["redis://state.example:6379?host=other.example", "state.example:6379"],
 		["redis://state.example:6379?family=6", "state.example:6379"],
 	])("keeps the endpoint for %s, which ioredis ignores", async (url, endpoint) => {
-		const event = await withEnv({ [PROVIDER_STATE_REDIS_URL_ENV]: url }, () =>
-			bootEvent(),
-		);
+		const event = await withEnv({ [PROVIDER_STATE_REDIS_URL_ENV]: url }, () => bootEvent());
 
 		expect(event.state.endpoint).toBe(endpoint);
 		expect(event.warnings).toBeUndefined();
@@ -251,9 +249,7 @@ describe("serve", () => {
 					logger: (event) => events.push(event),
 				});
 				try {
-					expect(
-						events.filter((event) => event.event === "provider_state_backend"),
-					).toMatchObject([
+					expect(events.filter((event) => event.event === "provider_state_backend")).toMatchObject([
 						{
 							level: "info",
 							providerId: "state-backend-provider",

@@ -1585,6 +1585,7 @@ export default {
 describe("resolveRecordBaseUrls", () => {
 	const lookup = (baseUrl?: string) => ({
 		riskClass: "read" as const,
+		descriptionKey: "operations.operation.description",
 		input: z.object({}),
 		output: z.object({}),
 		handler: async () => ({}),
@@ -1634,6 +1635,8 @@ describe("resolveRecordBaseUrls", () => {
 		expect(
 			resolveRecordBaseUrls(provider({ allowedHosts: ["hosts.example"] }), "recorded"),
 		).toEqual({ stealth: "https://hosts.example" });
-		expect(resolveRecordBaseUrls(provider({}), "recorded")).toEqual({ stealth: "https://example.com" });
+		expect(resolveRecordBaseUrls(provider({}), "recorded")).toEqual({
+			stealth: "https://example.com",
+		});
 	});
 });

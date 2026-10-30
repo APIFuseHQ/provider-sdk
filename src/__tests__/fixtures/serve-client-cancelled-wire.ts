@@ -40,6 +40,7 @@ const upstreamOrigin = `http://127.0.0.1:${upstream.port}`;
 
 const operation = {
 	riskClass: "read" as const,
+	descriptionKey: "operations.operation.description",
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),
 	upstream: { baseUrl: upstreamOrigin },

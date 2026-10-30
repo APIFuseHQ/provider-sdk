@@ -102,6 +102,7 @@ function providerWithJourney(journey: unknown) {
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				description: "Ping",
 				input: z.object({}),
 				output: z.object({}),
@@ -127,6 +128,7 @@ function providerWithCase(caseValue: unknown): ProviderDefinition {
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				description: "Ping",
 				input: z.object({}),
 				output: z.object({}),
@@ -139,6 +141,7 @@ function providerWithCase(caseValue: unknown): ProviderDefinition {
 			},
 			pong: {
 				riskClass: "read",
+				descriptionKey: "operations.pong.description",
 				description: "Pong",
 				input: z.object({}),
 				output: z.object({}),
@@ -174,6 +177,7 @@ function providerWithStaleCase(
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				description: "Ping",
 				input: z.object({}),
 				output: z.object({}),
@@ -205,6 +209,7 @@ function providerWithStaleJourney(journey: unknown): ProviderDefinition {
 		operations: {
 			ping: {
 				riskClass: "read",
+				descriptionKey: "operations.ping.description",
 				description: "Ping",
 				input: z.object({}),
 				output: z.object({}),
@@ -1023,7 +1028,8 @@ describe("declarative health scenarios", () => {
 			ITEM_GONE: { code: "ITEM_GONE", status: 404 },
 		});
 		const noData: { readonly code: "NO_DATA"; readonly status: 404 } = errors.NO_DATA;
-		const badDistrict: { readonly code: "BAD_DISTRICT"; readonly status: 400 } = errors.BAD_DISTRICT;
+		const badDistrict: { readonly code: "BAD_DISTRICT"; readonly status: 400 } =
+			errors.BAD_DISTRICT;
 		expect([noData.status, badDistrict.status]).toEqual([404, 400]);
 		// @ts-expect-error test-invalid: a 500 provider code is a fault, not an absence
 		errors.UPSTREAM_DOWN;
@@ -1042,7 +1048,10 @@ describe("declarative health scenarios", () => {
 
 		// A map spread into another keeps each factory's literal status.
 		const spread = errorRefs(
-			defineErrors({ ...declared, NO_ROUTE: { status: 404, category: "upstream_http", description: "No route." } }),
+			defineErrors({
+				...declared,
+				NO_ROUTE: { status: 404, category: "upstream_http", description: "No route." },
+			}),
 		);
 		const itemGone: { readonly code: "ITEM_GONE"; readonly status: 404 } = spread.ITEM_GONE;
 		expect([itemGone, spread.NO_ROUTE]).toEqual([
@@ -1053,7 +1062,12 @@ describe("declarative health scenarios", () => {
 		spread.UPSTREAM_DOWN;
 		// @ts-expect-error test-invalid: the spread upstream_rejected code stays refused
 		spread.PRODUCT_NOT_FOUND;
-		expect(Object.keys(spread).sort()).toEqual(["BAD_DISTRICT", "ITEM_GONE", "NO_DATA", "NO_ROUTE"]);
+		expect(Object.keys(spread).sort()).toEqual([
+			"BAD_DISTRICT",
+			"ITEM_GONE",
+			"NO_DATA",
+			"NO_ROUTE",
+		]);
 
 		// The reference serializes to the same wire entry as the table form.
 		const base = validScenario();

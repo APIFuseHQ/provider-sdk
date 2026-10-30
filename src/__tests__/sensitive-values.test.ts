@@ -78,6 +78,7 @@ it("seeds engine-owned CDP endpoint credentials before creating the request root
 			operations: {
 				[sentinel]: {
 					riskClass: "read",
+					descriptionKey: "operations.sentinel.description",
 					input: z.object({}),
 					output: z.object({}),
 					handler: async (ctx) => {

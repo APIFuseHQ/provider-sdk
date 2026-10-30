@@ -22,6 +22,7 @@ const Schema = z.object({ id: z.string() });
 function operation() {
 	return {
 		riskClass: READ_RISK_CLASS,
+		descriptionKey: "operations.operation.description",
 		input: Schema,
 		output: Schema,
 		handler: async (_ctx: unknown, input: unknown) => Schema.parse(input),

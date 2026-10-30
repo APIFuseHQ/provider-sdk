@@ -81,6 +81,7 @@ for (const factory of ["sync", "async"] as const) {
 				operations: {
 					probe: {
 						riskClass: "read",
+						descriptionKey: "operations.probe.description",
 						input: z.object({}),
 						output: z.object({ status: z.number() }),
 						handler: probe,

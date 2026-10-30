@@ -3570,7 +3570,6 @@ export interface LintDiagnostic {
 
 // @public (undocumented)
 export function lintOperation(op: {
-    descriptionKey?: string;
     whenToUseKeys?: readonly string[];
     whenNotToUseKeys?: readonly string[];
     input: unknown;
@@ -4469,7 +4468,7 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     // (undocumented)
     contract?: OperationContractMetadata;
     // (undocumented)
-    descriptionKey?: ProviderLocaleKeyInput;
+    descriptionKey: ProviderLocaleKeyInput;
     // @deprecated (undocumented)
     errorCodes?: readonly OperationErrorCode[];
     errors?: readonly ProviderErrorFactory[];
@@ -10023,8 +10022,8 @@ export { z }
 // dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:264:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:296:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:65:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:99:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:64:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:98:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:24:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:113:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts

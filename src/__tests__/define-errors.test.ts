@@ -432,6 +432,7 @@ async function serve(
 		operations: {
 			probe: {
 				riskClass: READ_RISK_CLASS,
+				descriptionKey: "operations.probe.description",
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				...(operation.errors ? { errors: operation.errors } : {}),

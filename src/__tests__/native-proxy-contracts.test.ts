@@ -283,6 +283,7 @@ function createNativeServerProvider(port: number): ProviderDefinition {
 		operations: {
 			probe: {
 				riskClass: "read",
+				descriptionKey: "operations.probe.description",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				upstream: { baseUrl: "http://127.0.0.1" },
@@ -420,6 +421,7 @@ describe("native server telemetry construction paths", () => {
 				operations: {
 					unused: {
 						riskClass: "read",
+						descriptionKey: "operations.unused.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async () => ({ ok: true }),
@@ -489,6 +491,7 @@ describe("native server error classification", () => {
 			operations: {
 				probe: {
 					riskClass: "read",
+					descriptionKey: "operations.probe.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -518,6 +521,7 @@ describe("native server error classification", () => {
 				transport,
 				{
 					riskClass: "read" as const,
+					descriptionKey: "operations.operation.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					upstream: { baseUrl: "http://127.0.0.1:9" },
@@ -592,6 +596,7 @@ describe("native server error classification", () => {
 				code,
 				{
 					riskClass: "read" as const,
+					descriptionKey: "operations.operation.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -630,6 +635,7 @@ describe("native server error classification", () => {
 				id,
 				{
 					riskClass: "read" as const,
+					descriptionKey: "operations.operation.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -714,6 +720,7 @@ describe("native server error classification", () => {
 				id,
 				{
 					riskClass: "read" as const,
+					descriptionKey: "operations.operation.description",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {

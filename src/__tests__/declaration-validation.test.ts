@@ -16,6 +16,7 @@ const READ_RISK_CLASS: OperationRiskClass = "read";
 function operation() {
 	return {
 		riskClass: READ_RISK_CLASS,
+		descriptionKey: "operations.operation.description",
 		input: z.object({}),
 		output: z.object({ ok: z.boolean() }),
 		handler: async () => ({ ok: true }),

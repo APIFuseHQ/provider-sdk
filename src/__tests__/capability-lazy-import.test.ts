@@ -99,6 +99,7 @@ describe("provider capability imports", () => {
 			operations: {
 				solve: {
 					riskClass: "read",
+					descriptionKey: "operations.solve.description",
 					input: z.object({}),
 					output: z.object({ token: z.string() }),
 					async handler(ctx) {

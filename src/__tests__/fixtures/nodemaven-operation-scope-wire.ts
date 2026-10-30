@@ -220,6 +220,7 @@ const provider = defineProvider({
 		// one more attempt (new sid, next carrier).
 		"get-stay-detail": {
 			riskClass: "read",
+			descriptionKey: "operations.getStayDetail.description",
 			input: z.object({}),
 			output: Output,
 			upstream: { baseUrl: originUrl },
@@ -242,6 +243,7 @@ const provider = defineProvider({
 		},
 		"search-stays": {
 			riskClass: "read",
+			descriptionKey: "operations.searchStays.description",
 			input: z.object({}),
 			output: Output,
 			upstream: { baseUrl: originUrl },

@@ -3237,7 +3237,7 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     // (undocumented)
     contract?: OperationContractMetadata;
     // (undocumented)
-    descriptionKey?: ProviderLocaleKeyInput;
+    descriptionKey: ProviderLocaleKeyInput;
     // @deprecated (undocumented)
     errorCodes?: readonly OperationErrorCode[];
     errors?: readonly ProviderErrorFactory[];

@@ -156,6 +156,7 @@ const DetailOutput = z.object({
 function stayOperations(app: string) {
 	const read = (path: string, extra: { sessionState?: false; method?: "POST" } = {}) => ({
 		riskClass: "read" as const,
+		descriptionKey: "operations.operation.description",
 		input: z.object({}),
 		output: DetailOutput,
 		upstream: { baseUrl: originUrl },
@@ -319,6 +320,7 @@ const apps = {
 			operations: {
 				"list-items": {
 					riskClass: "read",
+					descriptionKey: "operations.listItems.description",
 					input: z.object({}),
 					output: z.object({ status: z.number(), outcome: z.string().nullable() }),
 					healthCheckUnsupported: { reason: "wire fixture" },
@@ -359,6 +361,7 @@ const apps = {
 			operations: {
 				"get-profile": {
 					riskClass: "read",
+					descriptionKey: "operations.getProfile.description",
 					input: z.object({}),
 					output: z.object({ status: z.number(), outcome: z.string().nullable() }),
 					upstream: { baseUrl: originUrl },

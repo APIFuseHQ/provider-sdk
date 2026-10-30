@@ -51,6 +51,7 @@ function pastDeadline(): string {
 
 const operation = {
 	riskClass: "read" as const,
+	descriptionKey: "operations.operation.description",
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),
 	healthCheckUnsupported: { reason: "provider-thrown deadline assembly" },

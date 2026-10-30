@@ -6524,6 +6524,7 @@ function createStealthAbortProvider(): ProviderDefinition {
 		operations: {
 			cancelStealth: {
 				riskClass: "read",
+				descriptionKey: "operations.cancelStealth.description",
 				input: z.object({}),
 				output: CancellationErrorShapeSchema,
 				upstream: { baseUrl: "https://example.com" },
@@ -6591,6 +6592,7 @@ function createSbsdWiringProvider(): ProviderDefinition {
 		operations: {
 			sbsd: {
 				riskClass: "read",
+				descriptionKey: "operations.sbsd.description",
 				input: z.object({}),
 				output: z.object({ status: z.number(), outcome: z.string() }),
 				upstream: { baseUrl: "https://example.com" },
@@ -6620,6 +6622,7 @@ function createSbsdFailureCodeProvider(
 		operations: {
 			probe: {
 				riskClass: "read",
+				descriptionKey: "operations.probe.description",
 				input: z.object({}),
 				output: z.object({ code: z.string() }),
 				upstream: { baseUrl: "https://example.com" },
@@ -6783,6 +6786,7 @@ describe("server SBSD bound-transport wiring", () => {
 				operations: {
 					probe: {
 						riskClass: "read",
+						descriptionKey: "operations.probe.description",
 						input: z.object({}),
 						output: z.object({ status: z.number() }),
 						upstream: { baseUrl: "https://example.com" },
@@ -6899,6 +6903,7 @@ describe("server SBSD bound-transport wiring", () => {
 				operations: {
 					probe: {
 						riskClass: "read",
+						descriptionKey: "operations.probe.description",
 						input: z.object({}),
 						output: z.object({ status: z.number() }),
 						handler: async (ctx) => {
@@ -6957,6 +6962,7 @@ describe("server SBSD bound-transport wiring", () => {
 			operations: {
 				report: {
 					riskClass: "read",
+					descriptionKey: "operations.report.description",
 					input: z.object({}),
 					output: z.object({ body: z.string(), outcome: z.string() }),
 					upstream: { baseUrl: "https://example.com" },
@@ -7011,6 +7017,7 @@ describe("server SBSD bound-transport wiring", () => {
 			operations: {
 				report: {
 					riskClass: "read",
+					descriptionKey: "operations.report.description",
 					input: z.object({}),
 					output: z.object({ outcome: z.string() }),
 					upstream: { baseUrl: "https://example.com" },
@@ -7051,6 +7058,7 @@ describe("server SBSD bound-transport wiring", () => {
 			operations: {
 				probe: {
 					riskClass: "read",
+					descriptionKey: "operations.probe.description",
 					input: z.object({}),
 					output: z.object({ body: z.string(), classified: z.boolean() }),
 					upstream: { baseUrl: "https://example.com" },
@@ -7171,6 +7179,7 @@ describe("server SBSD bound-transport wiring", () => {
 			operations: {
 				defined: {
 					riskClass: "read",
+					descriptionKey: "operations.defined.description",
 					input: z.object({}),
 					output: z.object({ body: z.string(), outcome: z.string() }),
 					upstream: { baseUrl: "https://example.com" },

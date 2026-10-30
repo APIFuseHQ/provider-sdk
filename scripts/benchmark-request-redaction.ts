@@ -116,6 +116,7 @@ const provider: ProviderDefinition = {
 	operations: {
 		echo: {
 			riskClass: "read",
+			descriptionKey: "operations.echo.description",
 			input: z.object({ value: z.string() }),
 			output: z.object({ echoed: z.string(), secret: z.string().optional() }),
 			handler: async (ctx, input) => ({

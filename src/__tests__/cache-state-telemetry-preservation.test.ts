@@ -76,6 +76,7 @@ for (const mode of ["reject", "resolve", "caught"] as const) {
 				operations: {
 					probe: {
 						riskClass: "read",
+						descriptionKey: "operations.probe.description",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx) => {

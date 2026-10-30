@@ -45,6 +45,7 @@ const holdPort = holdAddress.port;
 
 const operation = {
 	riskClass: "read" as const,
+	descriptionKey: "operations.operation.description",
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),
 	healthCheckUnsupported: { reason: "native abort fixture" },
