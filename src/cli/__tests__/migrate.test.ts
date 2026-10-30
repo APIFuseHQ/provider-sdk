@@ -380,28 +380,18 @@ describe("apifuse migrate", () => {
 		// the SDK's own resolution over what each site reaches (SHOP_DOWN's hoisted
 		// declaration; nothing for the runtime-owned MISSING_SECRET, whose serve
 		// branch defaults to credential_unavailable / false).
+		// A provider throw carries no per-throw contract any more (`new
+		// ProviderError` refuses one), so the declaration alone is what the
+		// stripped site serves.
 		const shopDown = { status: 502, category: "upstream_http", retryable: false } as const;
 		expect(
-			resolveProviderErrorContract({
-				code: "SHOP_DOWN",
-				declaration: shopDown,
-				legacyOptions: { category: "upstream_http", retryable: false },
-			}),
-		).toEqual(
-			resolveProviderErrorContract({ code: "SHOP_DOWN", declaration: shopDown, legacyOptions: {} }),
-		);
+			resolveProviderErrorContract({ code: "SHOP_DOWN", declaration: shopDown, sdkContract: {} }),
+		).toEqual({ status: 502, category: "upstream_http", retryable: false });
 		expect(
 			resolveProviderErrorContract({
 				code: "MISSING_SECRET",
 				declaration: undefined,
-				legacyOptions: { category: "credential_unavailable", retryable: false },
-			}),
-		).toEqual({ status: 400, category: "credential_unavailable", retryable: false });
-		expect(
-			resolveProviderErrorContract({
-				code: "MISSING_SECRET",
-				declaration: undefined,
-				legacyOptions: {},
+				sdkContract: {},
 			}),
 		).toEqual({ status: 400, category: undefined, retryable: undefined });
 		const hoist = hoistOf(report);
@@ -696,8 +686,8 @@ describe("apifuse migrate", () => {
 		expect(
 			dynamicCode?.map((residue) => `${residue.ruleId} ${residue.line} ${residue.message}`),
 		).toEqual([
-			"errors-hoist-throw-site-dynamic-code 8 new ProviderError(...) here takes its code from a variable and sets category or retryable through a spread per throw; no step can tell which declaration it serves, so it is left as written and apifuse check keeps reporting it under legacy-error-options.",
-			"errors-hoist-throw-site-dynamic-code 16 new ValidationError(...) here takes its code from a variable and sets category and retryable per throw; no step can tell which declaration it serves, so it is left as written and apifuse check keeps reporting it under legacy-error-options.",
+			"errors-hoist-throw-site-dynamic-code 8 new ProviderError(...) here takes its code from a variable and sets category or retryable through a spread per throw; no step can tell which declaration it serves, so it is left as written and new ProviderError(...) refuses it at run time (PER_THROW_ERROR_OPTIONS_RETIRED).",
+			"errors-hoist-throw-site-dynamic-code 16 new ValidationError(...) here takes its code from a variable and sets category and retryable per throw; no step can tell which declaration it serves, so it is left as written and new ValidationError(...) refuses it at run time (PER_THROW_ERROR_OPTIONS_RETIRED).",
 			'errors-hoist-throw-site-dynamic-option 20 Throw site of "ITEM_GONE" (ProviderError) sets retryable or category from a variable; the value cannot be checked against what the server serves, so the site is left as written.',
 		]);
 		expect(search).toContain(

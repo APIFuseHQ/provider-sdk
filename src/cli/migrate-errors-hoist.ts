@@ -86,8 +86,9 @@ import {
  * `category` / `retryable` loses those options when they equal what the
  * server serves for the site without them (the declaration for a provider
  * code; the SDK's own value for a runtime-owned code), so nothing served
- * changes and the `legacy-error-options` lint has no user left. A per-throw
- * value the server would not serve stays, named.
+ * changes and `new ProviderError` has nothing left to refuse
+ * (`PER_THROW_ERROR_OPTIONS_RETIRED`). A per-throw value the server would not
+ * serve stays, named.
  */
 
 const SDK_IMPORT = "@apifuse/provider-sdk/provider";
@@ -1627,8 +1628,9 @@ function spreadNamesOption(
  * Every `new ProviderError(...)` (or `AuthError` / `ValidationError`) whose
  * code is not a string literal (a parameter, a variable, absent) and that
  * states a per-throw `category` or `retryable` in any form. No rule can read
- * what it serves, the lint counts it as a legacy-error-options user, and the
- * fleet's exit-0 criterion needs it named.
+ * what it serves, the constructor refuses it at run time
+ * (`PER_THROW_ERROR_OPTIONS_RETIRED`), and the fleet's exit-0 criterion needs
+ * it named.
  */
 function collectDynamicCodeSites(
 	ts: TypeScriptModule,
@@ -1674,7 +1676,7 @@ function collectDynamicCodeSites(
 								file,
 								node.getStart(file.source),
 								ERRORS_HOIST_RULES.throwSiteDynamicCode,
-								`new ${node.expression.text}(...) here ${how} and sets ${stated.length > 0 ? stated.join(" and ") : "category or retryable through a spread"} per throw; no step can tell which declaration it serves, so it is left as written and apifuse check keeps reporting it under legacy-error-options.`,
+								`new ${node.expression.text}(...) here ${how} and sets ${stated.length > 0 ? stated.join(" and ") : "category or retryable through a spread"} per throw; no step can tell which declaration it serves, so it is left as written and new ${node.expression.text}(...) refuses it at run time (PER_THROW_ERROR_OPTIONS_RETIRED).`,
 								"Make each caller throw its declared factory (errors.CODE({ message, details })), which carries the category and retryable, and delete the per-throw option here; then re-run apifuse migrate.",
 							),
 						);
@@ -2330,7 +2332,7 @@ function servedWithoutOptions(
 						category: read.category as ProviderFailureCategory,
 						retryable: read.retryable,
 					},
-		legacyOptions: {},
+		sdkContract: {},
 	});
 	if (code === MISSING_SECRET_CODE) {
 		return {
