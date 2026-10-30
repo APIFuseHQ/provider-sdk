@@ -102,6 +102,7 @@ import {
 	STREAM_MAX_DURATION_MS_MAX,
 	STREAM_MAX_DURATION_MS_MIN,
 	VALID_OPERATION_ERROR_STATUSES,
+	defaultApprovalPolicy,
 } from "./types.js";
 
 type ProviderImplementationSourceAccess =
@@ -1376,14 +1377,20 @@ function validateProviderProxy(config: {
 				},
 			);
 		}
+		if ("poolSize" in proxy.session) {
+			throw new ValidationError(
+				`Provider "${config.id}" declares proxy.session.poolSize, which no longer exists: the proxy pool is gone, every attempt mints its own vendor session and a vendor serves ${PROXY_ATTEMPTS_PER_VENDOR} attempts before the chain moves on.`,
+				{
+					code: "PROXY_POOL_SIZE_RETIRED",
+					fix: "Delete proxy.session.poolSize: run `apifuse migrate --only declaration` (scripts/codemods/declaration.yml).",
+				},
+			);
+		}
 		rejectUnknownFields(
 			proxy.session,
-			new Set(["affinity", "lifetimeMinutes", "poolSize", "drainLeadSeconds"]),
+			new Set(["affinity", "lifetimeMinutes", "drainLeadSeconds"]),
 			"proxy.session",
 		);
-		if (proxy.session.poolSize !== undefined) {
-			warnRetiredProxyPoolSize(config.id, proxy.session.poolSize);
-		}
 		if (proxy.session.affinity !== undefined) {
 			assertLiteralField(
 				proxy.session.affinity,
@@ -1470,22 +1477,6 @@ function validateProviderProxy(config: {
 			`[provider-sdk] Provider "${config.id}" uses deprecated proxy vendor(s): ${deprecatedVendors.join(", ")}. Use "smartproxy"/"nodemaven".`,
 		);
 	}
-}
-
-const retiredPoolSizeWarned = new Set<string>();
-
-/**
- * `proxy.session.poolSize` sized the smartproxy extraction pool that the
- * per-attempt session id replaced. The runtime never reads it; the field is
- * accepted one more release so a provider pin bump does not fail at load, and
- * the provider is told once, at definition, how to delete it.
- */
-function warnRetiredProxyPoolSize(providerId: string, poolSize: unknown): void {
-	if (retiredPoolSizeWarned.has(providerId)) return;
-	retiredPoolSizeWarned.add(providerId);
-	console.warn(
-		`[provider-sdk] Provider "${providerId}" declares proxy.session.poolSize (${String(poolSize)}), which is ignored: the proxy pool is gone, every attempt mints its own vendor session and a vendor serves ${PROXY_ATTEMPTS_PER_VENDOR} attempts before the chain moves on. Delete the field (apifuse migrate --only declaration, scripts/codemods/declaration.yml); the next minor refuses it at defineProvider.`,
-	);
 }
 
 function validateProviderStt(config: { id: string; stt?: ProviderSttConfig }): void {
@@ -1642,6 +1633,17 @@ function validateOperationMetadata(
 				VALID_OPERATION_APPROVAL_POLICIES,
 				providerId,
 			);
+			// `approval` is a deliberate override of the riskClass default; a copy of
+			// the default is the same fact declared twice.
+			if (operation.approval === defaultApprovalPolicy(operation.riskClass)) {
+				throw new ValidationError(
+					`Provider "${providerId}" operation "${operationName}" declares approval "${operation.approval}", which is already the default for riskClass "${operation.riskClass}".`,
+					{
+						code: "REDUNDANT_APPROVAL",
+						fix: `Delete operations.${operationName}.approval (run \`apifuse migrate-operation-declaration .\`, which removes an approval equal to the riskClass default); keep approval only for a deliberate override.`,
+					},
+				);
+			}
 		}
 		if (operation.connectionMode !== undefined) {
 			assertLiteralField(
@@ -3678,9 +3680,7 @@ function validateProviderDeployment(providerId: string, deployment: unknown): vo
 /** The second authoring phase for a declaration established by defineProvider. */
 export type ProviderBuilder<
 	TConfig extends ProviderDeclaration | ProviderDeclarationWithAuthConfig,
-> = <
-	TOperations extends Record<string, ProviderOperation>,
->(implementation: {
+> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
 	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 }) => Omit<ProviderDefinition, "operations"> & {
 	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;

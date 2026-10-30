@@ -2,9 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { lintOperation, lintProvider } from "../lint.js";
 import { describeKey, fields } from "../schema.js";
-import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "../types.js";
-
-const READ_RISK_CLASS: OperationRiskClass = "read";
+import type { AuthMode, OperationRiskClass } from "../types.js";
 
 describe("lintOperation", () => {
 	it("reports expected diagnostics for weak operation metadata", () => {
@@ -175,127 +173,6 @@ describe("lintProvider", () => {
 			}),
 		);
 	});
-
-	it("warns when ctx.context is used without declared context keys", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			auth: {
-				mode: "oauth2",
-				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
-			},
-			authFlowSource: "async function start(ctx) { return ctx.context.get('state'); }",
-		});
-
-		expect(diagnostics).toContainEqual(
-			expect.objectContaining({
-				rule: "context-keys-required",
-				level: "warn",
-			}),
-		);
-	});
-
-	it("stays silent on ctx.context once context keys are declared", () => {
-		const diagnostics = lintProvider({
-			id: "demo-provider",
-			auth: {
-				mode: "oauth2",
-				flow: {
-					start: async () => ({ kind: "redirect", turnId: "1" }),
-					continue: async () => ({ kind: "complete", turnId: "2" }),
-				},
-			},
-			context: { keys: ["state"] },
-			authFlowSource: "async function start(ctx) { return ctx.context.get('state'); }",
-		});
-
-		expect(diagnostics.some((diagnostic) => diagnostic.rule === "context-keys-required")).toBe(
-			false,
-		);
-	});
-});
-
-describe("lintProvider legacy-error-options", () => {
-	const legacy = (item: { rule: string }) => item.rule === "legacy-error-options";
-
-	function lintSources(
-		providerSourceFiles: Record<string, string>,
-		errorCodes: ReadonlyArray<{ code: string; status?: 400 | 502; description: string }> = [],
-	) {
-		return lintProvider({
-			id: "demo",
-			providerSourceFiles,
-			operations: {
-				lookup: {
-					input: z.object({}),
-					output: z.object({}),
-					riskClass: READ_RISK_CLASS,
-					...(errorCodes.length > 0 ? { errorCodes: [...errorCodes] } : {}),
-				},
-			},
-		}).filter(legacy);
-	}
-
-	it("warns once per code and option set on a throw site that sets category or retryable", () => {
-		const diagnostics = lintSources({
-			"upstream/client.ts": [
-				`throw new ProviderError("blocked", { code: "BLOCKED", category: "anti_bot_blocked", retryable: false });`,
-				`throw new ProviderError("blocked again", { code: "BLOCKED", category: "anti_bot_blocked", retryable: false });`,
-				`throw new ValidationError("bad row", { code: "ROW_INVALID", retryable: true });`,
-			].join("\n"),
-		});
-
-		expect(diagnostics).toEqual([
-			expect.objectContaining({
-				rule: "legacy-error-options",
-				level: "warn",
-				field: "sourceFiles.upstream/client.ts",
-				message: expect.stringContaining('ProviderError with code "BLOCKED"'),
-			}),
-			expect.objectContaining({
-				field: "sourceFiles.upstream/client.ts",
-				message: expect.stringContaining('ValidationError with code "ROW_INVALID"'),
-			}),
-		]);
-		expect(diagnostics[0]?.message).toContain(
-			"defineErrors({ BLOCKED: { status, category, description } })",
-		);
-		expect(diagnostics[0]?.message).toContain("errors.BLOCKED({ details, cause })");
-	});
-
-	it("warns on a non-literal category too, since a variable may carry any category", () => {
-		const diagnostics = lintSources({
-			"upstream/client.ts": `throw new ProviderError("gone", { code: "ITEM_GONE", category });`,
-		});
-
-		expect(diagnostics).toHaveLength(1);
-		expect(diagnostics[0]?.message).toContain("sets category per throw");
-	});
-
-	it("warns on an operation that still declares codes in the errorCodes table", () => {
-		const diagnostics = lintSources({}, [
-			{ code: "ITEM_GONE", status: 502, description: "Item withdrawn." },
-			{ code: "UPSTREAM_ERROR", status: 502, description: "Upstream failed." },
-		]);
-
-		expect(diagnostics).toEqual([
-			expect.objectContaining({
-				rule: "legacy-error-options",
-				level: "warn",
-				field: "operations.lookup.errorCodes",
-				message: expect.stringContaining(
-					"declares ITEM_GONE, UPSTREAM_ERROR in the deprecated errorCodes table",
-				),
-			}),
-		]);
-	});
-
-	it("stays silent for a throw site that only sets code, details and cause", () => {
-		const diagnostics = lintSources({
-			"upstream/client.ts": `throw new ProviderError("gone", { code: "ITEM_GONE", details: { id }, cause });`,
-		});
-
-		expect(diagnostics).toEqual([]);
-	});
 });
 
 describe("flat operation safety lint", () => {
@@ -308,7 +185,6 @@ describe("flat operation safety lint", () => {
 	function providerWithOperation(
 		operation: {
 			riskClass: OperationRiskClass;
-			approval?: OperationApprovalPolicy;
 			connectionMode?: "none" | "optional" | "required";
 		},
 		authMode: AuthMode = "none",
@@ -318,7 +194,9 @@ describe("flat operation safety lint", () => {
 			auth: { mode: authMode },
 			operations: {
 				lookup: {
-					...operation,
+					...(operation.connectionMode === undefined
+						? {}
+						: { connectionMode: operation.connectionMode }),
 					descriptionKey: "operations.lookup.description",
 					input: describeKey(z.object({}), "operations.lookup.input.description"),
 					output: describeKey(z.object({}), "operations.lookup.output.description"),
@@ -357,29 +235,48 @@ describe("flat operation safety lint", () => {
 			false,
 		);
 	});
+});
 
-	it.each([
-		{ riskClass: "read", approval: "never" },
-		{ riskClass: "write", approval: "risk-based" },
-		{ riskClass: "destructive", approval: "always" },
-		{ riskClass: "external-send", approval: "always" },
-	] satisfies readonly {
-		riskClass: OperationRiskClass;
-		approval: OperationApprovalPolicy;
-	}[])("rejects redundant $riskClass/$approval approval", (operation) => {
-		const diagnostics = providerWithOperation(operation);
-		expect(diagnostics).toContainEqual(
+describe("lintProvider deprecated errorCodes table", () => {
+	function lintWithErrorCodes(errorCodes?: ReadonlyArray<{ code: string; status: number }>) {
+		return lintProvider({
+			id: "table-provider",
+			operations: {
+				lookup: {
+					descriptionKey: "operations.lookup.description",
+					input: describeKey(z.object({}), "operations.lookup.input.description"),
+					output: describeKey(z.object({}), "operations.lookup.output.description"),
+					fixtures: { request: {}, response: {} },
+					...(errorCodes ? { errorCodes } : {}),
+				},
+			},
+		});
+	}
+
+	it("warns on an operation that still declares codes in the errorCodes table", () => {
+		const diagnostics = lintWithErrorCodes([
+			{ code: "ITEM_GONE", status: 502 },
+			{ code: "UPSTREAM_ERROR", status: 502 },
+		]);
+
+		expect(diagnostics).toEqual([
 			expect.objectContaining({
-				rule: "redundant-approval",
-				level: "error",
-				field: "operations.lookup.approval",
+				rule: "deprecated-error-codes-table",
+				level: "warn",
+				field: "operations.lookup.errorCodes",
+				message: expect.stringContaining(
+					"declares ITEM_GONE, UPSTREAM_ERROR in the deprecated errorCodes table",
+				),
 			}),
+		]);
+		expect(diagnostics[0]?.message).toContain(
+			"defineErrors({ ITEM_GONE: { status, category, description } })",
 		);
 	});
 
-	it("accepts an approval override that differs from the risk default", () => {
-		const diagnostics = providerWithOperation({ riskClass: "write", approval: "always" });
-		expect(diagnostics.some((item) => item.rule === "redundant-approval")).toBe(false);
+	it("stays silent for an operation without the table", () => {
+		expect(lintWithErrorCodes()).toEqual([]);
+		expect(lintWithErrorCodes([])).toEqual([]);
 	});
 });
 
@@ -404,7 +301,6 @@ export function apply(headers: Headers, tuples: Array<[string, string]>) {
 			providerSourceFiles: { "upstream/client.ts": source },
 			operations: {
 				search: {
-					riskClass: READ_RISK_CLASS,
 					descriptionKey:
 						"Use this operation when callers need upstream search results and when header ownership between ctx.stealth and ctx.http must be linted.",
 					input: z.object({ query: z.string() }),

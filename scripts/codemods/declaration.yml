@@ -34,8 +34,8 @@
 #    before the chain moves on. The field is deleted; when it was the last
 #    member only the pair goes, otherwise the session object is written
 #    without it, one member per line (a comment that explained the pool is
-#    left for the author to delete). The next minor refuses the field at
-#    defineProvider. (rewritten)
+#    left for the author to delete). `defineProvider` refuses the field
+#    (PROXY_POOL_SIZE_RETIRED). (rewritten)
 #
 # `defineCredentialsAuth(...)` returns the `credentials` arm directly, so
 # `defineProvider({ ...credentialsAuth })` and `auth: credentialsAuth.auth,
@@ -85,7 +85,7 @@ rule:
 id: provider-proxy-session-pool-size-last
 language: typescript
 severity: warning
-message: "proxy.session.poolSize is ignored (each attempt is its own vendor session); the field is deleted and the next minor refuses it."
+message: "proxy.session.poolSize no longer exists (each attempt is its own vendor session); the field is deleted (defineProvider refuses it)."
 rule:
   kind: pair
   has:
@@ -115,7 +115,7 @@ fix: ''
 id: provider-proxy-session-pool-size-middle
 language: typescript
 severity: warning
-message: "proxy.session.poolSize is ignored (each attempt is its own vendor session); the session object is rewritten without it and the next minor refuses the field."
+message: "proxy.session.poolSize no longer exists (each attempt is its own vendor session); the session object is rewritten without it (defineProvider refuses the field)."
 rule:
   kind: object
   inside:
@@ -138,7 +138,7 @@ fix: "{ $KEPT\n$NEXT, $$$AFTER }"
 id: provider-proxy-session-pool-size-first-of-two
 language: typescript
 severity: warning
-message: "proxy.session.poolSize is ignored (each attempt is its own vendor session); the session object is rewritten without it and the next minor refuses the field."
+message: "proxy.session.poolSize no longer exists (each attempt is its own vendor session); the session object is rewritten without it (defineProvider refuses the field)."
 rule:
   kind: object
   inside:

@@ -3,7 +3,6 @@ import {
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 } from "./error-resolution.js";
-import { legacyHandleOptionsOf } from "./handle/contract.js";
 import { isExpectedErrorByCode } from "./health-scenario.js";
 import {
 	isProviderFailureCategory,
@@ -16,7 +15,7 @@ import {
 	isStealthOwnedHeaderName,
 	SDK_OWNED_CHROME_HEADER_PREFIX,
 } from "./runtime/stealth-owned-headers.js";
-import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
+import type { AuthMode } from "./types.js";
 import { getTypeScript, scriptKindForSourceFile } from "./typescript-module.js";
 
 const CREDENTIAL_BEARING_AUTH_MODES = [
@@ -27,12 +26,6 @@ const CREDENTIAL_BEARING_AUTH_MODES = [
 
 function isCredentialBearingAuthMode(mode: AuthMode | undefined): boolean {
 	return CREDENTIAL_BEARING_AUTH_MODES.some((credentialMode) => credentialMode === mode);
-}
-
-function defaultApprovalPolicy(riskClass: OperationRiskClass): OperationApprovalPolicy {
-	if (riskClass === "read") return "never";
-	if (riskClass === "write") return "risk-based";
-	return "always";
 }
 
 /** The declaration shape the lint reads structurally; validity is `defineProvider`'s job. */
@@ -46,51 +39,6 @@ type ProviderAuthLike = {
 		refresh?: unknown;
 	};
 };
-
-function getAuthFlowSource(provider: { auth?: ProviderAuthLike; authFlowSource?: string }): string {
-	if (provider.authFlowSource) {
-		return provider.authFlowSource;
-	}
-
-	const parts = [
-		provider.auth?.flow?.start,
-		provider.auth?.flow?.continue,
-		provider.auth?.flow?.poll,
-		provider.auth?.flow?.abort,
-		provider.auth?.flow?.refresh,
-	];
-
-	return parts
-		.filter((part): part is (...args: unknown[]) => unknown => typeof part === "function")
-		.map((part) => part.toString())
-		.join("\n");
-}
-
-/**
- * `context-keys-required` stays one release: `FlowContext.context` is typed
- * for every flow, so a read of `ctx.context` without declared `context.keys`
- * still compiles and only this rule reports it.
- */
-function lintContextKeys(provider: {
-	id?: string;
-	auth?: ProviderAuthLike;
-	context?: { keys?: readonly string[] };
-	authFlowSource?: string;
-}): LintDiagnostic[] {
-	const authFlowSource = getAuthFlowSource(provider);
-	if (!authFlowSource.includes("ctx.context") || (provider.context?.keys?.length ?? 0) > 0) {
-		return [];
-	}
-	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	return [
-		{
-			rule: "context-keys-required",
-			level: "warn",
-			field: "context.keys",
-			message: `${providerLabel} should declare context.keys when auth flow code accesses ctx.context.*.`,
-		},
-	];
-}
 
 // Operations that perform an auth-lifecycle action belong on the single
 // `auth.flow` interface, never on a provider operation:
@@ -281,14 +229,10 @@ function lintCredentialWriteUsage(provider: {
 	});
 }
 
-// Captures the constructor name so each rule can pick its own scope: the
-// undeclared-code rule keeps its historical ProviderError/ValidationError
-// surface, while the localization rules also cover AuthError.
+// Captures the constructor name so a rule can pick its own scope (the
+// health-check expectedErrors rule reads ProviderError, AuthError and
+// ValidationError sites).
 const THROWN_ERROR_CONSTRUCTION_PATTERN = /new\s+(ProviderError|AuthError|ValidationError)\s*\(/g;
-const UNDECLARED_CODE_ERROR_CLASSES: ReadonlySet<string> = new Set([
-	"ProviderError",
-	"ValidationError",
-]);
 
 const TEST_SOURCE_FILE_PATTERN = /(?:^|\/)(?:__tests__|__mocks__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const RECORDED_FIXTURE_SOURCE_FILE_PATTERN =
@@ -1006,97 +950,6 @@ function collectThrowSiteLintSources(provider: {
 		}
 	}
 	return sources;
-}
-
-/**
- * The one rule for the pre-`defineErrors` error path, kept until that path is
- * removed. Reports, with the migration, each throw site that still sets the
- * deprecated per-throw `category` / `retryable` options and each operation
- * that still declares its codes in the deprecated `errorCodes` table. A
- * provider on `defineErrors` + `errors: [...]` never trips it: the factory
- * sets no per-throw option and the table is gone. Warning level: the existing
- * fleet migrates on its own schedule, so this must not fail `apifuse check`.
- */
-function lintLegacyErrorOptions(provider: {
-	id?: string;
-	authFlowSource?: string;
-	providerSourceFiles?: Record<string, string>;
-	operations?: Record<
-		string,
-		{
-			handler?: unknown;
-			source?: string;
-			errorCodes?: ReadonlyArray<{ code: string }>;
-		}
-	>;
-}): LintDiagnostic[] {
-	const providerId = provider.id ?? "unknown";
-	const diagnostics: LintDiagnostic[] = [];
-	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
-		const codes = (operation.errorCodes ?? []).flatMap((entry) =>
-			typeof entry?.code === "string" ? [entry.code] : [],
-		);
-		if (codes.length === 0) continue;
-		diagnostics.push({
-			rule: "legacy-error-options",
-			level: "warn",
-			field: `operations.${operationKey}.errorCodes`,
-			message: `Provider "${providerId}" operation "${operationKey}" declares ${codes.join(", ")} in the deprecated errorCodes table. Declare each code once with defineErrors({ ${codes[0]}: { status, category, description } }) (an SDK-registered code is sdkErrors.${codes[0]}) and list the factories as errors: [errors.${codes[0]}, ...]; status, retryable and the locale keys then come from that declaration.`,
-		});
-	}
-	for (const { field, source } of collectThrowSiteLintSources(provider)) {
-		const reported = new Set<string>();
-		for (const site of collectThrownErrorConstructionSites(source)) {
-			if (!UNDECLARED_CODE_ERROR_CLASSES.has(site.errorClass)) continue;
-			const options = [
-				...(site.category !== undefined || site.nonLiteralCategory ? ["category"] : []),
-				...(site.retryable !== undefined ? ["retryable"] : []),
-			];
-			if (options.length === 0) continue;
-			const code = site.code ?? "CODE";
-			const key = `${code}:${options.join(",")}`;
-			if (reported.has(key)) continue;
-			reported.add(key);
-			diagnostics.push({
-				rule: "legacy-error-options",
-				level: "warn",
-				field,
-				message: `${site.errorClass} with code "${code}" (${field}) sets ${options.join(" and ")} per throw; these options are deprecated (still served over the declaration for one release, then removed). Declare the code once with defineErrors({ ${code}: { status, category, description } }) and throw errors.${code}({ details, cause }).`,
-			});
-		}
-	}
-	return diagnostics;
-}
-
-/**
- * Handle contract (ADR-0012, amended 2026-10-28): the property key and the
- * issuing operation of a kind are read from the operation schemas by
- * `defineProvider`, `ctx.handle` is typed to the declared kinds, and
- * `handle: [...]` without `state` is a compile error. The only rule left is the
- * one for the deprecated declaration path, which the codemod removes.
- */
-function lintLegacyHandleDeclarations(provider: {
-	id?: string;
-	handle?: unknown;
-}): LintDiagnostic[] {
-	if (!Array.isArray(provider.handle)) return [];
-	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	const diagnostics: LintDiagnostic[] = [];
-	for (const kind of provider.handle) {
-		const declared = legacyHandleOptionsOf(kind);
-		if (declared.length === 0) continue;
-		const name =
-			typeof kind === "object" && kind !== null && typeof Reflect.get(kind, "name") === "string"
-				? (Reflect.get(kind, "name") as string)
-				: "?";
-		diagnostics.push({
-			rule: "legacy-handle-declaration",
-			level: "warn",
-			field: `handle.${name}`,
-			message: `${providerLabel} handle kind "${name}" still declares ${declared.join(" and ")}; the property key and the issuing operation are read from the operation schemas where ${name}.field() is placed. Delete the option(s): apifuse migrate --only handles`,
-		});
-	}
-	return diagnostics;
 }
 
 const STALE_IF_ERROR_OPTION = "staleIfErrorMs";
@@ -2125,9 +1978,6 @@ export function lintProvider(
 	provider: {
 		id?: string;
 		auth?: ProviderAuthLike;
-		context?: {
-			keys?: readonly string[];
-		};
 		authFlowSource?: string;
 		providerSourceFiles?: Record<string, string>;
 		operations?: Record<
@@ -2137,8 +1987,6 @@ export function lintProvider(
 				whenToUseKeys?: readonly string[];
 				whenNotToUseKeys?: readonly string[];
 				connectionMode?: "none" | "optional" | "required";
-				riskClass?: OperationRiskClass;
-				approval?: OperationApprovalPolicy;
 				input: unknown;
 				output: unknown;
 				fixtures?: unknown;
@@ -2174,6 +2022,32 @@ export function lintProvider(
 	return lintProviderWithInformation(provider, options).diagnostics;
 }
 
+/**
+ * The `errorCodes` table is still read (`@deprecated`) but `defineErrors` is
+ * the declaration: each operation still on the table is named with the move.
+ * Warning level: the table keeps serving, so this must not fail `apifuse check`.
+ */
+function lintDeprecatedErrorCodesTable(provider: {
+	id?: string;
+	operations?: Record<string, { errorCodes?: ReadonlyArray<{ code: string }> }>;
+}): LintDiagnostic[] {
+	const providerId = provider.id ?? "unknown";
+	const diagnostics: LintDiagnostic[] = [];
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const codes = (operation.errorCodes ?? []).flatMap((entry) =>
+			typeof entry?.code === "string" ? [entry.code] : [],
+		);
+		if (codes.length === 0) continue;
+		diagnostics.push({
+			rule: "deprecated-error-codes-table",
+			level: "warn",
+			field: `operations.${operationKey}.errorCodes`,
+			message: `Provider "${providerId}" operation "${operationKey}" declares ${codes.join(", ")} in the deprecated errorCodes table. Declare each code once with defineErrors({ ${codes[0]}: { status, category, description } }) (an SDK-registered code is sdkErrors.${codes[0]}) and list the factories as errors: [errors.${codes[0]}, ...]; status, retryable and the locale keys then come from that declaration (apifuse migrate --only errors-hoist).`,
+		});
+	}
+	return diagnostics;
+}
+
 /** Internal detailed result used by the CLI to render suppression audits. */
 export function lintProviderWithInformation(
 	provider: Parameters<typeof lintProvider>[0],
@@ -2182,14 +2056,12 @@ export function lintProviderWithInformation(
 ): ProviderLintResult {
 	warnProviderLintOptionsOnce(options);
 	const diagnostics: LintDiagnostic[] = [
-		...lintContextKeys(provider),
 		...lintCredentialWriteUsage(provider),
 		...lintBrowserVersionLiterals(provider),
-		...lintLegacyErrorOptions(provider),
-		...lintLegacyHandleDeclarations(provider),
 		...lintHealthCheckMonitorability(provider),
 		...lintHealthCheckStaleServe(provider),
 		...lintHealthCheckExpectedErrors(provider),
+		...lintDeprecatedErrorCodesTable(provider),
 	];
 	if (provider.operations) {
 		const authMode = provider.auth?.mode;
@@ -2204,18 +2076,6 @@ export function lintProviderWithInformation(
 					level: "error",
 					field: `operations.${operationKey}.connectionMode`,
 					message: `Provider "${provider.id ?? "unknown"}" uses credential-bearing auth.mode "${authMode}"; operation "${operationKey}" must declare connectionMode explicitly.`,
-				});
-			}
-			if (
-				operation.riskClass !== undefined &&
-				operation.approval !== undefined &&
-				operation.approval === defaultApprovalPolicy(operation.riskClass)
-			) {
-				diagnostics.push({
-					rule: "redundant-approval",
-					level: "error",
-					field: `operations.${operationKey}.approval`,
-					message: `Operation "${operationKey}" approval "${operation.approval}" repeats the default for riskClass "${operation.riskClass}"; omit approval unless it is a deliberate override.`,
 				});
 			}
 		}

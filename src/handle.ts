@@ -12,8 +12,10 @@ import {
 	brandHandleError,
 	hasHandleErrorBrand,
 	ProviderError,
-	type ProviderErrorOptions,
+	type SdkErrorOptions,
+	ValidationError,
 } from "./errors.js";
+import { sdkErrorOptions } from "./sdk-error-contract.js";
 import {
 	APIFUSE_HANDLE_META_KEY,
 	formatHandleIssuers,
@@ -23,17 +25,14 @@ import {
 	type HandleAccess,
 	type HandleFieldDirection,
 	type HandleFieldMeta,
-	type HandleFieldNames,
 	type HandleIssuedBy,
 	type HandleKindDeclaration,
 	type HandleKindType,
-	isHandleIssuedBy,
 } from "./handle-meta.js";
 import {
 	HANDLE_KIND_INTERNALS,
 	HANDLE_META_KIND,
 	type HandleKindInternals,
-	type LegacyHandleOption,
 	type MutableHandleFieldMeta,
 	type ResolvedHandleContract,
 } from "./handle/contract.js";
@@ -49,7 +48,6 @@ export type {
 	HandleAccess,
 	HandleFieldDirection,
 	HandleFieldMeta,
-	HandleFieldNames,
 	HandleIssuedBy,
 	HandleKindDeclaration,
 	HandleKindType,
@@ -265,24 +263,33 @@ const HANDLE_ERROR_DEFAULTS: Record<
 	PICK_NOT_OFFERED: { category: "input_validation", retryable: false },
 };
 
-export type HandleErrorOptions = Omit<ProviderErrorOptions, "code"> & {
+/**
+ * `HandleError` codes are SDK-owned: their category and retryability are the
+ * class defaults above, so these options carry the SDK contract fields and a
+ * caller may still state them.
+ */
+export type HandleErrorOptions = Omit<SdkErrorOptions, "code"> & {
 	/** Kind name the error relates to, when known. */
 	readonly kind?: string;
 };
 
 export class HandleError extends ProviderError {
+	declare readonly options?: SdkErrorOptions;
 	readonly handleCode: HandleErrorCode;
 	readonly kind?: string;
 
 	constructor(code: HandleErrorCode, message: string, options: HandleErrorOptions = {}) {
 		const { kind, ...rest } = options;
 		const defaults = HANDLE_ERROR_DEFAULTS[code];
-		super(message, {
-			...(defaults.category === undefined ? {} : { category: defaults.category }),
-			retryable: defaults.retryable,
-			...rest,
-			code,
-		});
+		super(
+			message,
+			sdkErrorOptions({
+				...(defaults.category === undefined ? {} : { category: defaults.category }),
+				retryable: defaults.retryable,
+				...rest,
+				code,
+			}),
+		);
 		this.name = "HandleError";
 		this.handleCode = code;
 		this.kind = kind;
@@ -377,14 +384,6 @@ export function parseHandleDurationMs(value: ProviderStateDurationString, label:
 export interface DefineCursorOptions<TSchema extends ZodType, TName extends string = string> {
 	/** Kind name, `/^[a-z]{2,12}$/`; becomes the handle prefix. */
 	readonly name: TName;
-	/**
-	 * @deprecated The property key is read from the operation schemas where
-	 * `kind.field()` is placed (one key per direction; `{ cursor: Page.field() }`
-	 * on input and `{ next_cursor: Page.field() }` on output need no
-	 * declaration). Delete this option; `scripts/codemods/handles.yml` does it.
-	 * Removed in the next release.
-	 */
-	readonly fieldName?: string | HandleFieldNames;
 	readonly schema: TSchema;
 	readonly ttl: ProviderStateDurationString;
 	/** `"bound"` (default): connection-scoped, 2 words. `"public"`: provider-scoped, 4-5 words. */
@@ -395,13 +394,6 @@ export interface DefineCursorOptions<TSchema extends ZodType, TName extends stri
 	readonly maxValueBytes?: number;
 	/** Public only; `"high"` forces 5 words. Auto-high when ttl > 1h. */
 	readonly strength?: HandleStrength;
-	/**
-	 * @deprecated The issuing operations are the ones whose output schema
-	 * contains `kind.field()`; `defineProvider` binds them for error text and the
-	 * field description. Delete this option; `scripts/codemods/handles.yml` does
-	 * it. Removed in the next release.
-	 */
-	readonly issuedBy?: HandleIssuedBy;
 }
 
 export interface DefineDraftOptions<
@@ -410,12 +402,6 @@ export interface DefineDraftOptions<
 	TName extends string = string,
 > {
 	readonly name: TName;
-	/**
-	 * @deprecated The property key is read from the operation schemas where
-	 * `kind.field()` is placed (one key per direction). Delete this option;
-	 * `scripts/codemods/handles.yml` does it. Removed in the next release.
-	 */
-	readonly fieldName?: string | HandleFieldNames;
 	readonly schema: TSchema;
 	/** Optional schema of the commit result (type-level). */
 	readonly result?: TResultSchema;
@@ -437,12 +423,27 @@ export interface DefineDraftOptions<
 	readonly maxValueBytes?: number;
 	/** Public only; `"high"` forces 5 words. Auto-high when ttl.max > 1h. */
 	readonly strength?: HandleStrength;
-	/**
-	 * @deprecated The issuing operations are the ones whose output schema
-	 * contains `kind.field()`; `defineProvider` binds them. Delete this option;
-	 * `scripts/codemods/handles.yml` does it. Removed in the next release.
-	 */
-	readonly issuedBy?: HandleIssuedBy;
+}
+
+/**
+ * The options `defineCursor` / `defineDraft` accepted before the key and the
+ * issuer were read from the operation schemas. The type no longer has them;
+ * this is the runtime refusal for a JavaScript caller or a stale build, and it
+ * names the codemod that deletes them.
+ */
+const RETIRED_HANDLE_OPTIONS = ["fieldName", "issuedBy"] as const;
+
+function rejectRetiredHandleOptions(options: object, define: string, name: string): void {
+	const present = RETIRED_HANDLE_OPTIONS.filter((option) => option in options);
+	if (present.length === 0) return;
+	throw new ValidationError(
+		`${define}: "${name}" declares ${present.join(" and ")}; the property key and the issuing operation are read from the operation schemas where ${name}.field() is placed, and the option${present.length > 1 ? "s are" : " is"} no longer accepted.`,
+		{
+			code: "HANDLE_OPTION_RETIRED",
+			fix: `Delete ${present.join(" and ")} from ${define}({ name: "${name}" }): run \`apifuse migrate --only handles\` (scripts/codemods/handles.yml).`,
+			details: { define, name, options: present },
+		},
+	);
 }
 
 function assertKindName(name: unknown, define: string): asserts name is string {
@@ -451,62 +452,6 @@ function assertKindName(name: unknown, define: string): asserts name is string {
 			`${define}: kind name must match ${HANDLE_KIND_NAME_PATTERN} (2-12 lowercase letters, no digits or separators) so it never fuses with the word body; received ${JSON.stringify(name)}.`,
 		);
 	}
-}
-
-function assertFieldName(
-	fieldName: unknown,
-	define: string,
-	label: string,
-): asserts fieldName is string {
-	if (typeof fieldName !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(fieldName)) {
-		throw new Error(
-			`${define}: ${label} must be a plain identifier usable as a schema property key; received ${JSON.stringify(fieldName)}.`,
-		);
-	}
-}
-
-/**
- * Resolves the deprecated `fieldName` option to the input key and, when the
- * two differ, the output key; undefined when the option is absent, so the
- * contract bound by `defineProvider` (or the `${name}_token` default) applies.
- *
- * The string form names one key for both directions. The object form requires
- * BOTH keys: a half-declaration would leave one side silently defaulting,
- * which is the kind of mismatch this option existed to make explicit.
- * `outputFieldName` is left undefined when the two keys are equal so a
- * one-name kind emits exactly the meta it always did.
- */
-function resolveFieldNames(
-	value: string | HandleFieldNames | undefined,
-	define: string,
-	name: string,
-): { fieldName?: string; outputFieldName?: string } {
-	if (value === undefined) return {};
-	if (typeof value === "string") {
-		assertFieldName(value, define, "fieldName");
-		return { fieldName: value };
-	}
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error(
-			`${define}: "${name}" fieldName must be a property key or { input, output }; received ${JSON.stringify(value)}.`,
-		);
-	}
-	const record = value as unknown as Record<string, unknown>;
-	const extra = Object.keys(record).filter((key) => key !== "input" && key !== "output");
-	if (extra.length > 0) {
-		throw new Error(
-			`${define}: "${name}" fieldName accepts only "input" and "output"; received extra ${extra.map((key) => JSON.stringify(key)).join(", ")}.`,
-		);
-	}
-	if (record.input === undefined || record.output === undefined) {
-		throw new Error(
-			`${define}: "${name}" fieldName must declare both "input" and "output" when the two directions differ; declaring one would leave the other defaulting to "${name}_token".`,
-		);
-	}
-	assertFieldName(record.input, define, "fieldName.input");
-	assertFieldName(record.output, define, "fieldName.output");
-	if (record.input === record.output) return { fieldName: record.input };
-	return { fieldName: record.input, outputFieldName: record.output };
 }
 
 function assertPositiveInteger(value: number, label: string, define: string): void {
@@ -527,25 +472,6 @@ function assertStrength(value: unknown, define: string): asserts value is Handle
 	}
 }
 
-/** Validates `issuedBy` and returns a frozen copy for lists; `undefined` stays undefined. */
-function normalizeIssuedBy(
-	value: unknown,
-	define: string,
-	name: string,
-): HandleIssuedBy | undefined {
-	if (value === undefined) return undefined;
-	if (!isHandleIssuedBy(value) || (typeof value === "string" ? value.length === 0 : false)) {
-		throw new Error(
-			`${define}: "${name}" issuedBy must be an operation key or a non-empty list of operation keys; received ${JSON.stringify(value)}.`,
-		);
-	}
-	if (typeof value === "string") return value;
-	if (value.some((operation) => operation.length === 0)) {
-		throw new Error(`${define}: "${name}" issuedBy must not contain empty operation keys.`);
-	}
-	return Object.freeze([...value]);
-}
-
 /** Word count for a kind: 2 bound; public 4, or 5 when high strength or the lifetime exceeds 1h. */
 function wordCountFor(
 	access: HandleAccess,
@@ -558,47 +484,29 @@ function wordCountFor(
 		: PUBLIC_HANDLE_WORD_COUNT;
 }
 
-const warnedLegacyHandleOptions = new Set<string>();
-
-function warnLegacyHandleOptions(define: string, name: string, declared: readonly string[]): void {
-	const token = `${define}:${name}`;
-	if (warnedLegacyHandleOptions.has(token)) return;
-	warnedLegacyHandleOptions.add(token);
-	console.warn(
-		`[provider-sdk] ${define} "${name}": ${declared.join(" and ")} ${declared.length > 1 ? "are" : "is"} deprecated; the property key and the issuing operation are read from the operation schemas where ${name}.field() is placed. Delete the option(s) (codemod: scripts/codemods/handles.yml).`,
-	);
-}
-
 /**
- * The names and issuers a kind reports. Options passed on the deprecated path
- * win outright so an unmigrated provider sees byte-identical text; otherwise
- * the contract `defineProvider` bound from the schemas applies; otherwise the
- * historical `${name}_token` default.
+ * The names and issuers a kind reports: the contract `defineProvider` bound
+ * from the schemas, otherwise the historical `${name}_token` default.
  */
 interface HandleKindContract {
 	readonly name: string;
 	readonly type: HandleKindType;
-	readonly declared: { fieldName?: string; outputFieldName?: string; issuedBy?: HandleIssuedBy };
 	resolved: ResolvedHandleContract;
 }
 
 function contractFieldName(contract: HandleKindContract): string {
-	return contract.declared.fieldName ?? contract.resolved.fieldName ?? `${contract.name}_token`;
+	return contract.resolved.fieldName ?? `${contract.name}_token`;
 }
 
 function contractOutputFieldName(contract: HandleKindContract): string | undefined {
-	if (contract.declared.fieldName !== undefined) return contract.declared.outputFieldName;
 	return contract.resolved.outputFieldName;
 }
 
 function contractIssuedBy(contract: HandleKindContract): HandleIssuedBy | undefined {
-	return contract.declared.issuedBy ?? contract.resolved.issuedBy;
+	return contract.resolved.issuedBy;
 }
 
-function createHandleKindInternals(
-	contract: HandleKindContract,
-	declared: readonly LegacyHandleOption[],
-): HandleKindInternals {
+function createHandleKindInternals(contract: HandleKindContract): HandleKindInternals {
 	const refreshMeta = (meta: MutableHandleFieldMeta): void => {
 		meta.fieldName = contractFieldName(contract);
 		const outputFieldName = contractOutputFieldName(contract);
@@ -609,7 +517,6 @@ function createHandleKindInternals(
 		else meta.issuedBy = issuedBy;
 	};
 	const internals: HandleKindInternals = {
-		declared,
 		get resolved() {
 			return contract.resolved;
 		},
@@ -637,16 +544,6 @@ function createHandleField<K extends HandleKindDeclaration>(
 		.meta({ description: handleFieldDescription(meta), [APIFUSE_HANDLE_META_KEY]: meta });
 }
 
-function declaredLegacyOptions(options: {
-	readonly fieldName?: unknown;
-	readonly issuedBy?: unknown;
-}): LegacyHandleOption[] {
-	const declared: LegacyHandleOption[] = [];
-	if (options.fieldName !== undefined) declared.push("fieldName");
-	if (options.issuedBy !== undefined) declared.push("issuedBy");
-	return declared;
-}
-
 function attachHandleKindInternals<K extends object>(kind: K, internals: HandleKindInternals): K {
 	Object.defineProperty(kind, HANDLE_KIND_INTERNALS, { value: internals, enumerable: false });
 	return Object.freeze(kind);
@@ -658,13 +555,12 @@ export function defineCursor<TSchema extends ZodType, const TName extends string
 ): CursorKind<TSchema, TName> {
 	const define = "defineCursor";
 	assertKindName(options.name, define);
-	const { fieldName, outputFieldName } = resolveFieldNames(options.fieldName, define, options.name);
+	rejectRetiredHandleOptions(options, define, options.name);
 	const access: unknown = options.access ?? "bound";
 	assertAccess(access, define);
 	const ttlMs = parseHandleDurationMs(options.ttl, `"${options.name}" ttl`);
 	const strength: unknown = options.strength ?? "standard";
 	assertStrength(strength, define);
-	const issuedBy = normalizeIssuedBy(options.issuedBy, define, options.name);
 	if (access === "public" && options.maxEntries === undefined) {
 		throw new Error(
 			`${define}: public cursor "${options.name}" must declare maxEntries (provider-wide live-entry quota).`,
@@ -675,15 +571,12 @@ export function defineCursor<TSchema extends ZodType, const TName extends string
 	const maxValueBytes = options.maxValueBytes ?? DEFAULT_CURSOR_MAX_VALUE_BYTES;
 	assertPositiveInteger(maxValueBytes, "maxValueBytes", define);
 	const wordCount = wordCountFor(access, strength, ttlMs);
-	const declared = declaredLegacyOptions(options);
-	if (declared.length > 0) warnLegacyHandleOptions(define, options.name, declared);
 	const contract: HandleKindContract = {
 		name: options.name,
 		type: "cursor",
-		declared: { fieldName, outputFieldName, issuedBy },
 		resolved: {},
 	};
-	const internals = createHandleKindInternals(contract, declared);
+	const internals = createHandleKindInternals(contract);
 	const kind: CursorKind<TSchema, TName> = {
 		name: options.name,
 		type: "cursor",
@@ -723,7 +616,7 @@ export function defineDraft<
 ): DraftKind<TSchema, TResultSchema, TName> {
 	const define = "defineDraft";
 	assertKindName(options.name, define);
-	const { fieldName, outputFieldName } = resolveFieldNames(options.fieldName, define, options.name);
+	rejectRetiredHandleOptions(options, define, options.name);
 	if (!options.ttl || typeof options.ttl !== "object") {
 		throw new Error(`${define}: draft "${options.name}" ttl must be { idle, max }.`);
 	}
@@ -745,7 +638,6 @@ export function defineDraft<
 			`${define}: draft "${options.name}" strength applies to public drafts only; bound drafts are always two words.`,
 		);
 	}
-	const issuedBy = normalizeIssuedBy(options.issuedBy, define, options.name);
 	if (access === "public" && options.maxEntries === undefined) {
 		throw new Error(
 			`${define}: public draft "${options.name}" must declare maxEntries (provider-wide live-entry quota).`,
@@ -757,15 +649,12 @@ export function defineDraft<
 	assertPositiveInteger(maxValueBytes, "maxValueBytes", define);
 	// A public draft's guessable lifetime is its hard `max` ttl (idle only shortens it).
 	const wordCount = wordCountFor(access, strength, maxTtlMs);
-	const declared = declaredLegacyOptions(options);
-	if (declared.length > 0) warnLegacyHandleOptions(define, options.name, declared);
 	const contract: HandleKindContract = {
 		name: options.name,
 		type: "draft",
-		declared: { fieldName, outputFieldName, issuedBy },
 		resolved: {},
 	};
-	const internals = createHandleKindInternals(contract, declared);
+	const internals = createHandleKindInternals(contract);
 	const kind: DraftKind<TSchema, TResultSchema, TName> = {
 		name: options.name,
 		type: "draft",

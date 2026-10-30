@@ -53,6 +53,17 @@ export type OperationRiskClass = "read" | "write" | "destructive" | "external-se
 
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
+/**
+ * The approval policy an operation gets from its `riskClass` alone. Declaring
+ * `approval` equal to this value is refused by `defineProvider`: `approval` is
+ * only ever a deliberate override.
+ */
+export function defaultApprovalPolicy(riskClass: OperationRiskClass): OperationApprovalPolicy {
+	if (riskClass === "read") return "never";
+	if (riskClass === "write") return "risk-based";
+	return "always";
+}
+
 export type OperationSensitivePath = string;
 
 export interface OperationObservabilitySensitiveConfig {
@@ -1181,15 +1192,6 @@ export interface ProviderProxyPolicy {
 		 * NodeMaven 1..1440) and reports the clamp in the resolution diagnostics.
 		 */
 		lifetimeMinutes?: number;
-		/**
-		 * @deprecated The proxy pool is gone: every attempt mints its own vendor
-		 * session and a vendor serves `PROXY_ATTEMPTS_PER_VENDOR` (3) attempts
-		 * before the chain moves on, so no pool size is declared. The field is
-		 * accepted and ignored for one more release (`defineProvider` warns once
-		 * per provider) and is refused in the next minor (2.3.0). Delete it:
-		 * `apifuse migrate --only declaration` (scripts/codemods/declaration.yml).
-		 */
-		poolSize?: number;
 		/**
 		 * Seconds before hard sticky expiry at which native connections receive
 		 * the `expiring` event so the provider can drain and reconnect cleanly.

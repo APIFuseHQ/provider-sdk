@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { platformFaultOf } from "../sdk-issued-errors.js";
 import { z } from "zod";
-import { ProviderError } from "../errors.js";
+import { isValidationError, ProviderError, type ValidationError } from "../errors.js";
 import {
 	type CursorKind,
 	type DataOf,
@@ -180,170 +180,78 @@ describe("handle kinds", () => {
 		expect(defaulted.resultTtl).toBe("24h");
 	});
 
-	describe("deprecated directional fieldName option", () => {
-		let warn: ReturnType<typeof spyOn>;
-		beforeAll(() => {
-			warn = spyOn(console, "warn").mockImplementation(() => {});
-		});
-		afterAll(() => {
-			warn.mockRestore();
-		});
+	describe("retired fieldName / issuedBy options", () => {
+		// The key and the issuer are read from the operation schemas where
+		// `kind.field()` is placed; the options that used to declare them are
+		// refused with the codemod that deletes them.
+		const base = { name: "page", schema: PageSchema, ttl: "10m" } as const;
 
-		it("accepts { input, output } and carries both names on the kind and the meta", () => {
-			const page = defineCursor({
+		it("refuses fieldName on a cursor with a ValidationError naming the codemod", () => {
+			let caught: unknown;
+			try {
+				// test-invalid: the option was removed from the type.
+				defineCursor({ ...base, fieldName: "page_token" } as never);
+			} catch (error) {
+				caught = error;
+			}
+			expect(isValidationError(caught)).toBe(true);
+			const error = caught as ValidationError;
+			expect(error.code).toBe("HANDLE_OPTION_RETIRED");
+			expect(error.message).toContain('defineCursor: "page" declares fieldName');
+			expect(error.fix).toContain("apifuse migrate --only handles");
+			expect(error.details).toEqual({
+				define: "defineCursor",
 				name: "page",
-				fieldName: { input: "cursor", output: "next_cursor" },
-				schema: PageSchema,
-				ttl: "10m",
-				issuedBy: "search",
+				options: ["fieldName"],
 			});
+		});
 
-			expect(page.fieldName).toBe("cursor");
-			expect(page.outputFieldName).toBe("next_cursor");
-			expect(page.field().meta()?.[APIFUSE_HANDLE_META_KEY]).toMatchObject({
-				kind: "page",
-				type: "cursor",
+		it("refuses issuedBy, and names both options when both are present", () => {
+			// test-invalid: the option was removed from the type.
+			expect(() => defineCursor({ ...base, issuedBy: "search" } as never)).toThrow(
+				/declares issuedBy;.*no longer accepted/,
+			);
+			let caught: unknown;
+			try {
+				// test-invalid: both removed options at once.
+				defineDraft({
+					name: "cart",
+					schema: z.object({}),
+					ttl: { idle: "5m", max: "1h" },
+					fieldName: { input: "cart_id", output: "new_cart_id" },
+					issuedBy: ["open-cart"],
+				} as never);
+			} catch (error) {
+				caught = error;
+			}
+			expect(isValidationError(caught)).toBe(true);
+			expect((caught as ValidationError).message).toContain(
+				'defineDraft: "cart" declares fieldName and issuedBy',
+			);
+			expect((caught as ValidationError).fix).toContain(
+				"Delete fieldName and issuedBy from defineDraft",
+			);
+		});
+
+		it("reads directional keys and the issuer from the bound contract only", () => {
+			const page = defineCursor(base);
+			bindHandleContract(page, {
 				fieldName: "cursor",
 				outputFieldName: "next_cursor",
-			});
-		});
-
-		it("works for drafts too", () => {
-			const draft = defineDraft({
-				name: "cart",
-				fieldName: { input: "cart_id", output: "new_cart_id" },
-				schema: z.object({}),
-				ttl: { idle: "5m", max: "1h" },
-			});
-
-			expect(draft.fieldName).toBe("cart_id");
-			expect(draft.outputFieldName).toBe("new_cart_id");
-		});
-
-		it("emits the historical single-name meta when both directions agree", () => {
-			// A one-name kind must serialize byte-identically to before this option
-			// existed, so no fleet contract churns on upgrade.
-			const string = defineCursor({
-				name: "page",
-				fieldName: "page_token",
-				schema: PageSchema,
-				ttl: "10m",
-			});
-			const object = defineCursor({
-				name: "page",
-				fieldName: { input: "page_token", output: "page_token" },
-				schema: PageSchema,
-				ttl: "10m",
-			});
-
-			expect(string.outputFieldName).toBeUndefined();
-			expect(object.outputFieldName).toBeUndefined();
-			expect(string.field().meta()?.[APIFUSE_HANDLE_META_KEY]).toEqual(
-				object.field().meta()?.[APIFUSE_HANDLE_META_KEY],
-			);
-			expect(
-				Object.hasOwn(
-					string.field().meta()?.[APIFUSE_HANDLE_META_KEY] as object,
-					"outputFieldName",
-				),
-			).toBe(false);
-		});
-
-		it("rejects a half-declared pair, extra keys, and non-identifier names", () => {
-			// The types already reject these shapes; the runtime guards exist because
-			// a provider's `handles.ts` is also read by untyped tooling, and because a
-			// half-declaration would otherwise default the other side to `page_token`.
-			const base = { name: "page", schema: PageSchema, ttl: "10m" } as const;
-
-			// test-invalid: only one direction declared.
-			expect(() => defineCursor({ ...base, fieldName: { input: "cursor" } as never })).toThrow(
-				/must declare both "input" and "output"/,
-			);
-			// test-invalid: only one direction declared.
-			expect(() =>
-				defineCursor({ ...base, fieldName: { output: "next_cursor" } as never }),
-			).toThrow(/must declare both "input" and "output"/);
-			// test-invalid: a third key the option does not define.
-			expect(() =>
-				defineCursor({
-					...base,
-					fieldName: { input: "cursor", output: "next_cursor", both: "x" } as never,
-				}),
-			).toThrow(/accepts only "input" and "output"/);
-			expect(() =>
-				defineCursor({ ...base, fieldName: { input: "next cursor", output: "next_cursor" } }),
-			).toThrow(/fieldName\.input must be a plain identifier/);
-			expect(() =>
-				defineCursor({ ...base, fieldName: { input: "cursor", output: "next-cursor" } }),
-			).toThrow(/fieldName\.output must be a plain identifier/);
-			// test-invalid: a list is neither a key nor the { input, output } pair.
-			expect(() => defineCursor({ ...base, fieldName: ["cursor"] as never })).toThrow(
-				/must be a property key or \{ input, output \}/,
-			);
-		});
-
-		it("names both keys in the collapsed public error, identically for every failure", async () => {
-			// The public collapse must stay indistinguishable across invalid /
-			// expired / not-found, but "a new one" is useless when the caller has to
-			// read a field it was never told about.
-			const DirectionalPublicPage = defineCursor({
-				name: "page",
-				fieldName: { input: "cursor", output: "next_cursor" },
-				schema: PageSchema,
-				ttl: "10m",
-				access: "public",
-				maxEntries: 100,
 				issuedBy: "search",
 			});
-			const expected =
-				"`cursor` is not valid or has expired. Call `search` again and pass the new `next_cursor` back as `cursor`, exactly as returned.";
-
-			const clock = fakeClock();
-			const ctx = createTestHandleContext({ nowMs: clock.nowMs });
-			const live = await ctx.create(DirectionalPublicPage, { query: "q", page: 1 });
-
-			const malformed = await expectHandleError(
-				ctx.read(DirectionalPublicPage, "page_not-a-handle"),
-				"HANDLE_INVALID",
-			);
-			const absent = await expectHandleError(
-				ctx.read(DirectionalPublicPage, "page_visor-anagram-abnormal-request"),
-				"HANDLE_INVALID",
-			);
-			clock.advance(11 * MINUTE);
-			const expired = await expectHandleError(
-				ctx.read(DirectionalPublicPage, live),
-				"HANDLE_INVALID",
-			);
-
-			expect(malformed.message).toBe(expected);
-			expect(absent.message).toBe(expected);
-			expect(expired.message).toBe(expected);
-		});
-
-		it("names the output key to read and the input key to write in the recovery sentence", () => {
-			const directional = defineCursor({
-				name: "page",
-				fieldName: { input: "cursor", output: "next_cursor" },
-				schema: PageSchema,
-				ttl: "10m",
-				issuedBy: "search",
-			});
-			const single = defineCursor({
-				name: "page",
-				fieldName: "page_token",
-				schema: PageSchema,
-				ttl: "10m",
-				issuedBy: "search",
-			});
-
-			expect(handleRecoverySentence(directional)).toBe(
+			expect(page.fieldName).toBe("cursor");
+			expect(page.outputFieldName).toBe("next_cursor");
+			expect(page.issuedBy).toBe("search");
+			expect(handleRecoverySentence(page)).toBe(
 				"Call `search` again and pass the new `next_cursor` back as `cursor`, exactly as returned.",
 			);
-			expect(handleRecoverySentence({ ...directional, issuedBy: undefined })).toBe(
+			expect(handleRecoverySentence({ ...page, issuedBy: undefined })).toBe(
 				"Request a new `next_cursor` and pass it back as `cursor`, exactly as returned.",
 			);
-			// Unchanged wording for the one-name majority of the fleet.
+			const single = defineCursor(base);
+			bindHandleContract(single, { fieldName: "page_token", issuedBy: "search" });
+			expect(single.outputFieldName).toBeUndefined();
 			expect(handleRecoverySentence(single)).toBe(
 				"Call `search` again and pass the new `page_token` exactly as returned.",
 			);
@@ -929,7 +837,7 @@ describe("drafts: update, commit, discard", () => {
 		const handle = await ctx.create(WaitingDraft, waitingData());
 		await expect(
 			ctx.commit(WaitingDraft, handle, async () => {
-				throw new ProviderError("upstream down", { code: "UPSTREAM", retryable: true });
+				throw new ProviderError("upstream down", { code: "UPSTREAM" });
 			}),
 		).rejects.toMatchObject({ code: "UPSTREAM" });
 		const record = await ctx.read(WaitingDraft, handle);
@@ -1736,30 +1644,12 @@ describe("multi-issuer kinds", () => {
 		);
 	});
 
-	it("rejects empty or malformed issuer lists at definition time", () => {
-		expect(() =>
-			defineCursor({ name: "bad", schema: PageSchema, ttl: "1m", issuedBy: [] }),
-		).toThrow(/issuedBy must be an operation key or a non-empty list/);
-		expect(() =>
-			defineDraft({
-				name: "bad",
-				schema: PageSchema,
-				ttl: { idle: "1m", max: "2m" },
-				issuedBy: ["search", ""],
-			}),
-		).toThrow(/must not contain empty operation keys/);
-	});
-
 	it("words the field description and every recovery sentence with all issuers", async () => {
 		expect(LocationCursor.field().meta()?.description).toBe(
 			"Opaque handle issued by `search-address` or `reverse-geocode`. Copy it exactly as returned; do not edit or shorten it.",
 		);
-		const three = defineCursor({
-			name: "tri",
-			schema: PageSchema,
-			ttl: "1m",
-			issuedBy: ["a", "b", "c"],
-		});
+		const three = defineCursor({ name: "tri", schema: PageSchema, ttl: "1m" });
+		bindHandleContract(three, { issuedBy: ["a", "b", "c"] });
 		expect(three.field().meta()?.description).toBe(
 			"Opaque handle issued by `a`, `b`, or `c`. Copy it exactly as returned; do not edit or shorten it.",
 		);

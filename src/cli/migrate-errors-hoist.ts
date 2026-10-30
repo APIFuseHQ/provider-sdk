@@ -86,8 +86,9 @@ import {
  * `category` / `retryable` loses those options when they equal what the
  * server serves for the site without them (the declaration for a provider
  * code; the SDK's own value for a runtime-owned code), so nothing served
- * changes and the `legacy-error-options` lint has no user left. A per-throw
- * value the server would not serve stays, named.
+ * changes and `new ProviderError` has nothing left to refuse
+ * (`PER_THROW_ERROR_OPTIONS_RETIRED`). A per-throw value the server would not
+ * serve stays, named.
  */
 
 const SDK_IMPORT = "@apifuse/provider-sdk/provider";
@@ -1627,8 +1628,9 @@ function spreadNamesOption(
  * Every `new ProviderError(...)` (or `AuthError` / `ValidationError`) whose
  * code is not a string literal (a parameter, a variable, absent) and that
  * states a per-throw `category` or `retryable` in any form. No rule can read
- * what it serves, the lint counts it as a legacy-error-options user, and the
- * fleet's exit-0 criterion needs it named.
+ * what it serves, the constructor refuses it at run time
+ * (`PER_THROW_ERROR_OPTIONS_RETIRED`), and the fleet's exit-0 criterion needs
+ * it named.
  */
 function collectDynamicCodeSites(
 	ts: TypeScriptModule,
@@ -1674,7 +1676,7 @@ function collectDynamicCodeSites(
 								file,
 								node.getStart(file.source),
 								ERRORS_HOIST_RULES.throwSiteDynamicCode,
-								`new ${node.expression.text}(...) here ${how} and sets ${stated.length > 0 ? stated.join(" and ") : "category or retryable through a spread"} per throw; no step can tell which declaration it serves, so it is left as written and apifuse check keeps reporting it under legacy-error-options.`,
+								`new ${node.expression.text}(...) here ${how} and sets ${stated.length > 0 ? stated.join(" and ") : "category or retryable through a spread"} per throw; no step can tell which declaration it serves, so it is left as written and new ${node.expression.text}(...) refuses it at run time (PER_THROW_ERROR_OPTIONS_RETIRED).`,
 								"Make each caller throw its declared factory (errors.CODE({ message, details })), which carries the category and retryable, and delete the per-throw option here; then re-run apifuse migrate.",
 							),
 						);
@@ -2239,8 +2241,9 @@ function resolveThrowSites(
 			}
 			if (!optioned(site)) continue;
 			// A subclass site serves the declaration once its per-throw options go:
-			// the options go when they equal it, else the site keeps serving its own
-			// value for one more release and is named.
+			// the options go when they equal it, else the site is left as written
+			// and named: new X(...) refuses a per-throw option at run time
+			// (PER_THROW_ERROR_OPTIONS_RETIRED), so the author must choose.
 			if (site.dynamic) {
 				residues.push(dynamicOptionResidue(site, at));
 			} else if ((site.category !== undefined && categoryDiffers) || retryableDiffers) {
@@ -2284,7 +2287,7 @@ function noDeclarationResidue(
 		site.file,
 		at,
 		ERRORS_HOIST_RULES.throwSiteConflict,
-		`Throw site of ${JSON.stringify(code)} (${site.constructor}) states ${statedOptions(site)}; reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category ${JSON.stringify(served.category)}, retryable ${served.retryable} once the option is gone, so the site is left as written and keeps serving its own value for one more release.`,
+		`Throw site of ${JSON.stringify(code)} (${site.constructor}) states ${statedOptions(site)}; reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category ${JSON.stringify(served.category)}, retryable ${served.retryable} once the option is gone; the site is left as written, and new ${site.constructor}(...) refuses the option at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.`,
 		"Throw the declared factory here (errors.CODE, which carries its declaration everywhere) or a distinct code whose default matches, then re-run apifuse migrate.",
 	);
 }
@@ -2330,7 +2333,7 @@ function servedWithoutOptions(
 						category: read.category as ProviderFailureCategory,
 						retryable: read.retryable,
 					},
-		legacyOptions: {},
+		sdkContract: {},
 	});
 	if (code === MISSING_SECRET_CODE) {
 		return {
@@ -2361,7 +2364,7 @@ function sdkConflict(
 		site.file,
 		at,
 		ERRORS_HOIST_RULES.throwSiteSdkConflict,
-		`Throw site of ${JSON.stringify(site.code)} (${site.constructor}) sets ${stated} per throw, and ${source} serves category ${JSON.stringify(served.category)}, retryable ${served.retryable}; the per-throw value is served for one more release, so the site is left as written.`,
+		`Throw site of ${JSON.stringify(site.code)} (${site.constructor}) sets ${stated} per throw, and ${source} serves category ${JSON.stringify(served.category)}, retryable ${served.retryable}; the site is left as written, and new ${site.constructor}(...) refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.`,
 		`Two choices: (a) accept the SDK's value: delete the per-throw category/retryable here and re-run apifuse migrate; or (b) declare a distinct provider code for this condition with defineErrors (its own status, category and retryable) and throw that factory here.`,
 	);
 }
@@ -2388,7 +2391,7 @@ function legacyRowResidue(site: ThrowSite, code: string, at: number): MigrateFin
 		site.file,
 		at,
 		ERRORS_HOIST_RULES.throwSiteCodeConflict,
-		`Throw site of ${JSON.stringify(code)} (${site.constructor}): a legacy errorCodes row of ${code} may stay in an operation this run cannot move (a list named above), and that operation would serve the row (no category) instead of the declaration once the per-throw option is gone; the site is left as written and keeps serving its own value for one more release.`,
+		`Throw site of ${JSON.stringify(code)} (${site.constructor}): a legacy errorCodes row of ${code} may stay in an operation this run cannot move (a list named above), and that operation would serve the row (no category) instead of the declaration once the per-throw option is gone; the site is left as written, and new ${site.constructor}(...) refuses the option at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted.`,
 		"Move every row into a defineErrors map (fix what names the lists above) and re-run apifuse migrate; the option is then deleted.",
 	);
 }
@@ -2444,10 +2447,7 @@ function throwSiteConflict(
 		...(site.retryable !== undefined ? [`retryable ${site.retryable}`] : []),
 	].join(" and ");
 	const declared = `category ${JSON.stringify(view.category)}, retryable ${view.retryable}`;
-	const kept =
-		site.constructor === "ProviderError"
-			? "it is left as new ProviderError(...) and keeps serving its own value"
-			: `it is left as new ${site.constructor}(...) and keeps serving its own value for one more release`;
+	const kept = `it is left as new ${site.constructor}(...), which refuses the per-throw value at run time (PER_THROW_ERROR_OPTIONS_RETIRED, served as a 500 platform fault) until it is deleted`;
 	return finding(
 		site.file,
 		at,

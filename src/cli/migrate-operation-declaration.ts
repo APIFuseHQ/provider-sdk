@@ -5,6 +5,7 @@ import type TS from "typescript";
 
 import { assertProviderLocaleKey } from "../i18n/keys.js";
 import { operationIdToLocaleNamespace } from "../i18n/operation-locale-namespace.js";
+import { defaultApprovalPolicy, type OperationRiskClass } from "../types.js";
 
 const ts: typeof import("typescript") = await loadTypeScript();
 
@@ -791,18 +792,14 @@ function resolveApproval(
 	if (value === undefined) {
 		return nonLiteral(fileName, operationKey, "approval must be a string literal.");
 	}
-	const defaultValue = defaultApprovalPolicy(riskClass);
+	// `riskClass` is the literal the source carries; an unknown value takes the
+	// strictest default, the same reading `defineProvider` applies.
+	const defaultValue = defaultApprovalPolicy(riskClass as OperationRiskClass);
 	if (value === defaultValue) {
 		return flat === undefined ? {} : { removeTop: flat.property };
 	}
 	if (flat !== undefined) return {};
 	return { insert: memberText(selected, "approval") };
-}
-
-function defaultApprovalPolicy(riskClass: string): string {
-	if (riskClass === "read") return "never";
-	if (riskClass === "write") return "risk-based";
-	return "always";
 }
 
 function mergeFlatAndNested(

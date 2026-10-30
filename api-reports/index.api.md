@@ -534,7 +534,7 @@ export interface AuthContext {
 
 // @public (undocumented)
 export class AuthError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -1294,7 +1294,7 @@ export type ConnectionMode = AuthMode;
 
 // @public (undocumented)
 export class ContextAccessError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -1574,7 +1574,7 @@ export interface CredentialDeclaration {
 
 // @public (undocumented)
 export class CredentialKeyError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public
@@ -1582,7 +1582,7 @@ type CredentialKeysName<TKeys, TWord extends string> = TKeys extends readonly (i
 
 // @public (undocumented)
 export class CredentialModeError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -1869,10 +1869,6 @@ export function defineCursor<TSchema extends ZodType, const TName extends string
 // @public (undocumented)
 export interface DefineCursorOptions<TSchema extends ZodType, TName extends string = string> {
     readonly access?: HandleAccess;
-    // @deprecated (undocumented)
-    readonly fieldName?: string | HandleFieldNames;
-    // @deprecated (undocumented)
-    readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
     readonly name: TName;
@@ -1917,10 +1913,6 @@ export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodTy
 // @public (undocumented)
 export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema extends ZodType | undefined, TName extends string = string> {
     readonly access?: HandleAccess;
-    // @deprecated (undocumented)
-    readonly fieldName?: string | HandleFieldNames;
-    // @deprecated (undocumented)
-    readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
     // (undocumented)
@@ -2304,7 +2296,7 @@ export type FlowContextStore = ContextScratchpad;
 
 // @public (undocumented)
 export class FlowExpiredError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public
@@ -2451,13 +2443,15 @@ export class HandleError extends ProviderError {
     readonly handleCode: HandleErrorCode;
     // (undocumented)
     readonly kind?: string;
+    // (undocumented)
+    readonly options?: SdkErrorOptions;
 }
 
 // @public (undocumented)
 export type HandleErrorCode = "HANDLE_INVALID" | "HANDLE_NOT_FOUND" | "HANDLE_EXPIRED" | "HANDLE_KIND_MISMATCH" | "HANDLE_BUSY" | "HANDLE_COMMITTED" | "HANDLE_CONNECTION_REQUIRED" | "HANDLE_STORAGE_UNAVAILABLE" | "HANDLE_TOO_LARGE" | "HANDLE_INVALID_DATA" | "PICK_NOT_OFFERED";
 
-// @public (undocumented)
-export type HandleErrorOptions = Omit<ProviderErrorOptions, "code"> & {
+// @public
+export type HandleErrorOptions = Omit<SdkErrorOptions, "code"> & {
     readonly kind?: string;
 };
 
@@ -2488,14 +2482,6 @@ export interface HandleFieldMeta {
 
 // @public
 export function handleFieldNameFor(kind: Pick<HandleKindDeclaration, "fieldName" | "outputFieldName">, direction: HandleFieldDirection): string;
-
-// @public
-export interface HandleFieldNames {
-    // (undocumented)
-    readonly input: string;
-    // (undocumented)
-    readonly output: string;
-}
 
 // @public
 export function handleHasDirectionalFieldNames(kind: Pick<HandleKindDeclaration, "fieldName" | "outputFieldName">): boolean;
@@ -3598,9 +3584,6 @@ export function lintOperation(op: {
 export function lintProvider(provider: {
     id?: string;
     auth?: ProviderAuthLike;
-    context?: {
-        keys?: readonly string[];
-    };
     authFlowSource?: string;
     providerSourceFiles?: Record<string, string>;
     operations?: Record<string, {
@@ -3608,8 +3591,6 @@ export function lintProvider(provider: {
         whenToUseKeys?: readonly string[];
         whenNotToUseKeys?: readonly string[];
         connectionMode?: "none" | "optional" | "required";
-        riskClass?: OperationRiskClass;
-        approval?: OperationApprovalPolicy;
         input: unknown;
         output: unknown;
         fixtures?: unknown;
@@ -5810,7 +5791,7 @@ export interface ProviderEngineAttachmentInput {
 
 // @public
 export class ProviderEngineAuthenticationError extends SDKError {
-    constructor(message?: string, options?: ProviderErrorOptions);
+    constructor(message?: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public (undocumented)
@@ -5904,7 +5885,7 @@ export class ProviderEngineUnavailableError extends SDKError {
 
 // @public
 export class ProviderError<TCode extends string = string> extends Error {
-    constructor(message: string, options?: ProviderErrorOptions | undefined);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
     // (undocumented)
     get code(): TCode | undefined;
     // (undocumented)
@@ -5935,6 +5916,9 @@ export type ProviderErrorCauseFrame = {
     messageFingerprint: string;
     providerObservability?: ProviderErrorObservability;
 };
+
+// @public
+export type ProviderErrorConstructorOptions<T extends ProviderErrorOptions = ProviderErrorOptions> = T & RetiredErrorContractFields;
 
 // @public
 export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
@@ -5986,14 +5970,12 @@ export type ProviderErrorObservability = {
     messageLength?: number;
 };
 
-// @public (undocumented)
+// @public
 export type ProviderErrorOptions = {
     fix?: string;
     code?: string;
     details?: unknown;
     cause?: Error;
-    category?: ProviderFailureCategory;
-    retryable?: boolean;
     observability?: ProviderErrorObservability;
     messageKey?: ProviderLocaleKeyInput;
     fixKey?: ProviderLocaleKeyInput;
@@ -6278,7 +6260,6 @@ export interface ProviderProxyPolicy {
     session?: {
         affinity?: ProviderProxySessionAffinity;
         lifetimeMinutes?: number;
-        poolSize?: number;
         drainLeadSeconds?: number;
     };
 }
@@ -6407,7 +6388,7 @@ export interface ProviderSecretDeclaration {
 
 // @public (undocumented)
 export class ProviderSecretError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: SdkErrorOptions);
 }
 
 // @public
@@ -6467,7 +6448,7 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     providerObservability?: ProviderErrorObservability;
     causeChain?: ProviderErrorCauseFrame[];
     stack?: string[];
-    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
+    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category" | "per_throw_error_options_retired";
     signalFix?: string;
     issues?: Array<{
         path: string;
@@ -6488,18 +6469,6 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     level: "info";
     event: "provider_handle";
 } & HandleTelemetryEvent) | {
-    level: "warn";
-    event: "provider_error_options_deprecated";
-    providerId: string;
-    code: string;
-    options: string[];
-    conflicts?: Array<{
-        option: "category" | "retryable";
-        thrown: string | boolean;
-        declared: string | boolean;
-    }>;
-    fix: string;
-} | {
     level: "warn";
     event: "provider_cleanup_failed";
     providerId: string;
@@ -7667,6 +7636,12 @@ export interface ResponseMatcher {
 // @public (undocumented)
 export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R, any> ? (R extends ZodType ? z.output<R> : unknown) : never;
 
+// @public
+export type RetiredErrorContractFields = {
+    readonly category?: never;
+    readonly retryable?: never;
+};
+
 // @public (undocumented)
 export type RetryPolicy = {
     maxAttempts: number;
@@ -8601,13 +8576,22 @@ export type SdkCopyLocale = "en" | "ko" | "ja";
 
 // @public (undocumented)
 export class SDKError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // Warning: (ae-forgotten-export) The symbol "SDK_ERROR_REGISTRY" needs to be exported by the entry point index.d.ts
 //
 // @public
 export type SdkErrorCode = keyof typeof SDK_ERROR_REGISTRY;
+
+// @public
+export type SdkErrorContract = {
+    readonly category?: ProviderFailureCategory;
+    readonly retryable?: boolean;
+};
+
+// @public
+export type SdkErrorOptions = ProviderErrorOptions & SdkErrorContract;
 
 // @public
 export type SdkErrorRef<TCode extends SdkErrorCode = SdkErrorCode> = {
@@ -8687,9 +8671,11 @@ export type SessionConfig = {
     path?: string;
 };
 
-// @public (undocumented)
+// @public
 export class SessionExpiredError extends AuthError {
-    constructor(message?: string, options?: ProviderErrorOptions);
+    constructor(message?: string, options?: SdkErrorOptions);
+    // (undocumented)
+    readonly options?: SdkErrorOptions;
 }
 
 // @public
@@ -9842,13 +9828,15 @@ export interface TraceSpan {
 export class TransportError extends ProviderError {
     constructor(message: string, options?: TransportErrorOptions);
     // (undocumented)
+    readonly options?: TransportErrorOptions;
+    // (undocumented)
     readonly status?: number;
     // (undocumented)
     readonly upstreamStatus?: number;
 }
 
-// @public (undocumented)
-export type TransportErrorOptions = ProviderErrorOptions & {
+// @public
+export type TransportErrorOptions = SdkErrorOptions & {
     status?: number;
     upstreamStatus?: number;
 };
@@ -9858,7 +9846,7 @@ export function truncate(str: string, maxLength: number, suffix?: string): strin
 
 // @public (undocumented)
 export class TurnValidationError extends ProviderError {
-    constructor(message: string, options?: ProviderErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions);
 }
 
 // @public
@@ -9929,7 +9917,7 @@ export function validateProviderLocaleCatalogs(options: {
 
 // @public (undocumented)
 export class ValidationError extends ProviderError {
-    constructor(message: string, options?: ValidationErrorOptions);
+    constructor(message: string, options?: ProviderErrorConstructorOptions<ValidationErrorOptions>);
     // (undocumented)
     readonly zodError?: unknown;
 }
@@ -10036,23 +10024,23 @@ export { z }
 // dist/define.d.ts:264:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:296:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:65:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:104:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:99:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:24:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:113:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:62:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:66:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:225:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:242:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:250:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:325:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:211:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:228:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:236:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:311:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:735:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2123:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2211:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2219:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2220:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2421:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:741:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2120:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2208:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2216:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2217:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2418:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

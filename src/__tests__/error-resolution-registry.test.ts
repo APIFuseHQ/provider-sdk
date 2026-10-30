@@ -70,23 +70,25 @@ describe("SDK error registry", () => {
 });
 
 describe("resolveProviderErrorContract", () => {
-	it("keeps the deprecated per-throw options winning over the declaration, in both directions", () => {
-		// The order the server always had (instance ?? declared): a bump changes
-		// no served verdict while the per-throw option is still honored.
-		expect(
-			resolveProviderErrorContract({
-				code: "UPSTREAM_ERROR",
-				declaration: { status: 502, retryable: false },
-				legacyOptions: { retryable: true, category: "upstream_rejected" },
-			}),
-		).toEqual({ status: 502, category: "upstream_rejected", retryable: true });
-		// A deterministic refusal thrown retryable: false under a table row (and
-		// a registry row) that says true stays non-retryable.
+	it("lets the contract an SDK-constructed error carries win over a declaration and the registry", () => {
+		// SDK-owned failures (transport, session expiry, output validation) state
+		// their category and retryability where the SDK throws them; nothing a
+		// provider declares describes them.
 		expect(
 			resolveProviderErrorContract({
 				code: "UPSTREAM_ERROR",
 				declaration: { status: 502, retryable: true },
-				legacyOptions: { retryable: false },
+				sdkContract: { retryable: false, category: "provider_error" },
+			}),
+		).toEqual({ status: 502, category: "provider_error", retryable: false });
+	});
+
+	it("answers from the declaration alone for a provider throw: there is no per-throw contract", () => {
+		expect(
+			resolveProviderErrorContract({
+				code: "UPSTREAM_ERROR",
+				declaration: { status: 502, retryable: false },
+				sdkContract: {},
 			}),
 		).toEqual({ status: 502, category: "upstream_http", retryable: false });
 	});
@@ -96,17 +98,17 @@ describe("resolveProviderErrorContract", () => {
 			resolveProviderErrorContract({
 				code: "UPSTREAM_ERROR",
 				declaration: { status: 502, category: "upstream_http", retryable: false },
-				legacyOptions: {},
+				sdkContract: {},
 			}),
 		).toEqual({ status: 502, category: "upstream_http", retryable: false });
 	});
 
-	it("falls back to the per-throw options when the declaration is silent on a field", () => {
+	it("falls back to the SDK contract when the declaration is silent on a field", () => {
 		expect(
 			resolveProviderErrorContract({
 				code: "SHOP_CLOSED",
 				declaration: { status: 502 },
-				legacyOptions: { retryable: true, category: "upstream_rejected" },
+				sdkContract: { retryable: true, category: "upstream_rejected" },
 			}),
 		).toEqual({ status: 502, category: "upstream_rejected", retryable: true });
 	});
@@ -116,7 +118,7 @@ describe("resolveProviderErrorContract", () => {
 			resolveProviderErrorContract({
 				code: "UPSTREAM_SCHEMA_ERROR",
 				declaration: { status: 422 },
-				legacyOptions: {},
+				sdkContract: {},
 			}),
 		).toEqual({ status: 422, category: "upstream_rejected", retryable: false });
 	});
@@ -126,7 +128,7 @@ describe("resolveProviderErrorContract", () => {
 			resolveProviderErrorContract({
 				code: "RATE_LIMITED",
 				declaration: undefined,
-				legacyOptions: {},
+				sdkContract: {},
 			}),
 		).toEqual({ status: 429, category: "upstream_rate_limited", retryable: true });
 	});
@@ -136,7 +138,7 @@ describe("resolveProviderErrorContract", () => {
 			resolveProviderErrorContract({
 				code: "SOMETHING",
 				declaration: undefined,
-				legacyOptions: {},
+				sdkContract: {},
 			}),
 		).toEqual({ status: undefined, category: undefined, retryable: undefined });
 	});

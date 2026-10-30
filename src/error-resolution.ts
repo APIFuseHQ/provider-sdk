@@ -1,3 +1,4 @@
+import type { SdkErrorContract } from "./errors.js";
 import type { ProviderFailureCategory } from "./observability.js";
 import type { ProviderErrorStatus } from "./types.js";
 
@@ -331,15 +332,6 @@ export type ProviderErrorDeclarationLike = {
 	readonly retryable?: boolean;
 };
 
-/**
- * The deprecated per-throw options a legacy `new ProviderError(message, {
- * category, retryable })` site still carries, read safely by the caller.
- */
-export type LegacyProviderErrorOptions = {
-	readonly category?: ProviderFailureCategory;
-	readonly retryable?: boolean;
-};
-
 /** The served status, category and retryability a provider error resolves to. */
 export type ProviderErrorContract = {
 	/** `undefined` when nothing declares one; the serving branch supplies its default. */
@@ -361,41 +353,36 @@ function isRejectionStatus(status: ProviderErrorStatus | undefined): boolean {
  * - `status`: the declaration (a `defineErrors` declaration carried by the
  *   thrown error, or the operation's legacy `errorCodes[]` entry for the
  *   code), then the SDK registry row (`SDK_ERROR_REGISTRY`, then the
- *   status-only map for SDK-runtime codes). A throw site never set a status.
- * - `category` and `retryable`: the deprecated per-throw option first, then
- *   the declaration, then (category only) a declared rejection status
- *   (409/410/422) → `upstream_rejected`, then the SDK registry row.
+ *   status-only map for SDK-runtime codes). A throw site never sets a status.
+ * - `category` and `retryable`: the contract an SDK-constructed error carries
+ *   (`sdkErrorOptions`: transport, session expiry, secrets, output validation
+ *   and the other errors no provider declaration describes), then the
+ *   declaration, then (category only) a declared rejection status
+ *   (409/410/422) -> `upstream_rejected`, then the SDK registry row.
  *
- * A field nothing answers is `undefined`, and the serving branch (transport,
- * validation, session expiry, plain provider error) applies its own default.
- *
- * The per-throw option keeps winning for the one release it is kept: that is
- * the order the server always had (`instance ?? declared ?? default`), so a
- * provider that bumps the SDK without touching its throw sites serves the
- * same `retryable` as before — a deterministic refusal thrown `retryable:
- * false` under a table row that says `true` stays non-retryable, and the
- * gateway and bori keep reading the verdict they read today. The server logs
- * one warning per code naming both values when they differ; the fix is a
- * distinct code for the other condition, not a per-throw override. A
- * factory-made error (`errors.X(...)`) carries no per-throw option, so for it
- * the declaration is the whole answer.
+ * A provider-thrown error carries no per-throw contract: `new ProviderError`
+ * refuses `category` / `retryable` options, so for a provider code the
+ * declaration is the whole answer and a different retryability is a distinct
+ * code. A field nothing answers is `undefined`, and the serving branch
+ * (transport, validation, session expiry, plain provider error) applies its
+ * own default.
  */
 export function resolveProviderErrorContract(input: {
 	readonly code: string | undefined;
 	readonly declaration: ProviderErrorDeclarationLike | undefined;
-	readonly legacyOptions: LegacyProviderErrorOptions;
+	readonly sdkContract: SdkErrorContract;
 }): ProviderErrorContract {
-	const { code, declaration, legacyOptions } = input;
+	const { code, declaration, sdkContract } = input;
 	const registration = sdkErrorRegistration(code);
 	const status =
 		declaration?.status ??
 		registration?.status ??
 		(code === undefined ? undefined : SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(code));
 	const category =
-		legacyOptions.category ??
+		sdkContract.category ??
 		declaration?.category ??
 		(isRejectionStatus(declaration?.status) ? "upstream_rejected" : undefined) ??
 		registration?.category;
-	const retryable = legacyOptions.retryable ?? declaration?.retryable ?? registration?.retryable;
+	const retryable = sdkContract.retryable ?? declaration?.retryable ?? registration?.retryable;
 	return { status, category, retryable };
 }

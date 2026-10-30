@@ -11,7 +11,23 @@ import {
 	validateProviderErrorLocaleKeys,
 } from "../define-errors.js";
 import { defineOperation, defineProvider } from "../define.js";
-import { isProviderError, ProviderError, ValidationError } from "../errors.js";
+import {
+	AuthError,
+	isProviderError,
+	ProviderError,
+	ProviderSecretError,
+	SDKError,
+	SessionExpiredError,
+	TransportError,
+	ValidationError,
+} from "../errors.js";
+import { HandleError } from "../handle.js";
+import {
+	PROVIDER_ERROR_SOURCES,
+	PROVIDER_FAILURE_CATEGORIES,
+	type ProviderFailureCategory,
+} from "../observability.js";
+import { isPerThrowOptionsRetiredError } from "../sdk-error-contract.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
@@ -399,7 +415,9 @@ describe("defineOperation errors", () => {
 
 type Served = {
 	status: number;
-	body: { error: { code: string; retryable: boolean; source: string; message: string } };
+	body: {
+		error: { code: string; retryable: boolean; source: string; message: string; fix?: string };
+	};
 	header: { origin: string; category: string; retryable: boolean; taxonomyVersion: string };
 	events: ProviderServerLogEvent[];
 };
@@ -521,119 +539,124 @@ describe("serving a factory-made error", () => {
 			retryable: false,
 		});
 	});
-
-	it("never logs the deprecated-options warning for a factory-made error", async () => {
-		const served = await serve(() => errors.SHOP_CLOSED());
-
-		expect(served.events.map((event) => event.event)).not.toContain(
-			"provider_error_options_deprecated",
-		);
-	});
 });
 
-describe("serving a legacy throw against a declaration", () => {
-	it("keeps the per-throw retryable winning over the declaration, and warns once per code with both values", async () => {
-		// A table row that says retryable: true (the fleet's UPSTREAM_ERROR
-		// consensus) under a throw that says false for a deterministic refusal:
-		// the server always served the throw site's value, and a bump keeps it.
-		const legacyErrorCodes = [
-			{
-				code: "UPSTREAM_ERROR",
-				status: 502,
-				description: "Upstream HTTP failure.",
-				retryable: true,
-			},
-		];
-		const throwIt = () =>
-			new ProviderError("TableCheck rejected the cancellation request.", {
-				code: "UPSTREAM_ERROR",
-				category: "upstream_http",
-				retryable: false,
-			});
-		const first = await serve(throwIt, { errorCodes: legacyErrorCodes });
-		const second = await serve(throwIt, { errorCodes: legacyErrorCodes });
+describe("per-throw category / retryable options are refused", () => {
+	function construct(options: Record<string, unknown>): unknown {
+		try {
+			// test-invalid: the options were removed from the type; the runtime refusal is under test.
+			new ProviderError("TableCheck rejected the cancellation request.", options as never);
+		} catch (error) {
+			return error;
+		}
+		return undefined;
+	}
 
-		expect(first.status).toBe(502);
-		expect(first.header).toMatchObject({ category: "upstream_http", retryable: false });
-		expect(first.body.error.retryable).toBe(false);
-		const warnings = [...first.events, ...second.events].filter(
-			(event) => event.event === "provider_error_options_deprecated",
+	it("throws an SDK-issued platform fault at construction that names the code and the options", () => {
+		const error = construct({
+			code: "UPSTREAM_ERROR",
+			category: "upstream_http",
+			retryable: false,
+		});
+		expect(error).toBeInstanceOf(SDKError);
+		expect(error).not.toBeInstanceOf(ValidationError);
+		const refusal = error as SDKError;
+		expect(refusal.code).toBe("PER_THROW_ERROR_OPTIONS_RETIRED");
+		expect(refusal.message).toContain(
+			'new ProviderError(..., { code: "UPSTREAM_ERROR", category, retryable }) sets category and retryable per throw',
 		);
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]).toMatchObject({
-			level: "warn",
+		expect(refusal.details).toEqual({
 			code: "UPSTREAM_ERROR",
 			options: ["category", "retryable"],
-			conflicts: [{ option: "retryable", thrown: false, declared: true }],
-			fix: expect.stringContaining("Declare a distinct code for the non-retryable condition"),
 		});
+		// The author guidance is not on the error: it reaches the failure log, not
+		// the caller's response body.
+		expect(refusal.fix).toBeUndefined();
+		// The fault travels on the error itself, so another SDK copy's server
+		// can read it (serve-cross-copy-refusal.test.ts serves that case).
+		expect(isPerThrowOptionsRetiredError(refusal)).toBe(true);
+		expect(isPerThrowOptionsRetiredError(new SDKError("plain", { code: "X" }))).toBe(false);
 	});
 
-	it("serves the declared retryable: false for a legacy throw that agrees with it, and warns without a conflict", async () => {
-		// The buyee shape: the row says false and the helper's throw says false.
+	it("refuses either option alone, on every provider-facing class, and names the missing code as CODE", () => {
+		expect((construct({ code: "SHOP_CLOSED", retryable: true }) as SDKError).details).toEqual({
+			code: "SHOP_CLOSED",
+			options: ["retryable"],
+		});
+		expect((construct({ category: "upstream_http" }) as SDKError).message).toContain(
+			'{ code: "CODE", category }',
+		);
+		// test-invalid: the options were removed from the type.
+		expect(() => new AuthError("refused", { code: "LOGIN", retryable: false } as never)).toThrow(
+			SDKError,
+		);
+		// test-invalid: the options were removed from the type.
+		expect(
+			() =>
+				new ValidationError("bad", { code: "BAD_INPUT", category: "input_validation" } as never),
+		).toThrow(SDKError);
+	});
+
+	it("accepts an option that is present but undefined, the shape a conditional spread leaves", () => {
+		expect(
+			construct({ code: "SHOP_CLOSED", category: undefined, retryable: undefined }),
+		).toBeUndefined();
+	});
+
+	it("serves the refusal as a platform fault the SDK detected, not as the caller's input failure", async () => {
 		const served = await serve(
 			() =>
-				new ProviderError("Buyee returned HTTP 404.", { code: "UPSTREAM_ERROR", retryable: false }),
-			{
-				errorCodes: [
+				new ProviderError(
+					"TableCheck rejected the cancellation request.",
 					{
-						code: "UPSTREAM_ERROR",
-						status: 502,
-						description: "Buyee returned a non-retryable upstream HTTP failure.",
+						code: "UPSTREAM_SCHEMA_ERROR",
+						category: "upstream_http",
 						retryable: false,
-					},
-				],
-			},
+					} as never /* test-invalid: removed options; the refusal is under test */,
+				),
+			{ errors: [errors.UPSTREAM_SCHEMA_ERROR] },
 		);
 
-		expect(served.status).toBe(502);
-		expect(served.header).toMatchObject({ category: "upstream_http", retryable: false });
-		expect(served.body.error.retryable).toBe(false);
-		const warning = served.events.find(
-			(event) => event.event === "provider_error_options_deprecated",
-		);
-		expect(warning).toMatchObject({ options: ["retryable"] });
-		expect(warning).not.toHaveProperty("conflicts");
-		expect(warning).toMatchObject({
-			fix: expect.stringContaining(
-				"defineErrors({ UPSTREAM_ERROR: { status, category, description } })",
-			),
+		// The declared code, its 502 and the per-throw words never reach the
+		// caller: the SDK refused the construction, and that is its own fault to
+		// report, like OUTPUT_VALIDATION_FAILED.
+		expect(served.status).toBe(500);
+		expect(served.body.error).toMatchObject({
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			source: "apifuse",
+			retryable: false,
 		});
+		expect(served.body.error.fix).toBeUndefined();
+		expect(served.header).toMatchObject({
+			origin: "platform",
+			category: "internal_error",
+			retryable: false,
+		});
+		const failure = served.events.find((event) => event.event === "provider_request_failed");
+		expect(failure).toMatchObject({
+			status: 500,
+			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
+			errorOrigin: "platform",
+			errorCategory: "internal_error",
+			signal: "per_throw_error_options_retired",
+		});
+		expect((failure as { signalFix?: string }).signalFix).toContain(
+			"apifuse migrate --only errors-factory",
+		);
 	});
 
-	it("serves the declared category under a per-throw platform word, and names no category conflict", async () => {
-		// A platform word is no value: serve reads the throw as setting no
-		// category, so the declaration's is served, and the warning does not
-		// claim the thrown word is.
+	it("leaves SDK-constructed errors their own contract (an SDK transport failure is not a provider code)", async () => {
 		const served = await serve(
 			() =>
-				new ProviderError("closed", {
-					code: "SHOP_CLOSED",
-					category:
-						"internal_error" as never /* test-invalid: the type rejects a platform word; the runtime reading is under test */,
+				new TransportError("upstream closed the socket", {
+					code: "transport_network_error",
+					status: 0,
+					category: "upstream_http",
+					retryable: true,
 				}),
-			{ errors: [errors.SHOP_CLOSED] },
 		);
 
-		expect(served.status).toBe(502);
-		expect(served.header).toMatchObject({ origin: "provider", category: "upstream_http" });
-		const warning = served.events.find(
-			(event) => event.event === "provider_error_options_deprecated",
-		);
-		expect(warning).toMatchObject({ options: ["category"] });
-		expect(warning).not.toHaveProperty("conflicts");
-		expect(served.events.find((event) => event.event === "provider_request_failed")).toMatchObject({
-			signal: "unknown_provider_error_category",
-		});
-	});
-
-	it("honors a per-throw retryable when nothing declares the code", async () => {
-		const served = await serve(
-			() => new ProviderError("gone", { code: "SOMETHING_ELSE", retryable: true }),
-		);
-
-		expect(served.status).toBe(500);
-		expect(served.header.retryable).toBe(true);
+		expect(served.header).toMatchObject({ category: "upstream_http", retryable: true });
 	});
 
 	it("resolves a hand-thrown code from the listed defineErrors declaration", async () => {
@@ -643,5 +666,100 @@ describe("serving a legacy throw against a declaration", () => {
 
 		expect(served.status).toBe(502);
 		expect(served.header).toMatchObject({ category: "upstream_http", retryable: false });
+	});
+});
+
+describe("an SDK-contract error a provider built with a category outside the provider-failure domain", () => {
+	// A provider can hand TransportError, SessionExpiredError, HandleError and
+	// ProviderSecretError a category through a cast or from JavaScript. A
+	// platform word or an unknown word there is no value: the failure is
+	// classified as if none were set, served under origin provider with a
+	// provider-failure category and a source, and the failure log names it.
+	const rows: ReadonlyArray<{
+		readonly name: string;
+		readonly word: string;
+		readonly create: () => Error;
+		readonly derived?: ProviderFailureCategory;
+	}> = [
+		{
+			name: "TransportError with a platform word",
+			word: "internal_error",
+			derived: "network",
+			create: () =>
+				new TransportError("upstream closed the socket", {
+					code: "transport_network_error",
+					status: 0,
+					category: "internal_error" as never /* test-invalid: outside the domain */,
+					retryable: true,
+				}),
+		},
+		{
+			name: "TransportError with an unknown word",
+			word: "not_a_category",
+			derived: "network",
+			create: () =>
+				new TransportError("upstream closed the socket", {
+					code: "transport_network_error",
+					status: 0,
+					category: "not_a_category" as never /* test-invalid: outside the domain */,
+				}),
+		},
+		{
+			name: "SessionExpiredError with a platform word",
+			word: "proxy_pool",
+			derived: "credential_expired",
+			create: () =>
+				new SessionExpiredError("expired", {
+					category: "proxy_pool" as never /* test-invalid: outside the domain */,
+				}),
+		},
+		{
+			name: "HandleError with a platform word",
+			word: "client_cancelled",
+			create: () =>
+				new HandleError("HANDLE_EXPIRED", "handle expired", {
+					category: "client_cancelled" as never /* test-invalid: outside the domain */,
+				}),
+		},
+		{
+			name: "ProviderSecretError with a platform word",
+			word: "dependency_unavailable",
+			create: () =>
+				new ProviderSecretError("secret unreadable", {
+					category: "dependency_unavailable" as never /* test-invalid: outside the domain */,
+				}),
+		},
+	];
+
+	for (const row of rows) {
+		it(`never serves ${row.name} under origin provider with that word`, async () => {
+			const served = await serve(row.create);
+
+			expect(served.header.origin).toBe("provider");
+			expect(served.header.category).not.toBe(row.word);
+			expect(PROVIDER_FAILURE_CATEGORIES as readonly string[]).toContain(served.header.category);
+			if (row.derived) expect(served.header.category).toBe(row.derived);
+			expect(PROVIDER_ERROR_SOURCES as readonly string[]).toContain(served.body.error.source);
+			expect(
+				served.events.find((event) => event.event === "provider_request_failed"),
+			).toMatchObject({
+				errorOrigin: "provider",
+				errorCategory: served.header.category,
+				signal: "unknown_provider_error_category",
+			});
+		});
+	}
+
+	it("keeps an in-domain contract word as served", async () => {
+		const served = await serve(
+			() =>
+				new SessionExpiredError("expired", {
+					category: "credential_unavailable",
+				}),
+		);
+		expect(served.header).toMatchObject({ origin: "provider", category: "credential_unavailable" });
+		expect(
+			served.events.find((event) => event.event === "provider_request_failed"),
+		).not.toHaveProperty("signal");
 	});
 });

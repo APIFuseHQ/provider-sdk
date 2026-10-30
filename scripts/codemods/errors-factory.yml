@@ -699,9 +699,10 @@ transform:
 ---
 # Residue, not a rewrite: a throw site of a registered code whose per-throw
 # retryable or category contradicts the SDK registry. Rule 1 leaves the site
-# as it is (the legacy options keep winning one more release), because the
-# factory form carries no per-throw option and would serve the registry's
-# value; the author chooses.
+# as it is because the factory form carries no per-throw option and would
+# serve the registry's value; the author chooses. Left as written, the site is
+# refused at run time: new ProviderError(...) throws
+# PER_THROW_ERROR_OPTIONS_RETIRED (served as a 500 platform fault).
 id: errors-factory-throw-site-registry-conflict
 language: typescript
 severity: warning

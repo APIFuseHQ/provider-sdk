@@ -7,6 +7,7 @@ import {
 	type ProxyUserAgentSource,
 } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import type {
 	ChallengeSolution,
@@ -248,10 +249,7 @@ function createResolverBudget(remainingMs: number): {
 		controller.abort(new ResolverBudgetExceededError());
 		return { signal: controller.signal, release() {} };
 	}
-	const timer = setTimeout(
-		() => controller.abort(new ResolverBudgetExceededError()),
-		remainingMs,
-	);
+	const timer = setTimeout(() => controller.abort(new ResolverBudgetExceededError()), remainingMs);
 	return { signal: controller.signal, release: () => clearTimeout(timer) };
 }
 
@@ -511,19 +509,22 @@ function throwExhausted(
 	const hasMissingChallengeInput = attempts.some(
 		(attempt) => attempt.reason === "missing_challenge_input",
 	);
-	throw new ProviderError("The challenge could not be resolved.", {
-		code: "RESOLVER_CHAIN_EXHAUSTED",
-		fix: hasMissingChallengeInput
-			? "Capture all required challenge fields and retry the request."
-			: "Retry the request or contact support if the challenge continues.",
-		retryable: false,
-		details: {
-			challengeKind,
-			attempts: executedAttemptCount,
-			outcome: "exhausted",
+	throw new ProviderError(
+		"The challenge could not be resolved.",
+		sdkErrorOptions({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			fix: hasMissingChallengeInput
+				? "Capture all required challenge fields and retry the request."
+				: "Retry the request or contact support if the challenge continues.",
 			retryable: false,
-		},
-	});
+			details: {
+				challengeKind,
+				attempts: executedAttemptCount,
+				outcome: "exhausted",
+				retryable: false,
+			},
+		}),
+	);
 }
 
 function assertClientProfileTransportContract(
@@ -877,10 +878,7 @@ function isCachedResolverSolution(value: unknown): value is CachedResolverSoluti
 		if (candidate.solution.form === "token") {
 			return typeof candidate.solution.token === "string" && candidate.solution.token.length > 0;
 		}
-		if (
-			candidate.solution.form !== "cookies" ||
-			typeof candidate.solution.userAgent !== "string"
-		) {
+		if (candidate.solution.form !== "cookies" || typeof candidate.solution.userAgent !== "string") {
 			return false;
 		}
 
@@ -1620,7 +1618,9 @@ function createResolverChainClient(options: {
 					}
 					let solution: ChallengeSolution;
 					try {
-						solution = detachable ? await raceWithSignal(settled, callerFacingSignal) : await settled;
+						solution = detachable
+							? await raceWithSignal(settled, callerFacingSignal)
+							: await settled;
 					} catch (error) {
 						if (detachable && callerFacingSignal.aborted && !attemptSettled) {
 							const detachedVendor = adapter.id;
@@ -1652,7 +1652,9 @@ function createResolverChainClient(options: {
 								outcome: "error",
 								ms: now() - attemptStartedAt,
 								errorClass,
-								...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
+								...(diagnostics.pollCount === undefined
+									? {}
+									: { pollCount: diagnostics.pollCount }),
 							});
 							signal.throwIfAborted();
 							attempts.push({ vendor: adapter.id, reason: "budget_exceeded" });
@@ -1673,7 +1675,9 @@ function createResolverChainClient(options: {
 								diagnostics: { attemptIndex, phase: diagnostics.phase },
 								outcome: "ok",
 								ms: now() - attemptStartedAt,
-								...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
+								...(diagnostics.pollCount === undefined
+									? {}
+									: { pollCount: diagnostics.pollCount }),
 							});
 							throw error;
 						}

@@ -6,6 +6,7 @@ import {
 	StealthCookieStoreVersionError,
 	TransportError,
 } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import {
 	REDACTED_QUERY_VALUE,
 	redactSensitiveError,
@@ -156,12 +157,17 @@ describe("sensitive request diagnostics", () => {
 			status: 500,
 			upstreamStatus: 500,
 		});
-		const providerError = new ProviderError("redirect failed", {
-			code: requestUrl,
-			// @ts-expect-error test-invalid: preserves a legacy category value for redaction coverage
-			category: "upstream",
-			retryable: false,
-		});
+		// SDK-constructed options are the only ones that still carry a category;
+		// the redactor must scrub classification fields there too.
+		const providerError = new ProviderError(
+			"redirect failed",
+			sdkErrorOptions({
+				code: requestUrl,
+				// @ts-expect-error test-invalid: preserves a legacy category value for redaction coverage
+				category: "upstream",
+				retryable: false,
+			}),
+		);
 		const shortSecretError = Object.assign(new Error("short"), {
 			code: "prefixapisuffix",
 		});

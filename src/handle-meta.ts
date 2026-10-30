@@ -23,18 +23,6 @@ export type HandleIssuedBy = string | readonly string[];
 export type HandleFieldDirection = "input" | "output";
 
 /**
- * Direction-specific property keys for one handle kind, for the operations
- * whose caller-facing contract names the same handle differently coming in and
- * going out (the platform canon's `cursor` in, `next_cursor` out). The two keys
- * are two spellings of ONE handle: the value a caller reads from `output` is
- * the value it must send back under `input`, unedited.
- */
-export interface HandleFieldNames {
-	readonly input: string;
-	readonly output: string;
-}
-
-/**
  * Value stored under {@link APIFUSE_HANDLE_META_KEY} on a handle field.
  *
  * `fieldName` is the INPUT property key — the name a caller sends the handle

@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -145,13 +145,9 @@ describe("proxy policy: operation scope and nodemaven options (contract)", () =>
 		).not.toThrow();
 	});
 
-	it("accepts the retired session.poolSize next to the live session fields for one release", () => {
-		// The pool is gone (each attempt is its own vendor session). A pin bump
-		// must still load the declaration: the field is kept, warned about once at
-		// defineProvider, and never read by the runtime.
-		const warn = spyOn(console, "warn").mockImplementation(() => {});
-		try {
-			const provider = defineProvider({
+	it("refuses the retired session.poolSize before the unknown-field check, with the codemod", () => {
+		expect(() =>
+			defineProvider({
 				...baseConfig,
 				id: "pool-size-with-session-fields",
 				proxy: {
@@ -163,29 +159,15 @@ describe("proxy policy: operation scope and nodemaven options (contract)", () =>
 						lifetimeMinutes: 120,
 						poolSize: 6,
 						drainLeadSeconds: 120,
-					},
+					} as never /* test-invalid: the field was removed from the type; the runtime refusal is under test */,
 				},
-			});
-			const proxy = provider.proxy;
-			if (!proxy || typeof proxy === "boolean") throw new Error("expected a proxy policy");
-			expect(proxy.session).toEqual({
-				affinity: "connection",
-				lifetimeMinutes: 120,
-				poolSize: 6,
-				drainLeadSeconds: 120,
-			});
-			expect(
-				warn.mock.calls.filter(
-					(call) =>
-						typeof call[0] === "string" &&
-						call[0].includes(
-							'Provider "pool-size-with-session-fields" declares proxy.session.poolSize (6)',
-						),
-				),
-			).toHaveLength(1);
-		} finally {
-			warn.mockRestore();
-		}
+			}),
+		).toThrow(
+			expect.objectContaining({
+				code: "PROXY_POOL_SIZE_RETIRED",
+				fix: expect.stringContaining("apifuse migrate --only declaration"),
+			}),
+		);
 	});
 });
 

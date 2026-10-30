@@ -14,6 +14,7 @@ import {
 	TransportError,
 	ValidationError,
 } from "../errors.js";
+import { sdkErrorOptions } from "../sdk-error-contract.js";
 import { NativeNetworkError } from "../runtime/native-network.js";
 import { createProxyEdgeAuthRejectedError } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
@@ -128,7 +129,6 @@ function createLocalFetchDouble(
 
 const ProbeCursor = defineCursor({
 	name: "probe",
-	fieldName: "token",
 	schema: z.object({ value: z.string() }),
 	ttl: "10m",
 	maxValueBytes: 10_000,
@@ -4231,22 +4231,6 @@ describe("operation-declared error resolution", () => {
 				retryable: true,
 			},
 			{
-				// The deprecated per-throw option keeps the order the server always
-				// had: a deterministic refusal thrown retryable: false stays
-				// non-retryable under a declaration that says true.
-				name: "the deprecated per-throw retryable beats the declaration",
-				entry: {
-					code: "INSTANCE_POLICY",
-					status: 502,
-					description: "The declaration says retryable; this throw is a refusal",
-					retryable: true,
-				},
-				createError: () =>
-					new ProviderError("Do not retry", { code: "INSTANCE_POLICY", retryable: false }),
-				status: 502,
-				retryable: false,
-			},
-			{
 				name: "the declaration answers a throw that sets no per-throw retryable",
 				entry: {
 					code: "DECLARED_POLICY",
@@ -4259,14 +4243,13 @@ describe("operation-declared error resolution", () => {
 				retryable: false,
 			},
 			{
-				name: "per-throw retryable fills a silent declaration",
+				name: "a silent declaration leaves the non-retryable default",
 				entry: {
 					code: "SILENT_POLICY",
 					status: 502,
 					description: "The declaration says nothing about retries",
 				},
-				createError: () =>
-					new ProviderError("Do not retry", { code: "SILENT_POLICY", retryable: false }),
+				createError: () => new ProviderError("Do not retry", { code: "SILENT_POLICY" }),
 				status: 502,
 				retryable: false,
 			},
@@ -4400,7 +4383,7 @@ describe("operation-declared error resolution", () => {
 				code: "reauth_required",
 			},
 			{
-				name: "output validation failure",
+				name: "output validation failure (the SDK's own construction)",
 				entry: {
 					code: "OUTPUT_VALIDATION_FAILED",
 					status: 400,
@@ -4410,10 +4393,13 @@ describe("operation-declared error resolution", () => {
 				// a platform fault, not a provider-thrown look-alike.
 				createError: () =>
 					issueSdkError(
-						new ValidationError("Operation handler output failed schema validation.", {
-							code: "OUTPUT_VALIDATION_FAILED",
-							retryable: false,
-						}),
+						new ValidationError(
+							"Operation handler output failed schema validation.",
+							sdkErrorOptions({
+								code: "OUTPUT_VALIDATION_FAILED",
+								retryable: false,
+							}),
+						),
 						{
 							category: "output_validation",
 							code: "OUTPUT_VALIDATION_FAILED",
@@ -4477,19 +4463,25 @@ describe("operation-declared error resolution", () => {
 				category: "provider_error",
 			},
 			{
-				name: "instance-explicit output failure",
+				// A provider ValidationError that states its own category is refused
+				// at construction; the served envelope is the refusal, a platform fault
+				// the SDK detected, not the stated category and not the caller's input.
+				name: "instance-explicit output failure is refused",
 				entry: {
 					code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
 					status: 502,
 					description: "Output was invalid",
 				},
 				createError: () =>
-					new ValidationError("Output was invalid", {
-						code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
-						category: "upstream_schema_drift",
-					}),
-				status: 502,
-				category: "upstream_schema_drift",
+					new ValidationError(
+						"Output was invalid",
+						{
+							code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
+							category: "upstream_schema_drift",
+						} as never /* test-invalid: the option was removed from the type */,
+					),
+				status: 500,
+				category: "internal_error",
 			},
 			{
 				name: "undeclared input failure",
