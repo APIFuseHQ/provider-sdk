@@ -1,0 +1,21 @@
+import { ProviderError, defineErrors, defineOperation } from "@apifuse/provider-sdk/provider";
+import type { ProviderContext } from "../index";
+const SEARCH_ERRORS = defineErrors({
+	QUERY_REJECTED: { status: 400, category: "provider_error", retryable: false, description: "The query was rejected." },
+});
+
+const BLOCKED_ERRORS = defineErrors({
+	QUERY_BLOCKED: { status: 403, category: "anti_bot_blocked", retryable: false, description: "The query was blocked." },
+});
+
+const blockedLabel = "blocked";
+export { blockedLabel as BLOCKED_ERRORS };
+
+export const searchOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.search.description",
+	errors: [...Object.values(SEARCH_ERRORS), ...Object.values(BLOCKED_ERRORS)],
+	handler: async (input, ctx) => {
+		if (input.query === "other") throw new ProviderError("Other.", { code: "OTHER_THING", category: "upstream_http", retryable: false });
+		return ctx.fetch(input.query);
+	},
+});

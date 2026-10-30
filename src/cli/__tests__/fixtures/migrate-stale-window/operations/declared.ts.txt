@@ -1,0 +1,15 @@
+import type { ProviderContext } from "../index";
+import { STALE_IF_ERROR_MS, readRows } from "../upstream/rows";
+
+export const declaredOperations = {
+	same: {
+		descriptionKey: "operations.same.description",
+		cache: { staleIfErrorMs: STALE_IF_ERROR_MS },
+		handler: async (ctx: ProviderContext) => readRows(ctx),
+	},
+	other: {
+		descriptionKey: "operations.other.description",
+		cache: { staleIfErrorMs: 1_000 },
+		handler: async (ctx: ProviderContext) => readRows(ctx),
+	},
+};

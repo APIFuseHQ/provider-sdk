@@ -1,0 +1,16 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+
+export const alphaOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.alpha.description",
+	handler: async (ctx, input) => {
+		const page = await ctx.cache.getOrSet(
+			`alpha:${input.id}`,
+			async () => fetchPage(input.id),
+			{ ttlMs: 60_000, staleIfErrorMs: 300_000, jitterPct: 0.1 },
+		);
+		await ctx.cache.set("alpha:last", page, { staleIfErrorMs: 300_000 });
+		return page;
+	},
+});

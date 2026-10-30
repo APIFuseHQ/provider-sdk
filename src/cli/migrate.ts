@@ -2,19 +2,27 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
+import { hoistInlineErrorRows } from "./migrate-errors-hoist.js";
+import type { SourceStepResult } from "./migrate-source.js";
+import { moveStaleWindowToOperations } from "./migrate-stale-window.js";
+
 /**
- * `apifuse migrate`: the one provider-facing entry point for the ast-grep
- * codemods under `scripts/codemods/`. Each YAML is the single source of its
- * rewrite and of the step it leaves to the author (its header). This module
- * only orders them, runs them against a provider checkout, and turns the
- * ast-grep findings into one summary: files changed per codemod, and the
- * residues (a finding without a fix, or a fix that did not apply) with
- * file:line and the message the rule carries.
+ * `apifuse migrate`: the one provider-facing entry point for the codemods.
+ * Most are ast-grep YAML under `scripts/codemods/`, each the single source of
+ * its rewrite and of the step it leaves to the author (its header). Two are
+ * TypeScript steps (`errors-hoist`, `health-stale-window`): they create or
+ * extend a file and follow a call graph, which an ast-grep rule cannot. This
+ * module only orders them, runs them against a provider checkout, and turns
+ * the findings into one summary: files changed per codemod, and the residues
+ * (a finding without a fix, or a fix that did not apply) with file:line and
+ * the message the rule carries.
  */
 
 export type CodemodId =
+	| "errors-hoist"
 	| "errors-factory"
 	| "health-refs"
+	| "health-stale-window"
 	| "handles"
 	| "runtime-boundary-allow-comments"
 	| "schema"
@@ -22,52 +30,85 @@ export type CodemodId =
 
 export type CodemodManifest = {
 	readonly id: CodemodId;
-	readonly file: `${CodemodId}.yml`;
 	/** One line: what the author still does by hand after this codemod ran. The YAML header has the detail. */
 	readonly manualStep: string;
-};
+} & (
+	| { readonly kind: "ast-grep"; readonly file: `${CodemodId}.yml` }
+	| {
+			readonly kind: "source";
+			readonly run: (options: {
+				readonly providerRoot: string;
+				readonly dryRun: boolean;
+			}) => SourceStepResult;
+	  }
+);
 
 /**
- * Dependency order. `errors-factory` first: it turns the `errorCodes` table
- * into the `defineErrors` map that `health-refs` references as `errors.<CODE>`,
- * so a health scenario rewritten after it points at a name that exists. The
- * others touch disjoint syntax (handle options, allow comments, schema
- * descriptions) and run after so their diagnostics are reported against the
- * migrated error sites.
+ * Dependency order. `errors-factory` first: it turns every `errorCodes`
+ * table into a `defineErrors` map, rewrites throw sites to `errors.CODE`,
+ * and leaves a list with inline rows whole. `health-refs` next: it rewrites
+ * scenarios to `errors.CODE` references. `errors-hoist` after both: it
+ * moves the inline rows into the provider's one map, spreads a table only
+ * once it is a map, and resolves every `errors.CODE` the two left (the
+ * import, or the file's own map), so it has to see their rewrites.
+ * `health-stale-window` after `health-refs`: it moves the per-call window
+ * `health-refs` only reports. The others touch disjoint syntax (handle
+ * options, allow comments, schema descriptions) and run after so their
+ * diagnostics are reported against the migrated error sites.
  */
 export const CODEMODS: readonly CodemodManifest[] = [
 	{
 		id: "errors-factory",
+		kind: "ast-grep",
 		file: "errors-factory.yml",
 		manualStep:
-			'import { defineErrors, sdkErrors } from "@apifuse/provider-sdk/provider" where a table became a map; import the map where errors.X is thrown or listed; tsc names the category a provider row still lacks',
+			"a throw site named here keeps a registry conflict, a locale key or a non-literal option (errors-hoist rewrites every other throw site once it has checked the code's rows and declarations, fills the category of a converted table's rows, adds the imports and resolves errors.X)",
 	},
 	{
 		id: "health-refs",
+		kind: "ast-grep",
 		file: "health-refs.yml",
 		manualStep:
-			"declare `errors` once in the scenario module (errorRefs(<operation>ErrorCodes) or the defineErrors map); move a per-call staleIfErrorMs to defineOperation({ cache: { staleIfErrorMs } }) and delete the per-call option",
+			"declare `errors` once in the scenario module (errorRefs(<operation>ErrorCodes) or the defineErrors map)",
+	},
+	{
+		id: "errors-hoist",
+		kind: "source",
+		run: hoistInlineErrorRows,
+		manualStep:
+			"a row left in errorCodes names its reason (a registered code whose row differs from the SDK registry, a code declared two ways across operations, a non-literal value, a spread that is not a map); a throw site left as new ProviderError names what it serves that one declaration does not (a per-throw value, a code declared with two contracts, a row that departs from the registry, a code no map declares): declare a distinct code for it, or make the declarations agree; a ValidationError or SDK-owned-code site that keeps a per-throw category/retryable names the value the SDK would serve instead: delete the option or declare a distinct code; a ValidationError or AuthError site that states no category is named when the declaration this run writes replaces the default it served (declare a distinct code for it, or accept the declared one); an errorCodes this step cannot read (a call, a property access, a name that is not a map) is named and keeps every such site's options: write the rows as a literal; a map spread into a plain array (errors-hoist-map-spread-in-array) stops the provider from loading: spread Object.values(MAP) there; a map another file must import is exported by this step, or the site is named when it cannot be (an export specifier takes the name); a registered code's site waits (errors-hoist-throw-site-row-unknown) while any errorCodes rows cannot be read, since such a row may depart from the registry; a construction whose code is a variable and that sets category/retryable (errors-hoist-throw-site-dynamic-code) is rewritten by hand to the declared factories at its callers; a site whose map import would close an import cycle is named: move the map to a module that imports nothing from the site's file; an array spread into the map errors-factory makes of a table (errors-hoist-array-spread-in-map) and a map entry under a registered key with its own values (errors-hoist-sdk-entry-conflict) stop the provider from loading: write the rows as entries, or X: sdkErrors.X",
+	},
+	{
+		id: "health-stale-window",
+		kind: "source",
+		run: moveStaleWindowToOperations,
+		manualStep:
+			"a per-call staleIfErrorMs left in place names its reason (an operation reaching two windows, a call no handler reaches by name, a declaration that disagrees); declare the window on that operation and delete the option",
 	},
 	{
 		id: "handles",
+		kind: "ast-grep",
 		file: "handles.yml",
 		manualStep:
 			"refresh contract snapshots that pinned the old issuer wording; `legacy-handle-declaration` must be 0 in apifuse check",
 	},
 	{
 		id: "runtime-boundary-allow-comments",
+		kind: "ast-grep",
 		file: "runtime-boundary-allow-comments.yml",
 		manualStep:
 			"fix what the removed comment acknowledged: the build-time boundary (apifuse check) names the file:line",
 	},
 	{
 		id: "schema",
+		kind: "ast-grep",
 		file: "schema.yml",
 		manualStep:
 			'add each `schema.<name>` key with the prose the note quotes to locales/en.json (and ko.json, ja.json where present); wrap a reported non-property .describe() as describeKey(<schema>, "<key>")',
 	},
 	{
 		id: "declaration",
+		kind: "ast-grep",
 		file: "declaration.yml",
 		manualStep:
 			'add the missing `allowedHosts` / `reviewed` field, give `auth` the shape its `mode` requires, move a reported `auth.exchange` or `reviewed: "staging"` to a supported value, and delete the comment that explained a removed `proxy.session.poolSize`',
@@ -127,6 +168,27 @@ export type MigrateOptions = {
 export const AST_GREP_PREREQUISITE =
 	"apifuse migrate needs the ast-grep binary: `bun add -d @ast-grep/cli` in the provider (resolved from node_modules/.bin), or install ast-grep on PATH.";
 
+// A TypeScript step reports every site it leaves with the reason; the YAML
+// diagnostic for the same site (written before the step existed) would name
+// it a second time with a generic note, so it is dropped when both run.
+const SUPERSEDED_RULES: ReadonlyMap<
+	CodemodId,
+	{ readonly by: CodemodId; readonly ruleIds: readonly string[] }
+> = new Map([
+	[
+		"errors-factory",
+		{
+			by: "errors-hoist",
+			ruleIds: [
+				"errors-factory-inline-row-hoist",
+				"errors-factory-entry-not-a-row",
+				"errors-factory-throw-site-option",
+			],
+		},
+	],
+	["health-refs", { by: "health-stale-window", ruleIds: ["health-stale-window-per-call"] }],
+]);
+
 /**
  * The provider's own install first (`bun add -d @ast-grep/cli`), then the SDK
  * checkout's (a developer running the SDK repo), then PATH. Undefined when none.
@@ -149,13 +211,32 @@ export async function runMigrate(options: MigrateOptions): Promise<MigrateReport
 		throw new Error(AST_GREP_PREREQUISITE);
 	}
 
+	// errors-factory and errors-hoist are one unit: the first turns a table
+	// into a map, the second rewrites the list that spreads it; either alone
+	// leaves a provider that does not load.
+	const requested = new Set(options.only ?? []);
+	if (requested.has("errors-factory") || requested.has("errors-hoist")) {
+		requested.add("errors-factory");
+		requested.add("errors-hoist");
+	}
 	const selected =
-		options.only === undefined
-			? CODEMODS
-			: CODEMODS.filter((codemod) => options.only?.includes(codemod.id));
+		options.only === undefined ? CODEMODS : CODEMODS.filter((codemod) => requested.has(codemod.id));
 
+	const selectedIds = new Set(selected.map((codemod) => codemod.id));
 	const codemods: CodemodResult[] = [];
 	for (const codemod of selected) {
+		if (codemod.kind === "source") {
+			const result = codemod.run({ providerRoot, dryRun: options.dryRun });
+			codemods.push({
+				id: codemod.id,
+				manualStep: codemod.manualStep,
+				filesChanged: result.filesChanged,
+				rewrites: result.rewrites,
+				notes: result.notes.map((note) => ({ codemod: codemod.id, ...note })),
+				residues: result.residues.map((residue) => ({ codemod: codemod.id, ...residue })),
+			});
+			continue;
+		}
 		const ruleFile = join(CODEMODS_DIR, codemod.file);
 		const before = await scan(astGrep, providerRoot, ruleFile);
 		const fixable = before.filter((finding) => finding.replacement !== undefined);
@@ -181,6 +262,10 @@ export async function runMigrate(options: MigrateOptions): Promise<MigrateReport
 			];
 		}
 
+		const superseded = SUPERSEDED_RULES.get(codemod.id);
+		if (superseded !== undefined && selectedIds.has(superseded.by)) {
+			residues = residues.filter((residue) => !superseded.ruleIds.includes(residue.ruleId));
+		}
 		codemods.push({
 			id: codemod.id,
 			manualStep: codemod.manualStep,
@@ -267,7 +352,23 @@ type AstGrepFinding = {
 	readonly replacement?: string;
 };
 
-const SCAN_GLOBS = ["--globs", "!node_modules/**", "--globs", "!dist/**", "--globs", "!.git/**"];
+// Tests pin behaviour and build their own fixtures (a case array whose rows
+// nest { code, status } is not an error table); the author updates them
+// against the migrated source.
+const SCAN_GLOBS = [
+	"--globs",
+	"!node_modules/**",
+	"--globs",
+	"!dist/**",
+	"--globs",
+	"!.git/**",
+	"--globs",
+	"!**/__tests__/**",
+	"--globs",
+	"!**/*.test.ts",
+	"--globs",
+	"!**/*.spec.ts",
+];
 
 async function scan(
 	astGrep: string,

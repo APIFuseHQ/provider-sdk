@@ -1,0 +1,6 @@
+export const OTP_CASES = [
+	{
+		page: { html: "<title>Service unavailable</title>", status: 503 },
+		expected: { name: "TransportError", code: "upstream_http_error", status: 503 },
+	},
+] as const;

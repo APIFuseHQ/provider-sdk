@@ -1,0 +1,5 @@
+import { defineErrors } from "@apifuse/provider-sdk/provider";
+
+export const OTHER_ERRORS = defineErrors({
+	OTHER_THING: { status: 502, category: "upstream_http", retryable: false, description: "Other." },
+});

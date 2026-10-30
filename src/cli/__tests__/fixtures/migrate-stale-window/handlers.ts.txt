@@ -1,0 +1,8 @@
+import type { ProviderContext } from "./index";
+
+const DELTA_STALE_MS = 42_000;
+
+export const handlers = {
+	delta: async (ctx: ProviderContext) =>
+		(await ctx.cache.getOrSet("delta", async () => load(), { ttlMs: 1_000, staleIfErrorMs: DELTA_STALE_MS })).value,
+};

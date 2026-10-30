@@ -1,0 +1,9 @@
+export const NAMED_GONE = {
+	code: "NAMED_GONE",
+	status: 410,
+	description: "Referenced by name from another file.",
+	retryable: false,
+};
+export const NAMED_UPSTREAM = { code: "UPSTREAM_ERROR", status: 502, description: "By name.", retryable: true };
+export const NOT_A_ROW = "x";
+export const SESSION_EXPIRED_ROW = { code: "reauth_required", status: 401, description: "Served by the SDK itself." };

@@ -1,0 +1,10 @@
+import { ProviderError } from "@apifuse/provider-sdk/provider";
+
+export function parcelLost(parcelId: string): never {
+	throw new ProviderError("The parcel was lost.", {
+		code: "PARCEL_LOST",
+		category: "upstream_http",
+		retryable: false,
+		details: { parcelId },
+	});
+}

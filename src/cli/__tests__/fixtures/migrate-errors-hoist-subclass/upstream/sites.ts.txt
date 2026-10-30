@@ -1,0 +1,66 @@
+import { ProviderError, ValidationError } from "@apifuse/provider-sdk/provider";
+
+export function shopDown(): never {
+	throw new ProviderError("The shop is down.", { code: "SHOP_DOWN", category: "upstream_http" });
+}
+
+export function shopDownInput(detail: string): never {
+	throw new ValidationError("The shop is down.", {
+		code: "SHOP_DOWN",
+		category: "upstream_http",
+		retryable: false,
+		details: { detail },
+	});
+}
+
+export function shopDownRetry(): never {
+	throw new ValidationError("The shop is down.", { code: "SHOP_DOWN", category: "upstream_http", retryable: true });
+}
+
+export function shopDownDynamic(category: "upstream_http"): never {
+	throw new ValidationError("The shop is down.", { code: "SHOP_DOWN", category });
+}
+
+export function badId(id: string): never {
+	throw new ValidationError("The id is malformed.", { code: "BAD_ID", category: "input_validation", retryable: false, details: { id } });
+}
+
+export function notFoundUpstream(): never {
+	throw new ProviderError("No item matches.", { code: "NOT_FOUND" });
+}
+
+export function notFoundInput(): never {
+	throw new ValidationError("No item matches.", { code: "NOT_FOUND", category: "upstream_http", retryable: false });
+}
+
+export function notFoundDynamic(retryable: boolean): never {
+	throw new ValidationError("No item matches.", { code: "NOT_FOUND", retryable });
+}
+
+export function mixedUpstream(): never {
+	throw new ProviderError("Thrown both ways.", { code: "MIXED_INPUT" });
+}
+
+export function mixedInput(): never {
+	throw new ValidationError("Thrown both ways.", { code: "MIXED_INPUT", retryable: false });
+}
+
+export function mixedInputBare(): never {
+	throw new ValidationError("Thrown both ways.", { code: "MIXED_INPUT" });
+}
+
+export function notFoundRetry(): never {
+	throw new ValidationError("No item matches.", { code: "NOT_FOUND", retryable: true });
+}
+
+export function secretMissing(name: string): never {
+	throw new ProviderError(`Secret ${name} missing.`, {
+		code: "MISSING_SECRET",
+		category: "credential_unavailable",
+		retryable: false,
+	});
+}
+
+export function secretMissingOdd(): never {
+	throw new ProviderError("Secret missing.", { code: "MISSING_SECRET", category: "provider_error" });
+}

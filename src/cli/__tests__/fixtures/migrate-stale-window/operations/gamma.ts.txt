@@ -1,0 +1,9 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { cachedJson, cachedCatalog } from "../upstream/client";
+
+export const gammaOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.gamma.description",
+	handler: async (ctx, input) => ({ page: await cachedJson(ctx, input.path), catalog: await cachedCatalog(ctx) }),
+});

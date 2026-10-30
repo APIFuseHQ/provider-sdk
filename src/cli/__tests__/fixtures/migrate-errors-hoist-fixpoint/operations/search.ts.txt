@@ -1,0 +1,14 @@
+import { defineErrors, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { NOL_ERRORS } from "../errors";
+
+export const READ_ERRORS = defineErrors({
+	UPSTREAM_UNAVAILABLE: { status: 503, category: "upstream_http", retryable: true, description: "Unavailable." },
+});
+
+export const searchOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.search.description",
+	errors: [...Object.values(NOL_ERRORS), ...Object.values(READ_ERRORS)],
+	handler: async (input, ctx) => ctx.fetch(input.query),
+});

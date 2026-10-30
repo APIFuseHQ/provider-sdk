@@ -1,0 +1,9 @@
+import { ProviderError } from "@apifuse/provider-sdk/provider";
+
+export function unavailable(): never {
+	throw new ProviderError("Unavailable.", { code: "UPSTREAM_UNAVAILABLE", category: "upstream_http", retryable: true });
+}
+
+export function authRejected(): never {
+	throw new ProviderError("Auth rejected.", { code: "UPSTREAM_AUTH_REJECTED", category: "upstream_auth", retryable: false });
+}

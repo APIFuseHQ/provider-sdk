@@ -2,14 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
+import { validateProviderLocaleCatalogs } from "../../i18n/catalog.js";
 import {
 	migrateOperationDeclaration,
 	migrateOperationDeclarationRepository,
 	type OperationDeclarationRefusalReason,
 	verifyOperationDeclarationRewrite,
 } from "../migrate-operation-declaration.js";
-import { validateProviderLocaleCatalogs } from "../../i18n/catalog.js";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "migrate-operation-declaration");
 

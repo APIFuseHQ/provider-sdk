@@ -1,0 +1,24 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { NAMED_GONE, NAMED_UPSTREAM, NOT_A_ROW, SESSION_EXPIRED_ROW } from "../rows";
+
+const LOCAL_ROW = { code: "LOCAL_ROW", status: 400, description: "Declared beside the operation." };
+
+export const namedOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.named.description",
+	errorCodes: [NAMED_UPSTREAM, LOCAL_ROW, NAMED_GONE, SESSION_EXPIRED_ROW],
+	handler: async (input) => fetchItem(input.itemId),
+});
+
+export const unresolvedOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.unresolved.description",
+	errorCodes: [NOT_A_ROW, { code: "BESIDE_UNRESOLVED", status: 400, description: "Beside a name that is not a row." }],
+	handler: async (input) => fetchItem(input.itemId),
+});
+
+export const unresolvedTwiceOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.unresolvedTwice.description",
+	errorCodes: [NOT_A_ROW, SESSION_EXPIRED_ROW, { code: "BESIDE_UNRESOLVED_TWICE", status: 400, description: "Same name, second list." }],
+	handler: async (input) => fetchItem(input.itemId),
+});

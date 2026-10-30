@@ -1,0 +1,10 @@
+import { ProviderError } from "@apifuse/provider-sdk/provider";
+
+import { SEARCH_ERRORS } from "../operations/search";
+
+export async function fetchPage(query: string): Promise<string> {
+	if (query === "") throw new ProviderError("No item matches.", { code: "NOT_FOUND" });
+	if (query === "x") throw new ProviderError("Unknown.", { code: "NEVER_DECLARED" });
+	if (query === "empty") throw new ProviderError("Nothing.", { code: "NO_DATA" });
+	return query;
+}

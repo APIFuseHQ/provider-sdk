@@ -1,0 +1,10 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { SEARCH_ERRORS } from "./search";
+
+export const wholeOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.whole.description",
+	errorCodes: SEARCH_ERRORS,
+	handler: async (input) => fetchItem(input.itemId),
+});

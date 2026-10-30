@@ -1,0 +1,12 @@
+import { ProviderError } from "@apifuse/provider-sdk/provider";
+
+export const BASE = "https://example.test";
+export type Page = { html: string };
+
+export function rejected(query: string): never {
+	throw new ProviderError("The query was rejected.", { code: "QUERY_REJECTED", category: "provider_error", retryable: false, details: { query } });
+}
+
+export function pageGone(): never {
+	throw new ProviderError("The page is gone.", { code: "PAGE_GONE", category: "upstream_http", retryable: false });
+}

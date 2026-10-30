@@ -1,0 +1,9 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { cachedJson } from "../upstream/client";
+
+export const betaOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.beta.description",
+	handler: async (ctx, input) => cachedJson(ctx, input.path),
+});

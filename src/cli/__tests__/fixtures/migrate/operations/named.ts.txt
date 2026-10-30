@@ -1,0 +1,10 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { GONE_ROW, UPSTREAM_ROW } from "../rows";
+
+export const namedOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.named.description",
+	errorCodes: [UPSTREAM_ROW, GONE_ROW],
+	handler: async (input) => fetchItem(input.itemId),
+});

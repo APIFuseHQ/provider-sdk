@@ -1,0 +1,11 @@
+import { defineProvider } from "@apifuse/provider-sdk/provider";
+
+import { alphaOperation } from "./operations/alpha";
+import { betaOperation } from "./operations/beta";
+import { gammaOperation } from "./operations/gamma";
+import { deltaOperation } from "./operations/delta";
+import { declaredOperations } from "./operations/declared";
+
+export default defineProvider({ id: "fixture", version: "1.0.0", runtime: "standard", cache: true })({
+	operations: { alpha: alphaOperation, beta: betaOperation, gamma: gammaOperation, delta: deltaOperation, ...declaredOperations },
+});

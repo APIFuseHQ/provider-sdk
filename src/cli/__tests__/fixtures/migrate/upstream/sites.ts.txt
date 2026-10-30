@@ -1,0 +1,89 @@
+import { ProviderError, TransportError, ValidationError } from "@apifuse/provider-sdk/provider";
+
+export function shopDown(detail: string): never {
+	throw new ProviderError("The shop is down.", {
+		code: "SHOP_DOWN",
+		category: "upstream_http",
+		retryable: false,
+		details: { detail },
+	});
+}
+
+export function shopDownAgain(): never {
+	throw new ProviderError("The shop is still down.", { code: "SHOP_DOWN", category: "upstream_http" });
+}
+
+export function shopBusy(): never {
+	throw new ProviderError("The shop is busy.", { code: "SHOP_BUSY", retryable: true });
+}
+
+export function shopBusyTransport(): never {
+	throw new TransportError("The shop did not answer.", { code: "SHOP_BUSY" });
+}
+
+export function slotGoneInput(): never {
+	throw new ProviderError("The slot is gone.", { code: "SLOT_GONE", category: "input_validation" });
+}
+
+export function slotGone(): never {
+	throw new ProviderError("The slot is gone.", { code: "SLOT_GONE", category: "upstream_rejected" });
+}
+
+export function shopSlow(): never {
+	throw new ProviderError("The shop timed out.", { code: "SHOP_SLOW", category: "timeout", retryable: false });
+}
+
+export function slotHeld(): never {
+	throw new ProviderError("The slot is held.", { code: "SLOT_HELD", category: "timeout" });
+}
+
+export function slotHeldAgain(): never {
+	throw new ProviderError("The slot is still held.", { code: "SLOT_HELD", category: "timeout" });
+}
+
+export function slotHeldBare(): never {
+	throw new ProviderError("The slot is held by someone.", { code: "SLOT_HELD" });
+}
+
+export function pageChanged(): never {
+	throw new ProviderError("The page changed.", { code: "PAGE_CHANGED" });
+}
+
+export function upstreamDown(): never {
+	throw new ProviderError("The shop answered 5xx.", { code: "UPSTREAM_ERROR" });
+}
+
+export function collect(): string[] {
+	const errors: string[] = [];
+	if (errors.length > 0) throw new ProviderError("The item was removed.", { code: "ITEM_GONE" });
+	return errors;
+}
+
+export function shopDownInput(detail: string): never {
+	throw new ValidationError("The shop is down.", {
+		code: "SHOP_DOWN",
+		category: "upstream_http",
+		retryable: false,
+		details: { detail },
+	});
+}
+
+export function shopDownRetry(): never {
+	throw new ValidationError("The shop is down.", { code: "SHOP_DOWN", category: "upstream_http", retryable: true });
+}
+
+export function secretMissing(name: string): never {
+	throw new ProviderError(`Secret ${name} missing.`, {
+		code: "MISSING_SECRET",
+		category: "credential_unavailable",
+		retryable: false,
+	});
+}
+
+export function secretMissingOdd(): never {
+	throw new ProviderError("Secret missing.", { code: "MISSING_SECRET", category: "provider_error" });
+}
+
+export function notFoundInputRow(): never {
+	throw new ValidationError("No item matches.", { code: "NOT_FOUND", category: "upstream_http", retryable: false });
+}

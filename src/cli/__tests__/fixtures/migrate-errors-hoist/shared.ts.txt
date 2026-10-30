@@ -1,0 +1,11 @@
+import { defineErrors } from "@apifuse/provider-sdk/provider";
+
+export const STATUS = 400;
+export const COMMON_ERRORS = defineErrors({
+	UPSTREAM_SCHEMA_ERROR: { status: 502, category: "upstream_schema_drift", description: "Shape drift." },
+	SHARED_ONLY: { status: 400, category: "input_validation", description: "Declared only here." },
+	CAT_WAYS: { status: 400, category: "input_validation", description: "Declared here with a category." },
+	BLOCKED: { status: 502, category: "anti_bot_blocked", retryable: true, description: "Blocked; a retry may pass." },
+});
+export const LEGACY_TABLE = [{ code: "TABLE_ROW", status: 400, description: "Still a table." }] as const;
+export const COMBINED_TABLE = [...LEGACY_TABLE, { code: "COMBINED_ROW", status: 404, description: "A table spreading a table." }] as const;

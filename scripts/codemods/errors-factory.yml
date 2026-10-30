@@ -16,126 +16,51 @@
 #     that condition (`UPSTREAM_REJECTED: sdkErrors.UPSTREAM_REJECTED` for a deterministic 4xx
 #     refusal, or a provider code with its own status/retryable) and throw it at those sites;
 #   - rows written inline in an operation's `errorCodes` that carry `status` or `description`
-#     are NOT rewritten (an `errors.X` reference could not carry them): rule 5 reports each row;
-#     hoist them into a `const T = [...] as const` table and spread it in the list, then re-run,
-#     so rule 3 turns the table into the defineErrors map and rule 2 the list into references;
+#     are NOT rewritten here (an `errors.X` reference could not carry them): `apifuse migrate`
+#     runs the `errors-hoist` step before this file, which moves them into the provider's one
+#     defineErrors map (domain/errors.ts, or the existing `export const errors`) and lists the
+#     references, so this file meets only tables and reference lists. Run standalone, rule 5
+#     reports each such row and rule 2 leaves the list whole;
 #   - a throw site whose `code` is not a string literal (`code: flag ? "A" : "B"`) is left as is.
 #
 # Rules, in order:
-#   1. throw-site          new ProviderError(msg, { code: "X", ...rest })  -> errors.X({ message: msg, ...rest })
-#                          (per-throw category/retryable are dropped: the declaration owns them;
-#                          a code that is not an identifier, e.g. "429", is reached as errors["429"])
-#   2. operation-list      errorCodes: [ { code: "X" }, ...TABLE ]          -> errors: [ errors.X, ...Object.values(TABLE) ]
-#                          (skipped while any row of the list carries status or description: rule 5)
+#   1. (moved) throw-site  a `new ProviderError(msg, { code: "X", ... })` site is rewritten to
+#                          `errors.X({ message: msg, ... })` by `apifuse migrate` (errors-hoist) only:
+#                          it reads every row and declaration of X first and rewrites the site when
+#                          exactly one contract serves what the site served (rule 10 names the site
+#                          in a standalone run; rules 6, 8 and 9 name the sites no rewrite can take)
+#   2. operation-list      errorCodes: [ { code: "X" } ]                     -> errors: [ errors.X ]
+#                          (skipped while any row of the list carries status or description: rule 5,
+#                          or any element is not a row literal, a spread included: rule 7; `apifuse
+#                          migrate` (errors-hoist) turns `...TABLE` into `...Object.values(TABLE)`
+#                          once TABLE is, or rule 3 makes it, a defineErrors map)
 #   3. declaration-table   const T = [ { code: "X", status, description, retryable }, ... ] as const
-#                          (only a table whose rows carry both code and status; a lookup table of
-#                          { code, name } rows is not an error table and is left alone)
+#                          (only a table whose own rows carry both code and status as their own keys;
+#                          a lookup table of { code, name } rows, or a test-case array whose rows nest
+#                          an { code, status } object, is not an error table and is left alone;
+#                          `apifuse migrate` never scans __tests__/** or *.test.ts)
 #                          -> const T = defineErrors({ X: sdkErrors.X | { status, description, retryable, category? } })
 #                          (a registered code becomes `sdkErrors.X` only when the row's status and
 #                          retryable equal the registry's; otherwise the row keeps its values)
-#   4. sdk-row-conflict    diagnostic only (no fix): a registered-code row whose status or retryable
-#                          differs from the registry, with the two choices
+#   4. sdk-row-conflict    diagnostic only (no fix): a registered-code row of a table whose status or
+#                          retryable differs from the registry, with the two choices (an inline
+#                          errorCodes row is the errors-hoist step's, which reports it itself)
 #   5. inline-row-hoist    diagnostic only (no fix): an errorCodes row written inline with status or
-#                          description; hoist it into a table, then re-run
-id: errors-factory-throw-site
-language: typescript
-rule:
-  pattern: new ProviderError($MSG, { $$$PROPS })
-  has:
-    pattern:
-      context: '{ code: $CODE }'
-      selector: pair
-    stopBy: end
-constraints:
-  CODE:
-    kind: string
-    regex: "^[\"'][A-Za-z_$][A-Za-z0-9_$]*[\"']$"
-rewriters:
-  - id: keep-throw-props
-    rule:
-      pattern: $PROP
-      any:
-        - kind: pair
-          not:
-            any:
-              - pattern:
-                  context: '{ code: $_ }'
-                  selector: pair
-              - pattern:
-                  context: '{ category: $_ }'
-                  selector: pair
-              - pattern:
-                  context: '{ retryable: $_ }'
-                  selector: pair
-        - kind: spread_element
-        - kind: shorthand_property_identifier
-    fix: $PROP
-transform:
-  CODE_NAME:
-    substring:
-      source: $CODE
-      startChar: 1
-      endChar: -1
-  REST:
-    rewrite:
-      source: $$$PROPS
-      rewriters: [keep-throw-props]
-      joinBy: ', '
-  INPUT:
-    replace:
-      source: $REST
-      replace: '(?s)^(.+)$'
-      by: ', $1'
-fix: 'errors.$CODE_NAME({ message: $MSG$INPUT })'
----
-# A code that is not an identifier (numeric, hyphenated) is reached by bracket
-# access; defineErrors keeps it under the same string key.
-id: errors-factory-throw-site-bracket
-language: typescript
-rule:
-  pattern: new ProviderError($MSG, { $$$PROPS })
-  has:
-    pattern:
-      context: '{ code: $CODE }'
-      selector: pair
-    stopBy: end
-constraints:
-  CODE:
-    kind: string
-    regex: "^[\"'](.*[^A-Za-z0-9_$].*|[0-9].*)[\"']$"
-rewriters:
-  - id: keep-throw-props
-    rule:
-      pattern: $PROP
-      any:
-        - kind: pair
-          not:
-            any:
-              - pattern:
-                  context: '{ code: $_ }'
-                  selector: pair
-              - pattern:
-                  context: '{ category: $_ }'
-                  selector: pair
-              - pattern:
-                  context: '{ retryable: $_ }'
-                  selector: pair
-        - kind: spread_element
-        - kind: shorthand_property_identifier
-    fix: $PROP
-transform:
-  REST:
-    rewrite:
-      source: $$$PROPS
-      rewriters: [keep-throw-props]
-      joinBy: ', '
-  INPUT:
-    replace:
-      source: $REST
-      replace: '(?s)^(.+)$'
-      by: ', $1'
-fix: 'errors[$CODE]({ message: $MSG$INPUT })'
----
+#                          description; `apifuse migrate` moves it (errors-hoist) and drops this
+#                          diagnostic when both run
+#   6. throw-site-registry-conflict  diagnostic only (no fix): a throw site of a registered code whose
+#                          per-throw retryable or category contradicts the registry; rule 1 skips it
+#   7. entry-not-a-row     diagnostic only (no fix): an errorCodes element that is not a row literal
+#                          (a spread, a row constant referenced by name); rule 2 skips the list and
+#                          `apifuse migrate` (errors-hoist) resolves the name across files
+#   9. throw-site-dynamic-option diagnostic only (no fix): a throw site whose retryable/category is a
+#                          shorthand or a variable; rule 1 skips it (the value cannot be checked)
+#  10. throw-site-option  diagnostic only (no fix): a throw site; `apifuse migrate` (errors-hoist)
+#                          rewrites or names it and drops this diagnostic
+#   8. throw-site-locale-key diagnostic only (no fix): a throw site stating messageKey/fixKey, which
+#                          the factory input cannot carry; rule 1 skips it. A throw site of a code the
+#                          SDK runtime owns (MISSING_SECRET, reauth_required, HANDLE_*, ...) is never
+#                          rewritten: no factory can exist for it and the SDK serves it as it is
 id: errors-factory-operation-list
 language: typescript
 rule:
@@ -146,17 +71,48 @@ rule:
     - pattern:
         context: '{ errorCodes: [ $$$ENTRIES ] as const }'
         selector: pair
-  # A row that still carries its contract inline cannot become a reference;
-  # the list waits until the author hoists it (rule 5 names the row).
-  not:
-    has:
-      kind: object
-      has:
-        kind: pair
+  all:
+    # A row that still carries its contract inline cannot become a reference;
+    # the list waits until errors-hoist moves it (rule 5 names the row).
+    - not:
         has:
-          field: key
-          regex: '^(status|description)$'
-      stopBy: end
+          kind: object
+          has:
+            kind: pair
+            has:
+              field: key
+              regex: '^(status|description)$'
+          stopBy: end
+    # An operation that already lists `errors` (errors-hoist left a residue
+    # row or a non-table spread in errorCodes) must not get a second key.
+    - not:
+        inside:
+          kind: object
+          has:
+            kind: pair
+            has:
+              field: key
+              regex: '^errors$'
+    # An element that is not a row literal (a spread, a row referenced by
+    # name, a call) is left to errors-hoist, which resolves the name across
+    # files and spreads a table only once it is a defineErrors map; this rule
+    # cannot see the other file, and `...Object.values(T)` over a table rule 3
+    # does not convert (rows without status) breaks the provider's load.
+    # Rule 7 reports such an element in a standalone run.
+    - not:
+        has:
+          kind: array
+          stopBy: end
+          has:
+            any:
+              - kind: spread_element
+              - kind: identifier
+              - kind: member_expression
+              - kind: subscript_expression
+              - kind: call_expression
+              - kind: ternary_expression
+              - kind: as_expression
+              - kind: parenthesized_expression
 rewriters:
   - id: entry-to-factory
     rule:
@@ -188,17 +144,11 @@ rewriters:
         kind: string
         regex: "^[\"'](.*[^A-Za-z0-9_$].*|[0-9].*)[\"']$"
     fix: errors[$CODE]
-  - id: spread-to-factories
-    rule:
-      pattern:
-        context: '[...$TABLE]'
-        selector: spread_element
-    fix: '...Object.values($TABLE)'
 transform:
   FACTORIES:
     rewrite:
-      source: $$$ENTRIES
-      rewriters: [entry-to-factory, entry-to-factory-bracket, spread-to-factories]
+      source: $$ENTRIES
+      rewriters: [entry-to-factory, entry-to-factory-bracket]
       joinBy: ', '
 fix: 'errors: [$FACTORIES]'
 ---
@@ -209,8 +159,19 @@ rule:
     - pattern: const $NAME = [ $$$ENTRIES ] as const
     - pattern: const $NAME = [ $$$ENTRIES ]
     - pattern: 'const $NAME: $TYPE = [ $$$ENTRIES ]'
+  # A row is a direct element of the declared array whose own keys include
+  # code and status; a nested object with those keys (a test case's
+  # `expected: { code, status }`) is not a row, and the file is not a table.
   has:
     kind: object
+    stopBy: end
+    inside:
+      kind: array
+      inside:
+        any:
+          - kind: variable_declarator
+          - kind: as_expression
+            inside: { kind: variable_declarator }
     all:
       - has:
           kind: pair
@@ -218,7 +179,23 @@ rule:
       - has:
           kind: pair
           has: { field: key, regex: '^status$' }
-    stopBy: end
+  # A spread that is not a plain name (`...DOCS.errorCodes`, `...rows()`) names
+  # no map this rule could know: the array's rows would land in the map object
+  # by index and defineErrors would refuse them. Such a table stays an array
+  # (errors-hoist names the spread: errors-hoist-array-spread-in-map).
+  not:
+    has:
+      stopBy: end
+      kind: spread_element
+      inside:
+        kind: array
+        inside:
+          any:
+            - kind: variable_declarator
+            - kind: as_expression
+              inside: { kind: variable_declarator }
+      not:
+        has: { kind: identifier }
 rewriters:
   - id: keep-row-fields
     rule:
@@ -526,7 +503,8 @@ fix: 'const $NAME = defineErrors({ $ROWS })'
 # status or retryable differs from the registry. The row keeps its own values
 # (rule 3 leaves it a provider-row under the registered key, which defineErrors
 # refuses at the type and at runtime), so the provider's contract is not
-# flipped by the migration; the author chooses.
+# flipped by the migration; the author chooses. An inline errorCodes row is
+# not a table row: the errors-hoist step owns it and reports the same choice.
 id: errors-factory-sdk-row-conflict
 language: typescript
 severity: warning
@@ -536,6 +514,13 @@ rule:
   kind: object
   inside:
     kind: array
+    not:
+      inside:
+        kind: pair
+        has:
+          field: key
+          regex: '^errorCodes$'
+        stopBy: end
   all:
     - has:
         pattern:
@@ -673,12 +658,14 @@ transform:
 ---
 # Residue, not a rewrite: an errorCodes row written inline with its contract.
 # A reference cannot carry status or description, so rule 2 leaves the whole
-# list alone until the row lives in a table.
+# list alone until the row lives in a map. `apifuse migrate` runs the
+# errors-hoist step first, which moves the row and reports the ones it cannot;
+# this diagnostic is for a standalone run of this file.
 id: errors-factory-inline-row-hoist
 language: typescript
 severity: warning
 message: 'Inline errorCodes row $CODE carries status or description that an errors.$CODE_NAME reference cannot; it is left in place.'
-note: 'Hoist the row into a `const T = [ ... ] as const` table (or straight into a defineErrors map), spread the table in this list (`errorCodes: [...T]`), then re-run apifuse migrate: the table becomes the defineErrors map and the list becomes references.'
+note: 'Run `apifuse migrate` (its errors-hoist step moves the row into the defineErrors map and lists errors.$CODE_NAME here), or hoist the row into a `const T = [ ... ] as const` table spread in this list and re-run this file.'
 rule:
   kind: object
   inside:
@@ -708,3 +695,508 @@ transform:
       source: $CODE
       startChar: 1
       endChar: -1
+---
+# Residue, not a rewrite: a throw site of a registered code whose per-throw
+# retryable or category contradicts the SDK registry. Rule 1 leaves the site
+# as it is (the legacy options keep winning one more release), because the
+# factory form carries no per-throw option and would serve the registry's
+# value; the author chooses.
+id: errors-factory-throw-site-registry-conflict
+language: typescript
+severity: warning
+message: 'Throw site of $CODE states a retryable or category that differs from the SDK registry (sdkErrors.$CODE_NAME); errors.$CODE_NAME(...) would serve the registry value, so the site is left as new ProviderError(...).'
+note: 'Two choices: (a) accept the registry value: delete the per-throw retryable/category and re-run apifuse migrate; or (b) declare a distinct provider code for this condition in the defineErrors map (its own status, category and retryable) and throw that factory here.'
+utils:
+  # A retryable/category written as a shorthand or a non-literal value.
+  dynamic-option:
+    any:
+      - kind: shorthand_property_identifier
+        regex: '^(retryable|category)$'
+      - kind: pair
+        all:
+          - has: { field: key, regex: '^(retryable|category)$' }
+          - has:
+              field: value
+              not:
+                any:
+                  - kind: 'true'
+                  - kind: 'false'
+                  - kind: string
+  # The options object of a throw whose per-throw retryable or category
+  # contradicts the SDK registry for a registered code: rewriting it would
+  # drop the option and flip what the site serves (rule 6 reports it).
+  registry-conflict-options:
+    kind: object
+    any:
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](NOT_FOUND|not_found|NO_DATA)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_http[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](RATE_LIMITED|UPSTREAM_RATE_LIMIT|LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^true$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_rate_limited[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_REJECTED)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_rejected[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^true$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_http[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](BLOCKED)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']anti_bot_blocked[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_SCHEMA_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_schema_drift[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_AUTH_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_auth[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](INVALID_REQUEST)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']input_validation[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](AUTH_REQUIRED)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']credential_unavailable[\"']$" } }
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+        stopBy: end
+    - has:
+        matches: registry-conflict-options
+        stopBy: end
+constraints:
+  CODE:
+    kind: string
+transform:
+  CODE_NAME:
+    substring:
+      source: $CODE
+      startChar: 1
+      endChar: -1
+---
+# Residue, not a rewrite: an errorCodes element that is neither a row literal
+# nor a spread, so rule 2 cannot turn it into a reference and leaves the list
+# whole. `apifuse migrate` (errors-hoist) resolves a row referenced by name
+# across files; anything else stays for the author.
+id: errors-factory-entry-not-a-row
+language: typescript
+severity: warning
+message: 'errorCodes element is not a row literal; the list is left whole so the declared codes are not dropped or spread from an array.'
+note: 'Run `apifuse migrate` (errors-hoist resolves a row constant by name, also from another file, and spreads a table once it is a defineErrors map), or write the rows inline, or list errors.CODE from the defineErrors map.'
+rule:
+  any:
+    - kind: spread_element
+    - kind: identifier
+    - kind: member_expression
+    - kind: subscript_expression
+    - kind: call_expression
+    - kind: ternary_expression
+    - kind: as_expression
+    - kind: parenthesized_expression
+  inside:
+    kind: array
+    inside:
+      kind: pair
+      has:
+        field: key
+        regex: '^errorCodes$'
+---
+# Residue, not a rewrite: a throw site that states a messageKey or fixKey.
+# The factory input carries neither (the declaration does), so rule 1 leaves
+# the site; the author moves the key to the defineErrors row.
+id: errors-factory-throw-site-locale-key
+language: typescript
+severity: warning
+message: 'Throw site of $CODE states a messageKey or fixKey; the factory input carries neither, so the site is left as new ProviderError(...).'
+note: 'Move the key to the code''s defineErrors declaration (messageKey / fixKey on the row) and delete it here, then re-run apifuse migrate.'
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+        stopBy: end
+    - has:
+        kind: pair
+        has: { field: key, regex: '^(messageKey|fixKey)$' }
+        stopBy: end
+constraints:
+  CODE:
+    kind: string
+---
+# Residue, not a rewrite: a throw site whose retryable or category is a
+# shorthand or a non-literal value. The declaration owns both, but a value
+# the codemod cannot read may differ from it, so the site stays.
+id: errors-factory-throw-site-dynamic-option
+language: typescript
+severity: warning
+message: 'Throw site of $CODE sets retryable or category from a variable; the declaration owns both and the value cannot be checked, so the site is left as new ProviderError(...).'
+note: 'Make the declaration carry the value (one code per retryable/category), delete the per-throw option, and re-run apifuse migrate; a condition that needs the other value is a distinct code.'
+utils:
+  dynamic-option:
+    any:
+      - kind: shorthand_property_identifier
+        regex: '^(retryable|category)$'
+      - kind: pair
+        all:
+          - has: { field: key, regex: '^(retryable|category)$' }
+          - has:
+              field: value
+              not:
+                any:
+                  - kind: 'true'
+                  - kind: 'false'
+                  - kind: string
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+        stopBy: end
+    - has:
+        matches: dynamic-option
+        stopBy: end
+constraints:
+  CODE:
+    kind: string
+---
+# Residue, not a rewrite (standalone run only): a throw site. Only `apifuse
+# migrate` (errors-hoist) rewrites one: it reads every row and declaration of
+# the code first, rewrites the site when exactly one contract serves what the
+# site served, and names the site when not. A site a registered-code or
+# locale-key or non-literal-option diagnostic names is reported there.
+id: errors-factory-throw-site-option
+language: typescript
+severity: warning
+utils:
+  # A retryable/category written as a shorthand or a non-literal value.
+  dynamic-option:
+    any:
+      - kind: shorthand_property_identifier
+        regex: '^(retryable|category)$'
+      - kind: pair
+        all:
+          - has: { field: key, regex: '^(retryable|category)$' }
+          - has:
+              field: value
+              not:
+                any:
+                  - kind: 'true'
+                  - kind: 'false'
+                  - kind: string
+  # The options object of a throw whose per-throw retryable or category
+  # contradicts the SDK registry for a registered code: rewriting it would
+  # drop the option and flip what the site serves (rule 6 reports it).
+  registry-conflict-options:
+    kind: object
+    any:
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](NOT_FOUND|not_found|NO_DATA)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_http[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](RATE_LIMITED|UPSTREAM_RATE_LIMIT|LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^true$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_rate_limited[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_REJECTED)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_rejected[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^true$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_http[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](BLOCKED)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']anti_bot_blocked[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_SCHEMA_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_schema_drift[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](UPSTREAM_AUTH_ERROR)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']upstream_auth[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](INVALID_REQUEST)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']input_validation[\"']$" } }
+      - all:
+          - has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^code$' }
+                - has: { field: value, regex: "^[\"'](AUTH_REQUIRED)[\"']$" }
+          - any:
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^retryable$' }
+                    - not: { has: { field: value, regex: '^false$' } }
+              - has:
+                  kind: pair
+                  all:
+                    - has: { field: key, regex: '^category$' }
+                    - not: { has: { field: value, regex: "^[\"']credential_unavailable[\"']$" } }
+message: 'Throw site of $CODE is rewritten by apifuse migrate (errors-hoist) once it has checked the provider''s rows and declaration; it is left as new ProviderError(...) in a standalone run.'
+note: 'Run apifuse migrate (errors-hoist rewrites the site to the factory, or names what it serves that the declaration does not).'
+rule:
+  pattern: new ProviderError($MSG, { $$$PROPS })
+  all:
+    - has:
+        pattern:
+          context: '{ code: $CODE }'
+          selector: pair
+        stopBy: end
+    - not:
+        has:
+          kind: pair
+          has: { field: key, regex: '^(messageKey|fixKey)$' }
+          stopBy: end
+    - not:
+        has:
+          matches: registry-conflict-options
+          stopBy: end
+    - not:
+        has:
+          matches: dynamic-option
+          stopBy: end
+constraints:
+  CODE:
+    kind: string

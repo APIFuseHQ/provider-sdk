@@ -1,0 +1,41 @@
+import { ProviderError, ValidationError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+
+export const listOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.list.description",
+	errorCodes: [
+		{ code: "ITEM_NOT_FOUND", status: 404, description: "No item matches the id.", retryable: false },
+		{ code: "UPSTREAM_ERROR", status: 502, description: "The shop answered 5xx.", retryable: true },
+		{ code: "NOT_FOUND", status: 404, description: "Registry row with the wrong retryable.", retryable: true },
+		{
+			code: "SHOP_CLOSED",
+			// 410: the shop was removed; a retry returns the same page.
+			status: 410 as const,
+			description: "The shop is closed.",
+		},
+		{ code: "429", status: 429, description: "Too many lists.", retryable: true },
+		{ code: "TWO_WAYS", status: 400, description: "Declared 400 here.", retryable: false },
+		{ code: "CAT_WAYS", status: 400, description: "Declared here without a category.", retryable: false },
+		{
+			code: "LOCALIZED",
+			status: 409,
+			description: "Carries locale keys.",
+			messageKey: "errors.localized.message",
+			fixKey: "errors.localized.fix",
+		},
+	],
+	handler: async (input, ctx) => {
+		if (input.id === "") {
+			throw new ProviderError("No item matches the id.", {
+				code: "ITEM_NOT_FOUND",
+				category: "upstream_http",
+			});
+		}
+		if (input.id === "two") throw new ProviderError("Two ways.", { code: "TWO_WAYS" });
+		if (input.id === "cat") throw new ProviderError("Category ways.", { code: "CAT_WAYS" });
+		if (input.id === "cat-input") throw new ValidationError("Category ways.", { code: "CAT_WAYS", retryable: false });
+		if (input.id === "bot") throw new ValidationError("Blocked.", { code: "BLOCKED", retryable: false });
+		return ctx.fetch(input.id);
+	},
+});

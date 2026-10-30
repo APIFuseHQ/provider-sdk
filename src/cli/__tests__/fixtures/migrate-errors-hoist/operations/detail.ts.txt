@@ -1,0 +1,25 @@
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { COMMON_ERRORS, LEGACY_TABLE, STATUS } from "../shared";
+
+export const detailOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.detail.description",
+	errorCodes: [
+		...COMMON_ERRORS,
+		{ code: "ITEM_NOT_FOUND", status: 404, description: "The detail page is gone.", retryable: false },
+		{ code: "TWO_WAYS", status: 404, description: "Declared 404 here.", retryable: false },
+		{ code: "DYNAMIC", status: STATUS, description: "Status from a constant." },
+	],
+	handler: async (input) => fetchItem(input.itemId),
+});
+
+export const builtOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.built.description",
+	errorCodes: [
+		...LEGACY_TABLE,
+		...buildCodes(),
+		{ code: "BUILT_ONLY", status: 404, description: "Beside a spread the step cannot read.", retryable: false },
+	],
+	handler: async (input) => fetchItem(input.itemId),
+});

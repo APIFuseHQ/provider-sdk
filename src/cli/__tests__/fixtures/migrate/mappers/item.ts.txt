@@ -1,0 +1,25 @@
+import { ProviderError } from "@apifuse/provider-sdk/provider";
+
+export function parseItem(html: string): string {
+	if (html === "") {
+		throw new ProviderError("The item was removed.", { code: "ITEM_GONE" });
+	}
+	if (html === "drift") {
+		throw new ProviderError("Shape drift.", { code: "UPSTREAM_SCHEMA_ERROR" });
+	}
+	if (html === "secret") {
+		throw new ProviderError("Service key missing.", { code: "MISSING_SECRET" });
+	}
+	if (html === "keyed") {
+		throw new ProviderError("Keyed.", { code: "ITEM_GONE", messageKey: "errors.itemGone.message" });
+	}
+	return html;
+}
+
+export function rethrow(error: ProviderError): never {
+	throw new ProviderError(error.message, { ...error.options, code: "ITEM_GONE" });
+}
+
+export function upstreamError(message: string, retryable = true): ProviderError {
+	return new ProviderError(message, { code: "UPSTREAM_ERROR", retryable });
+}

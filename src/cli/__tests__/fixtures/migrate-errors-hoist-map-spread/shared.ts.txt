@@ -1,0 +1,7 @@
+import { defineErrors } from "@apifuse/provider-sdk/provider";
+
+export const COMMON = defineErrors({
+	SHARED: { status: 400, category: "input_validation", retryable: false, description: "Shared." },
+});
+export const LEGACY_TABLE = [{ code: "TABLE_ROW", status: 400, description: "Still a table." }] as const;
+export const NOT_A_ROW = "x";

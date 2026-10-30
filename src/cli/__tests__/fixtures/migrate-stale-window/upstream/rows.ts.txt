@@ -1,0 +1,7 @@
+import type { ProviderContext } from "../index";
+
+export const STALE_IF_ERROR_MS = 90_000;
+
+export async function readRows(ctx: ProviderContext): Promise<unknown> {
+	return ctx.cache.getOrSet("rows", () => fetchRows(), { ttlMs: 1_000, staleIfErrorMs: STALE_IF_ERROR_MS });
+}
