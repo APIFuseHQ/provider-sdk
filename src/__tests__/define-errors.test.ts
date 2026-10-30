@@ -27,7 +27,7 @@ import {
 	PROVIDER_FAILURE_CATEGORIES,
 	type ProviderFailureCategory,
 } from "../observability.js";
-import { platformFaultOf } from "../sdk-issued-errors.js";
+import { isPerThrowOptionsRetiredError } from "../sdk-error-contract.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
@@ -572,12 +572,10 @@ describe("per-throw category / retryable options are refused", () => {
 		// The author guidance is not on the error: it reaches the failure log, not
 		// the caller's response body.
 		expect(refusal.fix).toBeUndefined();
-		expect(platformFaultOf(refusal)).toEqual({
-			category: "internal_error",
-			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
-			status: 500,
-			retryable: false,
-		});
+		// The fault travels on the error itself, so another SDK copy's server
+		// can read it (serve-cross-copy-refusal.test.ts serves that case).
+		expect(isPerThrowOptionsRetiredError(refusal)).toBe(true);
+		expect(isPerThrowOptionsRetiredError(new SDKError("plain", { code: "X" }))).toBe(false);
 	});
 
 	it("refuses either option alone, on every provider-facing class, and names the missing code as CODE", () => {

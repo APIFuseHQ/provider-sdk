@@ -7,8 +7,12 @@ import {
 } from "./error-brands.js";
 import type { ProviderErrorMessageParams } from "./i18n/error-messages.js";
 import type { ProviderFailureCategory } from "./observability.js";
-import { hasSdkErrorContractBrand, sdkErrorOptions } from "./sdk-error-contract.js";
-import { issueSdkError } from "./sdk-issued-errors.js";
+import {
+	brandPerThrowOptionsRetiredError,
+	hasSdkErrorContractBrand,
+	PER_THROW_ERROR_OPTIONS_RETIRED_CODE,
+	sdkErrorOptions,
+} from "./sdk-error-contract.js";
 import type { HttpRedirectFailureReason, ProviderLocaleKeyInput } from "./types.js";
 
 const SESSION_EXPIRED_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/session-expired@1");
@@ -116,7 +120,10 @@ const RETIRED_PER_THROW_OPTIONS = ["category", "retryable"] as const;
  * `OUTPUT_VALIDATION_FAILED`: a platform fault (500, source `apifuse`,
  * `retryable: false`), never the caller's input failure. The code and the
  * options it names stay on the error; the author guidance goes to the
- * failure log (`per_throw_error_options_retired` signal), not the body.
+ * failure log (`per_throw_error_options_retired` signal), not the body. The
+ * fault travels as an own brand on the error, not as a record in this
+ * module's memory: the provider's SDK copy constructs it and the serving
+ * copy may be another one.
  */
 function rejectPerThrowContractOptions(options: ProviderErrorOptions | undefined): void {
 	if (options === undefined || hasSdkErrorContractBrand(options)) return;
@@ -124,21 +131,15 @@ function rejectPerThrowContractOptions(options: ProviderErrorOptions | undefined
 	const present = RETIRED_PER_THROW_OPTIONS.filter((option) => record[option] !== undefined);
 	if (present.length === 0) return;
 	const code = typeof record.code === "string" ? record.code : "CODE";
-	throw issueSdkError(
-		new SDKError(
-			`new ProviderError(..., { code: "${code}", ${present.join(", ")} }) sets ${present.join(" and ")} per throw; these options were removed. A code's status, category and retryability come from its declaration only.`,
-			{
-				code: "PER_THROW_ERROR_OPTIONS_RETIRED",
-				details: { code, options: present },
-			},
-		),
+	const refusal = new SDKError(
+		`new ProviderError(..., { code: "${code}", ${present.join(", ")} }) sets ${present.join(" and ")} per throw; these options were removed. A code's status, category and retryability come from its declaration only.`,
 		{
-			category: "internal_error",
-			code: "PER_THROW_ERROR_OPTIONS_RETIRED",
-			status: 500,
-			retryable: false,
+			code: PER_THROW_ERROR_OPTIONS_RETIRED_CODE,
+			details: { code, options: present },
 		},
 	);
+	brandPerThrowOptionsRetiredError(refusal);
+	throw refusal;
 }
 
 /**

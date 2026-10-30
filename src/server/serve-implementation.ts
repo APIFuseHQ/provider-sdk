@@ -50,7 +50,12 @@ import {
 	type SdkErrorContract,
 	type TransportError,
 } from "../errors.js";
-import { sdkErrorContractOf, sdkErrorOptions } from "../sdk-error-contract.js";
+import {
+	isPerThrowOptionsRetiredError,
+	PER_THROW_ERROR_OPTIONS_RETIRED_FAULT,
+	sdkErrorContractOf,
+	sdkErrorOptions,
+} from "../sdk-error-contract.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
 	loadProviderLocaleCatalogs,
@@ -2050,10 +2055,10 @@ function isProviderTimeoutAbortTransportError(
 // request ZodError, not a fault the SDK issued. Its body is masked, and the
 // platform reports it as its own internal_error. Nothing the thrown value
 // carries is read for it.
-// The construction `new ProviderError` refuses (src/errors.ts): a per-throw
-// category or retryable. Recognized by the platform fault record's code, which
-// only SDK code writes, never by the error's own code.
-const PER_THROW_ERROR_OPTIONS_RETIRED_CODE = "PER_THROW_ERROR_OPTIONS_RETIRED";
+// The author guidance for the construction `new ProviderError` refuses
+// (src/errors.ts): a per-throw category or retryable. The refusal is
+// recognized by its own brand (isPerThrowOptionsRetiredError), which any SDK
+// copy's constructor writes and this copy reads, never by the error's code.
 const PER_THROW_ERROR_OPTIONS_RETIRED_FIX =
 	"Declare the code once with defineErrors({ CODE: { status, category, retryable, description } }) and throw errors.CODE({ details, cause }); for a condition with a different category or retryability declare a distinct code. `apifuse migrate --only errors-factory` (scripts/codemods/errors-factory.yml) rewrites the throw sites.";
 
@@ -2082,6 +2087,9 @@ const MASKED_THROW_FAULT: PlatformFault = {
  * a provider that throws a StatefulRoutingDeadlineError it built, or
  * STATEFUL_FORWARDING_DEADLINE_EXPIRED, OUTPUT_VALIDATION_FAILED or
  * PROXY_POOL_EXHAUSTED, has thrown a provider failure, or a throw serve masks.
+ * The one fault that is not in this copy's record is the construction
+ * refusal: the provider's SDK copy builds it, so it travels as an own brand
+ * (isPerThrowOptionsRetiredError) and this copy issues the fault for it.
  */
 function servedPlatformFault(
 	error: unknown,
@@ -2089,6 +2097,7 @@ function servedPlatformFault(
 ): PlatformFault | undefined {
 	const fault = platformFaultOf(error);
 	if (fault) return fault;
+	if (isPerThrowOptionsRetiredError(error)) return PER_THROW_ERROR_OPTIONS_RETIRED_FAULT;
 	if (isTransportError(error) && isClientCancelledTransportError(error, inboundSignal)) {
 		return {
 			category: "client_cancelled",
@@ -2589,12 +2598,11 @@ function logProviderError(
 		declaredErrorCode === undefined;
 	const isUnknownProviderErrorCategory =
 		details.origin === "provider" && providerErrorCategoryOutsideDomain(error, declaredErrorCode);
-	// A construction the SDK refused (per-throw category / retryable): the
-	// platform fault record, which only SDK code writes, is the evidence; the
-	// author guidance belongs here, not in the served body.
+	// A construction the SDK refused (per-throw category / retryable), in this
+	// copy or in the provider's: the author guidance belongs here, not in the
+	// served body.
 	const isPerThrowErrorOptionsRetired =
-		details.origin === "platform" &&
-		platformFaultOf(error)?.code === PER_THROW_ERROR_OPTIONS_RETIRED_CODE;
+		details.origin === "platform" && isPerThrowOptionsRetiredError(error);
 	const telemetryPayload = telemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	// The logger is caller-supplied and may mutate the event synchronously.
