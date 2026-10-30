@@ -4,6 +4,7 @@ import {
 	cpSync,
 	existsSync,
 	mkdtempSync,
+	readdirSync,
 	renameSync,
 	rmSync,
 	symlinkSync,
@@ -15,6 +16,7 @@ import path from "node:path";
 import {
 	countWindowRules,
 	dedupeClones,
+	groupRepositories,
 	judge,
 	normalizeRemote,
 	type ProviderProbe,
@@ -30,6 +32,8 @@ import {
 const SDK = path.resolve(import.meta.dirname, "..");
 const SCRIPT = path.join(SDK, "scripts", "bump-safety-scan.ts");
 const FIXTURES = path.join(SDK, "scripts", "__fixtures__", "bump-safety-scan");
+/** One provider per window rule, named after the rule, that trips it under the SDK build under test. */
+const WINDOW_FIXTURES = path.join(FIXTURES, "window");
 
 let scratch: string;
 let head: string;
@@ -70,7 +74,7 @@ function breakingHeadBuild(root: string): string {
 	return dir;
 }
 
-function runScan(targets: string, scratchName: string, json: boolean) {
+function runScan(targets: string, scratchName: string, json: boolean, headBuild = head) {
 	return spawnSync(
 		"bun",
 		[
@@ -78,14 +82,14 @@ function runScan(targets: string, scratchName: string, json: boolean) {
 			"--base",
 			SDK,
 			"--head",
-			head,
+			headBuild,
 			"--targets",
 			targets,
 			"--no-fixture-tests",
 			"--scratch",
 			path.join(scratch, scratchName),
 			"--jobs",
-			"2",
+			"4",
 			...(json ? ["--json"] : []),
 		],
 		{ cwd: SDK, encoding: "utf8", timeout: 240_000 },
@@ -178,7 +182,24 @@ describe("bump-safety-scan", () => {
 		expect(result.stdout).toContain("not covered: 1 target(s) fail on both sides");
 		expect(result.stdout).toMatch(/^ {2}unloadable: Error: fixture: cannot load on any SDK/m);
 		expect(result.stdout).toContain("DELETABLE");
+		expect(result.stdout).toContain("read DELETABLE together with a BREAK-free verdict table");
 	}, 120_000);
+
+	it("counts every window rule from the base SDK's own signal: one fixture provider per rule trips exactly its rule", () => {
+		const fixtureNames = readdirSync(WINDOW_FIXTURES).sort();
+		expect(fixtureNames).toEqual(WINDOW_RULES.map((entry) => entry.rule).sort());
+		const result = runScan(path.join(WINDOW_FIXTURES, "*"), "scan-window", true, SDK);
+		expect(result.status).toBe(0);
+		const report = JSON.parse(result.stdout) as ScanReport;
+		for (const target of report.targets) {
+			expect(target.base.probe?.load.status).toBe("ok");
+			expect(target.base.tsc?.errors).toBe(0);
+		}
+		for (const usage of report.windowRules) {
+			expect(usage.providers).toEqual([usage.rule]);
+			expect(usage.sites).toBeGreaterThan(0);
+		}
+	}, 180_000);
 });
 
 describe("judge", () => {
@@ -489,35 +510,121 @@ describe("normalizeRemote", () => {
 	});
 });
 
-describe("dedupeClones", () => {
-	const clone = (remote: string, head: string, committedAt: number) => ({
+describe("groupRepositories", () => {
+	const clone = (remote: string, roots: string[], head = "h", committedAt = 0) => ({
 		remote: normalizeRemote(remote),
+		roots: [...roots].sort(),
 		head,
 		committedAt,
 	});
+
+	it("joins clones that share a root commit or a remote, and keeps unrelated repositories apart", () => {
+		const clones = [
+			clone("https://github.com/O/modu-parking.git", ["ac83"]),
+			clone("https://github.com/O/modu-phone-otp.git", ["ac83"]),
+			clone("git@github.com:O/catchtable.git", ["1111"]),
+			clone("https://github.com/O/catchtable", ["1111"]),
+			clone("https://github.com/O/careem", ["2222"]),
+			clone("https://github.com/O/careem", []),
+			clone("https://github.com/O/orphan", []),
+			clone("https://github.com/O/grafted", ["3333", "4444"]),
+			clone("https://github.com/O/grafted-fork", ["4444"]),
+		];
+		const groups = groupRepositories(clones);
+		const same = (left: number, right: number) => groups[left] === groups[right];
+		expect(same(0, 1)).toBe(true);
+		expect(same(2, 3)).toBe(true);
+		expect(same(4, 5)).toBe(true);
+		expect(same(7, 8)).toBe(true);
+		for (const [left, right] of [
+			[0, 2],
+			[0, 4],
+			[0, 6],
+			[2, 4],
+			[4, 6],
+			[6, 7],
+			[0, 7],
+		] as const) {
+			expect(same(left, right)).toBe(false);
+		}
+		expect(new Set(groups).size).toBe(5);
+	});
+});
+
+describe("dedupeClones", () => {
+	const clone = (remote: string, roots: string[], head: string, committedAt: number) => ({
+		remote: normalizeRemote(remote),
+		roots: [...roots].sort(),
+		head,
+		committedAt,
+	});
+	/** The real shapes: catchtable clones under several URL spellings, and the renamed modu repository (two origin URLs, one root commit). */
 	const fixtures = [
-		{ name: "catchtable", clone: clone("https://github.com/O/catchtable.git", "c26a", 300) },
-		{ name: "catchtable-agent", clone: clone("git@github.com:O/catchtable.git", "8c14", 100) },
-		{ name: "catchtable-w3507-a", clone: clone("https://github.com/O/catchtable", "c26a", 300) },
-		{ name: "catchtable-w3507-b", clone: clone("https://github.com/O/catchtable", "8c14", 100) },
-		{ name: "modu-parking", clone: clone("https://github.com/O/modu-parking", "aaaa", 200) },
-		{ name: "modu-phone-otp", clone: clone("https://github.com/O/modu-parking", "bbbb", 150) },
-		{ name: "careem", clone: clone("https://github.com/O/careem", "cccc", 50) },
+		{
+			name: "catchtable",
+			clone: clone("https://github.com/O/catchtable.git", ["1111"], "c26a", 300),
+		},
+		{
+			name: "catchtable-agent",
+			clone: clone("git@github.com:O/catchtable.git", ["1111"], "8c14", 100),
+		},
+		{
+			name: "catchtable-w3507-a",
+			clone: clone("https://github.com/O/catchtable", ["1111"], "c26a", 300),
+		},
+		{
+			name: "catchtable-w3507-b",
+			clone: clone("https://github.com/O/catchtable", ["1111"], "8c14", 100),
+		},
+		{
+			name: "modu-parking",
+			clone: clone("https://github.com/O/apifuse-provider-modu-parking.git", ["ac83"], "5e00", 200),
+		},
+		{
+			name: "modu-phone-otp",
+			clone: clone(
+				"https://github.com/O/apifuse-provider-modu-phone-otp.git",
+				["ac83"],
+				"ef60",
+				150,
+			),
+		},
+		{
+			name: "fleet/modu-parking",
+			clone: clone("https://github.com/O/apifuse-provider-modu-parking.git", ["ac83"], "3607", 400),
+		},
+		{
+			name: "fleet/modu-phone-otp",
+			clone: clone(
+				"https://github.com/O/apifuse-provider-modu-phone-otp.git",
+				["ac83"],
+				"3607",
+				400,
+			),
+		},
+		{ name: "careem", clone: clone("https://github.com/O/careem", ["2222"], "cccc", 50) },
 		{ name: "plain-copy" },
 	];
+	const withClone = fixtures.filter((target) => target.clone !== undefined);
+	const repositoryOf = new Map<(typeof fixtures)[number], number>(
+		groupRepositories(withClone.map((target) => target.clone!)).map((group, index) => [
+			withClone[index]!,
+			group,
+		]),
+	);
 
-	it("scans one clone per remote and HEAD, keeps every HEAD, and marks the older HEADs stale", () => {
+	it("scans one clone per repository and HEAD, keeps every HEAD, and marks the older HEADs stale", () => {
 		const result = dedupeClones(fixtures);
 		const byIdentity = new Map<string, string>();
 		for (const target of fixtures) {
 			if (!target.clone) continue;
-			const key = `${target.clone.remote}@${target.clone.head}`;
+			const key = `${repositoryOf.get(target)}@${target.clone.head}`;
 			if (!byIdentity.has(key)) byIdentity.set(key, target.name);
 		}
 		const expectedKept = fixtures.filter(
 			(target) =>
 				!target.clone ||
-				byIdentity.get(`${target.clone.remote}@${target.clone.head}`) === target.name,
+				byIdentity.get(`${repositoryOf.get(target)}@${target.clone.head}`) === target.name,
 		);
 		expect(result.kept).toEqual(expectedKept);
 		expect(result.duplicates.map((entry) => [entry.dropped.name, entry.keptAs.name])).toEqual(
@@ -525,26 +632,40 @@ describe("dedupeClones", () => {
 				.filter((target) => !expectedKept.includes(target))
 				.map((target) => [
 					target.name,
-					byIdentity.get(`${target.clone?.remote}@${target.clone?.head}`),
+					byIdentity.get(`${repositoryOf.get(target)}@${target.clone?.head}`),
 				]),
 		);
-		const newestByRemote = new Map<string, (typeof fixtures)[number]>();
+		const newestByRepository = new Map<number, (typeof fixtures)[number]>();
 		for (const target of result.kept) {
 			if (!target.clone) continue;
-			const best = newestByRemote.get(target.clone.remote);
+			const repository = repositoryOf.get(target)!;
+			const best = newestByRepository.get(repository);
 			if (!best || (best.clone?.committedAt ?? 0) < target.clone.committedAt)
-				newestByRemote.set(target.clone.remote, target);
+				newestByRepository.set(repository, target);
 		}
 		const expectedStale = result.kept.filter(
-			(target) => target.clone && newestByRemote.get(target.clone.remote) !== target,
+			(target) => target.clone && newestByRepository.get(repositoryOf.get(target)!) !== target,
 		);
 		expect(result.stale.map((entry) => entry.clone)).toEqual(expectedStale);
 		for (const entry of result.stale) {
-			expect(entry.newest).toBe(newestByRemote.get(entry.clone.clone!.remote)!);
+			expect(entry.newest).toBe(newestByRepository.get(repositoryOf.get(entry.clone)!)!);
 			expect(entry.newest.clone!.committedAt).toBeGreaterThan(entry.clone.clone!.committedAt);
 		}
 		expect(expectedStale.length).toBeGreaterThan(0);
 		expect(result.duplicates.length).toBeGreaterThan(0);
+	});
+
+	it("treats the renamed modu repository as one: the old-name clone at the same HEAD is a duplicate, at an older HEAD a stale clone", () => {
+		const result = dedupeClones(fixtures);
+		const byName = (name: string) => fixtures.find((target) => target.name === name)!;
+		expect(result.duplicates).toContainEqual({
+			dropped: byName("fleet/modu-phone-otp"),
+			keptAs: byName("fleet/modu-parking"),
+		});
+		const staleNames = result.stale.map((entry) => [entry.clone.name, entry.newest.name]);
+		expect(staleNames).toContainEqual(["modu-phone-otp", "fleet/modu-parking"]);
+		expect(staleNames).toContainEqual(["modu-parking", "fleet/modu-parking"]);
+		expect(result.kept.map((target) => target.name)).not.toContain("fleet/modu-phone-otp");
 	});
 
 	it("leaves targets without a clone identity and single clones alone", () => {
@@ -568,7 +689,12 @@ describe("renderReport stale clones", () => {
 				name,
 				kind: "provider",
 				path: `/clones/${name}`,
-				clone: { remote: "github.com/o/catchtable", head: `${name}-sha-000000`, committedAt: 1 },
+				clone: {
+					remote: "github.com/o/catchtable",
+					roots: ["1111"],
+					head: `${name}-sha-000000`,
+					committedAt: 1,
+				},
 				...(staleCloneOf === undefined ? {} : { staleCloneOf }),
 				base: ok("a"),
 				head,
@@ -598,7 +724,7 @@ describe("renderReport stale clones", () => {
 		expect(rendered).toContain("summary: 0 BREAK, 0 WARN, 1 SAME, 0 NOT COVERED, 0 SKIP");
 		expect(rendered).not.toMatch(/^ {2}BREAK catchtable-agent/m);
 		expect(rendered).toContain(
-			"stale clones: 1 target(s) share a remote with a newer clone; reported, not gating",
+			"stale clones: 1 target(s) share a repository with a newer clone; reported, not gating",
 		);
 		expect(rendered).toContain(
 			`  catchtable-agent: BREAK, ${targets[1]?.clone?.head.slice(0, 12)} is older than catchtable: contract digest`,

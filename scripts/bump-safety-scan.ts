@@ -40,12 +40,14 @@
  * SDK on both sides and compared base to base.
  *
  * Several local directories can be clones of one GitHub repository (review
- * worktrees, renamed providers). Targets with the same `origin` remote and the
- * same HEAD commit are scanned once; when the same remote is checked out at
- * different commits every clone is scanned, but only the newest one gates:
- * the others are reported as stale clones with their verdict and are left out
- * of the summary and the exit code, so a stale clone can neither fail nor
- * pass the gate silently.
+ * worktrees, renamed providers). Two checkouts are the same repository when
+ * they share a root commit (`git rev-list --max-parents=0 HEAD`, an offline
+ * identity that survives a GitHub rename such as modu-phone-otp ->
+ * modu-parking) or the same normalized `origin` URL. Clones of one repository
+ * at the same HEAD are scanned once; at different HEADs every clone is
+ * scanned, but only the newest one gates: the others are reported as stale
+ * clones with their verdict and are left out of the summary and the exit
+ * code, so a stale clone can neither fail nor pass the gate silently.
  *
  * Per target and side the scan reports module load (ok / error class), the
  * `tsc --noEmit` errors, the served contract digest
@@ -69,7 +71,12 @@
  * regex-counted over source text (a nested `retryable:` in a client payload,
  * a deliberate `approval:` override or a supported `contextKeys` declaration
  * are not uses). A rule with 0 users can be deleted with its path; a rule
- * with users cannot.
+ * with users cannot. The table inherits the base lint's coverage: a per-throw
+ * `category` / `retryable` that reaches the constructor through a spread
+ * (`new ProviderError(msg, { ...base, code })`) is invisible to
+ * `legacy-error-options` and counts 0 here, while the tsc set diff above still
+ * marks that provider BREAK when the option is removed. Read DELETABLE
+ * together with a BREAK-free verdict table, never alone.
  *
  * Exit 1 when any BREAK row exists, 2 on a usage error.
  */
@@ -155,10 +162,17 @@ export interface FixtureFileResult {
 
 export type Verdict = "SAME" | "BREAK" | "WARN" | "NOT COVERED" | "SKIP";
 
-/** Where a provider checkout comes from: its `origin` remote and the commit it sits on. */
+/** Where a provider checkout comes from: its repository and the commit it sits on. */
 export interface CloneIdentity {
 	/** Normalized remote: `host/owner/repo`, lower case, no scheme, user or `.git`. */
 	remote: string;
+	/**
+	 * Root commits of HEAD's history (`git rev-list --max-parents=0 HEAD`),
+	 * sorted. Two checkouts that share one are the same repository whatever
+	 * their remote says, which is how a clone made under a repository's old
+	 * GitHub name is recognized after the rename.
+	 */
+	roots: string[];
 	head: string;
 	/** HEAD commit time (unix seconds); the newest clone of a remote is the one that gates. */
 	committedAt: number;
@@ -518,17 +532,49 @@ async function cloneIdentity(dir: string): Promise<CloneIdentity | undefined> {
 	} catch {
 		return undefined;
 	}
-	const [remote, head, committed] = await Promise.all([
+	const [remote, head, committed, roots] = await Promise.all([
 		git(["remote", "get-url", "origin"]),
 		git(["rev-parse", "HEAD"]),
 		git(["log", "-1", "--format=%ct", "HEAD"]),
+		git(["rev-list", "--max-parents=0", "HEAD"]),
 	]);
 	if (remote.code !== 0 || head.code !== 0) return undefined;
 	return {
 		remote: normalizeRemote(remote.stdout),
+		roots: roots.code === 0 ? roots.stdout.split("\n").filter(Boolean).sort() : [],
 		head: head.stdout.trim(),
 		committedAt: Number.parseInt(committed.stdout.trim(), 10) || 0,
 	};
+}
+
+/**
+ * Groups clones into repositories: two clones belong together when they share
+ * a root commit or the same normalized remote (union of both relations, so a
+ * renamed remote and an https/ssh spelling of one URL both collapse).
+ * Returns, per input index, the index of the repository's representative.
+ */
+export function groupRepositories(clones: ReadonlyArray<CloneIdentity>): number[] {
+	const parent = clones.map((_, index) => index);
+	const find = (index: number): number => {
+		while (parent[index] !== index) {
+			parent[index] = parent[parent[index]!]!;
+			index = parent[index]!;
+		}
+		return index;
+	};
+	const union = (left: number, right: number) => {
+		const [a, b] = [find(left), find(right)];
+		if (a !== b) parent[Math.max(a, b)] = Math.min(a, b);
+	};
+	const byKey = new Map<string, number>();
+	clones.forEach((clone, index) => {
+		for (const key of [`remote:${clone.remote}`, ...clone.roots.map((root) => `root:${root}`)]) {
+			const seen = byKey.get(key);
+			if (seen === undefined) byKey.set(key, index);
+			else union(seen, index);
+		}
+	});
+	return clones.map((_, index) => find(index));
 }
 
 export interface CloneDedupe<T> {
@@ -540,31 +586,36 @@ export interface CloneDedupe<T> {
 }
 
 /**
- * Same remote and same HEAD: one scan is enough, the first one found keeps
- * the row. Same remote at different HEADs: every clone is scanned, the one
- * with the newest commit gates, the rest are stale clones.
+ * Same repository (shared root commit or same remote, see
+ * `groupRepositories`) and same HEAD: one scan is enough, the first one found
+ * keeps the row. Same repository at different HEADs: every clone is scanned,
+ * the one with the newest commit gates, the rest are stale clones.
  */
 export function dedupeClones<T extends { clone?: CloneIdentity }>(targets: T[]): CloneDedupe<T> {
 	const kept: T[] = [];
 	const duplicates: CloneDedupe<T>["duplicates"] = [];
-	const byRemote = new Map<string, T[]>();
+	const withClone = targets.filter((target) => target.clone !== undefined);
+	const representative = groupRepositories(withClone.map((target) => target.clone!));
+	const repositoryOf = new Map(withClone.map((target, index) => [target, representative[index]!]));
+	const byRepository = new Map<number, T[]>();
 	for (const target of targets) {
-		if (!target.clone) {
+		const repository = repositoryOf.get(target);
+		if (repository === undefined) {
 			kept.push(target);
 			continue;
 		}
-		const group = byRemote.get(target.clone.remote) ?? [];
+		const group = byRepository.get(repository) ?? [];
 		const twin = group.find((other) => other.clone?.head === target.clone?.head);
 		if (twin) {
 			duplicates.push({ dropped: target, keptAs: twin });
 			continue;
 		}
 		group.push(target);
-		byRemote.set(target.clone.remote, group);
+		byRepository.set(repository, group);
 		kept.push(target);
 	}
 	const stale: CloneDedupe<T>["stale"] = [];
-	for (const group of byRemote.values()) {
+	for (const group of byRepository.values()) {
 		if (group.length < 2) continue;
 		const newest = group.reduce((best, candidate) =>
 			(candidate.clone?.committedAt ?? 0) > (best.clone?.committedAt ?? 0) ? candidate : best,
@@ -1278,7 +1329,7 @@ export function renderReport(report: ScanReport): string {
 	if (stale.length > 0) {
 		out.push("");
 		out.push(
-			`stale clones: ${stale.length} target(s) share a remote with a newer clone; reported, not gating`,
+			`stale clones: ${stale.length} target(s) share a repository with a newer clone; reported, not gating`,
 		);
 		for (const target of stale) {
 			out.push(
@@ -1289,7 +1340,7 @@ export function renderReport(report: ScanReport): string {
 	if (report.duplicateClones.length > 0) {
 		out.push("");
 		out.push(
-			`duplicate clones: ${report.duplicateClones.length} director(y|ies) at the same remote and HEAD as a scanned target, scanned once`,
+			`duplicate clones: ${report.duplicateClones.length} director(y|ies) at the same repository and HEAD as a scanned target, scanned once`,
 		);
 		for (const duplicate of report.duplicateClones)
 			out.push(`  ${duplicate.path} = ${duplicate.scannedAs}`);
@@ -1326,6 +1377,9 @@ export function renderReport(report: ScanReport): string {
 		]);
 	}
 	out.push(table(usageRows));
+	out.push(
+		"users are what the base SDK's own lint and defineProvider warnings report; the lint does not see a per-throw category/retryable carried in by a spread (new ProviderError(msg, { ...base, code })), so read DELETABLE together with a BREAK-free verdict table (the tsc set diff still catches such a provider), never alone",
+	);
 	return out.join("\n");
 }
 
