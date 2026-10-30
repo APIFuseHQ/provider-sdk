@@ -1,0 +1,31 @@
+import type { OperationErrorCode } from "@apifuse/provider-sdk";
+import { ProviderError, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+
+const BOOKING_DOCS = {
+	errorCodes: [{ code: "BOOKING_CLOSED", status: 409, description: "Booking is closed.", retryable: false }],
+};
+
+const QUOTE_ROW = { code: "QUOTE_STALE", status: 409, description: "The quote is stale.", retryable: false } as const;
+
+const QUOTE_ERRORS = [...BOOKING_DOCS.errorCodes, QUOTE_ROW] as const;
+
+const BOOKING_FLOW_ERRORS: OperationErrorCode[] = [
+	...BOOKING_DOCS.errorCodes,
+	{ code: "OFFER_UNAVAILABLE", status: 400, description: "The room is no longer bookable.", retryable: false },
+];
+
+const CONFIRM_ERRORS = [
+	...QUOTE_ERRORS,
+	{ code: "CONFIRM_REJECTED", status: 409, description: "The confirmation was rejected.", retryable: false },
+] as const;
+
+export const bookingOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.booking.description",
+	errorCodes: [...BOOKING_FLOW_ERRORS, ...CONFIRM_ERRORS],
+	handler: async (input, ctx) => {
+		if (input.roomId === "") throw new ProviderError("The room is no longer bookable.", { code: "OFFER_UNAVAILABLE" });
+		return ctx.fetch(input.roomId);
+	},
+});

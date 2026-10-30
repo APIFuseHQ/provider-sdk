@@ -1,0 +1,17 @@
+import { defineErrors, defineOperation } from "@apifuse/provider-sdk/provider";
+
+import type { ProviderContext } from "../index";
+import { BASE } from "../upstream";
+import { LEAF_ERRORS } from "../upstream/leaf";
+
+export const SEARCH_URL = `${BASE}/search`;
+
+export const SEARCH_ERRORS = defineErrors({
+	QUERY_REJECTED: { status: 400, category: "provider_error", retryable: false, description: "The query was rejected." },
+});
+
+export const searchOperation = defineOperation<ProviderContext>()({
+	descriptionKey: "operations.search.description",
+	errors: [...Object.values(SEARCH_ERRORS), ...Object.values(LEAF_ERRORS)],
+	handler: async (input, ctx) => ctx.fetch(SEARCH_URL, input.query),
+});

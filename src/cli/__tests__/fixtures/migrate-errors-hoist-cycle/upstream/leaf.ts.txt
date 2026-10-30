@@ -1,0 +1,11 @@
+import { defineErrors } from "@apifuse/provider-sdk/provider";
+
+import type { Page } from "./client";
+
+export const LEAF_ERRORS = defineErrors({
+	PAGE_GONE: { status: 404, category: "upstream_http", retryable: false, description: "The page is gone." },
+});
+
+export function describe(page: Page): string {
+	return page.html;
+}

@@ -94,6 +94,12 @@ const DRY_RUN_RESIDUES = [
 	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 	"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:33",
 	"errors-hoist errors-hoist-throw-site-row-unknown mappers/item.ts:8",
+	"errors-hoist errors-hoist-outside-operation operations/booking.ts:7",
+	"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:15",
+	"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:20",
+	"errors-hoist errors-hoist-spread-not-a-table operations/booking.ts:26",
+	"errors-hoist errors-hoist-map-spread-in-array operations/booking.ts:26",
+	"errors-hoist errors-hoist-throw-site-undeclared operations/booking.ts:28",
 	"errors-hoist errors-hoist-spread-not-a-table operations/checkout.ts:14",
 	"errors-hoist errors-hoist-throw-site-undeclared operations/checkout.ts:17",
 	"errors-hoist errors-hoist-map-spread-in-array operations/legal.ts:10",
@@ -103,6 +109,7 @@ const DRY_RUN_RESIDUES = [
 	"errors-hoist errors-hoist-list-not-readable operations/legal.ts:28",
 	"errors-hoist errors-hoist-throw-site-code-conflict operations/legal.ts:31",
 	"errors-hoist errors-hoist-throw-site-undeclared operations/own.ts:19",
+	"errors-hoist errors-hoist-sdk-entry-conflict operations/search.ts:7",
 	"errors-hoist errors-hoist-throw-site-row-unknown operations/search.ts:40",
 	"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 	"errors-hoist errors-hoist-throw-site-row-unknown upstream/client.ts:6",
@@ -165,14 +172,21 @@ describe("apifuse migrate", () => {
 		expect(sourceFiles()).toEqual(before);
 		expect(countsByCodemod(report)).toEqual({
 			"errors-factory": [
-				["operations/legal.ts", "operations/own.ts", "operations/parcel.ts", "operations/search.ts"],
-				4,
+				[
+					"operations/booking.ts",
+					"operations/legal.ts",
+					"operations/own.ts",
+					"operations/parcel.ts",
+					"operations/search.ts",
+				],
+				5,
 				4,
 			],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
 					"mappers/item.ts",
+					"operations/booking.ts",
 					"operations/detail.ts",
 					"operations/legal.ts",
 					"operations/named.ts",
@@ -183,8 +197,8 @@ describe("apifuse migrate", () => {
 					"upstream/dispatch.ts",
 					"upstream/sites.ts",
 				],
-				21,
-				29,
+				22,
+				36,
 			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
@@ -469,14 +483,21 @@ describe("apifuse migrate", () => {
 
 		expect(countsByCodemod(report)).toEqual({
 			"errors-factory": [
-				["operations/legal.ts", "operations/own.ts", "operations/parcel.ts", "operations/search.ts"],
-				4,
+				[
+					"operations/booking.ts",
+					"operations/legal.ts",
+					"operations/own.ts",
+					"operations/parcel.ts",
+					"operations/search.ts",
+				],
+				5,
 				4,
 			],
 			"errors-hoist": [
 				[
 					"domain/errors.ts",
 					"mappers/item.ts",
+					"operations/booking.ts",
 					"operations/detail.ts",
 					"operations/legal.ts",
 					"operations/named.ts",
@@ -487,8 +508,8 @@ describe("apifuse migrate", () => {
 					"upstream/dispatch.ts",
 					"upstream/sites.ts",
 				],
-				21,
-				29,
+				22,
+				36,
 			],
 			"health-refs": [["operations/search.ts"], 1, 0],
 			"health-stale-window": [["index.ts", "operations/search.ts"], 3, 0],
@@ -505,6 +526,12 @@ describe("apifuse migrate", () => {
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
 			"errors-hoist errors-hoist-throw-site-row-unknown mappers/item.ts:8",
+			"errors-hoist errors-hoist-outside-operation operations/booking.ts:7",
+			"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:15",
+			"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:19",
+			"errors-hoist errors-hoist-spread-not-a-table operations/booking.ts:23",
+			"errors-hoist errors-hoist-map-spread-in-array operations/booking.ts:23",
+			"errors-hoist errors-hoist-throw-site-undeclared operations/booking.ts:25",
 			"errors-hoist errors-hoist-spread-not-a-table operations/checkout.ts:14",
 			"errors-hoist errors-hoist-throw-site-undeclared operations/checkout.ts:17",
 			"errors-hoist errors-hoist-map-spread-in-array operations/legal.ts:8",
@@ -514,6 +541,7 @@ describe("apifuse migrate", () => {
 			"errors-hoist errors-hoist-list-not-readable operations/legal.ts:26",
 			"errors-hoist errors-hoist-throw-site-code-conflict operations/legal.ts:29",
 			"errors-hoist errors-hoist-throw-site-undeclared operations/own.ts:17",
+			"errors-hoist errors-hoist-sdk-entry-conflict operations/search.ts:5",
 			"errors-hoist errors-hoist-throw-site-row-unknown operations/search.ts:33",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 			"errors-hoist errors-hoist-throw-site-row-unknown upstream/client.ts:6",
@@ -540,6 +568,22 @@ describe("apifuse migrate", () => {
 		// table whole is named; the file is byte-identical.
 		expect(after["operations/checkout.ts"]).toBe(before["operations/checkout.ts"]);
 		expect(after["operations/checkout.ts"]).not.toContain("checkoutErrorCodes.");
+		// A table spreading a property access is one rule 3 leaves an array (a
+		// map object cannot take an array's rows by spread); a table spreading a
+		// plain name rule 3 cannot resolve is converted, and the spread of an
+		// array into that map is named in the dry run and the apply alike.
+		const booking = after["operations/booking.ts"] ?? "";
+		expect(booking).toContain(
+			"const BOOKING_FLOW_ERRORS: OperationErrorCode[] = [\n\t...BOOKING_DOCS.errorCodes,\n",
+		);
+		expect(booking).toContain('const CONFIRM_ERRORS = defineErrors({ ...QUOTE_ERRORS, "CONFIRM_REJECTED": {');
+		const arraySpreads = hoistOf(report)?.residues.filter(
+			(residue) => residue.ruleId === "errors-hoist-array-spread-in-map",
+		);
+		expect(arraySpreads?.map((residue) => `${residue.line} ${residue.message}`)).toEqual([
+			"15 This table spreads BOOKING_DOCS.errorCodes, which is not the name of a defineErrors map, so errors-factory leaves the table an array (a map object cannot take an array's rows by spread).",
+			"19 ...QUOTE_ERRORS spreads an array (not a defineErrors map) into the map object errors-factory makes of this table; the array's indices become keys and defineErrors refuses them at import, so the provider does not load until this is fixed.",
+		]);
 		// An errorCodes this step cannot read (a property access, a call) is
 		// named, and a subclass site of a code such a list may serve keeps its
 		// options (the legacy row there would serve once they are gone).
@@ -567,10 +611,11 @@ describe("apifuse migrate", () => {
 			(residue) => residue.ruleId === "errors-hoist-map-spread-in-array",
 		);
 		expect(spreads?.map((residue) => `${residue.line}:${residue.column} ${residue.message}`)).toEqual([
+			"23:39 ...CONFIRM_ERRORS spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
 			"8:28 ...LEGAL_ROWS spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
 			"8:43 ...SEARCH_ERRORS spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
 		]);
-		expect(spreads?.[0]?.note).toBe(
+		expect(spreads?.[1]?.note).toBe(
 			"Spread Object.values(LEGAL_ROWS) here, or list the map in the operation's errors, then re-run apifuse migrate.",
 		);
 		// Every errors.CODE the factory and health-refs wrote resolves: the
@@ -664,6 +709,12 @@ describe("apifuse migrate", () => {
 			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:25",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:29",
 			"errors-hoist errors-hoist-throw-site-row-unknown mappers/item.ts:9",
+			"errors-hoist errors-hoist-outside-operation operations/booking.ts:7",
+			"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:15",
+			"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:19",
+			"errors-hoist errors-hoist-spread-not-a-table operations/booking.ts:23",
+			"errors-hoist errors-hoist-map-spread-in-array operations/booking.ts:23",
+			"errors-hoist errors-hoist-throw-site-undeclared operations/booking.ts:25",
 			"errors-hoist errors-hoist-spread-not-a-table operations/checkout.ts:14",
 			"errors-hoist errors-hoist-throw-site-undeclared operations/checkout.ts:17",
 			"errors-hoist errors-hoist-map-spread-in-array operations/legal.ts:8",
@@ -673,6 +724,7 @@ describe("apifuse migrate", () => {
 			"errors-hoist errors-hoist-list-not-readable operations/legal.ts:26",
 			"errors-hoist errors-hoist-throw-site-code-conflict operations/legal.ts:29",
 			"errors-hoist errors-hoist-throw-site-undeclared operations/own.ts:12",
+			"errors-hoist errors-hoist-sdk-entry-conflict operations/search.ts:5",
 			"errors-hoist errors-hoist-throw-site-row-unknown operations/search.ts:36",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 			"errors-hoist errors-hoist-throw-site-row-unknown upstream/client.ts:6",
@@ -711,6 +763,12 @@ describe("apifuse migrate", () => {
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
 			"errors-hoist errors-hoist-throw-site-row-unknown mappers/item.ts:8",
+			"errors-hoist errors-hoist-outside-operation operations/booking.ts:7",
+			"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:15",
+			"errors-hoist errors-hoist-array-spread-in-map operations/booking.ts:19",
+			"errors-hoist errors-hoist-spread-not-a-table operations/booking.ts:23",
+			"errors-hoist errors-hoist-map-spread-in-array operations/booking.ts:23",
+			"errors-hoist errors-hoist-throw-site-undeclared operations/booking.ts:25",
 			"errors-hoist errors-hoist-spread-not-a-table operations/checkout.ts:14",
 			"errors-hoist errors-hoist-throw-site-undeclared operations/checkout.ts:17",
 			"errors-hoist errors-hoist-map-spread-in-array operations/legal.ts:8",
@@ -720,6 +778,7 @@ describe("apifuse migrate", () => {
 			"errors-hoist errors-hoist-list-not-readable operations/legal.ts:26",
 			"errors-hoist errors-hoist-throw-site-code-conflict operations/legal.ts:29",
 			"errors-hoist errors-hoist-throw-site-undeclared operations/own.ts:17",
+			"errors-hoist errors-hoist-sdk-entry-conflict operations/search.ts:5",
 			"errors-hoist errors-hoist-throw-site-row-unknown operations/search.ts:33",
 			"errors-hoist errors-hoist-spread-not-a-table operations/statusless.ts:8",
 			"errors-hoist errors-hoist-throw-site-row-unknown upstream/client.ts:6",
@@ -762,8 +821,8 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   4                   4         4");
-		expect(text).toContain("errors-hoist                     11                  21        29");
+		expect(text).toContain("errors-factory                   5                   5         4");
+		expect(text).toContain("errors-hoist                     12                  22        36");
 		expect(text).toContain(
 			"operations/search.ts:33:10 [errors-factory-throw-site-registry-conflict]",
 		);

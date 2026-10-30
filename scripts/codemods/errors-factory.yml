@@ -179,6 +179,23 @@ rule:
       - has:
           kind: pair
           has: { field: key, regex: '^status$' }
+  # A spread that is not a plain name (`...DOCS.errorCodes`, `...rows()`) names
+  # no map this rule could know: the array's rows would land in the map object
+  # by index and defineErrors would refuse them. Such a table stays an array
+  # (errors-hoist names the spread: errors-hoist-array-spread-in-map).
+  not:
+    has:
+      stopBy: end
+      kind: spread_element
+      inside:
+        kind: array
+        inside:
+          any:
+            - kind: variable_declarator
+            - kind: as_expression
+              inside: { kind: variable_declarator }
+      not:
+        has: { kind: identifier }
 rewriters:
   - id: keep-row-fields
     rule:

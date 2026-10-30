@@ -119,6 +119,8 @@ export const ERRORS_HOIST_RULES = {
 	mapSpreadInArray: "errors-hoist-map-spread-in-array",
 	throwSiteRowUnknown: "errors-hoist-throw-site-row-unknown",
 	throwSiteDynamicCode: "errors-hoist-throw-site-dynamic-code",
+	arraySpreadInMap: "errors-hoist-array-spread-in-map",
+	sdkEntryConflict: "errors-hoist-sdk-entry-conflict",
 } as const;
 
 export type ErrorsHoistOptions = {
@@ -248,6 +250,8 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 	const notes: MigrateFinding[] = [];
 
 	const maps = defineErrorsMaps(ts, sources, options.dryRun);
+	residues.push(...sdkEntryConflicts(maps));
+	residues.push(...arraySpreadsInMaps(ts, sources, maps, options.dryRun));
 	const { lists, opaque } = collectLists(ts, sources, residues);
 	const existing = findExistingMap(ts, sources);
 	const sites = collectThrowSites(ts, sources);
@@ -522,6 +526,7 @@ export function hoistInlineErrorRows(options: ErrorsHoistOptions): SourceStepRes
 		edits,
 		imports,
 		residues,
+		graph: valueImportGraph(ts, sources),
 	});
 	for (const [path, pending] of imports) {
 		if (!mergedImports.has(path)) editsFor(edits, pending.file).push(...pending.edits);
@@ -648,9 +653,35 @@ function resolveReferences(
 		readonly edits: Map<string, FileEdits>;
 		readonly imports: Map<string, FileEdits>;
 		readonly residues: MigrateFinding[];
+		/** Relative value imports between the provider's files, before this run's edits. */
+		readonly graph: Map<string, Set<string>>;
 	},
 ): number {
 	let rewrites = 0;
+	// The import this step would write closes a cycle when the map's module
+	// already reaches the site's file through value imports (an operations
+	// module importing a constant from the upstream module whose site throws
+	// its code). Module evaluation then runs the map's module with the site's
+	// file half-initialised, so no such import is written; the site is named.
+	const addedEdges = new Map<string, Set<string>>();
+	const cyclePath = (from: string, to: string): string[] | undefined => {
+		const previous = new Map<string, string>([[from, from]]);
+		const queue = [from];
+		while (queue.length > 0) {
+			const current = queue.shift() as string;
+			if (current === to) {
+				const path = [to];
+				while (path[0] !== from) path.unshift(previous.get(path[0] as string) as string);
+				return path;
+			}
+			for (const next of [...(context.graph.get(current) ?? []), ...(addedEdges.get(current) ?? [])]) {
+				if (previous.has(next)) continue;
+				previous.set(next, current);
+				queue.push(next);
+			}
+		}
+		return undefined;
+	};
 	const declaringMaps = (code: string): Array<{ path: string; name: string; info: MapInfo }> => {
 		const out: Array<{ path: string; name: string; info: MapInfo }> = [];
 		for (const [path, byName] of context.maps) {
@@ -756,9 +787,18 @@ function resolveReferences(
 			const remote = declaringMaps(code).filter((candidate) => candidate.path !== file.path);
 			const [only] = remote;
 			if (only !== undefined && remote.length === 1 && !bound.has(only.name)) {
-				if (!exportable(only.info, only.name)) {
+				const cycle = cyclePath(only.path, file.path);
+				if (cycle !== undefined) {
+					unexported.set(
+						item,
+						`importing ${only.name} from ${only.path} here would create an import cycle (${[...cycle, only.path].join(" -> ")}), and the provider would not load; move the map to a module that imports nothing from this file`,
+					);
+				} else if (!exportable(only.info, only.name)) {
 					unexported.set(item, `${only.name} in ${only.path} declares it but is not exported, and this step cannot export it`);
 				} else if (ensureImport(ts, file, only.name, only.path, context.residues, context.imports)) {
+					const edges = addedEdges.get(file.path) ?? new Set<string>();
+					edges.add(only.path);
+					addedEdges.set(file.path, edges);
 					scope.set(only.name, new Set(only.info.codes.keys()));
 					retarget(item, only.name);
 					continue;
@@ -2558,6 +2598,147 @@ function isRule3TableArray(ts: TypeScriptModule, array: TS.ArrayLiteralExpressio
 	);
 }
 
+/** Each file's relative value imports (`import ... from "./x"`, `export ... from "./x"`; `import type` excluded), resolved to provider-relative paths. */
+function valueImportGraph(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+): Map<string, Set<string>> {
+	const exists = (candidate: string): boolean => sources.some((source) => source.path === candidate);
+	const graph = new Map<string, Set<string>>();
+	for (const file of sources) {
+		const edges = new Set<string>();
+		for (const statement of file.source.statements) {
+			let specifier: string | undefined;
+			if (ts.isImportDeclaration(statement)) {
+				if (statement.importClause?.isTypeOnly) continue;
+				if (ts.isStringLiteral(statement.moduleSpecifier)) specifier = statement.moduleSpecifier.text;
+			} else if (ts.isExportDeclaration(statement) && statement.moduleSpecifier !== undefined) {
+				if (statement.isTypeOnly) continue;
+				if (ts.isStringLiteral(statement.moduleSpecifier)) specifier = statement.moduleSpecifier.text;
+			}
+			if (specifier === undefined) continue;
+			const target = resolveRelativeImport(file.path, specifier, exists);
+			if (target !== undefined && target !== file.path) edges.add(target);
+		}
+		graph.set(file.path, edges);
+	}
+	return graph;
+}
+
+/**
+ * A `...NAME` inside the object errors-factory makes of a table, where NAME
+ * is not a defineErrors map (an array left as written, a row constant):
+ * the array's indices become keys and `defineErrors` refuses them at import.
+ * Named in the dry run on the table rule 3 will convert and in the apply on
+ * the map it made. A table whose spread is not a plain name (a property
+ * access, a call) is one rule 3 leaves an array; its spread is named too.
+ */
+function arraySpreadsInMaps(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+	maps: MapsByFile,
+	dryRun: boolean,
+): MigrateFinding[] {
+	const out: MigrateFinding[] = [];
+	for (const file of sources) {
+		let inScope: Map<string, ReadonlySet<string>> | undefined;
+		for (const statement of file.source.statements) {
+			if (!ts.isVariableStatement(statement)) continue;
+			for (const declaration of statement.declarationList.declarations) {
+				if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+				const initializer = unwrapExpression(ts, declaration.initializer);
+				let spreads: readonly TS.Expression[] = [];
+				let converted = false;
+				if (
+					ts.isCallExpression(initializer) &&
+					ts.isIdentifier(initializer.expression) &&
+					initializer.expression.text === "defineErrors" &&
+					initializer.arguments[0] !== undefined &&
+					ts.isObjectLiteralExpression(initializer.arguments[0])
+				) {
+					converted = true;
+					spreads = initializer.arguments[0].properties
+						.filter((property): property is TS.SpreadAssignment => ts.isSpreadAssignment(property))
+						.map((property) => property.expression);
+				} else if (ts.isArrayLiteralExpression(initializer) && isRowTable(ts, initializer)) {
+					spreads = initializer.elements
+						.filter((element): element is TS.SpreadElement => ts.isSpreadElement(element))
+						.map((element) => element.expression);
+				} else {
+					continue;
+				}
+				for (const spread of spreads) {
+					const at = spread.getStart(file.source) - 3;
+					if (!ts.isIdentifier(spread)) {
+						if (converted) continue;
+						out.push(
+							finding(
+								file,
+								at,
+								ERRORS_HOIST_RULES.arraySpreadInMap,
+								`This table spreads ${file.text.slice(spread.getStart(file.source), spread.end)}, which is not the name of a defineErrors map, so errors-factory leaves the table an array (a map object cannot take an array's rows by spread).`,
+								"Write those rows as entries of this table, or make the source a defineErrors map and spread that name, then re-run apifuse migrate.",
+							),
+						);
+						continue;
+					}
+					if (!converted && !(dryRun && tableRule3Matches(ts, statement, declaration))) continue;
+					inScope ??= mapsInScope(ts, maps, file);
+					if (inScope.has(spread.text)) continue;
+					out.push(
+						finding(
+							file,
+							at,
+							ERRORS_HOIST_RULES.arraySpreadInMap,
+							`...${spread.text} spreads an array (not a defineErrors map) into the map object errors-factory makes of this table; the array's indices become keys and defineErrors refuses them at import, so the provider does not load until this is fixed.`,
+							`Write ${spread.text}'s rows as entries of this map (or make ${spread.text} a defineErrors map and keep the spread), then re-run apifuse migrate.`,
+						),
+					);
+				}
+			}
+		}
+	}
+	return out;
+}
+
+/** The array holds a `{ code, status }` row literal as a direct element (rule 3's own row test). */
+function isRowTable(ts: TypeScriptModule, array: TS.ArrayLiteralExpression): boolean {
+	return array.elements.some((element) => {
+		const row = unwrapExpression(ts, element);
+		return ts.isObjectLiteralExpression(row) && hasProperty(ts, row, "code") && hasProperty(ts, row, "status");
+	});
+}
+
+/**
+ * A map entry under a registered key whose status, retryable or locale key
+ * departs from the SDK registry: `defineErrors` refuses it at import, so the
+ * provider does not load. errors-factory names the row it converts on the run
+ * that converts it; this names the entry on every run after, so a dry run
+ * over a migrated tree still shows why the provider does not start.
+ */
+function sdkEntryConflicts(maps: MapsByFile): MigrateFinding[] {
+	const out: MigrateFinding[] = [];
+	for (const byName of maps.values()) {
+		for (const info of byName.values()) {
+			for (const [code, entry] of info.codes) {
+				if (entry.sdk || entry.node === undefined || !Object.hasOwn(SDK_ERROR_REGISTRY, code)) continue;
+				if (!rowDepartsFromRegistry(code as SdkErrorCode, entry)) continue;
+				const registry = SDK_ERROR_REGISTRY[code as SdkErrorCode];
+				out.push(
+					finding(
+						info.file,
+						entry.node.getStart(info.file.source),
+						ERRORS_HOIST_RULES.sdkEntryConflict,
+						`${info.table ? "Row" : "Map entry"} ${JSON.stringify(code)} states a status, retryable or locale key that differs from the SDK registry (sdkErrors.${code}: ${registry.status}, retryable ${registry.retryable}); defineErrors refuses a registered key with its own values, so the provider does not load while it stands.`,
+						`Two choices: (a) accept the SDK value: write ${mapKey(code)}: sdkErrors.${code}; or (b) declare a distinct provider code for this condition (its own status, category and retryable) and throw it at the sites that meant this entry. Then re-run apifuse migrate.`,
+					),
+				);
+			}
+		}
+	}
+	return out;
+}
+
 /**
  * The declaration shapes errors-factory rule 3 (`errors-factory-declaration-table`)
  * rewrites to `defineErrors({...})`: `const NAME = [...]`, `const NAME = [...]
@@ -2572,13 +2753,20 @@ function tableRule3Matches(
 	if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return false;
 	const initializer = declaration.initializer;
 	if (initializer === undefined) return false;
-	if (ts.isArrayLiteralExpression(initializer)) return true;
-	return (
-		ts.isAsExpression(initializer) &&
-		ts.isArrayLiteralExpression(initializer.expression) &&
-		ts.isTypeReferenceNode(initializer.type) &&
-		ts.isIdentifier(initializer.type.typeName) &&
-		initializer.type.typeName.text === "const"
+	const array = ts.isArrayLiteralExpression(initializer)
+		? initializer
+		: ts.isAsExpression(initializer) &&
+				ts.isArrayLiteralExpression(initializer.expression) &&
+				ts.isTypeReferenceNode(initializer.type) &&
+				ts.isIdentifier(initializer.type.typeName) &&
+				initializer.type.typeName.text === "const"
+			? initializer.expression
+			: undefined;
+	if (array === undefined) return false;
+	// A spread that is not a plain name (a property access, a call, a literal)
+	// names no map rule 3 could know; it leaves the table an array.
+	return !array.elements.some(
+		(element) => ts.isSpreadElement(element) && !ts.isIdentifier(element.expression),
 	);
 }
 

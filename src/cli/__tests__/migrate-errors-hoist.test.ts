@@ -217,7 +217,17 @@ describe("errors-hoist", () => {
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:16`,
 				`${ERRORS_HOIST_RULES.entryNotARow} operations/named.ts:22`,
 				`${ERRORS_HOIST_RULES.sdkOwnedCode} rows.ts:9`,
+				// A map entry under a registered key with its own values: defineErrors
+				// refuses it at import, so every run names it (not only the one that
+				// converted the row).
+				`${ERRORS_HOIST_RULES.sdkEntryConflict} shared.ts:8`,
 			]);
+			const entryConflict = result.residues.find(
+				(residue) => residue.ruleId === ERRORS_HOIST_RULES.sdkEntryConflict,
+			);
+			expect(entryConflict?.message).toBe(
+				'Map entry "BLOCKED" states a status, retryable or locale key that differs from the SDK registry (sdkErrors.BLOCKED: 502, retryable false); defineErrors refuses a registered key with its own values, so the provider does not load while it stands.',
+			);
 			// One row constant named from two lists is one row: one finding, at the constant.
 			expect(
 				result.residues.filter((residue) => residue.ruleId === ERRORS_HOIST_RULES.sdkOwnedCode),
@@ -663,6 +673,39 @@ describe("a map or a table spread into a list left whole", () => {
 			ERRORS_HOIST_RULES.mapSpreadInArray,
 			ERRORS_HOIST_RULES.entryNotARow,
 		]);
+	});
+});
+
+describe("a map whose module imports from the throw site's file", () => {
+	beforeEach(() => stage("migrate-errors-hoist-cycle"));
+
+	it("does not import the map (the import would close a cycle) and names the site; a leaf map is imported", () => {
+		const result = hoistInlineErrorRows({ providerRoot, dryRun: false });
+		expect(result.filesChanged).toEqual(["upstream/client.ts"]);
+		const client = read("upstream/client.ts");
+		expect(client).not.toContain("operations/search");
+		expect(client).toContain(
+			'import { ProviderError } from "@apifuse/provider-sdk/provider";\nimport { LEAF_ERRORS } from "./leaf";\n',
+		);
+		expect(client).toContain('throw LEAF_ERRORS.PAGE_GONE({ message: "The page is gone." });');
+		expect(client).toContain(
+			'throw new ProviderError("The query was rejected.", { code: "QUERY_REJECTED", category: "provider_error", retryable: false, details: { query } });',
+		);
+		expect(table(result.residues)).toEqual([`${ERRORS_HOIST_RULES.throwSiteUndeclared} upstream/client.ts:7`]);
+		expect(result.residues[0]?.message).toBe(
+			'Throw site of "QUERY_REJECTED" cannot reach a defineErrors map that declares QUERY_REJECTED from this file (importing SEARCH_ERRORS from operations/search.ts here would create an import cycle (operations/search.ts -> upstream/index.ts -> upstream/client.ts -> operations/search.ts), and the provider would not load; move the map to a module that imports nothing from this file); it is left as new ProviderError(...).',
+		);
+		expect(read("operations/search.ts")).toContain("\nexport const SEARCH_ERRORS = defineErrors({\n");
+		const again = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(again.rewrites).toBe(0);
+		expect(table(again.residues)).toEqual([`${ERRORS_HOIST_RULES.throwSiteUndeclared} upstream/client.ts:8`]);
+	});
+
+	it("dry run decides the same", () => {
+		const dry = hoistInlineErrorRows({ providerRoot, dryRun: true });
+		expect(dry.filesChanged).toEqual(["upstream/client.ts"]);
+		expect(dry.rewrites).toBe(1);
+		expect(table(dry.residues)).toEqual([`${ERRORS_HOIST_RULES.throwSiteUndeclared} upstream/client.ts:7`]);
 	});
 });
 
