@@ -942,13 +942,7 @@ export const ErrorEnvelopeSchema: z.ZodObject<{
 }, z.core.$strip>;
 
 // @public (undocumented)
-export type ErrorObservabilityDetails = {
-    category: ProviderErrorCategory;
-    taxonomyVersion: string;
-    retryable: boolean;
-    upstreamStatus?: number;
-    providerObservability?: ProviderErrorObservability;
-};
+export type ErrorObservabilityDetails = PlatformFaultObservabilityDetails | ProviderFailureObservabilityDetails;
 
 // Warning: (ae-forgotten-export) The symbol "GuardAttribution" needs to be exported by the entry point index.d.ts
 //
@@ -1918,6 +1912,16 @@ type JsonTemplate = JsonPrimitive | ReferenceNode | RelativeDateNode | JsonTempl
 // @public (undocumented)
 type JsonValue = JsonPrimitive | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
+};
+
+// @public
+export type LegacyErrorObservabilityDetails = {
+    origin?: undefined;
+    category: ProviderErrorCategory;
+    taxonomyVersion: string;
+    retryable: boolean;
+    upstreamStatus?: number;
+    providerObservability?: ProviderErrorObservability;
 };
 
 // @public (undocumented)
@@ -2931,6 +2935,23 @@ export type OutputUrlEventsLogPayload = {
 export type OutputUrlKind = (typeof OUTPUT_URL_KINDS)[number];
 
 // @public (undocumented)
+const PLATFORM_FAULT_CATEGORIES: readonly ["ok", "stateful_forwarding_deadline", "proxy_pool", "credential_unavailable", "output_validation", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+
+// Warning: (ae-forgotten-export) The symbol "PLATFORM_FAULT_CATEGORIES" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type PlatformFaultCategory = (typeof PLATFORM_FAULT_CATEGORIES)[number];
+
+// @public
+export type PlatformFaultObservabilityDetails = {
+    origin: "platform";
+    category: PlatformFaultCategory;
+    taxonomyVersion: string;
+    retryable: boolean;
+    upstreamStatus?: number;
+};
+
+// @public (undocumented)
 const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
     kind: z.ZodLiteral<"predicate">;
     operator: z.ZodEnum<{
@@ -3221,7 +3242,7 @@ type ProbeInterval = ms.StringValue;
 export const PROCFS_CLOCK_TICKS_PER_SECOND = 100;
 
 // @public (undocumented)
-const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+const PROVIDER_FAILURE_CATEGORIES: readonly ["timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "provider_error"];
 
 // @public (undocumented)
 export const PROVIDER_METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
@@ -3640,10 +3661,13 @@ class ProviderError<TCode extends string = string> extends Error {
     readonly options?: ProviderErrorOptions | undefined;
 }
 
-// Warning: (ae-forgotten-export) The symbol "PROVIDER_ERROR_CATEGORIES" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "ProviderFailureCategory" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
-type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
+type ProviderErrorCategory = PlatformFaultCategory | ProviderFailureCategory;
+
+// @public (undocumented)
+export type ProviderErrorCategoryOrigin = "platform" | "provider";
 
 // @public (undocumented)
 export type ProviderErrorCauseFrame = {
@@ -3656,7 +3680,7 @@ export type ProviderErrorCauseFrame = {
 };
 
 // @public
-type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     readonly code: TCode;
     readonly status: TStatus;
     readonly category: TCategory;
@@ -3667,7 +3691,7 @@ type ProviderErrorDeclaration<TCode extends string = string, TStatus extends Pro
 };
 
 // @public
-type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
     readonly declaration: ProviderErrorDeclaration<TCode, TStatus, TCategory>;
@@ -3701,7 +3725,7 @@ type ProviderErrorOptions = {
     code?: string;
     details?: unknown;
     cause?: Error;
-    category?: ProviderErrorCategory;
+    category?: ProviderFailureCategory;
     retryable?: boolean;
     observability?: ProviderErrorObservability;
     messageKey?: ProviderLocaleKeyInput;
@@ -3713,6 +3737,21 @@ type ProviderErrorOptions = {
 //
 // @public (undocumented)
 type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number];
+
+// Warning: (ae-forgotten-export) The symbol "PROVIDER_FAILURE_CATEGORIES" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ProviderFailureCategory = (typeof PROVIDER_FAILURE_CATEGORIES)[number];
+
+// @public (undocumented)
+export type ProviderFailureObservabilityDetails = {
+    origin: "provider";
+    category: ProviderFailureCategory;
+    taxonomyVersion: string;
+    retryable: boolean;
+    upstreamStatus?: number;
+    providerObservability?: ProviderErrorObservability;
+};
 
 // @public
 interface ProviderFileRef {
@@ -4025,12 +4064,13 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     message: string;
     upstreamStatus?: number;
     errorCategory?: ProviderErrorCategory;
+    errorOrigin?: ProviderErrorCategoryOrigin;
     taxonomyVersion?: string;
     retryable?: boolean;
     providerObservability?: ProviderErrorObservability;
     causeChain?: ProviderErrorCauseFrame[];
     stack?: string[];
-    signal?: "unregistered_provider_error_code";
+    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
     signalFix?: string;
     issues?: Array<{
         path: string;
@@ -6622,10 +6662,10 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // Warnings were encountered during analysis:
 //
 // dist/config/loader.d.ts:151:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:85:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:92:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:92:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:97:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:97:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:99:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:189:5 - (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1505:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1514:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts
@@ -6648,12 +6688,13 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:2105:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:2107:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:2108:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
+// dist/observability.d.ts:24:5 - (ae-forgotten-export) The symbol "PlatformFaultCategory" needs to be exported by the entry point index.d.ts
+// dist/observability.d.ts:48:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:24:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:113:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:19:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:232:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:255:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:227:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:250:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:130:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:166:5 - (ae-forgotten-export) The symbol "SafeRegex" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:199:9 - (ae-forgotten-export) The symbol "Iso8601Duration" needs to be exported by the entry point index.d.ts

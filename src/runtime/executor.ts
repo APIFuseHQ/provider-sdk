@@ -1,11 +1,8 @@
-import {
-	isValidationError,
-	ProviderError,
-	ValidationError,
-} from "../errors.js";
+import { isValidationError, ProviderError, ValidationError } from "../errors.js";
 import { z } from "zod";
 import { parseSchema } from "../schema.js";
 import type { EnvContext, ProviderDefinition } from "../types.js";
+import { issueSdkError } from "../sdk-issued-errors.js";
 import { assertRequiredSecretsPresent } from "./secrets.js";
 
 export function isStreamingOperation(provider: ProviderDefinition, operationId: string): boolean {
@@ -81,12 +78,20 @@ export async function executeOperation<
 		if (!(cause instanceof z.ZodError) && !isValidationError(cause)) {
 			throw cause;
 		}
-		throw new ValidationError(`Operation handler output failed schema validation.`, {
-			code: "OUTPUT_VALIDATION_FAILED",
-			category: "output_validation",
-			retryable: false,
-			zodError: isValidationError(cause) ? cause.zodError : cause,
-			...(cause instanceof Error ? { cause } : {}),
-		});
+		throw issueSdkError(
+			new ValidationError(`Operation handler output failed schema validation.`, {
+				code: "OUTPUT_VALIDATION_FAILED",
+				retryable: false,
+				zodError: isValidationError(cause) ? cause.zodError : cause,
+				...(cause instanceof Error ? { cause } : {}),
+			}),
+			{
+				category: "output_validation",
+				code: "OUTPUT_VALIDATION_FAILED",
+				status: 500,
+				retryable: false,
+				cause,
+			},
+		);
 	}
 }

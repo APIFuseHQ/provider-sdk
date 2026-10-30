@@ -19,17 +19,11 @@ const duplicateSdk: Promise<typeof import("../errors.js")> = import(duplicateSdk
 import { createProviderCache } from "../runtime/cache.js";
 import { createTestHandleContext } from "../runtime/handle.js";
 import { executeOperation } from "../runtime/executor.js";
+import { platformFaultOf } from "../sdk-issued-errors.js";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
-import type {
-	DeclarativeStealthResponse,
-	ProviderContext,
-	ProviderDefinition,
-} from "../types.js";
+import type { DeclarativeStealthResponse, ProviderContext, ProviderDefinition } from "../types.js";
 
-function createStealthResponse(
-	value: unknown,
-	status: number,
-): DeclarativeStealthResponse {
+function createStealthResponse(value: unknown, status: number): DeclarativeStealthResponse {
 	const body = JSON.stringify(value);
 	return {
 		status,
@@ -149,15 +143,23 @@ describe("executeOperation", () => {
 			handler: async () => ({ results: [42] }),
 		});
 
-		await expect(
-			executeOperation(provider, "search", ctx, { query: "test" }),
-		).rejects.toMatchObject({
+		const error: unknown = await executeOperation(provider, "search", ctx, {
+			query: "test",
+		}).then(
+			() => undefined,
+			(thrown: unknown) => thrown,
+		);
+		expect(error).toMatchObject({
 			name: "ValidationError",
-			options: {
-				code: "OUTPUT_VALIDATION_FAILED",
-				category: "output_validation",
-				retryable: false,
-			},
+			options: { code: "OUTPUT_VALIDATION_FAILED", retryable: false },
+		});
+		// The platform category lives in the SDK's issued-error record, not in
+		// options a provider could have set.
+		expect(platformFaultOf(error)).toMatchObject({
+			category: "output_validation",
+			code: "OUTPUT_VALIDATION_FAILED",
+			status: 500,
+			retryable: false,
 		});
 	});
 
@@ -294,7 +296,6 @@ describe("executeOperation", () => {
 		});
 		expect(calls).toBe(1);
 	});
-
 });
 
 describe("executeOperation SDK-owned secret enforcement", () => {
@@ -322,16 +323,22 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 			return { results: [] };
 		});
 
-		await expect(
-			executeOperation(provider, "search", ctxWithEnv({}), { query: "test" }),
-		).rejects.toMatchObject({
+		const error: unknown = await executeOperation(provider, "search", ctxWithEnv({}), {
+			query: "test",
+		}).then(
+			() => undefined,
+			(thrown: unknown) => thrown,
+		);
+		expect(error).toMatchObject({
 			name: "ProviderSecretError",
 			message: `Missing required provider secret: ${API_KEY}`,
-			options: {
-				code: "MISSING_SECRET",
-				category: "credential_unavailable",
-				retryable: false,
-			},
+			options: { code: "MISSING_SECRET", retryable: false },
+		});
+		expect(platformFaultOf(error)).toMatchObject({
+			category: "credential_unavailable",
+			code: "MISSING_SECRET",
+			status: 400,
+			retryable: false,
 		});
 		expect(calls).toBe(0);
 	});

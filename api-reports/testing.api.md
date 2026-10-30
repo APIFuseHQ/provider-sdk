@@ -2306,7 +2306,7 @@ const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
 type ProbeInterval = ms.StringValue;
 
 // @public (undocumented)
-const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+const PROVIDER_FAILURE_CATEGORIES: readonly ["timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "provider_error"];
 
 // @public (undocumented)
 interface ProviderAccessConfig {
@@ -2642,15 +2642,10 @@ class ProviderError<TCode extends string = string> extends Error {
     readonly options?: ProviderErrorOptions | undefined;
 }
 
-// Warning: (ae-forgotten-export) The symbol "PROVIDER_ERROR_CATEGORIES" needs to be exported by the entry point index.d.ts
-//
-// @public (undocumented)
-type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
-
-// Warning: (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "ProviderFailureCategory" needs to be exported by the entry point index.d.ts
 //
 // @public
-type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     readonly code: TCode;
     readonly status: TStatus;
     readonly category: TCategory;
@@ -2661,7 +2656,7 @@ type ProviderErrorDeclaration<TCode extends string = string, TStatus extends Pro
 };
 
 // @public
-type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
     readonly declaration: ProviderErrorDeclaration<TCode, TStatus, TCategory>;
@@ -2695,7 +2690,7 @@ type ProviderErrorOptions = {
     code?: string;
     details?: unknown;
     cause?: Error;
-    category?: ProviderErrorCategory;
+    category?: ProviderFailureCategory;
     retryable?: boolean;
     observability?: ProviderErrorObservability;
     messageKey?: ProviderLocaleKeyInput;
@@ -2707,6 +2702,11 @@ type ProviderErrorOptions = {
 //
 // @public (undocumented)
 type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number];
+
+// Warning: (ae-forgotten-export) The symbol "PROVIDER_FAILURE_CATEGORIES" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ProviderFailureCategory = (typeof PROVIDER_FAILURE_CATEGORIES)[number];
 
 // @public
 interface ProviderFileRef {
@@ -4348,11 +4348,11 @@ interface VerificationCodeExtractionResult {
 
 // Warnings were encountered during analysis:
 //
-// dist/define-errors.d.ts:85:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:86:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:92:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:92:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:93:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:97:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:97:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:99:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:189:5 - (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1505:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1514:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts

@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { defineProvider } from "../define.js";
 import { executeOperation } from "../runtime/executor.js";
+import { platformFaultOf } from "../sdk-issued-errors.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
@@ -195,6 +196,9 @@ const sourceRoutes = new Map<string, StatefulProviderRuntimeExecutor>([
 ]);
 
 const sourceEvents: ProviderServerLogEvent[] = [];
+// The error the source pod's session router threw for each request id, as
+// serve received it.
+const sourceRouteErrors = new Map<string, unknown>();
 const sourceApp = createServerApp(provider, {
 	logger: (event) => sourceEvents.push(event),
 	// The README's stateful operation executor: route the operation through the
@@ -203,23 +207,28 @@ const sourceApp = createServerApp(provider, {
 		const headers = request.headers ?? {};
 		const route = sourceRoutes.get(headers["x-test-route"] ?? "");
 		if (!route) throw new Error("unknown source route");
-		const result = await route.invoke(
-			buildStatefulOperationRequest({
-				requestId: request.requestId,
-				sessionKey,
-				providerId: PROVIDER_ID,
-				operationId,
-				connectionId: "connection-1",
-				serviceAccountId: "account-1",
-				input: request.input,
-				...(headers["x-test-deadline-at"] ? { deadlineAt: headers["x-test-deadline-at"] } : {}),
-				runtimeContext: withStatefulLocalProviderContext(
-					ctx,
-					statefulForwardingContextFromProviderRequest(request),
-				),
-			}),
-		);
-		return result.output;
+		try {
+			const result = await route.invoke(
+				buildStatefulOperationRequest({
+					requestId: request.requestId,
+					sessionKey,
+					providerId: PROVIDER_ID,
+					operationId,
+					connectionId: "connection-1",
+					serviceAccountId: "account-1",
+					input: request.input,
+					...(headers["x-test-deadline-at"] ? { deadlineAt: headers["x-test-deadline-at"] } : {}),
+					runtimeContext: withStatefulLocalProviderContext(
+						ctx,
+						statefulForwardingContextFromProviderRequest(request),
+					),
+				}),
+			);
+			return result.output;
+		} catch (error) {
+			sourceRouteErrors.set(request.requestId, error);
+			throw error;
+		}
 	},
 });
 const sourcePod = recordingListener((request) => sourceApp.fetch(request));
@@ -363,6 +372,11 @@ describe("a provider-constructed StatefulRoutingDeadlineError", () => {
 			code: "internal_error",
 			errorClass: "StatefulRoutingDeadlineError",
 		});
+		// The router handed serve the provider's own instance, which carries
+		// no platform fault.
+		const thrown = sourceRouteErrors.get("forwarder-lookalike");
+		expect(thrown).toBeInstanceOf(StatefulRoutingDeadlineError);
+		expect(platformFaultOf(thrown)).toBeUndefined();
 	});
 });
 
@@ -405,6 +419,14 @@ describe("a deadline the SDK detects in the same assembly", () => {
 			status: 504,
 			code: PLATFORM_DEADLINE_CODE,
 			errorClass: "StatefulRoutingDeadlineError",
+		});
+		// The router's check before routing issued its error as the deadline's
+		// platform fault.
+		expect(platformFaultOf(sourceRouteErrors.get("source-expired"))).toEqual({
+			category: "stateful_forwarding_deadline",
+			code: PLATFORM_DEADLINE_CODE,
+			status: 504,
+			retryable: false,
 		});
 	});
 });

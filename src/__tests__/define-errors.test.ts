@@ -153,7 +153,7 @@ describe("defineErrors", () => {
 		expect(throwsEither(false).code).toBe("SHOP_CLOSED");
 	});
 
-	it("rejects restating or overriding an SDK-registered code at the type level", () => {
+	it("rejects restating or overriding an SDK-registered code, or a platform-fault category, at the type level", () => {
 		const probes = {
 			restated: () =>
 				defineErrors({
@@ -170,8 +170,13 @@ describe("defineErrors", () => {
 					// @ts-expect-error test-invalid: a provider declaration needs a category
 					ITEM_GONE: { status: 404, description: "x" },
 				}),
+			platformWord: () =>
+				defineErrors({
+					// @ts-expect-error test-invalid: a declared category is a provider-failure category, never a platform fault
+					ITEM_GONE: { status: 502, category: "internal_error", description: "x" },
+				}),
 		};
-		expect(Object.keys(probes)).toHaveLength(3);
+		expect(Object.keys(probes)).toHaveLength(4);
 	});
 
 	it("accepts factories from another map, keyed by their own code", () => {
@@ -220,7 +225,7 @@ describe("defineErrors", () => {
 		).toThrow(/"MISSING_SECRET" is owned by the SDK runtime/);
 	});
 
-	it("rejects an invalid status, category, retryable, description or locale key", () => {
+	it("rejects an invalid status, category (a platform-fault word included), retryable, description or locale key", () => {
 		const base = { status: 404, category: "upstream_rejected", description: "x" } as const;
 		expect(() =>
 			defineErrors({
@@ -240,6 +245,20 @@ describe("defineErrors", () => {
 				},
 			}),
 		).toThrow(/"A" has invalid category nope/);
+		expect(() =>
+			defineErrors({
+				A: {
+					...base,
+					category:
+						"client_cancelled" as never /* test-invalid: the type rejects this; the runtime check is under test */,
+				},
+			}),
+		).toThrow(
+			/"A" declares the platform-fault category client_cancelled, which only the SDK reports/,
+		);
+		expect(() =>
+			defineErrors({ A: { ...base, category: "credential_unavailable" } }),
+		).not.toThrow();
 		expect(() =>
 			defineErrors({
 				A: {
@@ -381,7 +400,7 @@ describe("defineOperation errors", () => {
 type Served = {
 	status: number;
 	body: { error: { code: string; retryable: boolean; source: string; message: string } };
-	header: { category: string; retryable: boolean; taxonomyVersion: string };
+	header: { origin: string; category: string; retryable: boolean; taxonomyVersion: string };
 	events: ProviderServerLogEvent[];
 };
 
@@ -437,6 +456,7 @@ describe("serving a factory-made error", () => {
 			expect({ listed, status: served.status, ...served.header }).toEqual({
 				listed,
 				status: 404,
+				origin: "provider",
 				taxonomyVersion: expect.any(String),
 				category: "upstream_rejected",
 				retryable: false,
@@ -578,6 +598,32 @@ describe("serving a legacy throw against a declaration", () => {
 			fix: expect.stringContaining(
 				"defineErrors({ UPSTREAM_ERROR: { status, category, description } })",
 			),
+		});
+	});
+
+	it("serves the declared category under a per-throw platform word, and names no category conflict", async () => {
+		// A platform word is no value: serve reads the throw as setting no
+		// category, so the declaration's is served, and the warning does not
+		// claim the thrown word is.
+		const served = await serve(
+			() =>
+				new ProviderError("closed", {
+					code: "SHOP_CLOSED",
+					category:
+						"internal_error" as never /* test-invalid: the type rejects a platform word; the runtime reading is under test */,
+				}),
+			{ errors: [errors.SHOP_CLOSED] },
+		);
+
+		expect(served.status).toBe(502);
+		expect(served.header).toMatchObject({ origin: "provider", category: "upstream_http" });
+		const warning = served.events.find(
+			(event) => event.event === "provider_error_options_deprecated",
+		);
+		expect(warning).toMatchObject({ options: ["category"] });
+		expect(warning).not.toHaveProperty("conflicts");
+		expect(served.events.find((event) => event.event === "provider_request_failed")).toMatchObject({
+			signal: "unknown_provider_error_category",
 		});
 	});
 

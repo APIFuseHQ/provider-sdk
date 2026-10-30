@@ -37,7 +37,7 @@ import {
 	type MutableHandleFieldMeta,
 	type ResolvedHandleContract,
 } from "./handle/contract.js";
-import type { ProviderErrorCategory } from "./observability.js";
+import type { ProviderFailureCategory } from "./observability.js";
 import {
 	BOUND_HANDLE_WORD_COUNT,
 	HIGH_PUBLIC_HANDLE_WORD_COUNT,
@@ -243,20 +243,25 @@ export type HandleErrorCode =
 	| "HANDLE_INVALID_DATA"
 	| "PICK_NOT_OFFERED";
 
+// The codes the handle runtime raises for faults of its own (busy, connection
+// scope, storage, size, schema) carry no category here. Raised by the runtime
+// they are reported as platform faults (internal_error) through the SDK's
+// issued-error record; constructed by provider code they are provider errors
+// with no category, which the server reports as provider_error.
 const HANDLE_ERROR_DEFAULTS: Record<
 	HandleErrorCode,
-	{ readonly category: ProviderErrorCategory; readonly retryable: boolean }
+	{ readonly category?: ProviderFailureCategory; readonly retryable: boolean }
 > = {
 	HANDLE_INVALID: { category: "input_validation", retryable: false },
 	HANDLE_NOT_FOUND: { category: "input_validation", retryable: false },
 	HANDLE_EXPIRED: { category: "input_validation", retryable: false },
 	HANDLE_KIND_MISMATCH: { category: "input_validation", retryable: false },
-	HANDLE_BUSY: { category: "internal_error", retryable: true },
+	HANDLE_BUSY: { retryable: true },
 	HANDLE_COMMITTED: { category: "input_validation", retryable: false },
-	HANDLE_CONNECTION_REQUIRED: { category: "internal_error", retryable: false },
-	HANDLE_STORAGE_UNAVAILABLE: { category: "internal_error", retryable: false },
-	HANDLE_TOO_LARGE: { category: "internal_error", retryable: false },
-	HANDLE_INVALID_DATA: { category: "internal_error", retryable: false },
+	HANDLE_CONNECTION_REQUIRED: { retryable: false },
+	HANDLE_STORAGE_UNAVAILABLE: { retryable: false },
+	HANDLE_TOO_LARGE: { retryable: false },
+	HANDLE_INVALID_DATA: { retryable: false },
 	PICK_NOT_OFFERED: { category: "input_validation", retryable: false },
 };
 
@@ -273,7 +278,7 @@ export class HandleError extends ProviderError {
 		const { kind, ...rest } = options;
 		const defaults = HANDLE_ERROR_DEFAULTS[code];
 		super(message, {
-			category: defaults.category,
+			...(defaults.category === undefined ? {} : { category: defaults.category }),
 			retryable: defaults.retryable,
 			...rest,
 			code,

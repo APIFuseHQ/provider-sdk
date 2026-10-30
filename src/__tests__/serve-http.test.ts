@@ -4,7 +4,7 @@ import { type Socket, createServer } from "node:net";
 import { z } from "zod";
 
 import { safeProviderErrorObservability } from "../error-observability.js";
-import { PROVIDER_ERROR_CATEGORIES } from "../observability.js";
+import { PLATFORM_FAULT_CATEGORIES, PROVIDER_FAILURE_CATEGORIES } from "../observability.js";
 import {
 	AuthError,
 	ProviderError,
@@ -15,16 +15,19 @@ import {
 	ValidationError,
 } from "../errors.js";
 import { NativeNetworkError } from "../runtime/native-network.js";
+import { createProxyEdgeAuthRejectedError } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
 import * as diagnosticRedactor from "../runtime/diagnostic-redactor.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { defineCursor } from "../handle.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { issueSdkError } from "../sdk-issued-errors.js";
 import { OperationRequestSchema } from "../server/index.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
 	type ErrorObservabilityDetails,
+	type ProviderFailureObservabilityDetails,
 	type ProviderServerLogEvent,
 	resolveAuthFlowProxyAffinityKey,
 	resolveProviderProxyAffinityKey,
@@ -60,26 +63,48 @@ function clearSmartproxyEnv(): () => void {
 const READ_RISK_CLASS: OperationRiskClass = "read";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
+const ObservabilityFieldsSchema = {
+	taxonomyVersion: z.string(),
+	retryable: z.boolean(),
+	upstreamStatus: z.number().optional(),
+};
+
+// The served header, read as the origin-tagged shape: a category is only
+// accepted together with the origin whose set it belongs to.
+const ErrorObservabilitySchema: z.ZodType<ErrorObservabilityDetails> = z.union([
+	z.object({
+		origin: z.literal("platform"),
+		category: z.enum(PLATFORM_FAULT_CATEGORIES),
+		...ObservabilityFieldsSchema,
+	}),
+	z.object({
+		origin: z.literal("provider"),
+		category: z.enum(PROVIDER_FAILURE_CATEGORIES),
+		...ObservabilityFieldsSchema,
+		providerObservability: z
+			.object({
+				reason: z.string().optional(),
+				fingerprint: z.string().optional(),
+				messageLength: z.number().optional(),
+			})
+			.optional(),
+	}),
+]);
+
 function errorObservability(response: Response): ErrorObservabilityDetails {
 	const value = response.headers.get(ERROR_OBSERVABILITY_HEADER);
 	expect(value).toBeTruthy();
 	expect(value).not.toMatch(/[\r\n]/);
 	if (value === null) throw new Error("Expected error observability header");
-	return z
-		.object({
-			category: z.enum(PROVIDER_ERROR_CATEGORIES),
-			taxonomyVersion: z.string(),
-			retryable: z.boolean(),
-			upstreamStatus: z.number().optional(),
-			providerObservability: z
-				.object({
-					reason: z.string().optional(),
-					fingerprint: z.string().optional(),
-					messageLength: z.number().optional(),
-				})
-				.optional(),
-		})
-		.parse(JSON.parse(value));
+	return ErrorObservabilitySchema.parse(JSON.parse(value));
+}
+
+function providerFailureObservability(response: Response): ProviderFailureObservabilityDetails {
+	const details = errorObservability(response);
+	if (details.origin !== "provider") {
+		throw new Error(`Expected a provider failure header, got origin ${details.origin}`);
+	}
+	return details;
 }
 
 function parseValueInput(input: unknown): { value: string } {
@@ -634,7 +659,18 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					);
 				},
 			},
+			// The error the SDK's stealth transport throws when the proxy edge
+			// rejects a session, from the factory it uses.
 			proxyEdgeAuthRejected: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw createProxyEdgeAuthRejectedError();
+				},
+			},
+			// The same class, code and message built by the provider itself.
+			proxyEdgeAuthRejectedLookalike: {
 				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
@@ -1695,6 +1731,7 @@ describe("provider HTTP server", () => {
 
 			expect(response.status).toBe(503);
 			expect(errorObservability(response)).toEqual({
+				origin: "provider",
 				category: "upstream_http",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: true,
@@ -1717,6 +1754,7 @@ describe("provider HTTP server", () => {
 
 			expect(response.status).toBe(503);
 			expect(errorObservability(response)).toEqual({
+				origin: "provider",
 				category: "upstream_http",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: true,
@@ -2143,6 +2181,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -2337,6 +2376,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "timeout",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -2366,6 +2406,7 @@ describe("provider HTTP server", () => {
 		});
 		// The category was already timeout; it does not change.
 		expect(errorObservability(native)).toEqual({
+			origin: "provider",
 			category: "timeout",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -2395,6 +2436,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "timeout",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -2422,6 +2464,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "network",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -2449,6 +2492,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "provider_error",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -2470,6 +2514,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details).not.toHaveProperty("taxonomyVersion");
 		expect(body.error.details).not.toHaveProperty("upstreamStatus");
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -2489,6 +2534,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.retryable).toBe(false);
 		expect(body.error.details).toEqual({ retryable: true, providerPolicy: "independent" });
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -2535,6 +2581,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "credential_expired",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -2576,6 +2623,7 @@ describe("provider HTTP server", () => {
 
 		expect(response.status).toBe(401);
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "credential_expired",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -2607,6 +2655,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "credential_expired",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -2634,6 +2683,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -2663,6 +2713,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "anti_bot_blocked",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -2691,7 +2742,39 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "platform",
 			category: "proxy_pool",
+			taxonomyVersion: "2026-10-23",
+			retryable: true,
+		});
+	});
+
+	it("serves a provider-built proxy edge auth rejection as the provider's failure, not the proxy pool's", async () => {
+		const response = await app.request("/v1/proxyEdgeAuthRejectedLookalike", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_proxy_edge_auth_lookalike",
+				input: { value: "hello" },
+			}),
+		});
+
+		// The code is not a token for the platform's outcome: the transport
+		// failure the provider threw is classified like any other.
+		expect(response.status).toBe(502);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "PROXY_EDGE_AUTH_REJECTED",
+				message:
+					"Proxy provider rejected a session during authentication. The SDK retries with a new session when safe.",
+				requestId: "req_proxy_edge_auth_lookalike",
+				retryable: true,
+				source: "upstream_failure",
+			},
+		});
+		expect(errorObservability(response)).toEqual({
+			origin: "provider",
+			category: "upstream_http",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
 		});
@@ -2773,6 +2856,7 @@ describe("provider HTTP server", () => {
 			expect(body.error.retryable).toBe(true);
 			expect(body.error.details).toBeUndefined();
 			expect(errorObservability(response)).toMatchObject({
+				origin: "platform",
 				category: "proxy_pool",
 				retryable: true,
 			});
@@ -2846,6 +2930,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details?.category).toBe("internal_error");
 		expect(body.error.details?.errorClass).toBe("Error");
 		expect(errorObservability(response)).toEqual({
+			origin: "platform",
 			category: "internal_error",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -2906,6 +2991,7 @@ describe("provider HTTP server", () => {
 			expect(bodyText).not.toContain(".ts:");
 			expect(bodyText).not.toContain('"stack"');
 			expect(errorObservability(response)).toEqual({
+				origin: "platform",
 				category: "internal_error",
 				taxonomyVersion: "2026-10-23",
 				retryable: false,
@@ -3496,7 +3582,7 @@ describe("provider HTTP server", () => {
 			event: "provider_request_failed",
 			providerObservability,
 		});
-		const headerObservability = errorObservability(response).providerObservability;
+		const headerObservability = providerFailureObservability(response).providerObservability;
 		expect(headerObservability).toEqual(providerObservability);
 		expect(Object.getOwnPropertyDescriptor(events[0], "providerObservability")?.value).toEqual(
 			headerObservability,
@@ -3554,7 +3640,9 @@ describe("provider HTTP server", () => {
 				fingerprint: "000000000000",
 			},
 		});
-		expect(errorObservability(response).providerObservability).toEqual(providerObservability);
+		expect(providerFailureObservability(response).providerObservability).toEqual(
+			providerObservability,
+		);
 	});
 
 	it("rejects inherited observability from the log, header, cause frame, and body", async () => {
@@ -4010,6 +4098,7 @@ describe("provider HTTP server", () => {
 			expect.arrayContaining([expect.objectContaining({ path: "requestId" })]),
 		);
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "input_validation",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -4032,6 +4121,7 @@ describe("provider HTTP server", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "platform",
 			category: "output_validation",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -4110,6 +4200,7 @@ describe("operation-declared error resolution", () => {
 		const header = errorObservability(response);
 		expect(body.error.retryable).toBe(true);
 		expect(header).toEqual({
+			origin: "provider",
 			category: "upstream_schema_drift",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,
@@ -4315,12 +4406,21 @@ describe("operation-declared error resolution", () => {
 					status: 400,
 					description: "Conflicts with SDK output validation",
 				},
+				// Raised the way the SDK's output validation raises it: issued as
+				// a platform fault, not a provider-thrown look-alike.
 				createError: () =>
-					new ValidationError("Operation handler output failed schema validation.", {
-						code: "OUTPUT_VALIDATION_FAILED",
-						category: "output_validation",
-						retryable: false,
-					}),
+					issueSdkError(
+						new ValidationError("Operation handler output failed schema validation.", {
+							code: "OUTPUT_VALIDATION_FAILED",
+							retryable: false,
+						}),
+						{
+							category: "output_validation",
+							code: "OUTPUT_VALIDATION_FAILED",
+							status: 500,
+							retryable: false,
+						},
+					),
 				status: 500,
 				category: "output_validation",
 				code: "OUTPUT_VALIDATION_FAILED",
@@ -4386,10 +4486,10 @@ describe("operation-declared error resolution", () => {
 				createError: () =>
 					new ValidationError("Output was invalid", {
 						code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
-						category: "output_validation",
+						category: "upstream_schema_drift",
 					}),
 				status: 502,
-				category: "output_validation",
+				category: "upstream_schema_drift",
 			},
 			{
 				name: "undeclared input failure",
@@ -4465,6 +4565,7 @@ describe("operation-declared error resolution", () => {
 			},
 		});
 		expect(errorObservability(response)).toEqual({
+			origin: "provider",
 			category: "provider_error",
 			taxonomyVersion: "2026-10-23",
 			retryable: false,
@@ -4723,6 +4824,7 @@ describe("SDK-owned secret enforcement over HTTP", () => {
 			expect(body.error.retryable).toBe(false);
 			expect(body.error.details).toBeUndefined();
 			expect(errorObservability(response)).toEqual({
+				origin: "platform",
 				category: "credential_unavailable",
 				taxonomyVersion: "2026-10-23",
 				retryable: false,

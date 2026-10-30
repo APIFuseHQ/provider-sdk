@@ -143,7 +143,13 @@ describe("health-check expectedErrors lint (by-code form)", () => {
 	it("still finds a by-code entry after defineProvider attached the freshness guard", () => {
 		const guarded = (steps: [HealthStepInput, ...HealthStepInput[]]) =>
 			withFreshnessGuards(probeScenario(steps), new Set([OPERATION_KEY]));
-		const diagnostics = lint([expected(404, "NO_FORECAST")], undefined, undefined, undefined, guarded);
+		const diagnostics = lint(
+			[expected(404, "NO_FORECAST")],
+			undefined,
+			undefined,
+			undefined,
+			guarded,
+		);
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]).toMatchObject({ rule: UNMATCHABLE, field: `${FIELD}[0]` });
 	});
@@ -258,6 +264,29 @@ describe("health-check expectedErrors lint (by-code form)", () => {
 				errors.NO_FORECAST,
 			]),
 		).toEqual([]);
+	});
+
+	it("reads a platform word another SDK copy declared as no category, the way serve does", () => {
+		// This SDK's defineErrors rejects the word; a factory from an SDK copy
+		// that took every category still carries it. Serve reads it as unset, so
+		// the declared 404 serves provider_error with source apifuse, not the
+		// platform word's client source.
+		const fromAnotherCopy = {
+			code: "NO_FORECAST",
+			declaration: {
+				code: "NO_FORECAST",
+				status: 404,
+				category: "client_cancelled",
+				retryable: false,
+				description: "The service has no forecast for this area.",
+			},
+		};
+		const diagnostics = lint([expected(404, "NO_FORECAST")], undefined, undefined, [
+			fromAnotherCopy as never /* test-invalid: the type rejects a platform word; the runtime reading is under test */,
+		]);
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0]?.message).toContain('source "apifuse"');
+		expect(diagnostics[0]?.message).not.toContain('source "client"');
 	});
 
 	it("rejects a code the operation neither declares nor the SDK registers", () => {

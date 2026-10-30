@@ -37,7 +37,7 @@ import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 } from "../error-resolution.js";
-import { defineErrors, providerErrorDeclaration } from "../define-errors.js";
+import { providerErrorDeclaration } from "../define-errors.js";
 import {
 	AuthError,
 	isProviderError,
@@ -68,11 +68,26 @@ import {
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
+	type ErrorObservabilityDetails,
+	isProviderFailureCategory,
 	isRetryableCategory,
+	type PlatformFaultObservabilityDetails,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	type ProviderErrorCategory,
+	type ProviderErrorCategoryOrigin,
 	type ProviderErrorSource,
+	type ProviderFailureCategory,
+	type ProviderFailureObservabilityDetails,
 	sourceForCategory,
+	sourceForPlatformFault,
+} from "../observability.js";
+import { issueSdkError, type PlatformFault, platformFaultOf } from "../sdk-issued-errors.js";
+
+export type {
+	ErrorObservabilityDetails,
+	LegacyErrorObservabilityDetails,
+	PlatformFaultObservabilityDetails,
+	ProviderFailureObservabilityDetails,
 } from "../observability.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
@@ -279,13 +294,6 @@ const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
 /** Compact SDK-owned error classification emitted separately from the public response body. */
 export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
-export type ErrorObservabilityDetails = {
-	category: ProviderErrorCategory;
-	taxonomyVersion: string;
-	retryable: boolean;
-	upstreamStatus?: number;
-	providerObservability?: ProviderErrorObservability;
-};
 
 // Provider errors normally expose `options` through an own data property, but
 // providers can replace that property with a throwing accessor. Provider-controlled
@@ -1518,12 +1526,13 @@ export type ProviderServerLogEvent =
 			message: string;
 			upstreamStatus?: number;
 			errorCategory?: ProviderErrorCategory;
+			errorOrigin?: ProviderErrorCategoryOrigin;
 			taxonomyVersion?: string;
 			retryable?: boolean;
 			providerObservability?: ProviderErrorObservability;
 			causeChain?: ProviderErrorCauseFrame[];
 			stack?: string[];
-			signal?: "unregistered_provider_error_code";
+			signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
 			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
 	  })
@@ -1775,16 +1784,21 @@ function zodDetails(
 	}));
 }
 
-// Category-level projection with code-aware honesty overrides: a missing
-// deployment secret is an APIFuse-side defect even though its category
-// (credential_unavailable) usually means a caller credential problem, an
-// internal stateful-routing deadline is APIFuse-owned whatever category it
-// carries, and the built-in upstream failure families keep their upstream
-// attribution even under an explicit non-upstream category. An unset category
-// needs no override: a registered upstream code already carries its category
+// The public source follows the path that classified the failure. A platform
+// fault is APIFuse's, except an inbound cancellation, which the caller caused
+// (sourceForPlatformFault). A provider failure is a category-level projection
+// with code-aware honesty overrides: a provider-thrown missing deployment
+// secret is an APIFuse-side defect even though its category
+// (credential_unavailable) usually means a caller credential problem, and the
+// built-in upstream failure families keep their upstream attribution even
+// under an explicit non-upstream category. An unset category needs no
+// override: a registered upstream code already carries its category
 // (SDK_UPSTREAM_ERROR_CODE_REGISTRY), and the source follows from it.
-function publicErrorSource(error: unknown, category: ProviderErrorCategory): ProviderErrorSource {
-	if (isIssuedStatefulRoutingDeadlineError(error)) return "apifuse";
+function publicErrorSource(
+	error: unknown,
+	observability: ErrorObservabilityDetails,
+): ProviderErrorSource {
+	if (observability.origin === "platform") return sourceForPlatformFault(observability.category);
 	if (isProviderError(error)) {
 		const code = providerErrorCode(error);
 		if (code === MISSING_SECRET_CODE) return "apifuse";
@@ -1792,7 +1806,7 @@ function publicErrorSource(error: unknown, category: ProviderErrorCategory): Pro
 			return "upstream_failure";
 		}
 	}
-	return sourceForCategory(category);
+	return sourceForCategory(observability.category);
 }
 
 /**
@@ -1908,7 +1922,7 @@ function toErrorResponse(
 	inboundSignal?: AbortSignal,
 ): OperationErrorResponse {
 	const observability = observabilityDetails;
-	const source = publicErrorSource(error, observability.category);
+	const source = publicErrorSource(error, observability);
 	if (isIssuedStatefulRoutingDeadlineError(error)) {
 		return {
 			error: {
@@ -1980,53 +1994,6 @@ function toErrorResponse(
 	};
 }
 
-// Accepts `unknown` so the branded guards narrow cleanly from the top: the
-// subtype error classes are structurally compatible with ProviderError, so
-// narrowing from a ProviderError-typed value would collapse the negative branch
-// to `never`. Narrowing from unknown avoids that while still recognizing errors
-// from a duplicate SDK module instance.
-function ownErrorCode(error: unknown): string | undefined {
-	if (error === null || (typeof error !== "object" && typeof error !== "function")) {
-		return undefined;
-	}
-	try {
-		const descriptor = Object.getOwnPropertyDescriptor(error, "code");
-		return descriptor && Object.hasOwn(descriptor, "value") && typeof descriptor.value === "string"
-			? descriptor.value
-			: undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function errorChainHasCode(error: unknown, expected: string): boolean {
-	const seen = new Set<object>();
-	let current = error;
-	for (let depth = 0; depth < 5; depth++) {
-		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
-			return false;
-		}
-		if (seen.has(current)) return false;
-		seen.add(current);
-		let code: string | undefined;
-		try {
-			code = providerErrorCode(current) ?? ownErrorCode(current);
-		} catch {
-			code = ownErrorCode(current);
-		}
-		if (code === expected) return true;
-		let cause: PropertyDescriptor | undefined;
-		try {
-			cause = Object.getOwnPropertyDescriptor(current, "cause");
-		} catch {
-			return false;
-		}
-		if (!cause || !Object.hasOwn(cause, "value")) return false;
-		current = cause.value;
-	}
-	return false;
-}
-
 // ctx.http and ctx.stealth reject with `transport_cancelled` when their
 // signal aborts, but that signal merges the inbound request's signal with any
 // `signal` the provider passed itself (and, on the stateful route, the
@@ -2039,8 +2006,10 @@ function errorChainHasCode(error: unknown, expected: string): boolean {
 // caller's too, and otherwise it is classified like ctx.http's provider-side
 // `transport_cancelled`. For the native client a `TimeoutError` reason stays a
 // timeout either way: the provider's own time limit fired first
-// (isProviderTimeoutAbortTransportError). The observability category and the
-// served status both follow this.
+// (isProviderTimeoutAbortTransportError). The caller leaving is serve's own
+// observation of the request it serves, so such a failure is the platform
+// fault client_cancelled (servedPlatformFault), served with the streaming
+// path's status.
 function isClientCancelledTransportError(
 	error: TransportError,
 	inboundSignal: AbortSignal | undefined,
@@ -2088,76 +2057,160 @@ function isProviderTimeoutAbortTransportError(
 	}
 }
 
-function providerObservabilityDetails(
+// A throw serve cannot read as a provider failure: not a ProviderError, not a
+// request ZodError, not a fault the SDK issued. Its body is masked, and the
+// platform reports it as its own internal_error. Nothing the thrown value
+// carries is read for it.
+const MASKED_THROW_FAULT: PlatformFault = {
+	category: "internal_error",
+	code: "internal_error",
+	status: 500,
+	retryable: false,
+};
+
+/**
+ * The platform fault serve classifies `error` as, or `undefined` for a
+ * provider failure. The platform serializer reads only this, never options a
+ * provider could have set, and it comes from:
+ *
+ * - the record of a fault the SDK issued (`platformFaultOf`): the stateful
+ *   forwarding deadline, output validation, the inbound cancellation, the
+ *   required-secret gate, the handle runtime's faults, and the transports'
+ *   proxy allocation and proxy endpoint failures;
+ * - the served request's own signal: a transport cancellation after the
+ *   caller closed the connection (isClientCancelledTransportError);
+ * - a throw serve cannot read as a provider failure, served masked as
+ *   internal_error.
+ *
+ * A class, code, name or cause chain never makes an error a platform fault:
+ * a provider that throws a StatefulRoutingDeadlineError it built, or
+ * STATEFUL_FORWARDING_DEADLINE_EXPIRED, OUTPUT_VALIDATION_FAILED or
+ * PROXY_POOL_EXHAUSTED, has thrown a provider failure, or a throw serve masks.
+ */
+function servedPlatformFault(
 	error: unknown,
-	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
-): ErrorObservabilityDetails | undefined {
-	const contract = providerErrorContract(error, declaredErrorCode);
-	// Session-expiry surfaces the credential_expired category so Gateway and
-	// Credential Service can distinguish an expired credential from other 401s.
-	if (isSessionExpiredError(error)) {
+): PlatformFault | undefined {
+	const fault = platformFaultOf(error);
+	if (fault) return fault;
+	if (isTransportError(error) && isClientCancelledTransportError(error, inboundSignal)) {
 		return {
-			category: contract.category ?? "credential_expired",
-			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: contract.retryable ?? false,
+			category: "client_cancelled",
+			code: providerErrorCode(error) ?? "transport_cancelled",
+			status: CLIENT_CANCELLED_STATUS,
+			retryable: false,
 		};
 	}
-	// Missing-secret errors carry the canonical credential_unavailable category
-	// so Gateway/observability can attribute the failure to provisioning, not
-	// the upstream. Matched by code (not constructor) so both the SDK-owned
-	// runtime gate and any not-yet-migrated provider-thrown MISSING_SECRET
-	// serialize identically, including across duplicate SDK module instances.
-	if (isProviderError(error) && providerErrorCode(error) === MISSING_SECRET_CODE) {
-		return {
-			category: contract.category ?? "credential_unavailable",
-			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: contract.retryable ?? false,
-		};
-	}
-	// Native proxy resolution throws ProxyResolutionError directly, while HTTP
-	// normalizes it beneath a transport_network_error cause and stealth retains
-	// the original code. Preserve proxy attribution across all three forms.
-	if (errorChainHasCode(error, "PROXY_REQUIRED")) {
-		return {
-			category: "proxy_pool",
-			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: true,
-		};
-	}
-	if (!isTransportError(error)) {
-		return undefined;
-	}
-	const errorCode = providerErrorCode(error);
-	const isClientCancellation = isClientCancelledTransportError(error, inboundSignal);
-	const isProviderTimeoutAbort = isProviderTimeoutAbortTransportError(error, inboundSignal);
-	const isProxyPoolCode =
-		errorCode === PROXY_POOL_EXHAUSTED_CODE ||
-		errorCode === PROXY_EDGE_AUTH_REJECTED_CODE ||
-		errorCode === "PROXY_ALLOCATION_FAILED" ||
-		errorCode === "native_proxy_expired" ||
-		errorCode === "native_proxy_invalid";
-	const category =
-		contract.category ??
-		(isProxyPoolCode
-			? "proxy_pool"
-			: errorCode === PROXY_AUTH_IP_DENIED_CODE
-				? "anti_bot_blocked"
-				: errorCode === "transport_timeout" ||
-						errorCode === "native_connection_timeout" ||
-						errorCode === "native_connection_idle_timeout" ||
-						isProviderTimeoutAbort
-					? "timeout"
-					: errorCode === "transport_network_error" ||
-							errorCode === "native_connection_failed" ||
-							errorCode === "native_connection_closed"
-						? "network"
-						: isClientCancellation
-							? "client_cancelled"
-							: error.upstreamStatus
-								? categoryForStatus(error.upstreamStatus)
-								: "upstream_http");
+	if (isProviderError(error) || error instanceof z.ZodError) return undefined;
+	return MASKED_THROW_FAULT;
+}
+
+/** The platform serializer: a platform fault's header, from the fault alone. */
+function platformFaultObservabilityDetails(
+	fault: PlatformFault,
+): PlatformFaultObservabilityDetails {
 	return {
+		origin: "platform",
+		category: fault.category,
+		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+		retryable: fault.retryable,
+	};
+}
+
+// A category a provider set, read in its domain, the provider-failure
+// categories. Anything else there (a platform word through a cast or from
+// JavaScript, a word this SDK does not know, a non-string) is no value: the
+// failure is classified as if the provider had set none, and its failure log
+// carries the unknown_provider_error_category signal
+// (providerErrorCategoryOutsideDomain).
+function providerFailureCategoryIn(value: unknown): ProviderFailureCategory | undefined {
+	return typeof value === "string" && isProviderFailureCategory(value) ? value : undefined;
+}
+
+function isCategoryOutsideProviderFailureDomain(value: unknown): boolean {
+	return value !== undefined && value !== null && providerFailureCategoryIn(value) === undefined;
+}
+
+// Whether a category the provider set, on the throw (the deprecated
+// per-throw option) or on the code's declaration, lies outside the
+// provider-failure categories.
+function providerErrorCategoryOutsideDomain(
+	error: unknown,
+	declaredErrorCode: DeclaredErrorCode | undefined,
+): boolean {
+	const declaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
+	return (
+		isCategoryOutsideProviderFailureDomain(providerErrorOption(error, "category")) ||
+		isCategoryOutsideProviderFailureDomain(declaration?.category)
+	);
+}
+
+// What the provider serializer reads: the one resolution
+// (resolveProviderErrorContract) over the provider's per-throw options and the
+// code's declaration, each category read in the provider-failure domain
+// (providerFailureCategoryIn), so a category outside it resolves as if unset.
+function providerFailureContract(
+	error: unknown,
+	declaredErrorCode: DeclaredErrorCode | undefined,
+): {
+	readonly category: ProviderFailureCategory | undefined;
+	readonly retryable: boolean | undefined;
+} {
+	const declaration = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode;
+	const legacy = legacyProviderErrorOptions(error);
+	const legacyCategory = providerFailureCategoryIn(legacy.category);
+	const declaredCategory = providerFailureCategoryIn(declaration?.category);
+	const contract = resolveProviderErrorContract({
+		code: providerErrorCode(error),
+		declaration:
+			declaration === undefined
+				? undefined
+				: {
+						...(declaration.status === undefined ? {} : { status: declaration.status }),
+						...(declaration.retryable === undefined ? {} : { retryable: declaration.retryable }),
+						...(declaredCategory === undefined ? {} : { category: declaredCategory }),
+					},
+		legacyOptions: {
+			...(legacy.retryable === undefined ? {} : { retryable: legacy.retryable }),
+			...(legacyCategory === undefined ? {} : { category: legacyCategory }),
+		},
+	});
+	return { category: contract.category, retryable: contract.retryable };
+}
+
+// categoryForStatus for a failure. Every error status (400 and above) maps to a
+// provider-failure category; a status below that cannot describe a failure and
+// reads as upstream_http.
+function failureCategoryForStatus(status: number): ProviderFailureCategory {
+	const category = categoryForStatus(status);
+	return isProviderFailureCategory(category) ? category : "upstream_http";
+}
+
+function transportFailureObservabilityDetails(
+	error: TransportError,
+	contract: ReturnType<typeof providerFailureContract>,
+	inboundSignal: AbortSignal | undefined,
+): ProviderFailureObservabilityDetails {
+	const errorCode = providerErrorCode(error);
+	const isProviderTimeoutAbort = isProviderTimeoutAbortTransportError(error, inboundSignal);
+	const category: ProviderFailureCategory =
+		contract.category ??
+		(errorCode === PROXY_AUTH_IP_DENIED_CODE
+			? "anti_bot_blocked"
+			: errorCode === "transport_timeout" ||
+					errorCode === "native_connection_timeout" ||
+					errorCode === "native_connection_idle_timeout" ||
+					isProviderTimeoutAbort
+				? "timeout"
+				: errorCode === "transport_network_error" ||
+						errorCode === "native_connection_failed" ||
+						errorCode === "native_connection_closed"
+					? "network"
+					: error.upstreamStatus
+						? failureCategoryForStatus(error.upstreamStatus)
+						: "upstream_http");
+	return {
+		origin: "provider",
 		category,
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 		// The native abort error and ctx.http's cancellation both say
@@ -2172,18 +2225,64 @@ function providerObservabilityDetails(
 	};
 }
 
-function classifiedErrorObservabilityDetails(
+/**
+ * The provider serializer: the header for a provider failure, which is a
+ * ProviderError (validation and transport errors included) the SDK did not
+ * issue as a platform fault, or a request ZodError. Its category is a
+ * provider-failure category: the one the provider set or declared
+ * (providerFailureContract), else the one its code, its declared status or the
+ * transport outcome derives.
+ */
+function providerFailureObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
-): ErrorObservabilityDetails {
-	const providerDetails = providerObservabilityDetails(error, declaredErrorCode, inboundSignal);
-	if (providerDetails) return providerDetails;
-	const contract = providerErrorContract(error, declaredErrorCode);
+): ProviderFailureObservabilityDetails {
+	const details = classifiedProviderFailure(error, declaredErrorCode, inboundSignal);
+	const providerObservability = safeProviderErrorObservability(error);
+	return {
+		...details,
+		...(providerObservability ? { providerObservability } : {}),
+	};
+}
+
+function classifiedProviderFailure(
+	error: unknown,
+	declaredErrorCode: DeclaredErrorCode | undefined,
+	inboundSignal: AbortSignal | undefined,
+): ProviderFailureObservabilityDetails {
+	const contract = providerFailureContract(error, declaredErrorCode);
+	// Session-expiry surfaces the credential_expired category so Gateway and
+	// Credential Service can distinguish an expired credential from other 401s.
+	if (isSessionExpiredError(error)) {
+		return {
+			origin: "provider",
+			category: contract.category ?? "credential_expired",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: contract.retryable ?? false,
+		};
+	}
+	// A missing-secret error a provider threw itself carries the canonical
+	// credential_unavailable category, attributing the failure to
+	// provisioning rather than the upstream. Matched by code, so a duplicate SDK
+	// module instance serializes it the same. The SDK's own required-secret
+	// gate issues a platform fault and never gets here.
+	if (isProviderError(error) && providerErrorCode(error) === MISSING_SECRET_CODE) {
+		return {
+			origin: "provider",
+			category: contract.category ?? "credential_unavailable",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: contract.retryable ?? false,
+		};
+	}
+	if (isTransportError(error)) {
+		return transportFailureObservabilityDetails(error, contract, inboundSignal);
+	}
 
 	if (error instanceof z.ZodError || isValidationError(error)) {
 		const declaredStatus = sdkOwnsErrorResolution(error) ? undefined : declaredErrorCode?.status;
 		return {
+			origin: "provider",
 			category:
 				contract.category ??
 				(isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
@@ -2194,30 +2293,19 @@ function classifiedErrorObservabilityDetails(
 		};
 	}
 
-	if (isIssuedStatefulRoutingDeadlineError(error)) {
-		return {
-			category: "stateful_forwarding_deadline",
-			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: false,
-		};
-	}
-
-	if (isProviderError(error)) {
-		return {
-			category: contract.category ?? "provider_error",
-			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: contract.retryable ?? false,
-		};
-	}
-
 	return {
-		category: "internal_error",
+		origin: "provider",
+		category: contract.category ?? "provider_error",
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-		retryable: false,
+		retryable: contract.retryable ?? false,
 	};
 }
 
 /**
+ * The `X-ApiFuse-Error-Observability` header for a failure: the platform
+ * serializer's for a platform fault (servedPlatformFault), the provider
+ * serializer's for anything else.
+ *
  * `inboundSignal` is the served request's own signal (`c.req.raw.signal`).
  * Pass it wherever the request is known, so a transport cancellation caused by
  * the caller leaving is told apart from one the provider or a deadline caused.
@@ -2227,12 +2315,10 @@ function errorObservabilityDetails(
 	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
 ): ErrorObservabilityDetails {
-	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode, inboundSignal);
-	const providerObservability = safeProviderErrorObservability(error);
-	return {
-		...details,
-		...(providerObservability ? { providerObservability } : {}),
-	};
+	const fault = servedPlatformFault(error, inboundSignal);
+	return fault
+		? platformFaultObservabilityDetails(fault)
+		: providerFailureObservabilityDetails(error, declaredErrorCode, inboundSignal);
 }
 
 function responseWithErrorObservability(
@@ -2307,11 +2393,14 @@ function toStatusCode(
 	declaredErrorCode?: DeclaredErrorCode,
 	inboundSignal?: AbortSignal,
 ): ProviderErrorStatus {
+	// A platform fault is served with the status its fault states, never one
+	// the provider declared for its code.
+	const fault = servedPlatformFault(error, inboundSignal);
+	if (fault) {
+		return isEmittableErrorStatus(fault.status) ? fault.status : 500;
+	}
 	if (error instanceof z.ZodError) {
 		return 400;
-	}
-	if (isIssuedStatefulRoutingDeadlineError(error)) {
-		return 504;
 	}
 	if (isProviderError(error)) {
 		const contract = providerErrorContract(error, declaredErrorCode);
@@ -2319,11 +2408,10 @@ function toStatusCode(
 			return contract.status;
 		}
 		if (isTransportError(error)) {
-			if (isClientCancelledTransportError(error, inboundSignal)) return CLIENT_CANCELLED_STATUS;
 			return isServedAsTransportTimeout(error, inboundSignal) ? 504 : 502;
 		}
 		if (isValidationError(error)) {
-			return contract.category === "output_validation" ? 500 : 400;
+			return 400;
 		}
 
 		return 500;
@@ -2344,7 +2432,7 @@ function sdkOwnsErrorResolution(error: unknown): boolean {
 
 // What an operation declares for a code: a `defineErrors` declaration (listed
 // in `errors`) carries a category; a legacy `errorCodes` row does not.
-type DeclaredErrorCode = DeclaredErrorCodeRow & { readonly category?: ProviderErrorCategory };
+type DeclaredErrorCode = DeclaredErrorCodeRow & { readonly category?: ProviderFailureCategory };
 
 type OperationErrorCodeLookup = ReadonlyMap<string, ReadonlyMap<string, DeclaredErrorCode>>;
 
@@ -2411,7 +2499,10 @@ type LegacyErrorOptionConflict = {
 // deprecated per-throw options are still honored. A per-throw value that
 // differs from the declaration is named with both values: the per-throw one
 // is what is served (resolveProviderErrorContract), and the fix is a distinct
-// code for that condition rather than a per-throw override.
+// code for that condition rather than a per-throw override. A category outside
+// the provider-failure categories, thrown or declared, is no value
+// (providerFailureCategoryIn) and never a conflict: serve does not serve it,
+// and the failure log's unknown_provider_error_category signal names it.
 function warnLegacyErrorOptionsOnce(
 	emit: ProviderServerLogger,
 	provider: ProviderDefinition,
@@ -2425,15 +2516,17 @@ function warnLegacyErrorOptionsOnce(
 	if (options.length === 0) return;
 	const code = providerErrorCode(error) ?? "";
 	const conflicts: LegacyErrorOptionConflict[] = [];
+	const thrownCategory = providerFailureCategoryIn(legacy.category);
+	const declaredCategory = providerFailureCategoryIn(declaredErrorCode?.category);
 	if (
-		legacy.category !== undefined &&
-		declaredErrorCode?.category !== undefined &&
-		legacy.category !== declaredErrorCode.category
+		thrownCategory !== undefined &&
+		declaredCategory !== undefined &&
+		thrownCategory !== declaredCategory
 	) {
 		conflicts.push({
 			option: "category",
-			thrown: legacy.category,
-			declared: declaredErrorCode.category,
+			thrown: thrownCategory,
+			declared: declaredCategory,
 		});
 	}
 	if (
@@ -2564,21 +2657,27 @@ function logProviderError(
 	// provider code. 4xx failures keep the lean record.
 	const stack = status >= 500 ? providerErrorStackFrames(error, redact) : undefined;
 	const details = observabilityDetails;
+	// Both signals are about what a provider threw, so a platform fault never
+	// carries one. When both apply, the unregistered code is reported.
 	const isUnregisteredProviderErrorCode =
+		details.origin === "provider" &&
 		status === 500 &&
 		isProviderError(error) &&
 		!isValidationError(error) &&
 		typeof providerCode === "string" &&
 		!SDK_OWNED_PROVIDER_ERROR_CODES.has(providerCode) &&
 		declaredErrorCode === undefined;
+	const isUnknownProviderErrorCategory =
+		details.origin === "provider" && providerErrorCategoryOutsideDomain(error, declaredErrorCode);
 	const telemetryPayload = telemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	// The logger is caller-supplied and may mutate the event synchronously.
 	// Give it an independent snapshot so those mutations cannot corrupt the
 	// observability header serialized immediately afterwards.
-	const providerObservability = details.providerObservability
-		? { ...details.providerObservability }
-		: undefined;
+	const providerObservability =
+		details.origin === "provider" && details.providerObservability
+			? { ...details.providerObservability }
+			: undefined;
 	emit({
 		level: status >= 500 ? "error" : "warn",
 		event: "provider_request_failed",
@@ -2609,6 +2708,7 @@ function logProviderError(
 		...(providerObservability ? { providerObservability } : {}),
 		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
 		errorCategory: details.category,
+		errorOrigin: details.origin,
 		taxonomyVersion: details.taxonomyVersion,
 		retryable: details.retryable,
 		...(isUnregisteredProviderErrorCode
@@ -2617,7 +2717,13 @@ function logProviderError(
 					signalFix:
 						"Declare this code once with defineErrors({ CODE: { status, category, description } }) and throw errors.CODE(...) so it serves its intended status instead of 500.",
 				}
-			: {}),
+			: isUnknownProviderErrorCategory
+				? {
+						signal: "unknown_provider_error_category" as const,
+						signalFix:
+							"Set category to a provider-failure category (ProviderFailureCategory) or leave it unset so the SDK derives one. The SDK reports platform faults itself; a thrown error cannot carry one.",
+					}
+				: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error, redact) } : {}),
 	});
 	warnLegacyErrorOptionsOnce(
@@ -2723,20 +2829,26 @@ type RequestScope = RequestScopeContext & {
 
 const STREAM_CLEANUP_TIMEOUT_MS = 100;
 
-// The server's own terminal error for a stream the caller stopped reading.
-// Declared like a provider error so it carries its contract: nothing on it is
-// a deprecated per-throw option, and the deprecation warning never names it.
-const serverErrors = defineErrors({
-	client_cancelled: {
-		status: CLIENT_CANCELLED_STATUS,
-		category: "client_cancelled",
-		retryable: false,
-		description: "Request stream was cancelled by the client.",
-	},
-});
+// The server's own terminal error for a stream the caller stopped reading: the
+// platform fault client_cancelled, which serve observed itself. The SDK issues
+// it with its fault record, and serve reads the category, status and
+// retryability from that record alone. It is not a defineErrors declaration,
+// whose category is a provider-failure category, and it sets no deprecated
+// per-throw option, so the deprecation warning never names it.
+const CLIENT_CANCELLED_FAULT: PlatformFault = {
+	category: "client_cancelled",
+	code: "client_cancelled",
+	status: CLIENT_CANCELLED_STATUS,
+	retryable: false,
+};
 
 function clientCancelledError(): ProviderError {
-	return serverErrors.client_cancelled();
+	return issueSdkError(
+		new ProviderError("Request stream was cancelled by the client.", {
+			code: CLIENT_CANCELLED_FAULT.code,
+		}),
+		CLIENT_CANCELLED_FAULT,
+	);
 }
 
 async function runBestEffortWithTimeout(cleanup: () => void | Promise<void>): Promise<void> {
@@ -3177,12 +3289,14 @@ function createRequestScope(input: {
 // A raw `Response` result skips `toErrorResponse`. Its payload shape stays
 // provider-owned; known credentials in error payloads still need redaction.
 // The observability header is SDK-owned: derive it
-// from the status. Only timeouts, rate limits, and 5xx are retryable;
+// from the status. The provider answered with that status, so it is a provider
+// failure. Only timeouts, rate limits, and 5xx are retryable;
 // `isRetryableCategory` would otherwise mark every other 4xx (`upstream_http`)
 // as retryable.
-function rawResponseErrorObservability(status: number): ErrorObservabilityDetails {
+function rawResponseErrorObservability(status: number): ProviderFailureObservabilityDetails {
 	return {
-		category: categoryForStatus(status),
+		origin: "provider",
+		category: failureCategoryForStatus(status),
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 		retryable: status === 408 || status === 429 || status >= 500,
 	};
@@ -3358,13 +3472,20 @@ async function validateSseEvent(
 		if (event.event === APIFUSE_STREAM_ERROR_EVENT || event.event === APIFUSE_STREAM_DONE_EVENT) {
 			return event;
 		}
-		throw new ProviderError(
-			`SSE event "${event.event}" is not declared in operation transport.events.`,
+		throw issueSdkError(
+			new ProviderError(
+				`SSE event "${event.event}" is not declared in operation transport.events.`,
+				{
+					code: "SSE_EVENT_UNDECLARED",
+					retryable: false,
+					fix: `Add "${event.event}" to transport.events or stop emitting that event.`,
+				},
+			),
 			{
-				code: "SSE_EVENT_UNDECLARED",
 				category: "output_validation",
+				code: "SSE_EVENT_UNDECLARED",
+				status: 500,
 				retryable: false,
-				fix: `Add "${event.event}" to transport.events or stop emitting that event.`,
 			},
 		);
 	}
@@ -3515,13 +3636,20 @@ function toStreamingResponse(
 ): Response {
 	const transport = operation.transport?.kind ?? "json";
 	if (transport === "sse" && (result instanceof Response || result instanceof ReadableStream)) {
-		throw new ProviderError(
-			"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
+		throw issueSdkError(
+			new ProviderError(
+				"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
+				{
+					code: "SSE_RESULT_UNSUPPORTED",
+					retryable: false,
+					fix: "Return an async generator that yields stream.event(name, data) so APIFuse can validate event schemas and enforce event byte limits.",
+				},
+			),
 			{
-				code: "SSE_RESULT_UNSUPPORTED",
 				category: "output_validation",
+				code: "SSE_RESULT_UNSUPPORTED",
+				status: 500,
 				retryable: false,
-				fix: "Return an async generator that yields stream.event(name, data) so APIFuse can validate event schemas and enforce event byte limits.",
 			},
 		);
 	}

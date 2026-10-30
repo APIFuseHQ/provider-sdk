@@ -3,6 +3,7 @@ import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { CLIENT_CANCELLED_STATUS } from "../server/client-cancelled.js";
 
 type Observability = {
+	origin?: string;
 	category?: string;
 	taxonomyVersion?: string;
 	retryable?: boolean;
@@ -24,6 +25,7 @@ type FailureLog = {
 	code?: string;
 	errorClass?: string;
 	errorCategory?: string;
+	errorOrigin?: string;
 	retryable?: boolean;
 	causeChain?: CauseFrame[];
 };
@@ -85,6 +87,7 @@ const wire = await runWire();
 function outcome(scenario: Scenario) {
 	return {
 		status: scenario.served?.status,
+		origin: scenario.served?.observability?.origin,
 		category: scenario.served?.observability?.category,
 		retryable: scenario.served?.observability?.retryable,
 		source: scenario.served?.body.error?.source,
@@ -92,6 +95,7 @@ function outcome(scenario: Scenario) {
 		message: scenario.served?.body.error?.message,
 		logStatus: scenario.log?.status,
 		logCategory: scenario.log?.errorCategory,
+		logOrigin: scenario.log?.errorOrigin,
 		logRetryable: scenario.log?.retryable,
 	};
 }
@@ -99,6 +103,7 @@ function outcome(scenario: Scenario) {
 // What the `timeout` request option's transport_timeout is served as.
 const TIMEOUT_OUTCOME = {
 	status: 504,
+	origin: "provider",
 	category: "timeout",
 	retryable: true,
 	source: "upstream_failure",
@@ -106,12 +111,14 @@ const TIMEOUT_OUTCOME = {
 	message: "Request timed out",
 	logStatus: 504,
 	logCategory: "timeout",
+	logOrigin: "provider",
 	logRetryable: true,
 };
 
 // What any other transport_cancelled keeps being served as.
 const DEFAULT_CANCELLED_OUTCOME = {
 	status: 502,
+	origin: "provider",
 	category: "upstream_http",
 	retryable: false,
 	source: "upstream_failure",
@@ -119,6 +126,7 @@ const DEFAULT_CANCELLED_OUTCOME = {
 	message: "Upstream request failed",
 	logStatus: 502,
 	logCategory: "upstream_http",
+	logOrigin: "provider",
 	logRetryable: false,
 };
 
@@ -138,6 +146,7 @@ function expectProviderTimeoutCancellation(scenario: Scenario, requestId: string
 	expect(scenario.log?.causeChain?.[0]?.errorClass).toBe("TimeoutError");
 	expect(outcome(scenario)).toEqual(TIMEOUT_OUTCOME);
 	expect(scenario.served?.observability).toEqual({
+		origin: "provider",
 		category: "timeout",
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 		retryable: true,
@@ -206,6 +215,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 			expect(result.log?.causeChain?.[0]?.errorClass).toBe(causeClass);
 			expect(outcome(result)).toEqual(DEFAULT_CANCELLED_OUTCOME);
 			expect(result.served?.observability).toEqual({
+				origin: "provider",
 				category: "upstream_http",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: false,
@@ -231,6 +241,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 		expectCallerStayed(result);
 		expect(outcome(result)).toEqual({
 			status: 504,
+			origin: "platform",
 			category: "stateful_forwarding_deadline",
 			retryable: false,
 			source: "apifuse",
@@ -238,6 +249,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 			message: "Stateful forwarding deadline expired.",
 			logStatus: 504,
 			logCategory: "stateful_forwarding_deadline",
+			logOrigin: "platform",
 			logRetryable: false,
 		});
 		expect(result.served?.body.error?.code).toBe("STATEFUL_FORWARDING_DEADLINE_EXPIRED");
@@ -263,6 +275,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 		expect(result.log?.causeChain?.[0]?.errorClass).toBe("AbortError");
 		expect(outcome(result)).toEqual({
 			status: CLIENT_CANCELLED_STATUS,
+			origin: "platform",
 			category: "client_cancelled",
 			retryable: false,
 			source: "client",
@@ -270,6 +283,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 			message: "Upstream request failed",
 			logStatus: CLIENT_CANCELLED_STATUS,
 			logCategory: "client_cancelled",
+			logOrigin: "platform",
 			logRetryable: false,
 		});
 	});
@@ -289,6 +303,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 		expectCallerStayed(result);
 		expect(result.log?.code).toBe("upstream_http_error");
 		expect(result.served?.observability).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: true,
@@ -296,6 +311,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 		});
 		expect(outcome(result)).toEqual({
 			status: 502,
+			origin: "provider",
 			category: "upstream_http",
 			retryable: true,
 			source: "upstream_failure",
@@ -303,6 +319,7 @@ describe("serve classification of a provider's own per-request signal abort", ()
 			message: "Upstream request failed with status 503",
 			logStatus: 502,
 			logCategory: "upstream_http",
+			logOrigin: "provider",
 			logRetryable: true,
 		});
 	});

@@ -12,6 +12,7 @@ import {
 	PROVIDER_ERROR_SOURCES,
 	type ProviderErrorCategory,
 	type ProviderErrorSource,
+	type ProviderFailureCategory,
 	sourceForCategory,
 } from "../observability.js";
 import {
@@ -35,7 +36,7 @@ const READ_RISK_CLASS: OperationRiskClass = "read";
 const EXPECTED_UPSTREAM_CODES: ReadonlyArray<{
 	code: string;
 	status: ProviderErrorStatus;
-	category: ProviderErrorCategory;
+	category: ProviderFailureCategory;
 	source: ProviderErrorSource;
 	retryable: boolean;
 }> = [
@@ -258,7 +259,10 @@ describe("registered error code registry", () => {
 			["UPSTREAM_AUTH_ERROR", "upstream_auth"],
 		]);
 		for (const expected of EXPECTED_UPSTREAM_CODES) {
-			expect({ code: expected.code, category: expected.category }).toEqual({
+			expect<{ code: string; category: ProviderErrorCategory }>({
+				code: expected.code,
+				category: expected.category,
+			}).toEqual({
 				code: expected.code,
 				category: narrower.get(expected.code) ?? categoryForStatus(expected.status),
 			});
@@ -406,7 +410,7 @@ describe("serving an explicit category or an unregistered code", () => {
 			// UPSTREAM_ERROR and BLOCKED keep their code-level upstream
 			// attribution under any explicit category, as before this table.
 			{ code: "UPSTREAM_ERROR", category: "provider_error", source: "upstream_failure" },
-			{ code: "BLOCKED", category: "internal_error", source: "upstream_failure" },
+			{ code: "BLOCKED", category: "input_validation", source: "upstream_failure" },
 		] as const;
 		for (const testCase of cases) {
 			const served = await serveThrown(throwing(testCase.code, { category: testCase.category }));

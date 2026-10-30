@@ -1776,8 +1776,8 @@ interface DeclarativeStealthResponse {
 
 // @public
 type DeclaredErrorCategory<TEntry> = TEntry extends ProviderErrorFactory<string, ProviderErrorStatus, infer TCategory> ? TCategory : TEntry extends {
-    readonly category: infer TCategory extends ProviderErrorCategory;
-} ? TCategory : ProviderErrorCategory;
+    readonly category: infer TCategory extends ProviderFailureCategory;
+} ? TCategory : ProviderFailureCategory;
 
 // @public
 type DeclaredErrorStatus<TEntry> = TEntry extends ProviderErrorFactory<string, infer TStatus> ? TStatus : TEntry extends {
@@ -2090,6 +2090,9 @@ export function error(code: string, message: string, options?: Omit<SseErrorData
 
 // @public
 export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
+
+// @public (undocumented)
+export type ErrorObservabilityDetails = PlatformFaultObservabilityDetails | ProviderFailureObservabilityDetails;
 
 // Warning: (ae-forgotten-export) The symbol "ErrorRefsSource" needs to be exported by the entry point index.d.ts
 //
@@ -3474,7 +3477,13 @@ export type Iso4217CurrencyCode = Uppercase<string>;
 export type Iso8601Duration = string;
 
 // @public (undocumented)
+export function isPlatformFaultCategory(category: string): category is PlatformFaultCategory;
+
+// @public (undocumented)
 export function isProviderError(value: unknown): value is ProviderError;
+
+// @public (undocumented)
+export function isProviderFailureCategory(category: string): category is ProviderFailureCategory;
 
 // @public (undocumented)
 export function isProviderLocaleKey(value: unknown): value is ProviderLocaleKey;
@@ -3544,6 +3553,16 @@ export type JsonValue = JsonPrimitive | readonly JsonValue[] | {
 };
 
 // @public
+export type LegacyErrorObservabilityDetails = {
+    origin?: undefined;
+    category: ProviderErrorCategory;
+    taxonomyVersion: string;
+    retryable: boolean;
+    upstreamStatus?: number;
+    providerObservability?: ProviderErrorObservability;
+};
+
+// @public
 export function link(): z.ZodNullable<z.ZodType<LinkUrl, string>>;
 
 // @public
@@ -3609,7 +3628,7 @@ export function lintProvider(provider: {
             declaration: {
                 code: string;
                 status?: number;
-                category?: ProviderErrorCategory;
+                category?: ProviderFailureCategory;
             };
         }>;
     }>;
@@ -4858,6 +4877,21 @@ export interface PickOptions<T> {
 export function pivotByField(items: unknown[], keyField: string, valueField: string): Record<string, unknown>;
 
 // @public (undocumented)
+export const PLATFORM_FAULT_CATEGORIES: readonly ["ok", "stateful_forwarding_deadline", "proxy_pool", "credential_unavailable", "output_validation", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+
+// @public (undocumented)
+export type PlatformFaultCategory = (typeof PLATFORM_FAULT_CATEGORIES)[number];
+
+// @public
+export type PlatformFaultObservabilityDetails = {
+    origin: "platform";
+    category: PlatformFaultCategory;
+    taxonomyVersion: string;
+    retryable: boolean;
+    upstreamStatus?: number;
+};
+
+// @public (undocumented)
 const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
     kind: z.ZodLiteral<"predicate">;
     operator: z.ZodEnum<{
@@ -5180,6 +5214,11 @@ export const PROVIDER_ERROR_CATALOG_NAMESPACE = "errors";
 export const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "stateful_forwarding_deadline", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
 
 // @public (undocumented)
+export const PROVIDER_ERROR_CATEGORIES_LIST_BOTH_SETS: [
+Exclude<ProviderErrorCategory, (typeof PROVIDER_ERROR_CATEGORIES)[number]>
+] extends [never] ? true : Exclude<ProviderErrorCategory, (typeof PROVIDER_ERROR_CATEGORIES)[number]>;
+
+// @public (undocumented)
 export const PROVIDER_ERROR_CATEGORY_SOURCES: {
     readonly ok: "apifuse";
     readonly timeout: "upstream_failure";
@@ -5209,6 +5248,9 @@ export const PROVIDER_ERROR_LOCALES: readonly ["en", "ko", "ja"];
 
 // @public (undocumented)
 export const PROVIDER_ERROR_SOURCES: readonly ["client", "upstream_rule", "upstream_failure", "apifuse"];
+
+// @public (undocumented)
+export const PROVIDER_FAILURE_CATEGORIES: readonly ["timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "provider_error"];
 
 // @public (undocumented)
 export const PROVIDER_OBSERVABILITY_TAXONOMY_VERSION = "2026-10-23";
@@ -5874,12 +5916,15 @@ export class ProviderError<TCode extends string = string> extends Error {
 }
 
 // @public (undocumented)
-export type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
+export type ProviderErrorCategory = PlatformFaultCategory | ProviderFailureCategory;
 
 // @public
 export type ProviderErrorCategoryOfSource<TSource extends ProviderErrorSource> = {
     [K in ProviderErrorCategory]: (typeof PROVIDER_ERROR_CATEGORY_SOURCES)[K] extends TSource ? K : never;
 }[ProviderErrorCategory];
+
+// @public (undocumented)
+export type ProviderErrorCategoryOrigin = "platform" | "provider";
 
 // @public (undocumented)
 export type ProviderErrorCauseFrame = {
@@ -5892,7 +5937,7 @@ export type ProviderErrorCauseFrame = {
 };
 
 // @public
-export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+export type ProviderErrorDeclaration<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     readonly code: TCode;
     readonly status: TStatus;
     readonly category: TCategory;
@@ -5905,7 +5950,7 @@ export type ProviderErrorDeclaration<TCode extends string = string, TStatus exte
 // @public
 export type ProviderErrorDeclarationInput = {
     readonly status: ProviderErrorStatus;
-    readonly category: ProviderErrorCategory;
+    readonly category: ProviderFailureCategory;
     readonly retryable?: boolean;
     readonly description: string;
     readonly messageKey?: ProviderLocaleKeyInput;
@@ -5913,7 +5958,7 @@ export type ProviderErrorDeclarationInput = {
 };
 
 // @public
-export type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderErrorCategory = ProviderErrorCategory> = {
+export type ProviderErrorFactory<TCode extends string = string, TStatus extends ProviderErrorStatus = ProviderErrorStatus, TCategory extends ProviderFailureCategory = ProviderFailureCategory> = {
     (input?: ProviderErrorInput): ProviderError<TCode>;
     readonly code: TCode;
     readonly declaration: ProviderErrorDeclaration<TCode, TStatus, TCategory>;
@@ -5947,7 +5992,7 @@ export type ProviderErrorOptions = {
     code?: string;
     details?: unknown;
     cause?: Error;
-    category?: ProviderErrorCategory;
+    category?: ProviderFailureCategory;
     retryable?: boolean;
     observability?: ProviderErrorObservability;
     messageKey?: ProviderLocaleKeyInput;
@@ -5975,6 +6020,19 @@ export type ProviderErrorTextCandidate =
     readonly kind: "derived";
     readonly code: string | undefined;
     readonly field: string;
+};
+
+// @public (undocumented)
+export type ProviderFailureCategory = (typeof PROVIDER_FAILURE_CATEGORIES)[number];
+
+// @public (undocumented)
+export type ProviderFailureObservabilityDetails = {
+    origin: "provider";
+    category: ProviderFailureCategory;
+    taxonomyVersion: string;
+    retryable: boolean;
+    upstreamStatus?: number;
+    providerObservability?: ProviderErrorObservability;
 };
 
 // @public
@@ -6403,12 +6461,13 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     message: string;
     upstreamStatus?: number;
     errorCategory?: ProviderErrorCategory;
+    errorOrigin?: ProviderErrorCategoryOrigin;
     taxonomyVersion?: string;
     retryable?: boolean;
     providerObservability?: ProviderErrorObservability;
     causeChain?: ProviderErrorCauseFrame[];
     stack?: string[];
-    signal?: "unregistered_provider_error_code";
+    signal?: "unregistered_provider_error_code" | "unknown_provider_error_category";
     signalFix?: string;
     issues?: Array<{
         path: string;
@@ -8830,8 +8889,11 @@ interface SmsPhoneIdentity {
     nationalNumber: string;
 }
 
-// @public (undocumented)
+// @public
 export function sourceForCategory(category: ProviderErrorCategory): ProviderErrorSource;
+
+// @public
+export function sourceForPlatformFault(category: PlatformFaultCategory): ProviderErrorSource;
 
 // @public (undocumented)
 export type Span = TraceSpan;
@@ -9978,12 +10040,12 @@ export { z }
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:24:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:113:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:68:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:72:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:230:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:247:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:255:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:330:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:62:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:66:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:225:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:242:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:250:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:325:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/server/state-backend-report.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderStoreBackendReport" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:735:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:2123:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts

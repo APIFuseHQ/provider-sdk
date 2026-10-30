@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 
 type Observability = {
+	origin?: string;
 	category?: string;
 	taxonomyVersion?: string;
 	retryable?: boolean;
@@ -23,6 +24,7 @@ type FailureLog = {
 	code?: string;
 	errorClass?: string;
 	errorCategory?: string;
+	errorOrigin?: string;
 	retryable?: boolean;
 	causeChain?: CauseFrame[];
 };
@@ -92,12 +94,14 @@ const wire = await runWire();
 function outcome(scenario: Scenario) {
 	return {
 		status: scenario.served?.status,
+		origin: scenario.served?.observability?.origin,
 		category: scenario.served?.observability?.category,
 		retryable: scenario.served?.observability?.retryable,
 		source: scenario.served?.body.error?.source,
 		bodyRetryable: scenario.served?.body.error?.retryable,
 		logStatus: scenario.log?.status,
 		logCategory: scenario.log?.errorCategory,
+		logOrigin: scenario.log?.errorOrigin,
 		logRetryable: scenario.log?.retryable,
 	};
 }
@@ -107,12 +111,14 @@ function outcome(scenario: Scenario) {
 // stateful_forwarding_deadline, APIFuse-owned, not retryable.
 const DEADLINE_EXPIRED_OUTCOME = {
 	status: 504,
+	origin: "platform",
 	category: "stateful_forwarding_deadline",
 	retryable: false,
 	source: "apifuse",
 	bodyRetryable: false,
 	logStatus: 504,
 	logCategory: "stateful_forwarding_deadline",
+	logOrigin: "platform",
 	logRetryable: false,
 };
 
@@ -129,6 +135,7 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 			expect(result.holdReached).toBe(true);
 			expect(outcome(result)).toEqual(DEADLINE_EXPIRED_OUTCOME);
 			expect(result.served?.observability).toEqual({
+				origin: "platform",
 				category: "stateful_forwarding_deadline",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: false,
@@ -199,12 +206,14 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 		expect(result.served?.observability).toEqual(direct.served?.observability ?? null);
 		expect(outcome(result)).toEqual({
 			status: 400,
+			origin: "platform",
 			category: "client_cancelled",
 			retryable: false,
 			source: "client",
 			bodyRetryable: false,
 			logStatus: 400,
 			logCategory: "client_cancelled",
+			logOrigin: "platform",
 			logRetryable: false,
 		});
 	});
@@ -216,18 +225,21 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 		expect(result.served?.body.error?.code).toBe("transport_cancelled");
 		expect(result.served?.body.error?.message).toBe("Request timed out");
 		expect(result.served?.observability).toEqual({
+			origin: "provider",
 			category: "timeout",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: true,
 		});
 		expect(outcome(result)).toEqual({
 			status: 504,
+			origin: "provider",
 			category: "timeout",
 			retryable: true,
 			source: "upstream_failure",
 			bodyRetryable: true,
 			logStatus: 504,
 			logCategory: "timeout",
+			logOrigin: "provider",
 			logRetryable: true,
 		});
 		expect(outcome(result)).not.toEqual(DEADLINE_EXPIRED_OUTCOME);
@@ -242,6 +254,7 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 		const result = wire["upstream-503"];
 		expect(result.log?.code).toBe("upstream_http_error");
 		expect(result.served?.observability).toEqual({
+			origin: "provider",
 			category: "upstream_http",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: true,
@@ -249,12 +262,14 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 		});
 		expect(outcome(result)).toEqual({
 			status: 502,
+			origin: "provider",
 			category: "upstream_http",
 			retryable: true,
 			source: "upstream_failure",
 			bodyRetryable: true,
 			logStatus: 502,
 			logCategory: "upstream_http",
+			logOrigin: "provider",
 			logRetryable: true,
 		});
 		expect(result.source).toEqual({
@@ -268,6 +283,7 @@ describe("stateful forwarding deadline expiring mid-operation", () => {
 function callerOutcome(scenario: SourcePodScenario) {
 	return {
 		status: scenario.caller.status,
+		origin: scenario.caller.observability?.origin,
 		category: scenario.caller.observability?.category,
 		retryable: scenario.caller.observability?.retryable,
 		code: scenario.caller.body.error?.code,
@@ -276,6 +292,7 @@ function callerOutcome(scenario: SourcePodScenario) {
 		logStatus: scenario.log?.status,
 		logCode: scenario.log?.code,
 		logCategory: scenario.log?.errorCategory,
+		logOrigin: scenario.log?.errorOrigin,
 		logErrorClass: scenario.log?.errorClass,
 	};
 }
@@ -284,6 +301,7 @@ function callerOutcome(scenario: SourcePodScenario) {
 // expires: the same 504 the owner serves for it.
 const CALLER_DEADLINE_EXPIRED = {
 	status: 504,
+	origin: "platform",
 	category: "stateful_forwarding_deadline",
 	retryable: false,
 	code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
@@ -292,12 +310,14 @@ const CALLER_DEADLINE_EXPIRED = {
 	logStatus: 504,
 	logCode: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 	logCategory: "stateful_forwarding_deadline",
+	logOrigin: "platform",
 	logErrorClass: "StatefulRoutingDeadlineError",
 };
 
 // A forwarding failure the source pod's serve mapper does not classify.
 const CALLER_UNCLASSIFIED_FORWARDING_FAILURE = {
 	status: 500,
+	origin: "platform",
 	category: "internal_error",
 	retryable: false,
 	code: "internal_error",
@@ -306,6 +326,7 @@ const CALLER_UNCLASSIFIED_FORWARDING_FAILURE = {
 	logStatus: 500,
 	logCode: "internal_error",
 	logCategory: "internal_error",
+	logOrigin: "platform",
 	logErrorClass: "StatefulOwnerForwardingError",
 };
 

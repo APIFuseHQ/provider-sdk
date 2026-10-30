@@ -950,15 +950,26 @@ SDK observability is emitted separately in the
 `X-ApiFuse-Error-Observability` response header as compact, single-line JSON:
 
 ```json
-{"category":"upstream_http","taxonomyVersion":"2026-10-23","retryable":true,"upstreamStatus":502}
+{"origin":"provider","category":"upstream_http","taxonomyVersion":"2026-10-23","retryable":true,"upstreamStatus":502}
 ```
+
+`origin` says who reported the category, and with it which set the category
+comes from:
+
+- `provider`: how the provider's upstream call failed, whether your throw site
+  set the `category` or the SDK derived it (the rules below, a `ctx.http`
+  transport failure). The category is a `ProviderFailureCategory`.
+- `platform`: a fault the SDK observed and reports itself, such as an expired
+  stateful-forwarding deadline, a caller that disconnected, output that failed
+  validation, a masked internal error, the required-secret gate, or proxy
+  egress the SDK could not provide. The category is a `PlatformFaultCategory`.
 
 Treat this header as telemetry, not as provider-controlled public error detail.
 It is SDK-owned even when a handler returns a raw `Response`: a caller-set
 header is dropped, and a raw status of 400 or above gets a status-derived one
 (retryable only for 408, 429, and 5xx) while the body is left untouched.
-Its category, taxonomy version, retryability, and optional upstream status match
-the structured `provider_request_failed` log event.
+Its origin, category, taxonomy version, retryability, and optional upstream
+status match the structured `provider_request_failed` log event.
 
 Declare every error code once with `defineErrors`, throw its factory, and list
 the factories on the operations that can throw them. The declaration is the
@@ -989,10 +1000,11 @@ handler: async () => {
 A key that names an SDK-registered code must hold that `sdkErrors` reference;
 writing a status or retryability for it is a type error, so one code never has
 two answers across the fleet. A provider code states `status`, `category` and
-`description`; `retryable` defaults to the category's answer (`timeout`,
-`network`, `upstream_rate_limited`, `upstream_http` and `proxy_pool` retry,
-nothing else does). `errors.X()` returns a `ProviderError<"X">`, so a helper
-that throws several codes is typed by the union of their names. One map can
+`description`; `category` is a `ProviderFailureCategory` (see below), and
+`retryable` defaults to the category's answer (`timeout`, `network`,
+`upstream_rate_limited` and `upstream_http` retry, nothing else does).
+`errors.X()` returns a `ProviderError<"X">`, so a helper that throws several
+codes is typed by the union of their names. One map can
 spread another (`defineErrors({ ...commonErrors, ... })`), and
 `Object.values(commonErrors)` lists a whole map on an operation.
 
@@ -1051,8 +1063,8 @@ Every code provider code throws that the SDK registers (`sdkErrors`) carries
 its category and retryability with its status. When a `ProviderError` (or any
 subclass, `ValidationError` included) with one of these codes is thrown with
 no declaration and no per-throw option, the server reports the registry's
-category in `X-ApiFuse-Error-Observability`, serves its retryability, and the
-public `source` follows from the category:
+category, with origin `provider`, in `X-ApiFuse-Error-Observability`, serves its
+retryability, and the public `source` follows from the category:
 
 | Error code | Category | `source` | `retryable` |
 | --- | --- | --- | --- |
@@ -1075,6 +1087,31 @@ deterministic upstream failure needs its own non-retryable code. Your own codes
 are classified by their `defineErrors` declaration, and a legacy code with no
 category anywhere stays `provider_error`.
 
+The `category` option is typed `ProviderFailureCategory`, the twelve words for
+how an upstream call failed: `timeout`, `network`, `upstream_http`,
+`upstream_rate_limited`, `upstream_auth`, `upstream_rejected`,
+`upstream_schema_drift`, `anti_bot_blocked`, `credential_expired`,
+`credential_unavailable`, `input_validation`, and `provider_error`. The
+platform-fault words (`stateful_forwarding_deadline`, `proxy_pool`,
+`output_validation`, `internal_error`, `dependency_unavailable`,
+`unsupported_transport`, `client_cancelled`, `unclassified`, and the success
+stamp `ok`) are not in that type, so a TypeScript provider that sets one does
+not compile. They are not a throw site's to set because the SDK reports each
+platform fault itself, from the event it observed, with origin `platform`.
+Imitating one does not produce it: an SDK code string such as
+`OUTPUT_VALIDATION_FAILED`, an instance of a public SDK error class, or a
+category cast past the type, on an error your code throws, does not make that
+error the platform fault it imitates. A category outside
+`ProviderFailureCategory` that reaches the server at runtime (plain JavaScript
+or a cast) is read as no category, so the rules above classify the error, and
+the `provider_request_failed` log carries the `unknown_provider_error_category`
+signal. A `defineErrors` declaration's `category` has the same type, and
+`defineErrors` rejects a platform-fault word at definition, so plain JavaScript
+or a cast cannot declare one either. A declaration that still carries one,
+made by an SDK copy whose `defineErrors` took every category (a provider
+bundled with an earlier release), is read at serve the same way: as no
+category, with the same signal.
+
 An unregistered non-validation `ProviderError` code returns HTTP 500 and emits
 the greppable `unregistered_provider_error_code` signal with the code in the
 structured failure log. A matching operation declaration, including one that
@@ -1095,11 +1132,11 @@ any `signal` you pass in `RequestOptions`, so the server classifies the
 cancellation by what aborted it. The response body keeps the code
 `transport_cancelled` in every row:
 
-| What aborted the request | Category | HTTP status | `source` | `retryable` |
-| --- | --- | ---: | --- | --- |
-| The caller closed the connection before the server answered | `client_cancelled` | 400 | `client` | `false` |
-| Your own `signal` with a `TimeoutError` reason, such as `AbortSignal.timeout(ms)` | `timeout` | 504 | `upstream_failure` | `true` |
-| Your own `signal` with any other reason, such as `abort()` or `abort(reason)` | `upstream_http` | 502 | `upstream_failure` | `false` |
+| What aborted the request | Category | `origin` | HTTP status | `source` | `retryable` |
+| --- | --- | --- | ---: | --- | --- |
+| The caller closed the connection before the server answered | `client_cancelled` | `platform` | 400 | `client` | `false` |
+| Your own `signal` with a `TimeoutError` reason, such as `AbortSignal.timeout(ms)` | `timeout` | `provider` | 504 | `upstream_failure` | `true` |
+| Your own `signal` with any other reason, such as `abort()` or `abort(reason)` | `upstream_http` | `provider` | 502 | `upstream_failure` | `false` |
 
 A `TimeoutError` abort is reported like the `timeout` request option's
 `transport_timeout`, including the public message `Request timed out`, whether
@@ -1108,10 +1145,12 @@ body. A caller that disconnects before the server answers takes the first row
 even when your own signal fired first. On the stateful owner route, a forwarded
 deadline that expires mid-request is served as
 `STATEFUL_FORWARDING_DEADLINE_EXPIRED` (category
-`stateful_forwarding_deadline`, 504, `source` `apifuse`, `retryable: false`)
-instead. The same holds when the owner pod runs
+`stateful_forwarding_deadline`, origin `platform`, 504, `source` `apifuse`,
+`retryable: false`) instead. The same holds when the owner pod runs
 the forwarded operation through its own `StatefulSessionRouter` and the
-router's deadline timer cancels the read.
+router's deadline timer cancels the read. The SDK reports this deadline
+itself; throwing that code or a `StatefulRoutingDeadlineError` from provider
+code does not produce it.
 
 #### Three fleet-consensus codes are registered
 
@@ -1124,7 +1163,9 @@ router's deadline timer cancels the read.
   ("the upstream is sick") promises a recovery that will never arrive. It is a
   deployment/config defect, exactly like `MISSING_SECRET`. The status is about
   what the caller can do; the attribution is still the upstream's, since the
-  upstream is what refused the key, so the category is `upstream_auth`.
+  upstream is what refused the key, so the category is `upstream_auth` and the
+  origin is `provider`: your throw site reports the refusal, while the SDK's
+  secret gate reports `MISSING_SECRET` as a platform fault.
 - `UPSTREAM_SCHEMA_ERROR` is non-retryable: a retry returns the same payload
   the provider already could not normalize.
 - `INVALID_REQUEST` is the spelling for caller-side bad input. `INVALID_INPUT`,
@@ -1275,7 +1316,12 @@ unset or whitespace-only, the invocation fails with the canonical structured
 error — code `MISSING_SECRET`, HTTP 400, top-level `retryable: false`, and a
 `fix` naming every missing secret — across `/v1/{operation}`, self-test probes,
 `apifuse perf`, and `apifuse record`. Its error-observability header carries the
-`credential_unavailable` category. The server also emits a
+`credential_unavailable` category with origin `platform`, because the SDK's gate
+reported it. `credential_unavailable` is also a provider failure: a throw site
+of yours that sets it, for a credential check of its own beyond declared-secret
+presence, is reported with origin `provider`, and so is a hand-rolled
+`MISSING_SECRET`, so the origin tells the gate and your code apart. The server
+also emits a
 `provider_secrets_missing` warn log at boot so unprovisioned deployments are
 visible immediately without crashing the pod.
 

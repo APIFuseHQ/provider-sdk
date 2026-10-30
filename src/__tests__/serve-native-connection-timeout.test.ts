@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 
 type Observability = {
+	origin?: string;
 	category?: string;
 	taxonomyVersion?: string;
 	retryable?: boolean;
@@ -16,6 +17,7 @@ type FailureLog = {
 	code?: string;
 	message?: string;
 	errorCategory?: string;
+	errorOrigin?: string;
 	retryable?: boolean;
 };
 type Scenario = {
@@ -63,6 +65,7 @@ function outcome(scenario: Scenario) {
 		bodyRetryable: scenario.served?.body.error?.retryable,
 		logStatus: scenario.log?.status,
 		logCategory: scenario.log?.errorCategory,
+		logOrigin: scenario.log?.errorOrigin,
 		logRetryable: scenario.log?.retryable,
 	};
 }
@@ -70,6 +73,7 @@ function outcome(scenario: Scenario) {
 const timedOut = {
 	status: 504,
 	observability: {
+		origin: "provider",
 		category: "timeout",
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 		retryable: true,
@@ -79,6 +83,7 @@ const timedOut = {
 	bodyRetryable: true,
 	logStatus: 504,
 	logCategory: "timeout",
+	logOrigin: "provider",
 	logRetryable: true,
 };
 
@@ -120,6 +125,7 @@ describe("serving an operation whose upstream ran out of time", () => {
 		expect(outcome(result)).toEqual({
 			status: 502,
 			observability: {
+				origin: "provider",
 				category: "upstream_http",
 				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 				retryable: true,
@@ -130,6 +136,7 @@ describe("serving an operation whose upstream ran out of time", () => {
 			bodyRetryable: true,
 			logStatus: 502,
 			logCategory: "upstream_http",
+			logOrigin: "provider",
 			logRetryable: true,
 		});
 	});

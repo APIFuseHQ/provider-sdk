@@ -61,6 +61,11 @@ import {
 	nodemavenSessionWindow,
 	synthesizeNodemavenProxy,
 } from "./proxy-nodemaven.js";
+import {
+	issueProxyPoolFault,
+	PROXY_POOL_RESOLUTION_STATUS,
+	PROXY_POOL_TRANSPORT_STATUS,
+} from "./proxy-errors.js";
 import { redactSensitiveError } from "./request-options.js";
 import type {
 	NativeConnectTelemetryEvent,
@@ -563,10 +568,14 @@ function proxyRequiredError(
 		(vendor): vendor is "smartproxy" | "nodemaven" =>
 			vendor === "smartproxy" || vendor === "nodemaven",
 	);
-	return new ProxyResolutionError(
+	return issueProxyPoolFault(
+		new ProxyResolutionError(
+			"PROXY_REQUIRED",
+			`Native proxy egress is required but the vendor chain was exhausted: ${skips.map(formatVendorSkip).join("; ") || "no vendors declared"}.`,
+			{ vendorChain: chain },
+		),
 		"PROXY_REQUIRED",
-		`Native proxy egress is required but the vendor chain was exhausted: ${skips.map(formatVendorSkip).join("; ") || "no vendors declared"}.`,
-		{ vendorChain: chain },
+		PROXY_POOL_RESOLUTION_STATUS,
 	);
 }
 
@@ -671,6 +680,16 @@ async function connectPlainSocket(
 	return socket;
 }
 
+// The proxy endpoint the SDK allocated has a URL the native client cannot
+// tunnel through: a proxy pool fault, not something the provider asked for.
+function invalidNativeProxyUrlError(): NativeNetworkError {
+	return issueProxyPoolFault(
+		new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid"),
+		"native_proxy_invalid",
+		PROXY_POOL_TRANSPORT_STATUS,
+	);
+}
+
 function parseSocks5Proxy(proxyUrl: string): {
 	host: string;
 	port: number;
@@ -681,11 +700,11 @@ function parseSocks5Proxy(proxyUrl: string): {
 	try {
 		parsed = new URL(proxyUrl);
 	} catch {
-		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+		throw invalidNativeProxyUrlError();
 	}
 	const port = Number(parsed.port);
 	if (parsed.protocol !== "socks5:" || !parsed.hostname || !Number.isInteger(port) || port <= 0) {
-		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+		throw invalidNativeProxyUrlError();
 	}
 	try {
 		return {
@@ -695,7 +714,7 @@ function parseSocks5Proxy(proxyUrl: string): {
 			...(parsed.password ? { password: decodeURIComponent(parsed.password) } : {}),
 		};
 	} catch {
-		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+		throw invalidNativeProxyUrlError();
 	}
 }
 
@@ -709,7 +728,7 @@ function parseHttpConnectProxy(proxyUrl: string): {
 	try {
 		parsed = new URL(proxyUrl);
 	} catch {
-		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+		throw invalidNativeProxyUrlError();
 	}
 	const port = Number(parsed.port || "80");
 	if (
@@ -721,7 +740,7 @@ function parseHttpConnectProxy(proxyUrl: string): {
 		parsed.search ||
 		parsed.hash
 	) {
-		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+		throw invalidNativeProxyUrlError();
 	}
 	try {
 		return {
@@ -731,7 +750,7 @@ function parseHttpConnectProxy(proxyUrl: string): {
 			...(parsed.password ? { password: decodeURIComponent(parsed.password) } : {}),
 		};
 	} catch {
-		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+		throw invalidNativeProxyUrlError();
 	}
 }
 
@@ -1161,7 +1180,11 @@ export function createNativeNetworkConnection(
 		hardExpiryTimer = setTimeout(() => {
 			hardExpiryTimer = undefined;
 			if (socket.destroyed) return;
-			closeReason = new NativeProxyExpiredError(expiresAt);
+			closeReason = issueProxyPoolFault(
+				new NativeProxyExpiredError(expiresAt),
+				"native_proxy_expired",
+				PROXY_POOL_TRANSPORT_STATUS,
+			);
 			emitTelemetry(() =>
 				options.nativeTelemetry?.recordLifecycle({
 					kind: "expiry",

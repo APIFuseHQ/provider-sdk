@@ -12,9 +12,11 @@ import {
 	type ProviderLocaleCatalog,
 } from "./i18n/keys.js";
 import {
+	isPlatformFaultCategory,
+	isProviderFailureCategory,
 	isRetryableCategory,
-	PROVIDER_ERROR_CATEGORIES,
-	type ProviderErrorCategory,
+	PROVIDER_FAILURE_CATEGORIES,
+	type ProviderFailureCategory,
 } from "./observability.js";
 import {
 	type ProviderErrorStatus,
@@ -35,12 +37,19 @@ const ERROR_DECLARATION_BRAND = Symbol.for("@apifuse/provider-sdk/error-declarat
  */
 export type ProviderErrorDeclarationInput = {
 	readonly status: ProviderErrorStatus;
-	/** Who failed. Drives the public `source` and the health monitor's attribution. */
-	readonly category: ProviderErrorCategory;
+	/**
+	 * How the upstream call failed, one of the provider-failure categories.
+	 * Drives the public `source` and the health monitor's attribution. A
+	 * platform fault (`internal_error`, `client_cancelled`, `proxy_pool`,
+	 * `output_validation`, ...) is reported by the SDK for an event it observed
+	 * itself and is not declared here: the type rejects it, and so does
+	 * `defineErrors` at runtime.
+	 */
+	readonly category: ProviderFailureCategory;
 	/**
 	 * Whether a retry can help. Defaults to the category's answer
-	 * (timeout, network, upstream_rate_limited, upstream_http and proxy_pool
-	 * retry; every other category does not).
+	 * (timeout, network, upstream_rate_limited and upstream_http retry; every
+	 * other category does not).
 	 */
 	readonly retryable?: boolean;
 	/** Developer-facing English prose for docs and MCP tool text. Never localized. */
@@ -60,7 +69,7 @@ export type ProviderErrorDeclarationInput = {
 export type ProviderErrorDeclaration<
 	TCode extends string = string,
 	TStatus extends ProviderErrorStatus = ProviderErrorStatus,
-	TCategory extends ProviderErrorCategory = ProviderErrorCategory,
+	TCategory extends ProviderFailureCategory = ProviderFailureCategory,
 > = {
 	readonly code: TCode;
 	readonly status: TStatus;
@@ -128,7 +137,7 @@ export type ProviderErrorInput = {
 export type ProviderErrorFactory<
 	TCode extends string = string,
 	TStatus extends ProviderErrorStatus = ProviderErrorStatus,
-	TCategory extends ProviderErrorCategory = ProviderErrorCategory,
+	TCategory extends ProviderFailureCategory = ProviderFailureCategory,
 > = {
 	(input?: ProviderErrorInput): ProviderError<TCode>;
 	readonly code: TCode;
@@ -163,13 +172,13 @@ type DeclaredErrorStatus<TEntry> =
 			? TStatus
 			: ProviderErrorStatus;
 
-/** The literal category one `defineErrors` entry declares; the full category union when it is not a literal. */
+/** The literal category one `defineErrors` entry declares; the full provider-failure union when it is not a literal. */
 type DeclaredErrorCategory<TEntry> =
 	TEntry extends ProviderErrorFactory<string, ProviderErrorStatus, infer TCategory>
 		? TCategory
-		: TEntry extends { readonly category: infer TCategory extends ProviderErrorCategory }
+		: TEntry extends { readonly category: infer TCategory extends ProviderFailureCategory }
 			? TCategory
-			: ProviderErrorCategory;
+			: ProviderFailureCategory;
 
 /** The factories `defineErrors` returns, one per declared code, each carrying its declared status and category. */
 export type DefinedErrors<T extends DefineErrorsInput> = {
@@ -184,10 +193,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isProviderErrorCategory(value: unknown): value is ProviderErrorCategory {
-	return (
-		typeof value === "string" && (PROVIDER_ERROR_CATEGORIES as readonly string[]).includes(value)
-	);
+function isDeclarableCategory(value: unknown): value is ProviderFailureCategory {
+	return typeof value === "string" && isProviderFailureCategory(value);
 }
 
 function isProviderErrorStatus(value: unknown): value is ProviderErrorStatus {
@@ -202,6 +209,16 @@ function declarationError(code: string, problem: string, fix: string): Validatio
 		code: "ERROR_DECLARATION_INVALID",
 		fix,
 	});
+}
+
+function categoryError(code: string, category: unknown): ValidationError {
+	return declarationError(
+		code,
+		typeof category === "string" && isPlatformFaultCategory(category)
+			? `declares the platform-fault category ${category}, which only the SDK reports.`
+			: `has invalid category ${String(category)}.`,
+		`Set category to the provider-failure category for how the upstream call failed: one of ${PROVIDER_FAILURE_CATEGORIES.join(", ")}.`,
+	);
 }
 
 function localeKeyOf(
@@ -228,6 +245,10 @@ function resolveDeclaration(code: string, entry: unknown): ProviderErrorDeclarat
 				`is assigned the factory for "${entry.code}".`,
 				`Key the factory by its own code: ${entry.code}: errors.${entry.code}.`,
 			);
+		}
+		// Another SDK copy's defineErrors may have taken any category.
+		if (!isDeclarableCategory(entry.declaration.category)) {
+			throw categoryError(code, entry.declaration.category);
 		}
 		return entry.declaration;
 	}
@@ -272,12 +293,8 @@ function resolveDeclaration(code: string, entry: unknown): ProviderErrorDeclarat
 			`Set status to one of ${VALID_OPERATION_ERROR_STATUSES.join(", ")}.`,
 		);
 	}
-	if (!isProviderErrorCategory(entry.category)) {
-		throw declarationError(
-			code,
-			`has invalid category ${String(entry.category)}.`,
-			`Set category to one of ${PROVIDER_ERROR_CATEGORIES.join(", ")}.`,
-		);
+	if (!isDeclarableCategory(entry.category)) {
+		throw categoryError(code, entry.category);
 	}
 	if (entry.retryable !== undefined && typeof entry.retryable !== "boolean") {
 		throw declarationError(

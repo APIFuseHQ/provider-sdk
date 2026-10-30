@@ -106,12 +106,18 @@ export {
 } from "../runtime/browser-telemetry.js";
 export type { ResolverVendorUnavailableReason } from "../runtime/resolver-vendors/types.js";
 export type { Span, TraceContext } from "../runtime/trace.js";
+export type {
+	ErrorObservabilityDetails,
+	LegacyErrorObservabilityDetails,
+	PlatformFaultObservabilityDetails,
+	ProviderErrorCategoryOrigin,
+	ProviderFailureObservabilityDetails,
+} from "../observability.js";
 export type { StealthBrowser, StealthOS, StealthProfileDescriptor } from "../types.js";
 export {
 	createServerApp,
 	createServerAppAsync,
 	ERROR_OBSERVABILITY_HEADER,
-	type ErrorObservabilityDetails,
 	type ProviderServerCloseOptions,
 	type ProviderServerHandle,
 	type ProviderErrorCauseFrame,

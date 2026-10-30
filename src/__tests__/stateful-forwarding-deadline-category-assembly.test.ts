@@ -61,6 +61,7 @@ const WireErrorSchema = z.object({
 	}),
 });
 const ObservabilitySchema = z.object({
+	origin: z.enum(["platform", "provider"]),
 	category: z.string(),
 	taxonomyVersion: z.string(),
 	retryable: z.boolean(),
@@ -296,6 +297,7 @@ function expectServedAsDeadline(
 	const { wire, sourceError } = forwarded;
 	expect(wire.status).toBe(504);
 	expect(wire.observability).toEqual({
+		origin: "platform",
 		category: "stateful_forwarding_deadline",
 		taxonomyVersion: "2026-10-23",
 		retryable: false,
@@ -390,6 +392,7 @@ describe("stateful forwarding deadline category on a served owner pod", () => {
 
 		expect(wire.status).toBe(504);
 		expect(wire.observability).toEqual({
+			origin: "provider",
 			category: "timeout",
 			taxonomyVersion: "2026-10-23",
 			retryable: true,

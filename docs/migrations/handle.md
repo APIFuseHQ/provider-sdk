@@ -468,10 +468,17 @@ connection isolation for a guessable key (ADR-0012 Pitfall 1).
 
 ## 5. Error handling
 
-`HandleError` is already a `ProviderError` with `category`, `retryable`, and a
-message that ends in the recovery sentence, so the simplest correct handler
-lets it propagate. Wrap only when the operation's `errorCodes` contract needs a
-provider-specific code, and keep `cause`, `details`, and `fix`:
+`HandleError` is already a `ProviderError` with `retryable` and a message that
+ends in the recovery sentence, and the server already classifies it: the
+caller-side codes carry `category: "input_validation"`, and the faults the
+handle runtime raises for itself (`HANDLE_BUSY`, `HANDLE_CONNECTION_REQUIRED`,
+`HANDLE_STORAGE_UNAVAILABLE`, `HANDLE_TOO_LARGE`, `HANDLE_INVALID_DATA`) are
+reported by the SDK as platform faults (`internal_error`, origin `platform`).
+So the simplest correct handler lets it propagate. Wrap only when the
+operation's `errorCodes` contract needs a provider-specific code, and keep
+`cause`, `details`, and `fix`. Rethrow a runtime fault as the same object, as
+the last two branches below do: a new error built from it is your error, not
+the platform fault:
 
 ```ts
 import { HandleError, ProviderError } from "@apifuse/provider-sdk";

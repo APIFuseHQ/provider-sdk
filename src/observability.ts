@@ -1,6 +1,61 @@
 // Mirrors packages/provider-observability in the platform monorepo (SoT).
+import type { ProviderErrorObservability } from "./errors.js";
+
 export const PROVIDER_OBSERVABILITY_TAXONOMY_VERSION = "2026-10-23";
 
+// Who reported an error category: the platform (this SDK's runtime and the
+// Gateway, for faults of their own) or provider code (at a throw site, for the
+// way an upstream call failed). The `X-ApiFuse-Error-Observability` header
+// carries it as `origin`, so a category word is always read together with who
+// reported it.
+export type ProviderErrorCategoryOrigin = "platform" | "provider";
+
+// Categories the platform reports for faults of its own. `ok` is the stamp a
+// success gets. `credential_unavailable` is also a provider failure (next
+// list): the SDK's required-secret gate reports it as a platform fault and a
+// provider's own credential check reports it as a provider failure, and the
+// origin tells the two apart. Listed in wire order.
+export const PLATFORM_FAULT_CATEGORIES = [
+	"ok",
+	"stateful_forwarding_deadline",
+	"proxy_pool",
+	"credential_unavailable",
+	"output_validation",
+	"internal_error",
+	"dependency_unavailable",
+	"unsupported_transport",
+	"client_cancelled",
+	"unclassified",
+] as const;
+
+// Categories provider code reports for the way an upstream call failed: the
+// words `ProviderErrorOptions.category` accepts. Listed in wire order.
+export const PROVIDER_FAILURE_CATEGORIES = [
+	"timeout",
+	"network",
+	"upstream_http",
+	"upstream_rate_limited",
+	"upstream_auth",
+	"upstream_rejected",
+	"upstream_schema_drift",
+	"anti_bot_blocked",
+	"credential_expired",
+	"credential_unavailable",
+	"input_validation",
+	"provider_error",
+] as const;
+
+export type PlatformFaultCategory = (typeof PLATFORM_FAULT_CATEGORIES)[number];
+
+export type ProviderFailureCategory = (typeof PROVIDER_FAILURE_CATEGORIES)[number];
+
+export type ProviderErrorCategory = PlatformFaultCategory | ProviderFailureCategory;
+
+// Every category of both sets, once, in wire order: the order the SoT, the
+// Gateway's Go mirror and the provider_invocation_events CHECK list them.
+// Membership is the two sets' (a word in neither does not typecheck here, and
+// a word in a set but not here fails the declaration after this list); only
+// the order is this list's own.
 export const PROVIDER_ERROR_CATEGORIES = [
 	"ok",
 	"timeout",
@@ -30,9 +85,72 @@ export const PROVIDER_ERROR_CATEGORIES = [
 	"unsupported_transport",
 	"client_cancelled",
 	"unclassified",
-] as const;
+] as const satisfies readonly ProviderErrorCategory[];
 
-export type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
+// `true` while PROVIDER_ERROR_CATEGORIES lists every member of both sets;
+// otherwise the missing word's literal type, which `true` is not.
+export const PROVIDER_ERROR_CATEGORIES_LIST_BOTH_SETS: [
+	Exclude<ProviderErrorCategory, (typeof PROVIDER_ERROR_CATEGORIES)[number]>,
+] extends [never]
+	? true
+	: Exclude<ProviderErrorCategory, (typeof PROVIDER_ERROR_CATEGORIES)[number]> = true;
+
+const PLATFORM_FAULT_CATEGORY_SET: ReadonlySet<string> = new Set(PLATFORM_FAULT_CATEGORIES);
+
+const PROVIDER_FAILURE_CATEGORY_SET: ReadonlySet<string> = new Set(PROVIDER_FAILURE_CATEGORIES);
+
+export function isPlatformFaultCategory(category: string): category is PlatformFaultCategory {
+	return PLATFORM_FAULT_CATEGORY_SET.has(category);
+}
+
+export function isProviderFailureCategory(category: string): category is ProviderFailureCategory {
+	return PROVIDER_FAILURE_CATEGORY_SET.has(category);
+}
+
+/**
+ * The `X-ApiFuse-Error-Observability` JSON the server writes beside an error
+ * response. The `origin` tag says who reported the category and fixes which
+ * set the category comes from: a platform fault the SDK observed itself, or a
+ * provider failure the provider's throw site reported. The Gateway removes
+ * the header from tenant responses.
+ */
+export type PlatformFaultObservabilityDetails = {
+	origin: "platform";
+	category: PlatformFaultCategory;
+	taxonomyVersion: string;
+	retryable: boolean;
+	upstreamStatus?: number;
+};
+
+export type ProviderFailureObservabilityDetails = {
+	origin: "provider";
+	category: ProviderFailureCategory;
+	taxonomyVersion: string;
+	retryable: boolean;
+	upstreamStatus?: number;
+	providerObservability?: ProviderErrorObservability;
+};
+
+export type ErrorObservabilityDetails =
+	| PlatformFaultObservabilityDetails
+	| ProviderFailureObservabilityDetails;
+
+/**
+ * The header JSON an SDK released before `origin` existed writes: no origin,
+ * and a category from the union. A reader of another pod's header (the
+ * stateful source pod reading the owner pod's response) accepts this shape
+ * beside {@link ErrorObservabilityDetails} while the fleet still runs such
+ * SDKs, and stops on the rule the SoT's supported taxonomy versions follow:
+ * after the fleet is redeployed past them.
+ */
+export type LegacyErrorObservabilityDetails = {
+	origin?: undefined;
+	category: ProviderErrorCategory;
+	taxonomyVersion: string;
+	retryable: boolean;
+	upstreamStatus?: number;
+	providerObservability?: ProviderErrorObservability;
+};
 
 export function categoryForStatus(status: number): ProviderErrorCategory {
 	if (status >= 200 && status < 400) return "ok";
@@ -108,6 +226,16 @@ export type ProviderErrorCategoryOfSource<TSource extends ProviderErrorSource> =
 		: never;
 }[ProviderErrorCategory];
 
+/**
+ * The public source of a platform fault. The platform stopped the request,
+ * so the source is `apifuse`, except an inbound cancellation, which the
+ * caller caused.
+ */
+export function sourceForPlatformFault(category: PlatformFaultCategory): ProviderErrorSource {
+	return category === "client_cancelled" ? "client" : "apifuse";
+}
+
+/** The public source of a category a provider reported. */
 export function sourceForCategory(category: ProviderErrorCategory): ProviderErrorSource {
 	return PROVIDER_ERROR_CATEGORY_SOURCES[category];
 }

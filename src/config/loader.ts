@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 import type { ProviderProxyPolicy, ProviderProxyProvider, TraceConfig } from "../types.js";
+import { issueProxyPoolFault, PROXY_POOL_RESOLUTION_STATUS } from "../runtime/proxy-errors.js";
 import {
 	NODEMAVEN_DEFAULT_PROTOCOL,
 	NODEMAVEN_FILTER_ENV,
@@ -375,9 +376,13 @@ export async function resolveProxyConfigAsync(
 				deprecated.length > 0
 					? ` Deprecated vendor(s): ${deprecated.map((vendor) => `"${vendor}"`).join(", ")}.`
 					: "";
-			throw new ProxyResolutionError(
+			throw issueProxyPoolFault(
+				new ProxyResolutionError(
+					"PROXY_REQUIRED",
+					`Required proxy policy has no SDK-managed adapter for provider id(s): ${providerIds}.${deprecatedDetail} Use "smartproxy" or "nodemaven".`,
+				),
 				"PROXY_REQUIRED",
-				`Required proxy policy has no SDK-managed adapter for provider id(s): ${providerIds}.${deprecatedDetail} Use "smartproxy" or "nodemaven".`,
+				PROXY_POOL_RESOLUTION_STATUS,
 			);
 		}
 		// Deprecated decodo/custom providers have no SDK-managed adapter. Optional
@@ -514,15 +519,19 @@ export async function resolveProxyConfigAsync(
 				{ protocol: blockedProtocol, vendorChain: chain },
 			);
 		}
-		throw new ProxyResolutionError(
+		throw issueProxyPoolFault(
+			new ProxyResolutionError(
+				"PROXY_REQUIRED",
+				`Proxy egress is required but no vendor credentials are configured. Missing: ${chain
+					.map(
+						(vendor) =>
+							`${missingCredentialEnvNames(vendor, options.engineCredentials).join(" and ")} (${vendor})`,
+					)
+					.join(", ")}.`,
+				{ vendorChain: chain },
+			),
 			"PROXY_REQUIRED",
-			`Proxy egress is required but no vendor credentials are configured. Missing: ${chain
-				.map(
-					(vendor) =>
-						`${missingCredentialEnvNames(vendor, options.engineCredentials).join(" and ")} (${vendor})`,
-				)
-				.join(", ")}.`,
-			{ vendorChain: chain },
+			PROXY_POOL_RESOLUTION_STATUS,
 		);
 	}
 	return { shouldWarn: true };

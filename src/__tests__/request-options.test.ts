@@ -12,6 +12,7 @@ import {
 	redactSensitiveText,
 	serializeRequestUrl,
 } from "../runtime/request-options.js";
+import { isSdkIssuedError, issueSdkError, platformFaultOf } from "../sdk-issued-errors.js";
 
 describe("sensitive request diagnostics", () => {
 	it("collects every value for a declared-sensitive key from the URL and params", () => {
@@ -307,6 +308,37 @@ describe("sensitive request diagnostics", () => {
 		const redactedArray = redactSensitiveError(frozenArray, [secret]);
 		expect(Array.isArray(redactedArray)).toBe(true);
 		expect(redactedArray).toEqual(["safe", "value=[REDACTED]"]);
+	});
+
+	it("keeps the SDK's record of an issued error, and its platform fault, on the copy redaction makes", () => {
+		const secret = "issued-secret";
+		const fault = {
+			category: "proxy_pool",
+			code: "PROXY_POOL_EXHAUSTED",
+			status: 502,
+			retryable: true,
+		} as const;
+		// Frozen, so redaction has to replace it rather than scrub it in place.
+		const issued = Object.freeze(
+			issueSdkError(
+				new TransportError(`pool failed for ${secret}`, { code: "PROXY_POOL_EXHAUSTED" }),
+				fault,
+			),
+		);
+		const redacted = redactSensitiveError(issued, [secret]);
+		expect(redacted).not.toBe(issued);
+		expect(redacted.message).toBe(`pool failed for ${REDACTED_QUERY_VALUE}`);
+		expect(isSdkIssuedError(redacted)).toBe(true);
+		expect(platformFaultOf(redacted)).toEqual(fault);
+
+		// A copy of an error the SDK did not issue stays unrecorded.
+		const lookalike = Object.freeze(
+			new TransportError(`pool failed for ${secret}`, { code: "PROXY_POOL_EXHAUSTED" }),
+		);
+		const redactedLookalike = redactSensitiveError(lookalike, [secret]);
+		expect(redactedLookalike).not.toBe(lookalike);
+		expect(isSdkIssuedError(redactedLookalike)).toBe(false);
+		expect(platformFaultOf(redactedLookalike)).toBeUndefined();
 	});
 
 	it("scrubs sensitive property names, URL internal data, and lone surrogates", () => {

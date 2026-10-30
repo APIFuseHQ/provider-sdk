@@ -1,4 +1,5 @@
 import { ProviderSecretError } from "../errors.js";
+import { issueSdkError } from "../sdk-issued-errors.js";
 import type { EnvContext, ProviderDefinition } from "../types.js";
 
 /**
@@ -43,22 +44,29 @@ export function listMissingRequiredSecrets(
  * discovering them one deploy at a time (the 2026-07-22 unprovisioned-secret
  * incident failure mode).
  */
-export function assertRequiredSecretsPresent(
-	provider: ProviderDefinition,
-	env: EnvContext,
-): void {
+export function assertRequiredSecretsPresent(provider: ProviderDefinition, env: EnvContext): void {
 	const missing = listMissingRequiredSecrets(provider, env);
 	if (missing.length === 0) {
 		return;
 	}
 	const names = missing.join(", ");
-	throw new ProviderSecretError(
-		`Missing required provider secret${missing.length > 1 ? "s" : ""}: ${names}`,
+	// A platform fault: the deployment, not the caller or the upstream, left
+	// the secret out. Served as 400 MISSING_SECRET, category
+	// credential_unavailable under origin platform.
+	throw issueSdkError(
+		new ProviderSecretError(
+			`Missing required provider secret${missing.length > 1 ? "s" : ""}: ${names}`,
+			{
+				code: MISSING_SECRET_CODE,
+				retryable: false,
+				fix: `Provision ${names} in the provider environment (e.g. Doppler). Declared in defineProvider({ secrets: [...] }).`,
+			},
+		),
 		{
-			code: MISSING_SECRET_CODE,
 			category: "credential_unavailable",
+			code: MISSING_SECRET_CODE,
+			status: 400,
 			retryable: false,
-			fix: `Provision ${names} in the provider environment (e.g. Doppler). Declared in defineProvider({ secrets: [...] }).`,
 		},
 	);
 }
