@@ -14,12 +14,17 @@ import path from "node:path";
 
 import {
 	countWindowRules,
+	dedupeClones,
 	judge,
+	normalizeRemote,
+	type ProviderProbe,
 	parseFixtureTestOutput,
+	parseTscOutput,
 	renderReport,
 	type ScanReport,
-	stripComments,
 	type TargetReport,
+	WINDOW_RULES,
+	windowSignalLabel,
 } from "./bump-safety-scan.js";
 
 const SDK = path.resolve(import.meta.dirname, "..");
@@ -137,14 +142,26 @@ describe("bump-safety-scan", () => {
 
 		expect(report.summary).toEqual({ SAME: 1, BREAK: 2, WARN: 0, "NOT COVERED": 1, SKIP: 0 });
 		expect(report.targetPatterns).toEqual([path.join(FIXTURES, "*")]);
-		expect(report.windowRules.map((usage) => usage.rule)).toEqual([
-			"legacy-error-options",
-			"legacy-handle-declaration",
-			"proxy-session-pool-size",
-			"redundant-approval",
-			"context-keys",
-			"schema-describe-prose",
-		]);
+		expect(report.duplicateClones).toEqual([]);
+		expect(report.targets.every((target) => target.staleCloneOf === undefined)).toBe(true);
+		expect(report.windowRules.map((usage) => usage.rule)).toEqual(
+			WINDOW_RULES.map((entry) => entry.rule),
+		);
+		expect(report.windowRules.map((usage) => usage.signal)).toEqual(
+			WINDOW_RULES.map((entry) => windowSignalLabel(entry.signal)),
+		);
+		const expectedUsage = Object.fromEntries(
+			countWindowRules(report.targets).map((usage) => [usage.rule, usage.sites]),
+		);
+		expect(
+			Object.fromEntries(report.windowRules.map((usage) => [usage.rule, usage.sites])),
+		).toEqual(expectedUsage);
+		for (const target of report.targets) {
+			for (const entry of WINDOW_RULES) {
+				if ("lint" in entry.signal)
+					expect(target.base.probe?.lint[entry.signal.lint]).toBeUndefined();
+			}
+		}
 		expect(report.windowRules.every((usage) => usage.providers.length === 0)).toBe(true);
 	}, 120_000);
 
@@ -167,7 +184,7 @@ describe("bump-safety-scan", () => {
 describe("judge", () => {
 	const ok = (digest: string) => ({
 		probe: { load: { status: "ok" as const }, digest, lint: {}, warnings: [] },
-		tsc: { errors: 0, sample: [] },
+		tsc: { errors: 0, sample: [], keys: [] },
 	});
 	const failing = {
 		probe: {
@@ -190,10 +207,38 @@ describe("judge", () => {
 	});
 
 	it("is BREAK when tsc goes from clean to red", () => {
-		const head = { ...ok("a"), tsc: { errors: 3, sample: ["index.ts(1,1): error TS1"] } };
+		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED, []) };
 		const judged = judge({ kind: "provider", base: ok("a"), head });
 		expect(judged.verdict).toBe("BREAK");
-		expect(judged.reasons[0]).toContain("tsc 0 -> 3");
+		expect(judged.reasons[0]).toContain(
+			`tsc 0 -> ${head.tsc.errors}, ${head.tsc.errors} new on head`,
+		);
+	});
+
+	it("is BREAK when head has a tsc error base does not, even at the same count", () => {
+		const base = { ...ok("a"), tsc: parseTscOutput(TSC_RED, []) };
+		const head = { ...ok("a"), tsc: parseTscOutput(TSC_RED_ELSEWHERE, []) };
+		expect(head.tsc.errors).toBe(base.tsc.errors);
+		expect(head.tsc.keys.some((key) => !base.tsc.keys.includes(key))).toBe(true);
+		const judged = judge({ kind: "provider", base, head });
+		expect(judged.verdict).toBe("BREAK");
+		const introduced = head.tsc.keys.filter((key) => !base.tsc.keys.includes(key));
+		expect(judged.reasons[0]).toBe(
+			`tsc ${base.tsc.errors} -> ${head.tsc.errors}, ${introduced.length} new on head: ${introduced[0]}`,
+		);
+	});
+
+	it("is not BREAK when head only repeats or drops base tsc errors, or when tsc did not run on a side", () => {
+		const red = { ...ok("a"), tsc: parseTscOutput(TSC_RED, []) };
+		expect(judge({ kind: "provider", base: red, head: red }).verdict).toBe("SAME");
+		const fewer = {
+			...ok("a"),
+			tsc: parseTscOutput(TSC_RED.split("\n").slice(1).join("\n"), []),
+		};
+		expect(fewer.tsc.errors).toBe(red.tsc.errors - 1);
+		expect(judge({ kind: "provider", base: red, head: fewer }).verdict).toBe("SAME");
+		const notRun = { ...ok("a"), tsc: { errors: -1, sample: ["no tsconfig"], keys: [] } };
+		expect(judge({ kind: "provider", base: notRun, head: red }).verdict).toBe("SAME");
 	});
 
 	it("is BREAK when the head SDK cannot extract a contract it extracted on base, NOT COVERED when neither side can", () => {
@@ -293,6 +338,7 @@ describe("renderReport", () => {
 			head: { spec: "b", dir: "/b", version: "1" },
 			targetPatterns: ["/apifuse (fixture-tests)"],
 			targets: [target],
+			duplicateClones: [],
 			windowRules: [],
 			summary: { SAME: 0, BREAK: 0, WARN: 0, "NOT COVERED": 1, SKIP: 0 },
 		});
@@ -324,68 +370,240 @@ describe("parseFixtureTestOutput", () => {
 	});
 });
 
-describe("stripComments", () => {
-	it("removes comments but keeps comment-looking text inside strings and templates", () => {
-		const source = [
-			'const accept = "application/json, text/plain, */*";',
-			"// a line comment with new ProviderError(",
-			'const url = "https://example.com/path"; // trailing',
-			`const tpl = \`https://$\{host}/x\`; /* block */ const after = 1;`,
-			"/* multi",
-			"   line */",
-			'const slash = "contains // slash";',
-			"const last = 2;",
-		].join("\n");
-		const stripped = stripComments(source);
-		expect(stripped).toContain('"application/json, text/plain, */*"');
-		expect(stripped).toContain('"https://example.com/path"');
-		expect(stripped).toContain(`\`https://$\{host}/x\``);
-		expect(stripped).toContain('"contains // slash"');
-		expect(stripped).toContain("const after = 1;");
-		expect(stripped).toContain("const last = 2;");
-		expect(stripped).not.toContain("a line comment");
-		expect(stripped).not.toContain("trailing");
-		expect(stripped).not.toContain("block");
-		expect(stripped).not.toContain("multi");
+describe("parseTscOutput", () => {
+	it("keys each diagnostic by file, line, column and code with the per-side roots removed", () => {
+		const parsed = parseTscOutput(
+			[
+				"/scratch/head/p/index.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+				"/scratch/sdk/abc/dist/types.d.ts(9,1): error TS1005: ';' expected.",
+				"Found 2 errors.",
+			].join("\n"),
+			["/scratch/head/p", "/scratch/sdk/abc"],
+		);
+		expect(parsed.errors).toBe(2);
+		expect(parsed.keys).toEqual([
+			"dist/types.d.ts(9,1): error TS1005",
+			"index.ts(3,7): error TS2322",
+		]);
+		expect(parsed.sample).toEqual([
+			"index.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+			"dist/types.d.ts(9,1): error TS1005: ';' expected.",
+		]);
 	});
 });
 
+const TSC_RED = [
+	"index.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+	"index.ts(10,2): error TS2345: Argument of type 'A' is not assignable to parameter of type 'B'.",
+	"upstream/client.ts(44,12): error TS2339: Property 'x' does not exist on type 'Y'.",
+].join("\n");
+
+/** The same count as TSC_RED, every diagnostic at another site. */
+const TSC_RED_ELSEWHERE = [
+	"index.ts(4,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+	"index.ts(10,2): error TS2554: Expected 1 arguments, but got 2.",
+	"upstream/other.ts(44,12): error TS2339: Property 'x' does not exist on type 'Y'.",
+].join("\n");
+
 describe("countWindowRules", () => {
-	it("counts each window rule per target, skips comments and survives */* in strings", () => {
-		const dir = mkdtempSync(path.join(process.env.TMPDIR ?? tmpdir(), "window-rules-"));
-		try {
-			const file = path.join(dir, "ops.ts");
-			writeFileSync(
-				file,
-				[
-					'const headers = { Accept: "application/json, text/plain, */*" };',
-					'throw new ProviderError("x", { code: "X", retryable: false });',
-					'throw new ProviderError("y", { code: "Y" });',
-					"// throw new ProviderError('z', { category: 'upstream_http' });",
-					'const note = "contains // slash"; throw new ProviderError("w", { code: "W", category: "upstream_http" });',
-					'const cursor = defineCursor({ name: "page", fieldName: "page_token" });',
-					"const session = { poolSize: 3 };",
-					'const op = { approval: "always", contextKeys: ["a"] };',
-					'const schema = z.string().describe("prose");',
-					"/* .describe('in a block comment') */",
-				].join("\n"),
-			);
-			const usage = Object.fromEntries(
-				countWindowRules([{ name: "t", sources: [file] }]).map((entry) => [
-					entry.rule,
-					entry.sites,
-				]),
-			);
-			expect(usage).toEqual({
-				"legacy-error-options": 2,
-				"legacy-handle-declaration": 1,
-				"proxy-session-pool-size": 1,
-				"redundant-approval": 1,
-				"context-keys": 1,
-				"schema-describe-prose": 1,
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
+	const probe = (lint: ProviderProbe["lint"], warnings: string[] = []): ProviderProbe => ({
+		load: { status: "ok" },
+		digest: "d",
+		lint,
+		warnings,
+	});
+	const lintRules = WINDOW_RULES.flatMap((entry) =>
+		"lint" in entry.signal ? [[entry.rule, entry.signal.lint] as const] : [],
+	);
+	const warningRules = WINDOW_RULES.filter((entry) => !("lint" in entry.signal));
+
+	it("counts a user per base lint diagnostic of the rule's lint id, never from source text", () => {
+		const lintOnA = Object.fromEntries(
+			lintRules.map(([, lintId], index) => [lintId, { level: "warn" as const, count: index + 2 }]),
+		);
+		const targets = [
+			{ name: "a", base: { probe: probe(lintOnA) } },
+			{
+				name: "b",
+				base: { probe: probe({ "allowed-hosts-required": { level: "error", count: 1 } }) },
+			},
+			{ name: "c", base: { probe: probe(lintOnA) }, staleCloneOf: "a" },
+			{ name: "d", base: {} },
+		];
+		const usage = Object.fromEntries(countWindowRules(targets).map((entry) => [entry.rule, entry]));
+		for (const [rule, lintId] of lintRules) {
+			expect(usage[rule]?.providers).toEqual(["a"]);
+			expect(usage[rule]?.sites).toBe(lintOnA[lintId]?.count);
+			expect(usage[rule]?.signal).toBe(`lint ${lintId}`);
 		}
+		for (const entry of warningRules) {
+			expect(usage[entry.rule]?.providers).toEqual([]);
+			expect(usage[entry.rule]?.sites).toBe(0);
+			expect(usage[entry.rule]?.signal).toBe("defineProvider warning");
+		}
+	});
+
+	it("counts the rules without a lint rule from the base defineProvider warning", () => {
+		const warnings = [
+			'[provider-sdk] Provider "p" declares proxy.session.poolSize (6), which is ignored: the proxy pool is gone.',
+			'[provider-sdk] Provider "p" has 3 public schema fields without a locale key: output.a (raw .describe() prose), output.b (no description), output.c (no description). Describe each with .describeKey("<locale key>").',
+			"[provider-sdk] some unrelated warning mentioning poolSize and describe",
+		];
+		const usage = Object.fromEntries(
+			countWindowRules([{ name: "p", base: { probe: probe({}, warnings) } }]).map((entry) => [
+				entry.rule,
+				entry,
+			]),
+		);
+		expect(usage["proxy-session-pool-size"]).toMatchObject({ providers: ["p"], sites: 1 });
+		expect(usage["schema-describe-prose"]).toMatchObject({ providers: ["p"], sites: 1 });
+		for (const [rule] of lintRules) expect(usage[rule]?.providers).toEqual([]);
+	});
+
+	it("does not count a public schema field that merely lacks a description as raw .describe() prose", () => {
+		const warnings = [
+			'[provider-sdk] Provider "p" has 2 public schema fields without a locale key: output.a (no description), output.b (no description). Describe each with .describeKey("<locale key>") instead of .describe("prose").',
+		];
+		const usage = countWindowRules([{ name: "p", base: { probe: probe({}, warnings) } }]);
+		expect(usage.find((entry) => entry.rule === "schema-describe-prose")).toMatchObject({
+			providers: [],
+			sites: 0,
+		});
+	});
+});
+
+describe("normalizeRemote", () => {
+	it("maps scp, ssh and https spellings of one repository to one key", () => {
+		const spellings = [
+			"git@github.com:APIFuseHQ/apifuse-provider-catchtable.git",
+			"ssh://git@github.com/APIFuseHQ/apifuse-provider-catchtable",
+			"https://github.com/APIFuseHQ/apifuse-provider-catchtable.git",
+			"https://user@github.com/apifusehq/apifuse-provider-catchtable/\n",
+		];
+		expect(new Set(spellings.map(normalizeRemote))).toEqual(
+			new Set(["github.com/apifusehq/apifuse-provider-catchtable"]),
+		);
+		expect(normalizeRemote("https://github.com/a/b")).not.toBe(
+			normalizeRemote("https://github.com/a/c"),
+		);
+	});
+});
+
+describe("dedupeClones", () => {
+	const clone = (remote: string, head: string, committedAt: number) => ({
+		remote: normalizeRemote(remote),
+		head,
+		committedAt,
+	});
+	const fixtures = [
+		{ name: "catchtable", clone: clone("https://github.com/O/catchtable.git", "c26a", 300) },
+		{ name: "catchtable-agent", clone: clone("git@github.com:O/catchtable.git", "8c14", 100) },
+		{ name: "catchtable-w3507-a", clone: clone("https://github.com/O/catchtable", "c26a", 300) },
+		{ name: "catchtable-w3507-b", clone: clone("https://github.com/O/catchtable", "8c14", 100) },
+		{ name: "modu-parking", clone: clone("https://github.com/O/modu-parking", "aaaa", 200) },
+		{ name: "modu-phone-otp", clone: clone("https://github.com/O/modu-parking", "bbbb", 150) },
+		{ name: "careem", clone: clone("https://github.com/O/careem", "cccc", 50) },
+		{ name: "plain-copy" },
+	];
+
+	it("scans one clone per remote and HEAD, keeps every HEAD, and marks the older HEADs stale", () => {
+		const result = dedupeClones(fixtures);
+		const byIdentity = new Map<string, string>();
+		for (const target of fixtures) {
+			if (!target.clone) continue;
+			const key = `${target.clone.remote}@${target.clone.head}`;
+			if (!byIdentity.has(key)) byIdentity.set(key, target.name);
+		}
+		const expectedKept = fixtures.filter(
+			(target) =>
+				!target.clone ||
+				byIdentity.get(`${target.clone.remote}@${target.clone.head}`) === target.name,
+		);
+		expect(result.kept).toEqual(expectedKept);
+		expect(result.duplicates.map((entry) => [entry.dropped.name, entry.keptAs.name])).toEqual(
+			fixtures
+				.filter((target) => !expectedKept.includes(target))
+				.map((target) => [
+					target.name,
+					byIdentity.get(`${target.clone?.remote}@${target.clone?.head}`),
+				]),
+		);
+		const newestByRemote = new Map<string, (typeof fixtures)[number]>();
+		for (const target of result.kept) {
+			if (!target.clone) continue;
+			const best = newestByRemote.get(target.clone.remote);
+			if (!best || (best.clone?.committedAt ?? 0) < target.clone.committedAt)
+				newestByRemote.set(target.clone.remote, target);
+		}
+		const expectedStale = result.kept.filter(
+			(target) => target.clone && newestByRemote.get(target.clone.remote) !== target,
+		);
+		expect(result.stale.map((entry) => entry.clone)).toEqual(expectedStale);
+		for (const entry of result.stale) {
+			expect(entry.newest).toBe(newestByRemote.get(entry.clone.clone!.remote)!);
+			expect(entry.newest.clone!.committedAt).toBeGreaterThan(entry.clone.clone!.committedAt);
+		}
+		expect(expectedStale.length).toBeGreaterThan(0);
+		expect(result.duplicates.length).toBeGreaterThan(0);
+	});
+
+	it("leaves targets without a clone identity and single clones alone", () => {
+		const lone = fixtures.filter((target) => !target.clone || target.name === "careem");
+		expect(dedupeClones(lone)).toEqual({ kept: lone, duplicates: [], stale: [] });
+	});
+});
+
+describe("renderReport stale clones", () => {
+	it("shows a stale clone's verdict as non-gating and keeps it out of the summary lines", () => {
+		const ok = (digest: string) => ({
+			probe: { load: { status: "ok" as const }, digest, lint: {}, warnings: [] },
+			tsc: { errors: 0, sample: [], keys: [] },
+		});
+		const row = (
+			name: string,
+			head: ReturnType<typeof ok>,
+			staleCloneOf?: string,
+		): TargetReport => {
+			const target: TargetReport = {
+				name,
+				kind: "provider",
+				path: `/clones/${name}`,
+				clone: { remote: "github.com/o/catchtable", head: `${name}-sha-000000`, committedAt: 1 },
+				...(staleCloneOf === undefined ? {} : { staleCloneOf }),
+				base: ok("a"),
+				head,
+				verdict: "SKIP",
+				covered: false,
+				reasons: [],
+			};
+			return Object.assign(target, judge(target));
+		};
+		const targets = [row("catchtable", ok("a")), row("catchtable-agent", ok("b"), "catchtable")];
+		expect(targets[1]?.verdict).toBe("BREAK");
+		const rendered = renderReport({
+			base: { spec: "a", dir: "/a", version: "1" },
+			head: { spec: "b", dir: "/b", version: "1" },
+			targetPatterns: ["/clones/*"],
+			targets,
+			duplicateClones: [{ path: "/clones/catchtable-w3507-a", scannedAs: "catchtable" }],
+			windowRules: countWindowRules(targets),
+			summary: { SAME: 1, BREAK: 0, WARN: 0, "NOT COVERED": 0, SKIP: 0 },
+		});
+		expect(rendered).toContain(
+			"targets: 1 from /clones/* (+1 stale clone(s), not gating) (1 duplicate clone(s) scanned once)",
+		);
+		expect(rendered).toMatch(
+			/^catchtable-agent\s+.*stale clone \(BREAK\)\s+newest clone is catchtable; contract digest/m,
+		);
+		expect(rendered).toContain("summary: 0 BREAK, 0 WARN, 1 SAME, 0 NOT COVERED, 0 SKIP");
+		expect(rendered).not.toMatch(/^ {2}BREAK catchtable-agent/m);
+		expect(rendered).toContain(
+			"stale clones: 1 target(s) share a remote with a newer clone; reported, not gating",
+		);
+		expect(rendered).toContain(
+			`  catchtable-agent: BREAK, ${targets[1]?.clone?.head.slice(0, 12)} is older than catchtable: contract digest`,
+		);
+		expect(rendered).toContain("  /clones/catchtable-w3507-a = catchtable");
+		expect(rendered).toContain("window rules over the 1 target(s) above");
 	});
 });

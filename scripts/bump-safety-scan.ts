@@ -39,20 +39,37 @@
  * specifiers, so the preload method silently resolved the checkout's pinned
  * SDK on both sides and compared base to base.
  *
+ * Several local directories can be clones of one GitHub repository (review
+ * worktrees, renamed providers). Targets with the same `origin` remote and the
+ * same HEAD commit are scanned once; when the same remote is checked out at
+ * different commits every clone is scanned, but only the newest one gates:
+ * the others are reported as stale clones with their verdict and are left out
+ * of the summary and the exit code, so a stale clone can neither fail nor
+ * pass the gate silently.
+ *
  * Per target and side the scan reports module load (ok / error class), the
- * `tsc --noEmit` error count, the served contract digest
+ * `tsc --noEmit` errors, the served contract digest
  * (`digestProviderContract(extractProviderContract(provider))`), authoring
  * lint diagnostics by rule id, and the runtime warnings printed while
- * loading. The diff table marks a target BREAK when it loaded or compiled on
- * base and fails on head, or when its contract digest changes; a lint
+ * loading. The diff table marks a target BREAK when it loaded on base and
+ * fails on head, when its contract digest changes, or when head reports a
+ * tsc error (file, line, column, code) that base does not, whatever the
+ * counts are (a base that is already red cannot mask new head errors); a lint
  * error-level rule or a runtime warning that is new on head is marked WARN;
  * a target that fails on both sides is NOT COVERED (`covered: false` in the
  * JSON), because the diff says nothing about it.
  *
  * The second section counts the one-release window rules across the targets
  * (legacy per-throw error options, defineCursor/defineDraft fieldName or
- * issuedBy, proxy.session.poolSize, approval:, contextKeys, raw .describe()).
- * A rule with 0 users can be deleted with its path; a rule with users cannot.
+ * issuedBy, proxy.session.poolSize, redundant approval:, context keys, raw
+ * .describe()). "Uses the rule" is what the BASE SDK itself says about the
+ * provider, read from the base probe: the base lint diagnostics for the
+ * rule's lint id, or, for the two rules that have no lint rule, the
+ * once-per-provider warning `defineProvider` prints on base. Nothing is
+ * regex-counted over source text (a nested `retryable:` in a client payload,
+ * a deliberate `approval:` override or a supported `contextKeys` declaration
+ * are not uses). A rule with 0 users can be deleted with its path; a rule
+ * with users cannot.
  *
  * Exit 1 when any BREAK row exists, 2 on a usage error.
  */
@@ -71,8 +88,6 @@ import {
 } from "node:fs";
 import { cpus, tmpdir } from "node:os";
 import path from "node:path";
-
-import ts from "typescript";
 
 const SDK_REPO = path.resolve(import.meta.dirname, "..");
 const SDK_PACKAGE = "@apifuse/provider-sdk";
@@ -118,9 +133,17 @@ export interface ProviderProbe {
 	warnings: string[];
 }
 
+export interface TscResult {
+	/** Diagnostic count; -1 when tsc could not run (no tsconfig, no typescript, timeout). */
+	errors: number;
+	sample: string[];
+	/** One `file(line,col): error TSnnnn` key per diagnostic, sorted; the set the verdict compares. */
+	keys: string[];
+}
+
 export interface SideResult {
 	probe?: ProviderProbe;
-	tsc?: { errors: number; sample: string[] };
+	tsc?: TscResult;
 	tests?: { pass: number; fail: number; files: Record<string, FixtureFileResult> };
 }
 
@@ -132,10 +155,22 @@ export interface FixtureFileResult {
 
 export type Verdict = "SAME" | "BREAK" | "WARN" | "NOT COVERED" | "SKIP";
 
+/** Where a provider checkout comes from: its `origin` remote and the commit it sits on. */
+export interface CloneIdentity {
+	/** Normalized remote: `host/owner/repo`, lower case, no scheme, user or `.git`. */
+	remote: string;
+	head: string;
+	/** HEAD commit time (unix seconds); the newest clone of a remote is the one that gates. */
+	committedAt: number;
+}
+
 export interface TargetReport {
 	name: string;
 	kind: "provider" | "fixture-tests";
 	path: string;
+	clone?: CloneIdentity;
+	/** Set when another clone of the same remote sits on a newer commit: this row is reported but does not gate. */
+	staleCloneOf?: string;
 	base: SideResult;
 	head: SideResult;
 	verdict: Verdict;
@@ -147,8 +182,16 @@ export interface TargetReport {
 export interface WindowRuleUsage {
 	rule: string;
 	description: string;
+	/** What the base SDK emits for a user of the rule: a lint rule id or a defineProvider warning. */
+	signal: string;
 	providers: string[];
 	sites: number;
+}
+
+export interface DuplicateClone {
+	path: string;
+	/** The target that was scanned in its place (same remote, same HEAD). */
+	scannedAs: string;
 }
 
 export interface ScanReport {
@@ -156,7 +199,9 @@ export interface ScanReport {
 	head: { spec: string; dir: string; version: string };
 	targetPatterns: string[];
 	targets: TargetReport[];
+	duplicateClones: DuplicateClone[];
 	windowRules: WindowRuleUsage[];
+	/** Verdict counts over the gating targets (stale clones are not counted). */
 	summary: Record<Verdict, number>;
 }
 
@@ -164,6 +209,8 @@ interface Target {
 	name: string;
 	kind: "provider" | "fixture-tests";
 	path: string;
+	clone?: CloneIdentity;
+	staleCloneOf?: string;
 	sources: string[];
 	nodeModulesSources: string[];
 	testFiles?: string[];
@@ -440,12 +487,99 @@ function providerIdOf(dir: string): string | undefined {
 	}
 }
 
-export function discoverTargets(
+/**
+ * `git@host:owner/repo.git`, `ssh://git@host/owner/repo` and
+ * `https://host/owner/repo.git` all name one repository: `host/owner/repo`.
+ */
+export function normalizeRemote(url: string): string {
+	const trimmed = url.trim();
+	const scp = /^[^@/:]+@([^:/]+):(.+)$/.exec(trimmed);
+	const hostAndPath = scp
+		? `${scp[1]}/${scp[2]}`
+		: trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?/i, "");
+	return hostAndPath
+		.replace(/\/+$/, "")
+		.replace(/\.git$/, "")
+		.toLowerCase();
+}
+
+/**
+ * The clone identity of a checkout, or undefined when the directory is not the
+ * top level of a git repository with an `origin` remote (a fixture inside
+ * another repository, a plain copy). Only top-level checkouts are deduped so
+ * sibling fixtures of one repository never collapse into each other.
+ */
+async function cloneIdentity(dir: string): Promise<CloneIdentity | undefined> {
+	const git = (args: string[]) => run("git", ["-C", dir, ...args], { timeoutMs: 30_000 });
+	const top = await git(["rev-parse", "--show-toplevel"]);
+	if (top.code !== 0) return undefined;
+	try {
+		if (realpathSync(top.stdout.trim()) !== dir) return undefined;
+	} catch {
+		return undefined;
+	}
+	const [remote, head, committed] = await Promise.all([
+		git(["remote", "get-url", "origin"]),
+		git(["rev-parse", "HEAD"]),
+		git(["log", "-1", "--format=%ct", "HEAD"]),
+	]);
+	if (remote.code !== 0 || head.code !== 0) return undefined;
+	return {
+		remote: normalizeRemote(remote.stdout),
+		head: head.stdout.trim(),
+		committedAt: Number.parseInt(committed.stdout.trim(), 10) || 0,
+	};
+}
+
+export interface CloneDedupe<T> {
+	/** Input order, minus the clones that repeat an earlier clone's remote and HEAD. */
+	kept: T[];
+	duplicates: Array<{ dropped: T; keptAs: T }>;
+	/** Kept clones whose remote has another kept clone on a newer commit. */
+	stale: Array<{ clone: T; newest: T }>;
+}
+
+/**
+ * Same remote and same HEAD: one scan is enough, the first one found keeps
+ * the row. Same remote at different HEADs: every clone is scanned, the one
+ * with the newest commit gates, the rest are stale clones.
+ */
+export function dedupeClones<T extends { clone?: CloneIdentity }>(targets: T[]): CloneDedupe<T> {
+	const kept: T[] = [];
+	const duplicates: CloneDedupe<T>["duplicates"] = [];
+	const byRemote = new Map<string, T[]>();
+	for (const target of targets) {
+		if (!target.clone) {
+			kept.push(target);
+			continue;
+		}
+		const group = byRemote.get(target.clone.remote) ?? [];
+		const twin = group.find((other) => other.clone?.head === target.clone?.head);
+		if (twin) {
+			duplicates.push({ dropped: target, keptAs: twin });
+			continue;
+		}
+		group.push(target);
+		byRemote.set(target.clone.remote, group);
+		kept.push(target);
+	}
+	const stale: CloneDedupe<T>["stale"] = [];
+	for (const group of byRemote.values()) {
+		if (group.length < 2) continue;
+		const newest = group.reduce((best, candidate) =>
+			(candidate.clone?.committedAt ?? 0) > (best.clone?.committedAt ?? 0) ? candidate : best,
+		);
+		for (const clone of group) if (clone !== newest) stale.push({ clone, newest });
+	}
+	return { kept, duplicates, stale };
+}
+
+export async function discoverTargets(
 	patterns: string[],
 	apifuse: string,
 	fixtureTests: boolean,
-): Target[] {
-	const targets: Target[] = [];
+): Promise<{ targets: Target[]; duplicateClones: DuplicateClone[] }> {
+	const found: Target[] = [];
 	const seen = new Set<string>();
 	const workspaceProviders = path.join(DEFAULT_APIFUSE, ".provider-workspace", "providers");
 	for (const pattern of patterns) {
@@ -455,21 +589,26 @@ export function discoverTargets(
 			if (seen.has(real)) continue;
 			seen.add(real);
 			let name = targetName(real);
-			if (targets.some((target) => target.name === name))
+			if (found.some((target) => target.name === name))
 				name = `${path.basename(path.dirname(real))}/${name}`;
 			const nodeModulesSources = [path.join(real, "node_modules")];
 			const id = providerIdOf(real) ?? path.basename(real);
 			const twin = path.join(workspaceProviders, id, "node_modules");
 			if (twin !== nodeModulesSources[0] && existsSync(twin)) nodeModulesSources.push(twin);
-			targets.push({
+			const clone = await cloneIdentity(real);
+			found.push({
 				name,
 				kind: "provider",
 				path: real,
+				...(clone ? { clone } : {}),
 				sources: collectSources(real),
 				nodeModulesSources,
 			});
 		}
 	}
+	const deduped = dedupeClones(found);
+	for (const { clone, newest } of deduped.stale) clone.staleCloneOf = newest.name;
+	const targets = deduped.kept;
 	if (fixtureTests && existsSync(apifuse)) {
 		const testFiles: string[] = [];
 		for (const relativeDir of FIXTURE_TEST_DIRS) {
@@ -494,7 +633,13 @@ export function discoverTargets(
 			});
 		}
 	}
-	return targets;
+	return {
+		targets,
+		duplicateClones: deduped.duplicates.map(({ dropped, keptAs }) => ({
+			path: dropped.path,
+			scannedAs: keptAs.name,
+		})),
+	};
 }
 
 function targetName(dir: string): string {
@@ -763,23 +908,38 @@ function typescriptEntry(staged: string, sdk: SdkBuild): string | undefined {
 	return undefined;
 }
 
-async function typecheck(staged: string, sdk: SdkBuild): Promise<SideResult["tsc"]> {
+async function typecheck(staged: string, sdk: SdkBuild): Promise<TscResult> {
 	const tsc = typescriptEntry(staged, sdk);
-	if (!tsc) return { errors: -1, sample: ["no typescript install reachable"] };
+	if (!tsc) return { errors: -1, sample: ["no typescript install reachable"], keys: [] };
 	const project = ["tsconfig.typecheck.json", "tsconfig.json"]
 		.map((name) => path.join(staged, name))
 		.find((candidate) => existsSync(candidate));
-	if (!project) return { errors: -1, sample: ["no tsconfig"] };
+	if (!project) return { errors: -1, sample: ["no tsconfig"], keys: [] };
 	const result = await run("bun", [tsc, "--noEmit", "--pretty", "false", "-p", project], {
 		cwd: staged,
 		timeoutMs: 300_000,
 	});
-	if (result.timedOut) return { errors: -1, sample: ["tsc timed out after 300s"] };
-	const lines = `${result.stdout}\n${result.stderr}`
-		.split("\n")
-		.filter((line) => /error TS\d+/.test(line))
-		.map((line) => line.replace(`${staged}/`, "").trim());
-	return { errors: lines.length, sample: lines.slice(0, 5) };
+	if (result.timedOut) return { errors: -1, sample: ["tsc timed out after 300s"], keys: [] };
+	return parseTscOutput(`${result.stdout}\n${result.stderr}`, [staged, sdk.dir]);
+}
+
+/**
+ * One diagnostic per `file(line,col): error TSnnnn: message` line. The staged
+ * copy and the SDK build differ per side, so both prefixes are removed from
+ * the file before it becomes part of the key the verdict compares.
+ */
+export function parseTscOutput(text: string, roots: string[]): TscResult {
+	const lines: string[] = [];
+	const keys: string[] = [];
+	for (const raw of text.split("\n")) {
+		let line = raw.trim();
+		if (!/error TS\d+/.test(line)) continue;
+		for (const root of roots) line = line.split(`${root}/`).join("");
+		lines.push(line);
+		const key = /^(.*?\(\d+,\d+\)): error (TS\d+)/.exec(line);
+		keys.push(key ? `${key[1]}: error ${key[2]}` : line);
+	}
+	return { errors: lines.length, sample: lines.slice(0, 5), keys: keys.sort() };
 }
 
 async function runFixtureTests(
@@ -916,8 +1076,15 @@ export function judge(target: Pick<TargetReport, "kind" | "base" | "head">): Jud
 	}
 	const baseTsc = target.base.tsc;
 	const headTsc = target.head.tsc;
-	if (baseTsc && headTsc && baseTsc.errors === 0 && headTsc.errors > 0) {
-		escalate("BREAK", `tsc 0 -> ${headTsc.errors}: ${headTsc.sample[0] ?? ""}`);
+	if (baseTsc && headTsc && baseTsc.errors >= 0 && headTsc.errors >= 0) {
+		const known = new Set(baseTsc.keys);
+		const introduced = headTsc.keys.filter((key) => !known.has(key));
+		if (introduced.length > 0) {
+			escalate(
+				"BREAK",
+				`tsc ${baseTsc.errors} -> ${headTsc.errors}, ${introduced.length} new on head: ${introduced[0]}`,
+			);
+		}
 	}
 	const baseWarnings = new Set(base.warnings);
 	const newWarnings = head.warnings.filter((line) => !baseWarnings.has(line));
@@ -927,129 +1094,93 @@ export function judge(target: Pick<TargetReport, "kind" | "base" | "head">): Jud
 	return { verdict, covered, reasons };
 }
 
-const WINDOW_RULES: Array<{
+/**
+ * How the BASE SDK reports a use of a window rule, read from the base probe.
+ * `lint`: the diagnostics of that lint rule id (sites = diagnostic count).
+ * `warning`: the once-per-provider `defineProvider` warning for a rule that
+ * has no lint rule; `sites` reads the count the warning states, else 1.
+ */
+type WindowSignal = { lint: string } | { warning: RegExp; sites?: (line: string) => number };
+
+export const WINDOW_RULES: ReadonlyArray<{
 	rule: string;
 	description: string;
-	count: (source: string) => number;
+	signal: WindowSignal;
 }> = [
 	{
 		rule: "legacy-error-options",
 		description:
-			"per-throw options: { category | retryable } on ProviderError/AuthError/ValidationError",
-		count: (source) =>
-			callArguments(source, /new\s+(?:ProviderError|AuthError|ValidationError)\s*\(/g).filter(
-				(args) => /\b(?:category|retryable)\s*:/.test(args),
-			).length,
+			"per-throw { category | retryable } on ProviderError/AuthError/ValidationError, or an errorCodes table",
+		signal: { lint: "legacy-error-options" },
 	},
 	{
 		rule: "legacy-handle-declaration",
 		description: "defineCursor( / defineDraft( with fieldName or issuedBy",
-		count: (source) =>
-			callArguments(source, /define(?:Cursor|Draft)\s*\(/g).filter((args) =>
-				/\b(?:fieldName|issuedBy)\s*:/.test(args),
-			).length,
+		signal: { lint: "legacy-handle-declaration" },
 	},
 	{
 		rule: "proxy-session-pool-size",
-		description: "proxy.session.poolSize",
-		count: (source) => matches(source, /\bpoolSize\s*:/g),
+		description: "proxy.session.poolSize (no lint rule; defineProvider warns once per provider)",
+		signal: { warning: /\[provider-sdk\] Provider "[^"]*" declares proxy\.session\.poolSize/ },
 	},
 	{
 		rule: "redundant-approval",
-		description: "approval: on an operation",
-		count: (source) => matches(source, /\bapproval\s*:/g),
+		description: "approval: equal to the riskClass default (an override is not a use)",
+		signal: { lint: "redundant-approval" },
 	},
 	{
 		rule: "context-keys",
-		description: "contextKeys",
-		count: (source) => matches(source, /\bcontextKeys\b/g),
+		description:
+			"auth flow reads ctx.context without declared context.keys (declaring keys is not a use)",
+		signal: { lint: "context-keys-required" },
 	},
 	{
 		rule: "schema-describe-prose",
-		description: "raw .describe( on a schema",
-		count: (source) => matches(source, /\.describe\s*\(/g),
+		description:
+			"raw .describe() prose on a public schema field (no lint rule; defineProvider warns once per provider, naming each field with its reason)",
+		signal: {
+			warning:
+				/\[provider-sdk\] Provider "[^"]*" has \d+ public schema fields? without a locale key:.*\(raw \.describe\(\) prose\)/,
+			sites: (line) => line.split("(raw .describe() prose)").length - 1,
+		},
 	},
 ];
 
+export function windowSignalLabel(signal: WindowSignal): string {
+	return "lint" in signal ? `lint ${signal.lint}` : "defineProvider warning";
+}
+
+/** Sites of one window rule in one base probe, as the base SDK reported them. */
+function windowSites(signal: WindowSignal, probe: ProviderProbe): number {
+	if ("lint" in signal) return probe.lint[signal.lint]?.count ?? 0;
+	let sites = 0;
+	for (const line of probe.warnings) {
+		if (signal.warning.test(line)) sites += signal.sites ? signal.sites(line) : 1;
+	}
+	return sites;
+}
+
 /**
- * Blanks every comment the TypeScript parser sees, so a `*\/*` inside a string
- * (an `Accept` header) or a `//` inside a string or template never opens one.
+ * Users of each window rule over the gating targets, read from what the base
+ * SDK emitted for each provider (the base probe's lint diagnostics or
+ * defineProvider warnings). A target without a base probe (fixture tests, a
+ * staging failure) or whose base load failed has no signal and is not a user.
  */
-export function stripComments(source: string): string {
-	const sourceFile = ts.createSourceFile("source.ts", source, ts.ScriptTarget.Latest, true);
-	const ranges = new Map<number, number>();
-	const collect = (comments: readonly ts.CommentRange[] | undefined) => {
-		for (const comment of comments ?? []) ranges.set(comment.pos, comment.end);
-	};
-	const visit = (node: ts.Node) => {
-		collect(ts.getLeadingCommentRanges(source, node.getFullStart()));
-		collect(ts.getTrailingCommentRanges(source, node.getEnd()));
-		for (const child of node.getChildren(sourceFile)) visit(child);
-	};
-	visit(sourceFile);
-	let stripped = "";
-	let cursor = 0;
-	for (const [start, end] of [...ranges.entries()].sort(([left], [right]) => left - right)) {
-		if (start < cursor) continue;
-		stripped += source.slice(cursor, start);
-		cursor = end;
-	}
-	return stripped + source.slice(cursor);
-}
-
-function matches(source: string, pattern: RegExp): number {
-	return (source.match(pattern) ?? []).length;
-}
-
-/** The argument text of every call matched by `opener` (balanced parentheses, strings skipped). */
-function callArguments(source: string, opener: RegExp): string[] {
-	const out: string[] = [];
-	opener.lastIndex = 0;
-	for (let match = opener.exec(source); match; match = opener.exec(source)) {
-		let depth = 1;
-		let quote: string | null = null;
-		const start = match.index + match[0].length;
-		for (let index = start; index < source.length; index++) {
-			const char = source[index]!;
-			if (quote) {
-				if (char === "\\") index++;
-				else if (char === quote) quote = null;
-				continue;
-			}
-			if (char === '"' || char === "'" || char === "`") quote = char;
-			else if (char === "(") depth++;
-			else if (char === ")" && --depth === 0) {
-				out.push(source.slice(start, index));
-				break;
-			}
-		}
-	}
-	return out;
-}
-
 export function countWindowRules(
-	targets: Array<Pick<Target, "name" | "sources">>,
+	targets: Array<Pick<TargetReport, "name" | "base" | "staleCloneOf">>,
 ): WindowRuleUsage[] {
-	return WINDOW_RULES.map(({ rule, description, count }) => {
+	return WINDOW_RULES.map(({ rule, description, signal }) => {
 		const providers: string[] = [];
 		let sites = 0;
 		for (const target of targets) {
-			let hits = 0;
-			for (const file of target.sources) {
-				let source: string;
-				try {
-					source = stripComments(readFileSync(file, "utf8"));
-				} catch {
-					continue;
-				}
-				hits += count(source);
-			}
+			if (target.staleCloneOf !== undefined || !target.base.probe) continue;
+			const hits = windowSites(signal, target.base.probe);
 			if (hits > 0) {
 				providers.push(target.name);
 				sites += hits;
 			}
 		}
-		return { rule, description, providers, sites };
+		return { rule, description, signal: windowSignalLabel(signal), providers, sites };
 	});
 }
 
@@ -1098,7 +1229,15 @@ export function renderReport(report: ScanReport): string {
 	out.push(
 		`bump-safety-scan: base ${report.base.spec} v${report.base.version} -> head ${report.head.spec} v${report.head.version}`,
 	);
-	out.push(`targets: ${report.targets.length} from ${report.targetPatterns.join(", ")}`);
+	const gating = report.targets.filter((target) => target.staleCloneOf === undefined);
+	const stale = report.targets.filter((target) => target.staleCloneOf !== undefined);
+	out.push(
+		`targets: ${gating.length} from ${report.targetPatterns.join(", ")}` +
+			(stale.length > 0 ? ` (+${stale.length} stale clone(s), not gating)` : "") +
+			(report.duplicateClones.length > 0
+				? ` (${report.duplicateClones.length} duplicate clone(s) scanned once)`
+				: ""),
+	);
 	out.push("");
 	const rows: string[][] = [
 		["target", "load b/h", "tsc b/h", "digest", "lint b/h", "warns b/h", "verdict", "reason"],
@@ -1119,8 +1258,10 @@ export function renderReport(report: ScanReport): string {
 			digest,
 			`${lintCell(target.base)} / ${lintCell(target.head)}`,
 			`${target.base.probe?.warnings.length ?? "-"} / ${target.head.probe?.warnings.length ?? "-"}`,
-			target.verdict,
-			target.reasons[0] ?? "",
+			target.staleCloneOf === undefined ? target.verdict : `stale clone (${target.verdict})`,
+			target.staleCloneOf === undefined
+				? (target.reasons[0] ?? "")
+				: `newest clone is ${target.staleCloneOf}; ${target.reasons[0] ?? ""}`,
 		]);
 	}
 	out.push(table(rows));
@@ -1128,13 +1269,32 @@ export function renderReport(report: ScanReport): string {
 	out.push(
 		`summary: ${report.summary.BREAK} BREAK, ${report.summary.WARN} WARN, ${report.summary.SAME} SAME, ${report.summary["NOT COVERED"]} NOT COVERED, ${report.summary.SKIP} SKIP`,
 	);
-	for (const target of report.targets) {
+	for (const target of gating) {
 		if (target.verdict === "BREAK" || target.verdict === "WARN") {
 			for (const reason of target.reasons)
 				out.push(`  ${target.verdict} ${target.name}: ${reason}`);
 		}
 	}
-	const uncovered = report.targets.filter((target) => !target.covered);
+	if (stale.length > 0) {
+		out.push("");
+		out.push(
+			`stale clones: ${stale.length} target(s) share a remote with a newer clone; reported, not gating`,
+		);
+		for (const target of stale) {
+			out.push(
+				`  ${target.name}: ${target.verdict}, ${target.clone?.head.slice(0, 12) ?? "?"} is older than ${target.staleCloneOf}${target.reasons[0] ? `: ${target.reasons[0]}` : ""}`,
+			);
+		}
+	}
+	if (report.duplicateClones.length > 0) {
+		out.push("");
+		out.push(
+			`duplicate clones: ${report.duplicateClones.length} director(y|ies) at the same remote and HEAD as a scanned target, scanned once`,
+		);
+		for (const duplicate of report.duplicateClones)
+			out.push(`  ${duplicate.path} = ${duplicate.scannedAs}`);
+	}
+	const uncovered = gating.filter((target) => !target.covered);
 	const uncoveredReason =
 		/^(fails to load on both sides: |contract extraction fails on both sides: )|fail on both sides: /;
 	if (uncovered.length > 0) {
@@ -1151,12 +1311,13 @@ export function renderReport(report: ScanReport): string {
 	}
 	out.push("");
 	out.push(
-		`window rules over the ${report.targets.length} target(s) above (deletion gate: a rule and its one-release path can go only at 0 users on the default target set)`,
+		`window rules over the ${gating.length} target(s) above, as the base SDK reports them (deletion gate: a rule and its one-release path can go only at 0 users on the default target set)`,
 	);
-	const usageRows: string[][] = [["rule", "providers", "sites", "gate", "users"]];
+	const usageRows: string[][] = [["rule", "signal", "providers", "sites", "gate", "users"]];
 	for (const usage of report.windowRules) {
 		usageRows.push([
 			usage.rule,
+			usage.signal,
 			String(usage.providers.length),
 			String(usage.sites),
 			usage.providers.length === 0 ? "DELETABLE" : "KEEP",
@@ -1175,7 +1336,11 @@ export async function scan(options: Options): Promise<ScanReport> {
 	try {
 		const base = await resolveSdk(options.base, options.scratch);
 		const head = await resolveSdk(options.head, options.scratch);
-		const targets = discoverTargets(options.targets, options.apifuse, options.fixtureTests);
+		const { targets, duplicateClones } = await discoverTargets(
+			options.targets,
+			options.apifuse,
+			options.fixtureTests,
+		);
 		if (targets.length === 0)
 			throw new Error(
 				"no targets matched; a target is a directory whose index.ts calls defineProvider",
@@ -1193,6 +1358,8 @@ export async function scan(options: Options): Promise<ScanReport> {
 				name: target.name,
 				kind: target.kind,
 				path: target.path,
+				...(target.clone ? { clone: target.clone } : {}),
+				...(target.staleCloneOf === undefined ? {} : { staleCloneOf: target.staleCloneOf }),
 				base: {},
 				head: {},
 				verdict: "SKIP",
@@ -1258,8 +1425,9 @@ export async function scan(options: Options): Promise<ScanReport> {
 			report.verdict = judged.verdict;
 			report.covered = judged.covered;
 			report.reasons = judged.reasons;
-			summary[report.verdict] += 1;
+			if (report.staleCloneOf === undefined) summary[report.verdict] += 1;
 		}
+		const targetReports = [...reports.values()];
 		return {
 			base,
 			head,
@@ -1267,8 +1435,9 @@ export async function scan(options: Options): Promise<ScanReport> {
 				...options.targets,
 				...(options.fixtureTests ? [`${options.apifuse} (fixture-tests)`] : []),
 			],
-			targets: [...reports.values()],
-			windowRules: countWindowRules(targets),
+			targets: targetReports,
+			duplicateClones,
+			windowRules: countWindowRules(targetReports),
 			summary,
 		};
 	} finally {
