@@ -62,7 +62,7 @@ export const CODEMODS: readonly CodemodManifest[] = [
 		kind: "ast-grep",
 		file: "errors-factory.yml",
 		manualStep:
-			"a throw site named here keeps a registry conflict, a locale key or a non-literal option (errors-hoist rewrites every other throw site once it has checked the code's rows and declarations, fills the category of a converted table's rows, adds the imports and resolves errors.X)",
+			"a throw site named here keeps a registry conflict or a non-literal option (errors-hoist rewrites every other throw site, a per-throw messageKey/fixKey riding into the factory input, once it has checked the code's rows and declarations, fills the category of a converted table's rows, adds the imports and resolves errors.X)",
 	},
 	{
 		id: "health-refs",

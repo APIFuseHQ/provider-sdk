@@ -89,7 +89,6 @@ function countsByCodemod(report: MigrateReport): Record<string, [string[], numbe
 }
 
 const DRY_RUN_RESIDUES = [
-	"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:14",
 	"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:24",
 	"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 	"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:33",
@@ -180,7 +179,7 @@ describe("apifuse migrate", () => {
 					"operations/search.ts",
 				],
 				5,
-				4,
+				3,
 			],
 			"errors-hoist": [
 				[
@@ -323,7 +322,9 @@ describe("apifuse migrate", () => {
 		// A code declared with two contracts (detail's row retryable true, the
 		// search table retryable false): a factory would carry one of them to every
 		// operation, so the bare site stays and names both.
-		expect(sites).toContain('throw new ProviderError("The page changed.", { code: "PAGE_CHANGED" });');
+		expect(sites).toContain(
+			'throw new ProviderError("The page changed.", { code: "PAGE_CHANGED" });',
+		);
 		const codeConflict = hoistOf(report)?.residues.find(
 			(residue) =>
 				residue.ruleId === "errors-hoist-throw-site-code-conflict" &&
@@ -363,7 +364,9 @@ describe("apifuse migrate", () => {
 			(residue) => residue.file === "upstream/sites.ts" && residue.line === 63,
 		);
 		expect(noDeclaration?.ruleId).toBe("errors-hoist-throw-site-conflict");
-		expect(noDeclaration?.message).toContain("reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category \"input_validation\", retryable false");
+		expect(noDeclaration?.message).toContain(
+			'reached outside an operation (an auth flow, a health scenario) the server reads no declaration and would serve category "input_validation", retryable false',
+		);
 		expect(sites).toContain(
 			'throw new ValidationError("The shop is down.", { code: "SHOP_DOWN", category: "upstream_http", retryable: true });',
 		);
@@ -432,8 +435,12 @@ describe("apifuse migrate", () => {
 		// code cannot import the provider map under the taken name and is named.
 		// The local map is never taken for the provider's (it is not exported).
 		const own = after["operations/own.ts"] ?? "";
-		expect(own).toContain('throw errors.OWN_TOKEN({ message: "The own token is stale.", fix: "Start the search again." });');
-		expect(own).toContain('throw new ProviderError("The item was removed.", { code: "ITEM_GONE" });');
+		expect(own).toContain(
+			'throw errors.OWN_TOKEN({ message: "The own token is stale.", fix: "Start the search again." });',
+		);
+		expect(own).toContain(
+			'throw new ProviderError("The item was removed.", { code: "ITEM_GONE" });',
+		);
 		expect(own).not.toContain("domain/errors");
 		expect(after["domain/errors.ts"]).not.toContain("OWN_TOKEN");
 		const ownSite = hoist?.residues.find((residue) => residue.file === "operations/own.ts");
@@ -491,7 +498,7 @@ describe("apifuse migrate", () => {
 					"operations/search.ts",
 				],
 				5,
-				4,
+				3,
 			],
 			"errors-hoist": [
 				[
@@ -521,7 +528,6 @@ describe("apifuse migrate", () => {
 		// The table above the throw site collapsed to one line, so the residue
 		// sits six lines higher than in the dry run.
 		expect(residueTable(report)).toEqual([
-			"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:14",
 			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:24",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
@@ -560,7 +566,7 @@ describe("apifuse migrate", () => {
 			"errors-hoist errors-hoist-throw-site-conflict upstream/sites.ts:63",
 			"errors-hoist errors-hoist-throw-site-conflict upstream/sites.ts:72",
 			"errors-hoist errors-hoist-throw-site-sdk-conflict upstream/sites.ts:84",
-	"errors-hoist errors-hoist-throw-site-code-conflict upstream/sites.ts:88",
+			"errors-hoist errors-hoist-throw-site-code-conflict upstream/sites.ts:88",
 		]);
 		// A table rule 3 does not convert (`[...] satisfies T[]`) stays an array,
 		// so it is never a map: the site of its code is not rewritten to
@@ -576,7 +582,9 @@ describe("apifuse migrate", () => {
 		expect(booking).toContain(
 			"const BOOKING_FLOW_ERRORS: OperationErrorCode[] = [\n\t...BOOKING_DOCS.errorCodes,\n",
 		);
-		expect(booking).toContain('const CONFIRM_ERRORS = defineErrors({ ...QUOTE_ERRORS, "CONFIRM_REJECTED": {');
+		expect(booking).toContain(
+			'const CONFIRM_ERRORS = defineErrors({ ...QUOTE_ERRORS, "CONFIRM_REJECTED": {',
+		);
 		const arraySpreads = hoistOf(report)?.residues.filter(
 			(residue) => residue.ruleId === "errors-hoist-array-spread-in-map",
 		);
@@ -606,11 +614,15 @@ describe("apifuse migrate", () => {
 		// A map (one rule 3 made of a table this run, or SEARCH_ERRORS) spread
 		// into a plain array throws at import: each such spread is named with
 		// the fix, since the provider will not load until it is applied.
-		expect(legal).toContain("const LEGAL_SEARCH_ROWS = [...LEGAL_ROWS, ...SEARCH_ERRORS] as const;");
+		expect(legal).toContain(
+			"const LEGAL_SEARCH_ROWS = [...LEGAL_ROWS, ...SEARCH_ERRORS] as const;",
+		);
 		const spreads = hoistOf(report)?.residues.filter(
 			(residue) => residue.ruleId === "errors-hoist-map-spread-in-array",
 		);
-		expect(spreads?.map((residue) => `${residue.line}:${residue.column} ${residue.message}`)).toEqual([
+		expect(
+			spreads?.map((residue) => `${residue.line}:${residue.column} ${residue.message}`),
+		).toEqual([
 			"23:39 ...CONFIRM_ERRORS spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
 			"8:28 ...LEGAL_ROWS spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
 			"8:43 ...SEARCH_ERRORS spreads a defineErrors map (an object; errors-factory makes one of the table) into an array, which throws at import: the provider will not load until this is fixed.",
@@ -628,15 +640,21 @@ describe("apifuse migrate", () => {
 		expect(mapper).toContain('throw errors.ITEM_GONE({ message: "The item was removed." });');
 		// A registered code's site stays while rows this run cannot read exist
 		// (row-unknown above); nothing is declared by value for it.
-		expect(mapper).toContain('throw new ProviderError("Shape drift.", { code: "UPSTREAM_SCHEMA_ERROR" });');
+		expect(mapper).toContain(
+			'throw new ProviderError("Shape drift.", { code: "UPSTREAM_SCHEMA_ERROR" });',
+		);
 		expect(after["domain/errors.ts"]).not.toContain("UPSTREAM_SCHEMA_ERROR");
-		// An SDK-owned code has no factory; a per-throw locale key has no factory
-		// input: both sites stay, the second with a residue.
+		// An SDK-owned code has no factory: the site stays.
 		expect(mapper).toContain(
 			'throw new ProviderError("Service key missing.", { code: "MISSING_SECRET" });',
 		);
+		// A per-throw locale key rides into the factory input as written: a
+		// literal, a shorthand variable, an identifier-valued fixKey.
 		expect(mapper).toContain(
-			'throw new ProviderError("Keyed.", { code: "ITEM_GONE", messageKey: "errors.itemGone.message" });',
+			'throw errors.ITEM_GONE({ message: "Keyed.", messageKey: "errors.itemGone.message" });',
+		);
+		expect(mapper).toContain(
+			'throw errors.ITEM_GONE({ message: "Keyed by variable.", messageKey, fixKey: fix });',
 		);
 		// A spread in the options rides along into the factory input.
 		expect(mapper).toContain(
@@ -675,7 +693,9 @@ describe("apifuse migrate", () => {
 		const dynamicCode = hoistOf(report)?.residues.filter(
 			(residue) => residue.file === "upstream/raise.ts",
 		);
-		expect(dynamicCode?.map((residue) => `${residue.ruleId} ${residue.line} ${residue.message}`)).toEqual([
+		expect(
+			dynamicCode?.map((residue) => `${residue.ruleId} ${residue.line} ${residue.message}`),
+		).toEqual([
 			"errors-hoist-throw-site-dynamic-code 8 new ProviderError(...) here takes its code from a variable and sets category or retryable through a spread per throw; no step can tell which declaration it serves, so it is left as written and apifuse check keeps reporting it under legacy-error-options.",
 			"errors-hoist-throw-site-dynamic-code 16 new ValidationError(...) here takes its code from a variable and sets category and retryable per throw; no step can tell which declaration it serves, so it is left as written and apifuse check keeps reporting it under legacy-error-options.",
 			'errors-hoist-throw-site-dynamic-option 20 Throw site of "ITEM_GONE" (ProviderError) sets retryable or category from a variable; the value cannot be checked against what the server serves, so the site is left as written.',
@@ -705,7 +725,6 @@ describe("apifuse migrate", () => {
 		expect(again.codemods.map((result) => result.rewrites)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
 		// Every left site is named again.
 		expect(residueTable(again)).toEqual([
-			"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:15",
 			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:25",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:29",
 			"errors-hoist errors-hoist-throw-site-row-unknown mappers/item.ts:9",
@@ -758,7 +777,6 @@ describe("apifuse migrate", () => {
 		const detail = readFileSync(join(providerRoot, "operations/detail.ts"), "utf8");
 		expect(detail).toContain("errors.ITEM_GONE");
 		expect(residueTable(report)).toEqual([
-			"errors-factory errors-factory-throw-site-locale-key mappers/item.ts:14",
 			"errors-factory errors-factory-throw-site-dynamic-option mappers/item.ts:24",
 			"errors-factory errors-factory-sdk-row-conflict operations/search.ts:7",
 			"errors-factory errors-factory-throw-site-registry-conflict operations/search.ts:26",
@@ -797,7 +815,7 @@ describe("apifuse migrate", () => {
 			"errors-hoist errors-hoist-throw-site-conflict upstream/sites.ts:63",
 			"errors-hoist errors-hoist-throw-site-conflict upstream/sites.ts:72",
 			"errors-hoist errors-hoist-throw-site-sdk-conflict upstream/sites.ts:84",
-	"errors-hoist errors-hoist-throw-site-code-conflict upstream/sites.ts:88",
+			"errors-hoist errors-hoist-throw-site-code-conflict upstream/sites.ts:88",
 		]);
 		expect(readFileSync(join(providerRoot, "mappers/item.ts"), "utf8")).toContain(
 			'import { errors } from "../domain/errors";',
@@ -821,7 +839,7 @@ describe("apifuse migrate", () => {
 		expect(text).toContain(
 			"codemod                          files would change  rewrites  residues",
 		);
-		expect(text).toContain("errors-factory                   5                   5         4");
+		expect(text).toContain("errors-factory                   5                   5         3");
 		expect(text).toContain("errors-hoist                     12                  22        36");
 		expect(text).toContain(
 			"operations/search.ts:33:10 [errors-factory-throw-site-registry-conflict]",

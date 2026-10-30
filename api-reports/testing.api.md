@@ -2671,6 +2671,8 @@ type ProviderErrorFactory<TCode extends string = string, TStatus extends Provide
 type ProviderErrorInput = {
     readonly message?: string;
     readonly fix?: string;
+    readonly messageKey?: ProviderLocaleKeyInput;
+    readonly fixKey?: ProviderLocaleKeyInput;
     readonly details?: unknown;
     readonly cause?: Error;
     readonly params?: ProviderErrorMessageParams;
@@ -4346,11 +4348,11 @@ interface VerificationCodeExtractionResult {
 
 // Warnings were encountered during analysis:
 //
-// dist/define-errors.d.ts:70:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:71:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:75:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:75:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point index.d.ts
-// dist/define-errors.d.ts:77:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:85:5 - (ae-forgotten-export) The symbol "ProviderErrorMessageParams" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:86:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderErrorInput" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:90:5 - (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point index.d.ts
+// dist/define-errors.d.ts:92:5 - (ae-forgotten-export) The symbol "ProviderErrorDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:189:5 - (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1505:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1514:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts

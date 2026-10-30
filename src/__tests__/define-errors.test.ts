@@ -119,6 +119,29 @@ describe("defineErrors", () => {
 		expect(providerErrorDeclaration(error)?.retryable).toBe(false);
 	});
 
+	it("lets a throw carry its own messageKey / fixKey over the declaration's, on a provider code and an SDK reference alike", () => {
+		const keyed = errors.ITEM_NOT_FOUND({
+			messageKey: "errors.itemNotFound.byId.message",
+			fixKey: "errors.itemNotFound.byId.fix",
+		});
+		expect(keyed.options).toEqual({
+			code: "ITEM_NOT_FOUND",
+			messageKey: "errors.itemNotFound.byId.message",
+			fixKey: "errors.itemNotFound.byId.fix",
+		});
+		// The declaration (and so the contract) is untouched by a per-throw key.
+		expect(providerErrorDeclaration(keyed)).toBe(errors.ITEM_NOT_FOUND.declaration);
+		expect(errors.ITEM_NOT_FOUND.declaration.messageKey).toBe("errors.itemNotFound.message");
+		expect(errors.ITEM_NOT_FOUND().options?.messageKey).toBe("errors.itemNotFound.message");
+		// An sdkErrors row cannot declare a key; the throw still can.
+		const sdk = errors.UPSTREAM_SCHEMA_ERROR({ messageKey: "errors.upstreamSchema.rows.message" });
+		expect(sdk.options).toEqual({
+			code: "UPSTREAM_SCHEMA_ERROR",
+			messageKey: "errors.upstreamSchema.rows.message",
+		});
+		expect(providerErrorDeclaration(sdk)).toBe(errors.UPSTREAM_SCHEMA_ERROR.declaration);
+	});
+
 	it("types the code of a factory-made error as its literal", () => {
 		const error = errors.ITEM_NOT_FOUND();
 		const code: "ITEM_NOT_FOUND" | undefined = error.code;

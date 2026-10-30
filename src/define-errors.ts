@@ -96,12 +96,27 @@ export const sdkErrors: { readonly [K in SdkErrorCode]: SdkErrorRef<K> } = Objec
 	) as { [K in SdkErrorCode]: SdkErrorRef<K> },
 );
 
-/** What one throw adds to a declared error. */
+/**
+ * What one throw adds to a declared error. The status served, the category
+ * reported and the retryability published come from the declaration alone;
+ * a throw can only add text (an English literal, a locale key, params), a
+ * cause, details and observability.
+ */
 export type ProviderErrorInput = {
 	/** English literal for logs, cause frames and the unlocalized envelope. Defaults to the declaration's description. */
 	readonly message?: string;
-	/** English literal `fix`; the declaration's `fixKey` localizes it when present. */
+	/** English literal `fix`; the declaration's `fixKey` (or this throw's `fixKey`) localizes it when present. */
 	readonly fix?: string;
+	/**
+	 * Locale catalog key for this throw's client-facing `message`, for a site
+	 * that says something more specific than the code's one sentence. Wins
+	 * over the declaration's `messageKey`, which wins over the derived
+	 * `errors.<code>.message`; the same order the legacy
+	 * `new ProviderError(msg, { code, messageKey })` path resolves.
+	 */
+	readonly messageKey?: ProviderLocaleKeyInput;
+	/** Locale catalog key for this throw's client-facing `fix`. Same resolution as `messageKey`. */
+	readonly fixKey?: ProviderLocaleKeyInput;
 	readonly details?: unknown;
 	readonly cause?: Error;
 	/** Values for `{name}` placeholders in the localized text. */
@@ -141,22 +156,20 @@ type CheckedDefineErrorsInput<T extends DefineErrorsInput> = {
 };
 
 /** The literal status one `defineErrors` entry declares; the full status union when it is not a literal. */
-type DeclaredErrorStatus<TEntry> = TEntry extends ProviderErrorFactory<string, infer TStatus>
-	? TStatus
-	: TEntry extends { readonly status: infer TStatus extends ProviderErrorStatus }
+type DeclaredErrorStatus<TEntry> =
+	TEntry extends ProviderErrorFactory<string, infer TStatus>
 		? TStatus
-		: ProviderErrorStatus;
+		: TEntry extends { readonly status: infer TStatus extends ProviderErrorStatus }
+			? TStatus
+			: ProviderErrorStatus;
 
 /** The literal category one `defineErrors` entry declares; the full category union when it is not a literal. */
-type DeclaredErrorCategory<TEntry> = TEntry extends ProviderErrorFactory<
-	string,
-	ProviderErrorStatus,
-	infer TCategory
->
-	? TCategory
-	: TEntry extends { readonly category: infer TCategory extends ProviderErrorCategory }
+type DeclaredErrorCategory<TEntry> =
+	TEntry extends ProviderErrorFactory<string, ProviderErrorStatus, infer TCategory>
 		? TCategory
-		: ProviderErrorCategory;
+		: TEntry extends { readonly category: infer TCategory extends ProviderErrorCategory }
+			? TCategory
+			: ProviderErrorCategory;
 
 /** The factories `defineErrors` returns, one per declared code, each carrying its declared status and category. */
 export type DefinedErrors<T extends DefineErrorsInput> = {
@@ -297,10 +310,12 @@ function createFactory<TCode extends string>(
 	declaration: ProviderErrorDeclaration<TCode>,
 ): ProviderErrorFactory<TCode> {
 	const factory = (input: ProviderErrorInput = {}): ProviderError<TCode> => {
+		const messageKey = input.messageKey ?? declaration.messageKey;
+		const fixKey = input.fixKey ?? declaration.fixKey;
 		const error = new ProviderError<TCode>(input.message ?? declaration.description, {
 			code: declaration.code,
-			...(declaration.messageKey === undefined ? {} : { messageKey: declaration.messageKey }),
-			...(declaration.fixKey === undefined ? {} : { fixKey: declaration.fixKey }),
+			...(messageKey === undefined ? {} : { messageKey }),
+			...(fixKey === undefined ? {} : { fixKey }),
 			...(input.fix === undefined ? {} : { fix: input.fix }),
 			...(input.details === undefined ? {} : { details: input.details }),
 			...(input.cause === undefined ? {} : { cause: input.cause }),

@@ -4476,6 +4476,8 @@ export type ProviderErrorFactory<TCode extends string = string, TStatus extends 
 export type ProviderErrorInput = {
     readonly message?: string;
     readonly fix?: string;
+    readonly messageKey?: ProviderLocaleKeyInput;
+    readonly fixKey?: ProviderLocaleKeyInput;
     readonly details?: unknown;
     readonly cause?: Error;
     readonly params?: ProviderErrorMessageParams;

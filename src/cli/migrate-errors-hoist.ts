@@ -232,7 +232,6 @@ type ThrowSite = {
 	readonly spreadOption: boolean;
 	/** The site writes a category (literal or not), so the bare default does not apply. */
 	readonly categoryStated: boolean;
-	readonly localeKey: boolean;
 	/** A local `errors` binding is in scope at the site, so `errors.CODE` there would not reach the map import. */
 	readonly shadowed: boolean;
 };
@@ -674,7 +673,10 @@ function resolveReferences(
 				while (path[0] !== from) path.unshift(previous.get(path[0] as string) as string);
 				return path;
 			}
-			for (const next of [...(context.graph.get(current) ?? []), ...(addedEdges.get(current) ?? [])]) {
+			for (const next of [
+				...(context.graph.get(current) ?? []),
+				...(addedEdges.get(current) ?? []),
+			]) {
 				if (previous.has(next)) continue;
 				previous.set(next, current);
 				queue.push(next);
@@ -794,8 +796,13 @@ function resolveReferences(
 						`importing ${only.name} from ${only.path} here would create an import cycle (${[...cycle, only.path].join(" -> ")}), and the provider would not load; move the map to a module that imports nothing from this file`,
 					);
 				} else if (!exportable(only.info, only.name)) {
-					unexported.set(item, `${only.name} in ${only.path} declares it but is not exported, and this step cannot export it`);
-				} else if (ensureImport(ts, file, only.name, only.path, context.residues, context.imports)) {
+					unexported.set(
+						item,
+						`${only.name} in ${only.path} declares it but is not exported, and this step cannot export it`,
+					);
+				} else if (
+					ensureImport(ts, file, only.name, only.path, context.residues, context.imports)
+				) {
 					const edges = addedEdges.get(file.path) ?? new Set<string>();
 					edges.add(only.path);
 					addedEdges.set(file.path, edges);
@@ -1557,7 +1564,11 @@ type ServedCategory = {
  * reported by `resolveThrowSites`. A site whose category cannot be known (a
  * variable) or that the declaration never reaches does not vote.
  */
-function categoryServedBySites(code: string, status: number | undefined, sites: ThrowSites): ServedCategory {
+function categoryServedBySites(
+	code: string,
+	status: number | undefined,
+	sites: ThrowSites,
+): ServedCategory {
 	const fallback = fallbackCategory(status);
 	const served = new Set<string>();
 	let counted = 0;
@@ -1594,7 +1605,11 @@ function categoryFromSitesNote(
  * (it serves the declaration, which a bare site always did). By code.
  */
 /** A top-level `...spread` of the options object whose text names `category` or `retryable` (the lint's own reading of such a spread). */
-function spreadNamesOption(ts: TypeScriptModule, file: ProviderSourceFile, options: TS.ObjectLiteralExpression): boolean {
+function spreadNamesOption(
+	ts: TypeScriptModule,
+	file: ProviderSourceFile,
+	options: TS.ObjectLiteralExpression,
+): boolean {
 	return options.properties.some(
 		(property) =>
 			ts.isSpreadAssignment(property) &&
@@ -1628,18 +1643,24 @@ function collectDynamicCodeSites(
 				const options = node.arguments?.[1];
 				if (options !== undefined && ts.isObjectLiteralExpression(options)) {
 					const codePair = propertyOf(ts, options, "code");
-					const literal = codePair === undefined ? undefined : literalString(ts, codePair.initializer);
+					const literal =
+						codePair === undefined ? undefined : literalString(ts, codePair.initializer);
 					const codeShorthand = options.properties.some(
-						(property) => ts.isShorthandPropertyAssignment(property) && property.name.text === "code",
+						(property) =>
+							ts.isShorthandPropertyAssignment(property) && property.name.text === "code",
 					);
 					const stated = ["category", "retryable"].filter(
 						(name) =>
 							propertyOf(ts, options, name) !== undefined ||
 							options.properties.some(
-								(property) => ts.isShorthandPropertyAssignment(property) && property.name.text === name,
+								(property) =>
+									ts.isShorthandPropertyAssignment(property) && property.name.text === name,
 							),
 					);
-					if (literal === undefined && (stated.length > 0 || spreadNamesOption(ts, file, options))) {
+					if (
+						literal === undefined &&
+						(stated.length > 0 || spreadNamesOption(ts, file, options))
+					) {
 						const how =
 							codePair === undefined && !codeShorthand
 								? "states no code"
@@ -1663,7 +1684,10 @@ function collectDynamicCodeSites(
 	return out;
 }
 
-function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourceFile[]): ThrowSites {
+function collectThrowSites(
+	ts: TypeScriptModule,
+	sources: readonly ProviderSourceFile[],
+): ThrowSites {
 	const out = new Map<string, ThrowSite[]>();
 	const add = (site: ThrowSite): void => {
 		const list = out.get(site.code) ?? [];
@@ -1715,9 +1739,6 @@ function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourc
 								(retryable !== undefined && retryableValue === undefined),
 							spreadOption,
 							categoryStated,
-							localeKey:
-								propertyOf(ts, options, "messageKey") !== undefined ||
-								propertyOf(ts, options, "fixKey") !== undefined,
 							shadowed: shadowedByLocalBinding(ts, node, MAP_NAME),
 						});
 					}
@@ -1742,7 +1763,6 @@ function collectThrowSites(ts: TypeScriptModule, sources: readonly ProviderSourc
 						dynamic: false,
 						spreadOption: false,
 						categoryStated: false,
-						localeKey: false,
 						shadowed: false,
 					});
 				}
@@ -1785,7 +1805,8 @@ function namesBoundBy(ts: TypeScriptModule, scope: TS.Node): Set<string> {
 		return out;
 	}
 	if (ts.isCatchClause(scope)) {
-		if (scope.variableDeclaration !== undefined) boundNames(ts, scope.variableDeclaration.name, out);
+		if (scope.variableDeclaration !== undefined)
+			boundNames(ts, scope.variableDeclaration.name, out);
 		return out;
 	}
 	const declarations = (list: TS.ForInitializer | undefined): void => {
@@ -1797,7 +1818,13 @@ function namesBoundBy(ts: TypeScriptModule, scope: TS.Node): Set<string> {
 		declarations(scope.initializer);
 		return out;
 	}
-	if (ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) || ts.isCaseClause(scope) || ts.isDefaultClause(scope)) {
+	if (
+		ts.isBlock(scope) ||
+		ts.isSourceFile(scope) ||
+		ts.isModuleBlock(scope) ||
+		ts.isCaseClause(scope) ||
+		ts.isDefaultClause(scope)
+	) {
 		for (const statement of scope.statements) {
 			if (ts.isVariableStatement(statement)) {
 				for (const declaration of statement.declarationList.declarations) {
@@ -1816,7 +1843,11 @@ function namesBoundBy(ts: TypeScriptModule, scope: TS.Node): Set<string> {
 
 /** True when a binding named `name` below the top level is in scope at `node`, so `name` there is not the file's import. */
 function shadowedByLocalBinding(ts: TypeScriptModule, node: TS.Node, name: string): boolean {
-	for (let scope = node.parent; scope !== undefined && !ts.isSourceFile(scope); scope = scope.parent) {
+	for (
+		let scope = node.parent;
+		scope !== undefined && !ts.isSourceFile(scope);
+		scope = scope.parent
+	) {
 		if (namesBoundBy(ts, scope).has(name)) return true;
 	}
 	return false;
@@ -2085,7 +2116,6 @@ function resolveThrowSites(
 					}
 					continue;
 				}
-				if (site.localeKey) continue;
 				if (site.dynamic) {
 					if (site.spreadOption) {
 						residues.push(dynamicOptionResidue(site, site.node.getStart(site.file.source)));
@@ -2142,13 +2172,7 @@ function resolveThrowSites(
 		const view = views.get(code);
 		const contracts = codeConflicts.get(code);
 		for (const site of list) {
-			if (
-				site.constructor === "factory" ||
-				declarationIgnoredFor(site.constructor) ||
-				(site.localeKey && site.constructor === "ProviderError")
-			) {
-				continue;
-			}
+			if (site.constructor === "factory" || declarationIgnoredFor(site.constructor)) continue;
 			const at = site.node.getStart(site.file.source);
 			const own = site.constructor === "ProviderError" && !site.dynamic;
 			// The provider declares this code with more than one contract (across
@@ -2218,7 +2242,9 @@ function resolveThrowSites(
 			} else if ((site.category !== undefined && categoryDiffers) || retryableDiffers) {
 				residues.push(throwSiteConflict(site, view, at, site.category));
 			} else if (differsFrom(site, servedWithoutOptions(site, code, undefined))) {
-				residues.push(noDeclarationResidue(site, code, servedWithoutOptions(site, code, undefined), at));
+				residues.push(
+					noDeclarationResidue(site, code, servedWithoutOptions(site, code, undefined), at),
+				);
 			} else if (legacyRowStays(code)) {
 				residues.push(legacyRowResidue(site, code, at));
 			} else {
@@ -2450,7 +2476,13 @@ function replacedDefaultResidue(
 	);
 }
 
-/** The `errors.CODE({ message, ...rest })` text errors-factory rule 1 writes, under the map name the file reaches the code by. */
+/**
+ * The `errors.CODE({ message, ...rest })` text errors-factory rule 1 writes,
+ * under the map name the file reaches the code by. `code`, `category` and
+ * `retryable` go (the declaration carries them); every other option, a
+ * `messageKey` / `fixKey` included (a literal, a variable, a shorthand), is
+ * copied as written, since the factory input carries it per throw.
+ */
 function throwSiteEdit(ts: TypeScriptModule, site: ThrowSite, mapName: string): TextEdit {
 	const node = site.node as TS.NewExpression;
 	const file = site.file;
@@ -2592,7 +2624,11 @@ function isRule3TableArray(ts: TypeScriptModule, array: TS.ArrayLiteralExpressio
 		(unwrapExpression(ts, declaration.initializer) as TS.ArrayLiteralExpression).elements.some(
 			(element) => {
 				const row = unwrapExpression(ts, element);
-				return ts.isObjectLiteralExpression(row) && hasProperty(ts, row, "code") && hasProperty(ts, row, "status");
+				return (
+					ts.isObjectLiteralExpression(row) &&
+					hasProperty(ts, row, "code") &&
+					hasProperty(ts, row, "status")
+				);
 			},
 		)
 	);
@@ -2603,7 +2639,8 @@ function valueImportGraph(
 	ts: TypeScriptModule,
 	sources: readonly ProviderSourceFile[],
 ): Map<string, Set<string>> {
-	const exists = (candidate: string): boolean => sources.some((source) => source.path === candidate);
+	const exists = (candidate: string): boolean =>
+		sources.some((source) => source.path === candidate);
 	const graph = new Map<string, Set<string>>();
 	for (const file of sources) {
 		const edges = new Set<string>();
@@ -2611,10 +2648,12 @@ function valueImportGraph(
 			let specifier: string | undefined;
 			if (ts.isImportDeclaration(statement)) {
 				if (statement.importClause?.isTypeOnly) continue;
-				if (ts.isStringLiteral(statement.moduleSpecifier)) specifier = statement.moduleSpecifier.text;
+				if (ts.isStringLiteral(statement.moduleSpecifier))
+					specifier = statement.moduleSpecifier.text;
 			} else if (ts.isExportDeclaration(statement) && statement.moduleSpecifier !== undefined) {
 				if (statement.isTypeOnly) continue;
-				if (ts.isStringLiteral(statement.moduleSpecifier)) specifier = statement.moduleSpecifier.text;
+				if (ts.isStringLiteral(statement.moduleSpecifier))
+					specifier = statement.moduleSpecifier.text;
 			}
 			if (specifier === undefined) continue;
 			const target = resolveRelativeImport(file.path, specifier, exists);
@@ -2705,7 +2744,11 @@ function arraySpreadsInMaps(
 function isRowTable(ts: TypeScriptModule, array: TS.ArrayLiteralExpression): boolean {
 	return array.elements.some((element) => {
 		const row = unwrapExpression(ts, element);
-		return ts.isObjectLiteralExpression(row) && hasProperty(ts, row, "code") && hasProperty(ts, row, "status");
+		return (
+			ts.isObjectLiteralExpression(row) &&
+			hasProperty(ts, row, "code") &&
+			hasProperty(ts, row, "status")
+		);
 	});
 }
 
@@ -2721,7 +2764,8 @@ function sdkEntryConflicts(maps: MapsByFile): MigrateFinding[] {
 	for (const byName of maps.values()) {
 		for (const info of byName.values()) {
 			for (const [code, entry] of info.codes) {
-				if (entry.sdk || entry.node === undefined || !Object.hasOwn(SDK_ERROR_REGISTRY, code)) continue;
+				if (entry.sdk || entry.node === undefined || !Object.hasOwn(SDK_ERROR_REGISTRY, code))
+					continue;
 				if (!rowDepartsFromRegistry(code as SdkErrorCode, entry)) continue;
 				const registry = SDK_ERROR_REGISTRY[code as SdkErrorCode];
 				out.push(

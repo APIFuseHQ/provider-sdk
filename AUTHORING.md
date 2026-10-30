@@ -1174,17 +1174,24 @@ throw errors.SCHEDULE_UNAVAILABLE({ params: { provider: "Culture Data" } });
 The keys live on the declaration, so every site that throws the code is
 localized. A registered code (`sdkErrors.UPSTREAM_SCHEMA_ERROR`) takes the
 derived `errors.UPSTREAM_SCHEMA_ERROR.message` / `.fix` keys: add those entries
-to the catalogs and nothing else is needed. The legacy throw-site `messageKey`
-/ `fixKey` options and `errorCodes[]` keys keep working for one more release.
+to the catalogs and nothing else is needed. The legacy `errorCodes[]` keys keep
+working for one more release.
+
+A site that says something more specific than the code's one sentence passes
+its own key per throw: `errors.INVALID_REQUEST({ message, messageKey:
+"errors.invalidRequest.roundNotFound.message" })`. The per-throw `messageKey`
+/ `fixKey` wins over the declaration's, the declaration's over the derived key,
+and the contract (status, category, retryable) is the declaration's either
+way; a registered code (`sdkErrors.NO_DATA`), whose row cannot declare a key,
+takes one this way too. `apifuse migrate` carries a legacy site's key into the
+factory call as written (a literal or a variable).
 
 Resolution order per field, evaluated at serve time:
 
-1. the throw site's `messageKey` / `fixKey` (legacy);
+1. the throw's `messageKey` / `fixKey` (the factory input, or the legacy
+   `new ProviderError(msg, { code, messageKey })` option);
 2. the declaration's `messageKey` / `fixKey` (`defineErrors`, or a legacy
-   `errorCodes[]` entry);Resolution order per field, evaluated at serve time:
-
-1. the throw site's `messageKey` / `fixKey`;
-2. the matching `errorCodes[]` entry's `messageKey` / `fixKey`;
+   `errorCodes[]` entry);
 3. the derived `errors.<code>.message` / `errors.<code>.fix` (the code is used
    verbatim as a catalog segment, so `errors.UPSTREAM_SCHEMA_ERROR.message`
    works with no declaration at all);

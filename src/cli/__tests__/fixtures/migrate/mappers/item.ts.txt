@@ -23,3 +23,7 @@ export function rethrow(error: ProviderError): never {
 export function upstreamError(message: string, retryable = true): ProviderError {
 	return new ProviderError(message, { code: "UPSTREAM_ERROR", retryable });
 }
+
+export function keyedItemGone(messageKey: string, fix: string): never {
+	throw new ProviderError("Keyed by variable.", { code: "ITEM_GONE", messageKey, fixKey: fix });
+}
