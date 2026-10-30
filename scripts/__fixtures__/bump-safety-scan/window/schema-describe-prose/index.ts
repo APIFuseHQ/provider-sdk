@@ -1,11 +1,12 @@
 import {
 	defineOperation,
 	defineProvider,
+	describeKey,
 	type ProviderContextOf,
 	z,
 } from "@apifuse/provider-sdk/provider";
 
-// bump-safety-scan window fixture: trips the "schema-describe-prose" window rule under the base SDK.
+// bump-safety-scan window fixture: every public schema node carries a locale key except output.ok, which is described with raw .describe() prose, so only the "(raw .describe() prose)" tag fires.
 const buildProvider = defineProvider({
 	id: "bump-scan-window-schema-describe-prose",
 	version: "1.0.0",
@@ -28,8 +29,14 @@ export default buildProvider({
 			connectionMode: "none",
 			riskClass: "read",
 			descriptionKey: "operations.ping.description",
-			input: z.object({ value: z.string() }),
-			output: z.object({ ok: z.boolean().describe("whether the ping succeeded") }),
+			input: describeKey(
+				z.object({ value: describeKey(z.string(), "fields.value") }),
+				"operations.ping.input",
+			),
+			output: describeKey(
+				z.object({ ok: z.boolean().describe("whether the ping succeeded") }),
+				"operations.ping.output",
+			),
 			handler: async () => ({ ok: true }),
 			fixtures: { request: { value: "hello" }, response: { ok: true } },
 			healthCheckUnsupported: {

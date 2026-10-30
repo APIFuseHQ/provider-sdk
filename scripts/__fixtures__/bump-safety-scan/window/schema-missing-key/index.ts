@@ -1,27 +1,23 @@
 import {
 	defineOperation,
 	defineProvider,
+	describeKey,
 	type ProviderContextOf,
 	z,
 } from "@apifuse/provider-sdk/provider";
 
-// bump-safety-scan window fixture: trips the "proxy-session-pool-size" window rule under the base SDK.
+// bump-safety-scan window fixture: every public schema node carries a locale key except output.ok, which has no description at all, so only the "(no description)" tag fires.
 const buildProvider = defineProvider({
-	id: "bump-scan-window-proxy-session-pool-size",
+	id: "bump-scan-window-schema-missing-key",
 	version: "1.0.0",
 	runtime: "standard",
 	allowedHosts: ["api.example.com"],
 	reviewed: "community",
 	meta: {
-		displayName: "bump-scan-window-proxy-session-pool-size",
+		displayName: "bump-scan-window-schema-missing-key",
 		displayNameKey: "meta.displayName",
 		descriptionKey: "meta.description",
 		category: "data",
-	},
-	proxy: {
-		mode: "required",
-		providers: ["smartproxy", "nodemaven"],
-		session: { affinity: "connection", lifetimeMinutes: 120, poolSize: 6 },
 	},
 });
 
@@ -33,8 +29,11 @@ export default buildProvider({
 			connectionMode: "none",
 			riskClass: "read",
 			descriptionKey: "operations.ping.description",
-			input: z.object({ value: z.string() }),
-			output: z.object({ ok: z.boolean() }),
+			input: describeKey(
+				z.object({ value: describeKey(z.string(), "fields.value") }),
+				"operations.ping.input",
+			),
+			output: describeKey(z.object({ ok: z.boolean() }), "operations.ping.output"),
 			handler: async () => ({ ok: true }),
 			fixtures: { request: { value: "hello" }, response: { ok: true } },
 			healthCheckUnsupported: {

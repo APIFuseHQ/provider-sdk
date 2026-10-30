@@ -61,22 +61,21 @@
  * a target that fails on both sides is NOT COVERED (`covered: false` in the
  * JSON), because the diff says nothing about it.
  *
- * The second section counts the one-release window rules across the targets
- * (legacy per-throw error options, defineCursor/defineDraft fieldName or
- * issuedBy, proxy.session.poolSize, redundant approval:, context keys, raw
- * .describe()). "Uses the rule" is what the BASE SDK itself says about the
- * provider, read from the base probe: the base lint diagnostics for the
- * rule's lint id, or, for the two rules that have no lint rule, the
- * once-per-provider warning `defineProvider` prints on base. Nothing is
- * regex-counted over source text (a nested `retryable:` in a client payload,
- * a deliberate `approval:` override or a supported `contextKeys` declaration
- * are not uses). A rule with 0 users can be deleted with its path; a rule
- * with users cannot. The table inherits the base lint's coverage: a per-throw
- * `category` / `retryable` that reaches the constructor through a spread
- * (`new ProviderError(msg, { ...base, code })`) is invisible to
- * `legacy-error-options` and counts 0 here, while the tsc set diff above still
- * marks that provider BREAK when the option is removed. Read DELETABLE
- * together with a BREAK-free verdict table, never alone.
+ * The second section counts the one-release window rules across the targets.
+ * Today those are the two public-schema description paths the next release
+ * refuses (a field described with raw `.describe()` prose, a field with no
+ * description at all); a window row leaves the table once the PR that deletes
+ * its path merges, the last scan on the pre-deletion base being that
+ * deletion's evidence. "Uses the rule" is what the BASE SDK itself says about
+ * the provider, read from the base probe: a base lint diagnostic for the
+ * rule's lint id when the rule has one, else the once-per-provider warning
+ * `defineProvider` prints on base (the schema rows read the two field tags
+ * of the locale-key warning). Nothing is regex-counted over source text. A
+ * rule with 0 users can be deleted with its path; a rule with users cannot.
+ * The table inherits the base SDK's own coverage: a use the base lint or
+ * warning does not see counts 0 here, while the tsc set diff above still
+ * marks the provider BREAK when the path goes. Read DELETABLE together with
+ * a BREAK-free verdict table, never alone.
  *
  * Exit 1 when any BREAK row exists, 2 on a usage error.
  */
@@ -1158,44 +1157,38 @@ export const WINDOW_RULES: ReadonlyArray<{
 	description: string;
 	signal: WindowSignal;
 }> = [
-	{
-		rule: "legacy-error-options",
-		description:
-			"per-throw { category | retryable } on ProviderError/AuthError/ValidationError, or an errorCodes table",
-		signal: { lint: "legacy-error-options" },
-	},
-	{
-		rule: "legacy-handle-declaration",
-		description: "defineCursor( / defineDraft( with fieldName or issuedBy",
-		signal: { lint: "legacy-handle-declaration" },
-	},
-	{
-		rule: "proxy-session-pool-size",
-		description: "proxy.session.poolSize (no lint rule; defineProvider warns once per provider)",
-		signal: { warning: /\[provider-sdk\] Provider "[^"]*" declares proxy\.session\.poolSize/ },
-	},
-	{
-		rule: "redundant-approval",
-		description: "approval: equal to the riskClass default (an override is not a use)",
-		signal: { lint: "redundant-approval" },
-	},
-	{
-		rule: "context-keys",
-		description:
-			"auth flow reads ctx.context without declared context.keys (declaring keys is not a use)",
-		signal: { lint: "context-keys-required" },
-	},
+	// A window row is removed from this table once the PR that deletes its path
+	// merges; the last scan on the pre-deletion base is that deletion's evidence.
 	{
 		rule: "schema-describe-prose",
 		description:
-			"raw .describe() prose on a public schema field (no lint rule; defineProvider warns once per provider, naming each field with its reason)",
-		signal: {
-			warning:
-				/\[provider-sdk\] Provider "[^"]*" has \d+ public schema fields? without a locale key:.*\(raw \.describe\(\) prose\)/,
-			sites: (line) => line.split("(raw .describe() prose)").length - 1,
-		},
+			'public schema field described with raw .describe() prose instead of a locale key (no lint rule; defineProvider warns once per provider, tagging each field "(raw .describe() prose)")',
+		signal: publicSchemaFieldSignal("raw .describe() prose"),
+	},
+	{
+		rule: "schema-missing-key",
+		description:
+			'public schema field with no description at all (no lint rule; the same defineProvider warning tags each field "(no description)")',
+		signal: publicSchemaFieldSignal("no description"),
 	},
 ];
+
+/**
+ * The base SDK's one locale-key warning lists every undeclared public schema
+ * field as `operations.<op>.<path> (<reason>)`, with the reason being one of
+ * the two `UndeclaredFieldReason` texts; each reason is its own window row,
+ * sites = fields carrying that tag.
+ */
+function publicSchemaFieldSignal(reason: string): WindowSignal {
+	const tag = `(${reason})`;
+	const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return {
+		warning: new RegExp(
+			`\\[provider-sdk\\] Provider "[^"]*" has \\d+ public schema fields? without a locale key:.*${escaped}`,
+		),
+		sites: (line) => line.split(tag).length - 1,
+	};
+}
 
 export function windowSignalLabel(signal: WindowSignal): string {
 	return "lint" in signal ? `lint ${signal.lint}` : "defineProvider warning";
@@ -1378,7 +1371,7 @@ export function renderReport(report: ScanReport): string {
 	}
 	out.push(table(usageRows));
 	out.push(
-		"users are what the base SDK's own lint and defineProvider warnings report; the lint does not see a per-throw category/retryable carried in by a spread (new ProviderError(msg, { ...base, code })), so read DELETABLE together with a BREAK-free verdict table (the tsc set diff still catches such a provider), never alone",
+		"users are what the base SDK's own lint and defineProvider warnings report, so a use that signal does not see counts 0 here; read DELETABLE together with a BREAK-free verdict table (the tsc set diff still catches such a provider), never alone",
 	);
 	return out.join("\n");
 }

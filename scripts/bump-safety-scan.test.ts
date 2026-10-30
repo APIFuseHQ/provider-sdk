@@ -166,7 +166,20 @@ describe("bump-safety-scan", () => {
 					expect(target.base.probe?.lint[entry.signal.lint]).toBeUndefined();
 			}
 		}
-		expect(report.windowRules.every((usage) => usage.providers.length === 0)).toBe(true);
+		// The four verdict fixtures leave public fields undescribed, so the missing-key row lists exactly the
+		// targets whose base warning carries that tag, and the raw-prose row lists none.
+		const missingKeyUsers = report.targets
+			.filter((target) =>
+				target.base.probe?.warnings.some((line) => line.includes("(no description)")),
+			)
+			.map((target) => target.name)
+			.sort();
+		expect(missingKeyUsers.length).toBeGreaterThan(0);
+		for (const usage of report.windowRules) {
+			if (usage.rule === "schema-missing-key")
+				expect([...usage.providers].sort()).toEqual(missingKeyUsers);
+			else expect(usage.providers).toEqual([]);
+		}
 	}, 120_000);
 
 	it("renders the verdict table, the not-covered section and exits 1", () => {
@@ -437,18 +450,24 @@ describe("countWindowRules", () => {
 		"lint" in entry.signal ? [[entry.rule, entry.signal.lint] as const] : [],
 	);
 	const warningRules = WINDOW_RULES.filter((entry) => !("lint" in entry.signal));
+	const localeKeyWarning = (fields: Array<[string, "raw .describe() prose" | "no description"]>) =>
+		`[provider-sdk] Provider "p" has ${fields.length} public schema field${fields.length === 1 ? "" : "s"} without a locale key: ${fields.map(([path, reason]) => `operations.ping.${path} (${reason})`).join(", ")}. Describe each with .describeKey("<locale key>") instead of .describe("prose") (codemod: scripts/codemods/schema.yml); the next release refuses them at defineProvider.`;
 
-	it("counts a user per base lint diagnostic of the rule's lint id, never from source text", () => {
+	it("counts a user per base lint diagnostic of the rule's lint id and nothing from source text, skipping stale and probe-less targets", () => {
 		const lintOnA = Object.fromEntries(
 			lintRules.map(([, lintId], index) => [lintId, { level: "warn" as const, count: index + 2 }]),
 		);
+		const fields: Array<[string, "raw .describe() prose" | "no description"]> = [
+			["output.a", "raw .describe() prose"],
+			["output.b", "no description"],
+		];
 		const targets = [
-			{ name: "a", base: { probe: probe(lintOnA) } },
+			{ name: "a", base: { probe: probe(lintOnA, [localeKeyWarning(fields)]) } },
 			{
 				name: "b",
 				base: { probe: probe({ "allowed-hosts-required": { level: "error", count: 1 } }) },
 			},
-			{ name: "c", base: { probe: probe(lintOnA) }, staleCloneOf: "a" },
+			{ name: "c", base: { probe: probe(lintOnA, [localeKeyWarning(fields)]) }, staleCloneOf: "a" },
 			{ name: "d", base: {} },
 		];
 		const usage = Object.fromEntries(countWindowRules(targets).map((entry) => [entry.rule, entry]));
@@ -458,17 +477,22 @@ describe("countWindowRules", () => {
 			expect(usage[rule]?.signal).toBe(`lint ${lintId}`);
 		}
 		for (const entry of warningRules) {
-			expect(usage[entry.rule]?.providers).toEqual([]);
-			expect(usage[entry.rule]?.sites).toBe(0);
+			expect(usage[entry.rule]?.providers).toEqual(["a"]);
 			expect(usage[entry.rule]?.signal).toBe("defineProvider warning");
 		}
 	});
 
-	it("counts the rules without a lint rule from the base defineProvider warning", () => {
+	it("reads each public-schema reason of the base locale-key warning as its own row, sites = fields with that tag", () => {
+		const fields: Array<[string, "raw .describe() prose" | "no description"]> = [
+			["output.a", "raw .describe() prose"],
+			["output.b", "no description"],
+			["output.c", "no description"],
+			["input.value", "raw .describe() prose"],
+		];
+		const byReason = (reason: string) => fields.filter(([, tag]) => tag === reason).length;
 		const warnings = [
-			'[provider-sdk] Provider "p" declares proxy.session.poolSize (6), which is ignored: the proxy pool is gone.',
-			'[provider-sdk] Provider "p" has 3 public schema fields without a locale key: output.a (raw .describe() prose), output.b (no description), output.c (no description). Describe each with .describeKey("<locale key>").',
-			"[provider-sdk] some unrelated warning mentioning poolSize and describe",
+			localeKeyWarning(fields),
+			"[provider-sdk] some unrelated warning mentioning describe and (no description) outside the locale-key warning",
 		];
 		const usage = Object.fromEntries(
 			countWindowRules([{ name: "p", base: { probe: probe({}, warnings) } }]).map((entry) => [
@@ -476,19 +500,45 @@ describe("countWindowRules", () => {
 				entry,
 			]),
 		);
-		expect(usage["proxy-session-pool-size"]).toMatchObject({ providers: ["p"], sites: 1 });
-		expect(usage["schema-describe-prose"]).toMatchObject({ providers: ["p"], sites: 1 });
+		expect(usage["schema-describe-prose"]).toMatchObject({
+			providers: ["p"],
+			sites: byReason("raw .describe() prose"),
+		});
+		expect(usage["schema-missing-key"]).toMatchObject({
+			providers: ["p"],
+			sites: byReason("no description"),
+		});
 		for (const [rule] of lintRules) expect(usage[rule]?.providers).toEqual([]);
 	});
 
-	it("does not count a public schema field that merely lacks a description as raw .describe() prose", () => {
-		const warnings = [
-			'[provider-sdk] Provider "p" has 2 public schema fields without a locale key: output.a (no description), output.b (no description). Describe each with .describeKey("<locale key>") instead of .describe("prose").',
-		];
-		const usage = countWindowRules([{ name: "p", base: { probe: probe({}, warnings) } }]);
-		expect(usage.find((entry) => entry.rule === "schema-describe-prose")).toMatchObject({
+	it("keeps the two schema reasons apart: a provider with only undescribed fields is not a raw-prose user and vice versa", () => {
+		const onlyMissing = countWindowRules([
+			{
+				name: "p",
+				base: { probe: probe({}, [localeKeyWarning([["output.a", "no description"]])]) },
+			},
+		]);
+		expect(onlyMissing.find((entry) => entry.rule === "schema-describe-prose")).toMatchObject({
 			providers: [],
 			sites: 0,
+		});
+		expect(onlyMissing.find((entry) => entry.rule === "schema-missing-key")).toMatchObject({
+			providers: ["p"],
+			sites: 1,
+		});
+		const onlyProse = countWindowRules([
+			{
+				name: "p",
+				base: { probe: probe({}, [localeKeyWarning([["output.a", "raw .describe() prose"]])]) },
+			},
+		]);
+		expect(onlyProse.find((entry) => entry.rule === "schema-missing-key")).toMatchObject({
+			providers: [],
+			sites: 0,
+		});
+		expect(onlyProse.find((entry) => entry.rule === "schema-describe-prose")).toMatchObject({
+			providers: ["p"],
+			sites: 1,
 		});
 	});
 });
