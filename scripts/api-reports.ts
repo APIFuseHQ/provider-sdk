@@ -105,6 +105,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorObservability ProviderErrorOptions PROVIDER_FAILURE_CATEGORIES ProviderFailureCategory
 			DeclaresCapability
 			ProviderErrorConstructorOptions RetiredErrorContractFields
+			OperationAgentContract OperationAgentPolicy OperationAnnotations OperationCardProjection OperationDetailFact OperationErrorGuidance OperationErrorOutcome OperationHandleConsumed OperationHandleProduced OperationHandles OperationInputNormalizer OperationResultFact OperationResultProjection OperationSecureInput OperationTerms ProviderAgentContract
 		`,
 	),
 	"index.api.md": forgottenExports(
@@ -249,6 +250,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			DeclaresCapability
 			PLATFORM_FAULT_CATEGORIES PROVIDER_FAILURE_CATEGORIES PlatformFaultCategory ProviderFailureCategory
 			ProviderErrorConstructorOptions RetiredErrorContractFields
+			OperationAgentContract OperationAgentPolicy OperationAnnotations OperationCardProjection OperationDetailFact OperationErrorGuidance OperationErrorOutcome OperationHandleConsumed OperationHandleProduced OperationHandles OperationInputNormalizer OperationResultFact OperationResultProjection OperationSecureInput OperationTerms ProviderAgentContract
 		`,
 	),
 	"stateful.api.md": forgottenExports(
@@ -300,6 +302,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderError ProviderErrorDeclaration ProviderErrorFactory ProviderErrorInput ProviderErrorMessageParams ProviderErrorObservability ProviderErrorOptions PROVIDER_FAILURE_CATEGORIES ProviderFailureCategory
 			DeclaresCapability
 			ProviderErrorConstructorOptions RetiredErrorContractFields
+			OperationAgentContract OperationAgentPolicy OperationAnnotations OperationCardProjection OperationDetailFact OperationErrorGuidance OperationErrorOutcome OperationHandleConsumed OperationHandleProduced OperationHandles OperationInputNormalizer OperationResultFact OperationResultProjection OperationSecureInput OperationTerms ProviderAgentContract
 		`,
 	),
 };

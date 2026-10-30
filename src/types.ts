@@ -1517,6 +1517,24 @@ export interface ProviderMeta {
 			readonly reason: string;
 		}[];
 	};
+	/**
+	 * What an agent host (a model reading a connector index) is told about this
+	 * provider as a whole. Required once any operation declares `agent`; see
+	 * {@link ProviderAgentContract}.
+	 */
+	agent?: ProviderAgentContract;
+}
+
+/**
+ * Provider-level agent contract: the one factual line a model reads in a
+ * connector index (service plus what it does, for example "CatchTable
+ * restaurant reservations: search, availability, reserve, waiting list").
+ * `meta.descriptionKey` stays the marketing copy a person reads; this key is
+ * written for the model and resolved by the host from `locales/<locale>.json`
+ * with English as the baseline.
+ */
+export interface ProviderAgentContract {
+	readonly descriptionKey: ProviderLocaleKeyInput;
 }
 
 export type RequestParamPrimitive = string | number | boolean | null | undefined;
@@ -2906,6 +2924,169 @@ export interface OperationDefinition<
 	healthCheckUnsupported?: HealthCheckUnsupported;
 	/** The operation's items have no picture and no own page upstream; see `noMedia()`. */
 	noMedia?: NoMediaDeclaration;
+	/**
+	 * What an agent host (a model path) reads about this operation beyond its
+	 * description, schemas and error codes. Omitted, the operation is exposed with
+	 * those alone. See {@link OperationAgentContract}.
+	 */
+	agent?: OperationAgentContract;
+}
+
+// ---------------------------------------------------------------------------
+// Operation agent contract: what a model path reads about an operation beyond
+// its description, schemas and error codes. Every sentence is a locale key
+// resolved by the host from `locales/<locale>.json` (English required); a
+// sentence names another operation with the `{op:<operationId>}` placeholder
+// and never with a host tool name. Rules a declaration must hold are listed on
+// `AGENT_CONTRACT_RULE_IDS` in `agent-contract.ts`.
+// ---------------------------------------------------------------------------
+
+/** Tool annotations in the MCP standard's names. Owned here, so no `Hint` suffix: they are facts, not hints. */
+export interface OperationAnnotations {
+	readonly readOnly?: boolean;
+	readonly destructive?: boolean;
+	readonly idempotent?: boolean;
+	readonly openWorld?: boolean;
+}
+
+/** A handle this operation's result issues: where it sits in the output body and how long the provider honours it. */
+export interface OperationHandleProduced {
+	readonly kind: string;
+	/** Dot path inside the output body (`offers_token`). Must exist in the output schema. */
+	readonly path: string;
+	readonly ttlMs: number;
+}
+
+/** A handle this operation's input consumes: the input field the live handle of `kind` fills. */
+export interface OperationHandleConsumed {
+	readonly field: string;
+	readonly kind: string;
+}
+
+export interface OperationHandles {
+	readonly produces?: readonly OperationHandleProduced[];
+	readonly consumes?: readonly OperationHandleConsumed[];
+}
+
+/** One `details` path of a result or an error, read to the model as one fact sentence. */
+export interface OperationDetailFact {
+	readonly path: string;
+	/** Locale key whose `{value}` is filled with the value at `path`; `values` maps a value to its own key instead. */
+	readonly textKey?: ProviderLocaleKeyInput;
+	readonly values?: Readonly<Record<string, ProviderLocaleKeyInput>>;
+	/** The sentence for a value `values` does not list (a new value outside the closed vocabulary). */
+	readonly otherwiseKey?: ProviderLocaleKeyInput;
+}
+
+/**
+ * The effect of a failed write: nothing was sent, the upstream refused it, unknown (verify first), or read from a
+ * marker in `details` (`fromDetail` is its path; `notSent` and `refused` list the marker values, as strings, for each).
+ */
+export type OperationErrorOutcome =
+	| "not_sent"
+	| "refused"
+	| "unknown"
+	| {
+			readonly fromDetail: string;
+			readonly notSent: readonly string[];
+			readonly refused: readonly string[];
+	  };
+
+export interface OperationErrorGuidance {
+	/** The model's next step in one sentence. `{op:<id>}` placeholders allowed. */
+	readonly fixKey?: ProviderLocaleKeyInput;
+	/** How to wait on a retryable error. */
+	readonly retryHintKey?: ProviderLocaleKeyInput;
+	/** A host branch to take: the connect card, or the flow from its first step. */
+	readonly action?: "connect" | "restart_flow";
+	readonly outcome?: OperationErrorOutcome;
+	/** The operation to read first when the effect is unknown. */
+	readonly stateQuery?: string;
+	readonly detailFacts?: readonly OperationDetailFact[];
+}
+
+export type OperationInputNormalizer =
+	/** Closed set: case and separators ignored, aliases (display names, translations) resolve to the canonical value, else the nearest values are listed. */
+	| { readonly kind: "closed_set"; readonly aliases?: Readonly<Record<string, readonly string[]>> }
+	/** One item per line: `key=value`, `key:count`, `lat,lng`, `min-max`; parsed into the input field `into`. */
+	| {
+			readonly kind: "line";
+			readonly grammar: "key_value" | "key_count" | "lat_lng" | "number_range";
+			readonly into: string;
+	  }
+	/** One arithmetic or lookup step: a chip string to a number or a canonical string. */
+	| { readonly kind: "map"; readonly values: Readonly<Record<string, number | string>> };
+
+/** The field map a common card renderer reads, as item-relative output paths. */
+export interface OperationCardProjection {
+	readonly id: string;
+	readonly title: string;
+	readonly subtitle?: string;
+	readonly price?: string;
+	readonly photos?: string;
+	readonly url?: string;
+	readonly eta?: string;
+	readonly rating?: string;
+}
+
+export interface OperationResultProjection {
+	/** Output path of a list answer's item array, and the item cap. Absent, the whole answer is one record. */
+	readonly items?: string;
+	readonly limit?: number;
+	/** Item-relative paths kept; empty keeps all. Photo URLs ride on the card and leave the body. */
+	readonly keep?: readonly string[];
+	readonly drop?: readonly string[];
+	readonly textLimit?: number;
+	readonly card?: OperationCardProjection;
+	readonly sort?: { readonly by: string; readonly order: "asc" | "desc" };
+	/** Link templates attached to the answer (`https://map.kakao.com/link/to/{name},{lat},{lng}`). */
+	readonly links?: Readonly<Record<string, string>>;
+}
+
+/** A fact sentence attached to an answer when `when.path` is present, or equals `when.equals`. */
+export interface OperationResultFact {
+	readonly when: { readonly path: string; readonly equals?: string | number | boolean };
+	readonly textKey: ProviderLocaleKeyInput;
+}
+
+export interface OperationTerms {
+	/** Cancellation terms: an output field and what it means. They ride on the answer for the model, not on a payment sheet. */
+	readonly cancellation?: readonly {
+		readonly field: string;
+		readonly meaningKey: ProviderLocaleKeyInput;
+	}[];
+	/** Notices read before a payment: a condition and its sentence. */
+	readonly prePayment?: readonly OperationResultFact[];
+}
+
+export interface OperationAgentPolicy {
+	readonly dedupe?: { readonly maxAgeMs: number; readonly nonTerminalStatuses?: readonly string[] };
+	/** One target per turn: the sentence when `field` arrives twice with different values in one turn. */
+	readonly singleTargetPerTurn?: {
+		readonly field: string;
+		readonly textKey: ProviderLocaleKeyInput;
+	};
+}
+
+export interface OperationSecureInput {
+	/** When `field` takes one of `values`, the call goes through the host's server-only path (a payment sheet). */
+	readonly selector: { readonly field: string; readonly values: readonly string[] };
+}
+
+export interface OperationAgentContract {
+	readonly annotations?: OperationAnnotations;
+	/** Input paths the model never sees. Every consumed handle field is one of them. */
+	readonly serverOnly?: readonly string[];
+	readonly handles?: OperationHandles;
+	readonly secureInput?: OperationSecureInput;
+	/** Guidance per error code. A key is one of this operation's `errorCodes[].code`, or `default`. */
+	readonly errors?: Readonly<Record<string, OperationErrorGuidance>>;
+	/** Normalizers per input field. A key is an input schema path. */
+	readonly normalizers?: Readonly<Record<string, OperationInputNormalizer>>;
+	readonly projection?: OperationResultProjection;
+	readonly facts?: readonly OperationResultFact[];
+	readonly terms?: OperationTerms;
+	readonly policy?: OperationAgentPolicy;
 }
 
 /**
