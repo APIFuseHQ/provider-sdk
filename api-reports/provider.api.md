@@ -19,6 +19,61 @@ export type AbsenceErrorRef<T> = T extends {
     readonly category: infer TCategory extends ProviderErrorCategory;
 } ? TCategory extends ExpectedAbsenceCategory ? OperationErrorRef<TCode, TStatus> : never : OperationErrorRef<TCode, TStatus> : never;
 
+// @public (undocumented)
+export const AGENT_CONTRACT_RULE_IDS: {
+    readonly shape: "agent-contract-shape";
+    readonly inputPath: "agent-input-path-exists";
+    readonly outputPath: "agent-output-path-exists";
+    readonly handleProducer: "agent-handle-producer-unique";
+    readonly errorCode: "agent-error-code-declared";
+    readonly localeKey: "agent-locale-key-exists";
+    readonly riskClassConsistent: "agent-annotations-risk-class-consistent";
+    readonly descriptionRequired: "agent-description-required";
+    readonly opPlaceholder: "agent-op-placeholder-resolves";
+};
+
+// @public
+export const AGENT_ERROR_DEFAULT_KEY = "default";
+
+// @public
+export const AGENT_OP_PLACEHOLDER_RE: RegExp;
+
+// @public (undocumented)
+export type AgentContractOperation = Pick<OperationDefinition, "agent" | "input" | "output" | "riskClass" | "errors">;
+
+// @public (undocumented)
+export type AgentContractProvider = {
+    readonly meta?: {
+        readonly agent?: unknown;
+    };
+    readonly operations?: Readonly<Record<string, AgentContractOperation>>;
+};
+
+// @public (undocumented)
+export type AgentContractRuleId = (typeof AGENT_CONTRACT_RULE_IDS)[keyof typeof AGENT_CONTRACT_RULE_IDS];
+
+// @public (undocumented)
+export interface AgentContractViolation {
+    // (undocumented)
+    readonly fix: string;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    readonly ruleId: AgentContractRuleId;
+}
+
+// @public (undocumented)
+export interface AgentLocaleKeyRef {
+    // (undocumented)
+    readonly key: ProviderLocaleKeyInput;
+    readonly path: string;
+}
+
+// @public
+export function agentOperationPlaceholders(text: string): string[];
+
 // @public
 export type AllowedHostList = readonly [string, ...string[]];
 
@@ -882,6 +937,12 @@ export interface CloudflareBlockPageOptions {
     // (undocumented)
     readonly ttl?: SessionStateDuration;
 }
+
+// @public
+export function collectAgentContractViolations(provider: AgentContractProvider): AgentContractViolation[];
+
+// @public
+export function collectAgentLocaleKeys(provider: AgentContractProvider): AgentLocaleKeyRef[];
 
 // @public (undocumented)
 export function collectSensitivePaths(schema: unknown): SensitivePath[];
@@ -3205,11 +3266,196 @@ export const OperandSchema: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z
 }, z.core.$strict>]>;
 
 // @public (undocumented)
+export interface OperationAgentContract {
+    // (undocumented)
+    readonly annotations?: OperationAnnotations;
+    readonly errors?: Readonly<Record<string, OperationErrorGuidance>>;
+    // (undocumented)
+    readonly facts?: readonly OperationResultFact[];
+    // (undocumented)
+    readonly handles?: OperationHandles;
+    readonly normalizers?: Readonly<Record<string, OperationInputNormalizer>>;
+    // (undocumented)
+    readonly policy?: OperationAgentPolicy;
+    // (undocumented)
+    readonly projection?: OperationResultProjection;
+    // (undocumented)
+    readonly secureInput?: OperationSecureInput;
+    readonly serverOnly?: readonly string[];
+    // (undocumented)
+    readonly terms?: OperationTerms;
+}
+
+// @public (undocumented)
+export const OperationAgentContractSchema: z.ZodObject<{
+    annotations: z.ZodOptional<z.ZodObject<{
+        readOnly: z.ZodOptional<z.ZodBoolean>;
+        destructive: z.ZodOptional<z.ZodBoolean>;
+        idempotent: z.ZodOptional<z.ZodBoolean>;
+        openWorld: z.ZodOptional<z.ZodBoolean>;
+    }, z.core.$strict>>;
+    serverOnly: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    handles: z.ZodOptional<z.ZodObject<{
+        produces: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            kind: z.ZodString;
+            path: z.ZodString;
+            ttlMs: z.ZodNumber;
+        }, z.core.$strict>>>;
+        consumes: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            field: z.ZodString;
+            kind: z.ZodString;
+        }, z.core.$strict>>>;
+    }, z.core.$strict>>;
+    secureInput: z.ZodOptional<z.ZodObject<{
+        selector: z.ZodObject<{
+            field: z.ZodString;
+            values: z.ZodArray<z.ZodString>;
+        }, z.core.$strict>;
+    }, z.core.$strict>>;
+    errors: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        fixKey: z.ZodOptional<z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>>;
+        retryHintKey: z.ZodOptional<z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>>;
+        action: z.ZodOptional<z.ZodEnum<{
+            connect: "connect";
+            restart_flow: "restart_flow";
+        }>>;
+        outcome: z.ZodOptional<z.ZodUnion<readonly [z.ZodLiteral<"not_sent">, z.ZodLiteral<"refused">, z.ZodLiteral<"unknown">, z.ZodObject<{
+            fromDetail: z.ZodString;
+            notSent: z.ZodArray<z.ZodString>;
+            refused: z.ZodArray<z.ZodString>;
+        }, z.core.$strict>]>>;
+        stateQuery: z.ZodOptional<z.ZodString>;
+        detailFacts: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            path: z.ZodString;
+            textKey: z.ZodOptional<z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>>;
+            values: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>>>;
+            otherwiseKey: z.ZodOptional<z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>>;
+        }, z.core.$strict>>>;
+    }, z.core.$strict>>>;
+    normalizers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodLiteral<"closed_set">;
+        aliases: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodArray<z.ZodString>>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"line">;
+        grammar: z.ZodEnum<{
+            key_value: "key_value";
+            key_count: "key_count";
+            lat_lng: "lat_lng";
+            number_range: "number_range";
+        }>;
+        into: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"map">;
+        values: z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodNumber, z.ZodString]>>;
+    }, z.core.$strict>], "kind">>>;
+    projection: z.ZodOptional<z.ZodObject<{
+        items: z.ZodOptional<z.ZodString>;
+        limit: z.ZodOptional<z.ZodNumber>;
+        keep: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        drop: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        textLimit: z.ZodOptional<z.ZodNumber>;
+        card: z.ZodOptional<z.ZodObject<{
+            id: z.ZodString;
+            title: z.ZodString;
+            subtitle: z.ZodOptional<z.ZodString>;
+            price: z.ZodOptional<z.ZodString>;
+            photos: z.ZodOptional<z.ZodString>;
+            url: z.ZodOptional<z.ZodString>;
+            eta: z.ZodOptional<z.ZodString>;
+            rating: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+        sort: z.ZodOptional<z.ZodObject<{
+            by: z.ZodString;
+            order: z.ZodEnum<{
+                asc: "asc";
+                desc: "desc";
+            }>;
+        }, z.core.$strict>>;
+        links: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    }, z.core.$strict>>;
+    facts: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        when: z.ZodObject<{
+            path: z.ZodString;
+            equals: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>;
+        }, z.core.$strict>;
+        textKey: z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>;
+    }, z.core.$strict>>>;
+    terms: z.ZodOptional<z.ZodObject<{
+        cancellation: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            field: z.ZodString;
+            meaningKey: z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>;
+        }, z.core.$strict>>>;
+        prePayment: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            when: z.ZodObject<{
+                path: z.ZodString;
+                equals: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>;
+            }, z.core.$strict>;
+            textKey: z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>;
+        }, z.core.$strict>>>;
+    }, z.core.$strict>>;
+    policy: z.ZodOptional<z.ZodObject<{
+        dedupe: z.ZodOptional<z.ZodObject<{
+            maxAgeMs: z.ZodNumber;
+            nonTerminalStatuses: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        }, z.core.$strict>>;
+        singleTargetPerTurn: z.ZodOptional<z.ZodObject<{
+            field: z.ZodString;
+            textKey: z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>;
+}, z.core.$strict>;
+
+// @public (undocumented)
+export interface OperationAgentPolicy {
+    // (undocumented)
+    readonly dedupe?: {
+        readonly maxAgeMs: number;
+        readonly nonTerminalStatuses?: readonly string[];
+    };
+    readonly singleTargetPerTurn?: {
+        readonly field: string;
+        readonly textKey: ProviderLocaleKeyInput;
+    };
+}
+
+// @public
+export interface OperationAnnotations {
+    // (undocumented)
+    readonly destructive?: boolean;
+    // (undocumented)
+    readonly idempotent?: boolean;
+    // (undocumented)
+    readonly openWorld?: boolean;
+    // (undocumented)
+    readonly readOnly?: boolean;
+}
+
+// @public (undocumented)
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
 // @public
 export interface OperationCachePolicy {
     readonly staleIfErrorMs: number;
+}
+
+// @public
+export interface OperationCardProjection {
+    // (undocumented)
+    readonly eta?: string;
+    // (undocumented)
+    readonly id: string;
+    // (undocumented)
+    readonly photos?: string;
+    // (undocumented)
+    readonly price?: string;
+    // (undocumented)
+    readonly rating?: string;
+    // (undocumented)
+    readonly subtitle?: string;
+    // (undocumented)
+    readonly title: string;
+    // (undocumented)
+    readonly url?: string;
 }
 
 // @public (undocumented)
@@ -3230,6 +3476,7 @@ export interface OperationContractMetadata {
 
 // @public (undocumented)
 export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike, TContext = ProviderContext> {
+    agent?: OperationAgentContract;
     approval?: OperationApprovalPolicy;
     cache?: OperationCachePolicy;
     connectionExternalRefParam?: string;
@@ -3307,6 +3554,16 @@ interface OperationDeprecationMetadata {
     replacement?: string;
 }
 
+// @public
+export interface OperationDetailFact {
+    readonly otherwiseKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    readonly path: string;
+    readonly textKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    readonly values?: Readonly<Record<string, ProviderLocaleKeyInput>>;
+}
+
 // @public (undocumented)
 export interface OperationErrorCode {
     // (undocumented)
@@ -3327,6 +3584,25 @@ export type OperationErrorCodeDeclaration = {
     readonly category?: ProviderErrorCategory;
 };
 
+// @public (undocumented)
+export interface OperationErrorGuidance {
+    readonly action?: "connect" | "restart_flow";
+    // (undocumented)
+    readonly detailFacts?: readonly OperationDetailFact[];
+    readonly fixKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    readonly outcome?: OperationErrorOutcome;
+    readonly retryHintKey?: ProviderLocaleKeyInput;
+    readonly stateQuery?: string;
+}
+
+// @public
+export type OperationErrorOutcome = "not_sent" | "refused" | "unknown" | {
+    readonly fromDetail: string;
+    readonly notSent: readonly string[];
+    readonly refused: readonly string[];
+};
+
 // @public
 export type OperationErrorRef<TCode extends string = string, TStatus extends ExpectedAbsenceStatus = ExpectedAbsenceStatus> = {
     readonly code: TCode;
@@ -3343,10 +3619,35 @@ export interface OperationExample {
     scenarioKey: ProviderLocaleKeyInput;
 }
 
+// @public
+export interface OperationHandleConsumed {
+    // (undocumented)
+    readonly field: string;
+    // (undocumented)
+    readonly kind: string;
+}
+
+// @public
+export interface OperationHandleProduced {
+    // (undocumented)
+    readonly kind: string;
+    readonly path: string;
+    // (undocumented)
+    readonly ttlMs: number;
+}
+
 // Warning: (ae-forgotten-export) The symbol "ProviderStreamEvent" needs to be exported by the entry point provider.d.ts
 //
 // @public (undocumented)
 type OperationHandlerResult<TOutput> = TOutput | Response | ReadableStream<Uint8Array> | AsyncIterable<ProviderStreamEvent>;
+
+// @public (undocumented)
+export interface OperationHandles {
+    // (undocumented)
+    readonly consumes?: readonly OperationHandleConsumed[];
+    // (undocumented)
+    readonly produces?: readonly OperationHandleProduced[];
+}
 
 // @public (undocumented)
 interface OperationHttpStreamTransport {
@@ -3361,6 +3662,25 @@ interface OperationHttpStreamTransport {
     // (undocumented)
     maxDurationMs?: number;
 }
+
+// @public (undocumented)
+export type OperationInputNormalizer =
+/** Closed set: case and separators ignored, aliases (display names, translations) resolve to the canonical value, else the nearest values are listed. */
+    {
+    readonly kind: "closed_set";
+    readonly aliases?: Readonly<Record<string, readonly string[]>>;
+}
+/** One item per line: `key=value`, `key:count`, `lat,lng`, `min-max`; parsed into the input field `into`. */
+| {
+    readonly kind: "line";
+    readonly grammar: "key_value" | "key_count" | "lat_lng" | "number_range";
+    readonly into: string;
+}
+/** One arithmetic or lookup step: a chip string to a number or a canonical string. */
+| {
+    readonly kind: "map";
+    readonly values: Readonly<Record<string, number | string>>;
+};
 
 // @public (undocumented)
 interface OperationJsonTransport {
@@ -3409,8 +3729,47 @@ export type OperationResult = {
     };
 };
 
+// @public
+export interface OperationResultFact {
+    // (undocumented)
+    readonly textKey: ProviderLocaleKeyInput;
+    // (undocumented)
+    readonly when: {
+        readonly path: string;
+        readonly equals?: string | number | boolean;
+    };
+}
+
+// @public (undocumented)
+export interface OperationResultProjection {
+    // (undocumented)
+    readonly card?: OperationCardProjection;
+    // (undocumented)
+    readonly drop?: readonly string[];
+    readonly items?: string;
+    readonly keep?: readonly string[];
+    // (undocumented)
+    readonly limit?: number;
+    readonly links?: Readonly<Record<string, string>>;
+    // (undocumented)
+    readonly sort?: {
+        readonly by: string;
+        readonly order: "asc" | "desc";
+    };
+    // (undocumented)
+    readonly textLimit?: number;
+}
+
 // @public (undocumented)
 export type OperationRiskClass = "read" | "write" | "destructive" | "external-send";
+
+// @public (undocumented)
+export interface OperationSecureInput {
+    readonly selector: {
+        readonly field: string;
+        readonly values: readonly string[];
+    };
+}
 
 // @public (undocumented)
 export type OperationSensitivePath = string;
@@ -3468,6 +3827,15 @@ export const OperationStepSchema: z.ZodObject<{
     journal: z.ZodOptional<z.ZodType<JournalPolicy, unknown, z.core.$ZodTypeInternals<JournalPolicy, unknown>>>;
     expectedErrors: z.ZodOptional<z.ZodPipe<z.ZodArray<z.ZodType<ExpectedError, unknown, z.core.$ZodTypeInternals<ExpectedError, unknown>>>, z.ZodTransform<[ExpectedError, ...ExpectedError[]], ExpectedError[]>>>;
 }, z.core.$strict>;
+
+// @public (undocumented)
+export interface OperationTerms {
+    readonly cancellation?: readonly {
+        readonly field: string;
+        readonly meaningKey: ProviderLocaleKeyInput;
+    }[];
+    readonly prePayment?: readonly OperationResultFact[];
+}
 
 // Warning: (ae-forgotten-export) The symbol "OperationJsonTransport" needs to be exported by the entry point provider.d.ts
 // Warning: (ae-forgotten-export) The symbol "OperationSseTransport" needs to be exported by the entry point provider.d.ts
@@ -3890,6 +4258,17 @@ interface ProviderAccessConfig {
 // @public (undocumented)
 export type ProviderAccessVisibility = "public" | "early_access";
 
+// @public
+export interface ProviderAgentContract {
+    // (undocumented)
+    readonly descriptionKey: ProviderLocaleKeyInput;
+}
+
+// @public (undocumented)
+export const ProviderAgentContractSchema: z.ZodObject<{
+    descriptionKey: z.ZodString & ZodType<ProviderLocaleKey, string, z.core.$ZodTypeInternals<ProviderLocaleKey, string>>;
+}, z.core.$strict>;
+
 // Warning: (ae-forgotten-export) The symbol "NoAuthExchange" needs to be exported by the entry point provider.d.ts
 //
 // @public
@@ -4159,6 +4538,7 @@ export interface ProviderDeclaration {
                 readonly reason: string;
             }[];
         };
+        agent?: ProviderAgentContract;
     };
     // (undocumented)
     native?: NativeProviderConfig;
@@ -4625,6 +5005,7 @@ export type ProviderLogoProfile = {
 
 // @public (undocumented)
 interface ProviderMeta {
+    agent?: ProviderAgentContract;
     // (undocumented)
     category: string;
     // (undocumented)
@@ -5174,6 +5555,9 @@ export const SafeRegexSchema: z.ZodObject<{
         i: "i";
     }>;
 }, z.core.$strict>;
+
+// @public
+export function schemaHasPath(schema: unknown, path: string): boolean;
 
 // @public
 export type SchemaLike = ZodType | StandardSchemaV1;
@@ -6774,6 +7158,12 @@ export const UpstreamMaintenanceWindowsSchema: z.ZodType<NonEmpty<UpstreamMainte
 // @public (undocumented)
 const VALID_OPERATION_ERROR_STATUSES: readonly [400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504];
 
+// @public
+export function validateAgentLocaleKeys(input: {
+    readonly provider: AgentContractProvider;
+    readonly catalog: Record<string, unknown>;
+}): AgentContractViolation[];
+
 // @public (undocumented)
 export class ValidationError extends ProviderError {
     // Warning: (ae-forgotten-export) The symbol "ValidationErrorOptions" needs to be exported by the entry point provider.d.ts
@@ -6882,8 +7272,8 @@ export { z }
 // dist/config/loader.d.ts:153:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:264:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:296:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:313:5 - (ae-forgotten-export) The symbol "AuthConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:298:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:315:5 - (ae-forgotten-export) The symbol "AuthConfig" needs to be exported by the entry point provider.d.ts
 // dist/health-scenario.d.ts:1690:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts
@@ -6903,17 +7293,17 @@ export { z }
 // dist/types.d.ts:762:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:1042:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:1055:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1748:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1748:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2067:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2073:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2074:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2078:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2085:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2120:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2412:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2418:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2420:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1765:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1765:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2084:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2090:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2091:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2095:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2102:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2137:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2429:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2435:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:2437:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

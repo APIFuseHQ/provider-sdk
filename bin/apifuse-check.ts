@@ -20,6 +20,7 @@ import { redundantDeploymentDefaults } from "../src/cli/deployment-intent.js";
 import { isProviderError } from "../src/errors.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { validateProviderErrorLocaleKeys } from "../src/define-errors.js";
+import { validateAgentLocaleKeys } from "../src/agent-contract.js";
 import { lintProviderWithInformation, type ProviderLintMode } from "../src/lint.js";
 import {
 	formatOutputUrlCoverageWarning,
@@ -158,6 +159,7 @@ export async function runChecks(
 		checkOutputUrlCoverage(provider),
 		checkAuthoringLint(provider, providerSourceFiles),
 		checkErrorLocaleKeys(provider, localeCatalogEn),
+		checkAgentLocaleKeys(provider, localeCatalogEn),
 		await checkRuntimeBoundary(providerRoot, indexPath, options.lintMode),
 		checkProviderMetadata(provider),
 		await checkDeploymentIntent(providerRoot, provider),
@@ -451,6 +453,23 @@ function checkErrorLocaleKeys(
 		catalog: localeCatalogEn,
 	});
 	return { message, passed: details.length === 0, ...(details.length > 0 ? { details } : {}) };
+}
+
+const AGENT_LOCALE_CHECK_MESSAGE = "Agent contract locale keys resolve in locales/en.json";
+
+function checkAgentLocaleKeys(
+	provider: ProviderDefinition | undefined,
+	localeCatalogEn: Record<string, unknown>,
+): CheckResult {
+	if (!provider) return { message: AGENT_LOCALE_CHECK_MESSAGE, passed: false };
+	const details = validateAgentLocaleKeys({ provider, catalog: localeCatalogEn }).map(
+		(violation) => `${violation.path} [${violation.ruleId}]: ${violation.message} ${violation.fix}`,
+	);
+	return {
+		message: AGENT_LOCALE_CHECK_MESSAGE,
+		passed: details.length === 0,
+		...(details.length > 0 ? { details } : {}),
+	};
 }
 
 function checkAuthoringLint(

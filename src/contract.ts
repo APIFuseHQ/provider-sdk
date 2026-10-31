@@ -110,6 +110,7 @@ function extractOperation(
 	const healthCheck = extractHealthCheck(operation.healthCheck);
 	const healthCheckUnsupported = extractHealthCheckUnsupported(operation.healthCheckUnsupported);
 	const noMedia = toJsonValue(operation.noMedia);
+	const agent = toJsonValue(operation.agent);
 
 	return {
 		id: operationId,
@@ -140,6 +141,7 @@ function extractOperation(
 		...(healthCheck === undefined ? {} : { healthCheck }),
 		...(healthCheckUnsupported === undefined ? {} : { healthCheckUnsupported }),
 		...(noMedia === undefined ? {} : { noMedia }),
+		...(agent === undefined ? {} : { agent }),
 	};
 }
 

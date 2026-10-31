@@ -1,3 +1,4 @@
+import { AGENT_CONTRACT_RULE_IDS, collectAgentContractViolations } from "./agent-contract.js";
 import { zodSchemaToJson } from "./contract-serialization.js";
 import { ProviderError } from "./errors.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
@@ -28,6 +29,16 @@ export const DECLARATION_RULE_IDS = {
 	resolverClientProfileFamily: "resolver-client-profile-family",
 	outputUrlKindUnique: "output-url-kind-unique",
 	noMediaContradiction: "no-media-contradiction",
+	agentShape: AGENT_CONTRACT_RULE_IDS.shape,
+	agentInputPath: AGENT_CONTRACT_RULE_IDS.inputPath,
+	agentOutputPath: AGENT_CONTRACT_RULE_IDS.outputPath,
+	agentHandleProducer: AGENT_CONTRACT_RULE_IDS.handleProducer,
+	agentErrorCode: AGENT_CONTRACT_RULE_IDS.errorCode,
+	agentRiskClassConsistent: AGENT_CONTRACT_RULE_IDS.riskClassConsistent,
+	agentDescriptionRequired: AGENT_CONTRACT_RULE_IDS.descriptionRequired,
+	agentOpPlaceholder: AGENT_CONTRACT_RULE_IDS.opPlaceholder,
+	/** Reported by `apifuse check`, which reads `locales/en.json`; `defineProvider` cannot. */
+	agentLocaleKey: AGENT_CONTRACT_RULE_IDS.localeKey,
 } as const;
 
 export type DeclarationRuleId = (typeof DECLARATION_RULE_IDS)[keyof typeof DECLARATION_RULE_IDS];
@@ -65,6 +76,7 @@ export function validateFailClosedDeclaration(provider: ProviderDefinition): voi
 	validateResolverClientProfileDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
 	validateOutputUrlKindDeclaration(provider, payloadSchemas, violations);
+	violations.push(...collectAgentContractViolations(provider));
 	if (violations.length > 0) throw declarationInvalidError(violations);
 }
 
@@ -72,7 +84,9 @@ type ProviderDeclarationRulesInput = Pick<
 	ProviderDefinition,
 	"healthJourneys" | "meta" | "proxy" | "resolver" | "stealth"
 >;
-type OperationDeclarationRulesInput = Pick<ProviderDefinition, "operations">;
+type OperationDeclarationRulesInput = Pick<ProviderDefinition, "operations"> & {
+	readonly meta?: Pick<ProviderDefinition["meta"], "agent">;
+};
 
 /** Enforces fail-closed rules that only depend on the provider declaration. */
 export function validateFailClosedProviderDeclaration(
@@ -170,6 +184,7 @@ function collectOperationDeclarationViolations(
 	const payloadSchemas = validateSchemaDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
 	validateOutputUrlKindDeclaration(provider, payloadSchemas, violations);
+	violations.push(...collectAgentContractViolations(provider));
 }
 
 function validateHealthDeclaration(

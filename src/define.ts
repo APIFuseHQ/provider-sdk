@@ -65,6 +65,7 @@ import type {
 	OperationWebSocketTransport,
 	OtpMedium,
 	ProviderAccessConfig,
+	ProviderAgentContract,
 	ProviderChallengeKind,
 	ProviderContext,
 	ProviderDefinition,
@@ -848,6 +849,8 @@ export interface ProviderDeclaration {
 				readonly reason: string;
 			}[];
 		};
+		/** The one factual line a model reads for this provider; see {@link ProviderAgentContract}. */
+		agent?: ProviderAgentContract;
 	};
 	healthMonitor?: ProviderHealthMonitorConfig;
 	/** New name for `healthMonitor` (transitional alias); declaring both is a ValidationError. */
