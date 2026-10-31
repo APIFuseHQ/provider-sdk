@@ -3079,7 +3079,7 @@ export interface OperationAgentContract {
 	readonly serverOnly?: readonly string[];
 	readonly handles?: OperationHandles;
 	readonly secureInput?: OperationSecureInput;
-	/** Guidance per error code. A key is one of this operation's `errorCodes[].code`, or `default`. */
+	/** Guidance per error code. A key is a code this operation lists in `errors: [errors.CODE]`, or `default`. */
 	readonly errors?: Readonly<Record<string, OperationErrorGuidance>>;
 	/** Normalizers per input field. A key is an input schema path. */
 	readonly normalizers?: Readonly<Record<string, OperationInputNormalizer>>;

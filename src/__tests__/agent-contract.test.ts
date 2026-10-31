@@ -186,6 +186,7 @@ describe("operation agent contract rules", () => {
 
 	it("rule shape: an unknown key or a wrong value type is rejected under agent-contract-shape", () => {
 		const violations = collectAgentContractViolations(
+			// test-invalid: `credentialed` is not an annotation key; the shape rule must reject it at runtime.
 			withConfirmAgent({ ...RESERVE_CONFIRM_AGENT, annotations: { credentialed: true } } as never),
 		);
 		expect(rulesOf(violations)).toEqual([
@@ -283,7 +284,7 @@ describe("operation agent contract rules", () => {
 		]);
 	});
 
-	it("rule 4 also reads codes from the deprecated errorCodes table", () => {
+	it("rule 4 reads only the defineErrors declaration, never a legacy errorCodes row", () => {
 		const base = provider();
 		const confirm = base.operations["reserve-confirm"] as OperationDefinition;
 		const violations = collectAgentContractViolations({
@@ -293,6 +294,7 @@ describe("operation agent contract rules", () => {
 				"reserve-confirm": {
 					...confirm,
 					errors: undefined,
+					// @ts-expect-error test-invalid: the agent contract reads no legacy errorCodes row, so the type has none.
 					errorCodes: [
 						{ code: "ATTEMPT_EXPIRED", description: "expired" },
 						{ code: "RESERVATION_REFUSED", description: "refused" },
@@ -300,7 +302,16 @@ describe("operation agent contract rules", () => {
 				},
 			},
 		});
-		expect(violations).toEqual([]);
+		const agentCodes = Object.keys(RESERVE_CONFIRM_AGENT.errors ?? {}).filter(
+			(code) => code !== "default",
+		);
+		expect(agentCodes.length).toBeGreaterThan(0);
+		expect(rulesOf(violations)).toEqual(
+			agentCodes.map(
+				(code) =>
+					`${AGENT_CONTRACT_RULE_IDS.errorCode} @ operations.reserve-confirm.agent.errors.${code}`,
+			),
+		);
 	});
 
 	it("rule 6: readOnly and destructive must agree with riskClass", () => {

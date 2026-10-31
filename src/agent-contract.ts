@@ -15,7 +15,6 @@ import { isSchemaNode, schemaChildren } from "./schema-walk.js";
 import type {
 	OperationAgentContract,
 	OperationDefinition,
-	OperationErrorCode,
 	ProviderLocaleKeyInput,
 } from "./types.js";
 
@@ -234,7 +233,7 @@ export interface AgentContractViolation {
 
 export type AgentContractOperation = Pick<
 	OperationDefinition,
-	"agent" | "input" | "output" | "riskClass" | "errorCodes" | "errors"
+	"agent" | "input" | "output" | "riskClass" | "errors"
 >;
 
 export type AgentContractProvider = {
@@ -279,9 +278,13 @@ export function schemaHasPath(schema: unknown, path: string): boolean {
 	return true;
 }
 
+/**
+ * The codes an operation declares through `errors: [errors.CODE, ...]`. The
+ * `defineErrors` declaration is the one source of an operation's codes; the
+ * agent contract never reads a legacy `errorCodes` row.
+ */
 function declaredErrorCodes(operation: AgentContractOperation): Set<string> {
 	const codes = new Set<string>();
-	for (const entry of operation.errorCodes ?? []) codes.add((entry as OperationErrorCode).code);
 	for (const factory of operation.errors ?? []) codes.add(factory.declaration.code);
 	return codes;
 }
