@@ -11,7 +11,7 @@
 import { type ZodType, z } from "zod";
 
 import { isProviderLocaleKey } from "./i18n/keys.js";
-import { isSchemaNode, schemaChildren } from "./schema-walk.js";
+import { isSchemaNode, schemaChildren, schemaDef } from "./schema-walk.js";
 import type {
 	OperationAgentContract,
 	OperationDefinition,
@@ -246,7 +246,8 @@ export type AgentContractProvider = {
  * steps; optional, nullable, default, pipe, array element, record value, tuple
  * item and union branch wrappers are transparent, so `offers.price` resolves
  * through an array of objects and `a.b` through `z.object({ a: z.object({ b })
- * .optional() })`. A record value matches any key.
+ * .optional() })`. A record value matches any key; the `z.never()` catchall a
+ * strict object carries rejects every unknown key and so matches none.
  */
 export function schemaHasPath(schema: unknown, path: string): boolean {
 	if (!isSchemaNode(schema)) return false;
@@ -264,8 +265,9 @@ export function schemaHasPath(schema: unknown, path: string): boolean {
 					continue;
 				}
 				if (edge.kind === "entry") {
-					// A record value or catchall takes any key.
-					next.push(edge.schema);
+					// A record value or catchall takes any key, unless the catchall is
+					// the `never` a strict object uses to reject unknown keys.
+					if (schemaDef(edge.schema).type !== "never") next.push(edge.schema);
 					continue;
 				}
 				visit(edge.schema);

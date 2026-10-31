@@ -177,6 +177,16 @@ describe("schemaHasPath", () => {
 		expect(schemaHasPath(schema, "missing")).toBe(false);
 		expect(schemaHasPath(undefined, "offers")).toBe(false);
 	});
+
+	it("treats a strict object's never catchall as no key, not any key", () => {
+		const strict = z.strictObject({ ok: z.boolean(), nested: z.object({ id: z.string() }).strict() });
+		expect(schemaHasPath(strict, "ok")).toBe(true);
+		expect(schemaHasPath(strict, "nested.id")).toBe(true);
+		expect(schemaHasPath(strict, "missing")).toBe(false);
+		expect(schemaHasPath(strict, "nested.missing")).toBe(false);
+		expect(schemaHasPath(z.object({ ok: z.boolean() }).strict(), "missing")).toBe(false);
+		expect(schemaHasPath(z.object({ ok: z.boolean() }).catchall(z.string()), "any")).toBe(true);
+	});
 });
 
 describe("operation agent contract rules", () => {
